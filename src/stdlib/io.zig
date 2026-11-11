@@ -73,20 +73,20 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn print(evaluator: *Fiber) MachineError!void {
-    return callWithNewline(evaluator, "io.core.prin", "io.core.prin");
+fn print(fiber: *Fiber) MachineError!void {
+    return callWithNewline(fiber, "io.core.prin", "io.core.prin");
 }
 
 /// Bounded like `prin`: the string is encoded under the kernel poll quantum
 /// and written once complete. There is no availability precondition because
 /// a missing diagnostics writer is not an error for this word.
-fn eprint(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popString();
+fn eprint(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popString();
     defer item.deinit();
     const string = item.borrow();
-    try evaluator.startDriver(EprintDriver{
+    try fiber.startDriver(EprintDriver{
         .item = .init(item.take()),
-        .encoder = .init(.init(evaluator.allocator, string)),
+        .encoder = .init(.init(fiber.allocator, string)),
     });
 }
 
@@ -95,19 +95,19 @@ const EprintDriver = struct {
     item: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.StringEncoder),
 
-    pub fn advance(evaluator: *Fiber, self: *EprintDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *EprintDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(
+            error.InvalidCodepoint => return fiber.fail(
                 .domain,
                 "string contains an invalid Unicode scalar",
             ),
         }) {
             .pending => .stepped,
             .complete => |encoded| completed: {
-                defer evaluator.allocator.free(encoded);
-                try writeDiagnosticsLine(evaluator, encoded);
+                defer fiber.allocator.free(encoded);
+                try writeDiagnosticsLine(fiber, encoded);
                 break :completed .completed;
             },
         };
@@ -115,51 +115,51 @@ const EprintDriver = struct {
 };
 
 /// Diagnostics share the Session console's serialization with advisory output.
-fn writeDiagnosticsLine(evaluator: *Fiber, bytes: []const u8) MachineError!void {
-    evaluator.inherited.runtime().console.writeDiagnostics(bytes, true) catch
-        return evaluator.fail(.io, "diagnostics stream write failed");
+fn writeDiagnosticsLine(fiber: *Fiber, bytes: []const u8) MachineError!void {
+    fiber.inherited.runtime().console.writeDiagnostics(bytes, true) catch
+        return fiber.fail(.io, "diagnostics stream write failed");
 }
 
-fn inspect(evaluator: *Fiber) MachineError!void {
-    const quotation = try list.fromValues(evaluator.allocator, &.{
-        .{ .symbol = try evaluator.coreWord(try intern.intern("dup")) },
-        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.pp")) },
+fn inspect(fiber: *Fiber) MachineError!void {
+    const quotation = try list.fromValues(fiber.allocator, &.{
+        .{ .symbol = try fiber.coreWord(try intern.intern("dup")) },
+        .{ .symbol = try fiber.coreWord(try intern.intern("io.core.pp")) },
     });
-    try evaluator.callOwned(quotation.list);
+    try fiber.callOwned(quotation.list);
 }
 
-fn debug(evaluator: *Fiber) MachineError!void {
+fn debug(fiber: *Fiber) MachineError!void {
     var separator = heap.OwnedValue.init(
-        evaluator.releases,
-        try machine.stringValue(evaluator.allocator, evaluator.releases, ": "),
+        fiber.releases,
+        try machine.stringValue(fiber.allocator, fiber.releases, ": "),
     );
     defer separator.deinit();
-    const quotation = try list.fromValues(evaluator.allocator, &.{
-        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.prin")) },
+    const quotation = try list.fromValues(fiber.allocator, &.{
+        .{ .symbol = try fiber.coreWord(try intern.intern("io.core.prin")) },
         separator.borrow(),
-        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.prin")) },
-        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.inspect")) },
+        .{ .symbol = try fiber.coreWord(try intern.intern("io.core.prin")) },
+        .{ .symbol = try fiber.coreWord(try intern.intern("io.core.inspect")) },
     });
-    try evaluator.callOwned(quotation.list);
+    try fiber.callOwned(quotation.list);
 }
 
 /// Schedule `prin "\n" prin` as an ordinary definition-site quotation. The
 /// body is fixed-size; its one heap value is retained by the quotation before
 /// the local owner releases it.
 fn callWithNewline(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     comptime first: []const u8,
     comptime last: []const u8,
 ) MachineError!void {
     var newline = heap.OwnedValue.init(
-        evaluator.releases,
-        try machine.stringValue(evaluator.allocator, evaluator.releases, "\n"),
+        fiber.releases,
+        try machine.stringValue(fiber.allocator, fiber.releases, "\n"),
     );
     defer newline.deinit();
-    const quotation = try list.fromValues(evaluator.allocator, &.{
-        .{ .symbol = try evaluator.coreWord(try intern.intern(first)) },
+    const quotation = try list.fromValues(fiber.allocator, &.{
+        .{ .symbol = try fiber.coreWord(try intern.intern(first)) },
         newline.borrow(),
-        .{ .symbol = try evaluator.coreWord(try intern.intern(last)) },
+        .{ .symbol = try fiber.coreWord(try intern.intern(last)) },
     });
-    try evaluator.callOwned(quotation.list);
+    try fiber.callOwned(quotation.list);
 }

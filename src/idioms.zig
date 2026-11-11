@@ -242,9 +242,9 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
 
 /// Whether `word`, where the phrase runs, is the core binding expected: a
 /// builtin, and the given primitive when one is named.
-fn wordMatches(evaluator: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) bool {
+fn wordMatches(fiber: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) bool {
     if (!plainWord(word.slot)) return false;
-    return liveWord(evaluator.peekWord(word), primitive) != null;
+    return liveWord(fiber.peekWord(word), primitive) != null;
 }
 
 /// A following word, resolved as its own dispatch would resolve it: through
@@ -253,9 +253,9 @@ fn wordMatches(evaluator: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveI
 /// looked up in full and remembered, since the phrase consumes it instead of
 /// dispatching it. Either way it must be the core builtin expected; its trace
 /// word is what a fault inside the phrase names.
-fn followingWord(evaluator: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.TraceWord {
+fn followingWord(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.TraceWord {
     if (!plainWord(word.slot)) return null;
-    return liveWord(try evaluator.resolveForRecognition(word), null);
+    return liveWord(try fiber.resolveForRecognition(word), null);
 }
 
 /// Resolves `word` where the phrase runs and returns its trace word only when
@@ -272,7 +272,7 @@ fn liveWord(peeked: ?machine.PeekedWord, primitive: ?env.PrimitiveImpl) ?intern.
 
 /// Matches an offered quotation against one entry's pattern, checking each
 /// pattern word's binding where the quotation runs.
-fn matchPhrase(evaluator: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture {
+fn matchPhrase(fiber: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture {
     if (phrase != .list or phrase.list.length() != entry.pattern.len) return null;
     var capture: Capture = .{};
     for (entry.pattern, 0..) |atom, atom_index| {
@@ -286,14 +286,14 @@ fn matchPhrase(evaluator: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture 
                 // A quoted occurrence pushes its symbol; it is never the operation.
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
                     !std.mem.eql(u8, intern.get(actual.symbol.name), entry.operation.spelling())) return null;
-                if (!wordMatches(evaluator, actual.symbol, operationPrimitive(entry.operation))) return null;
+                if (!wordMatches(fiber, actual.symbol, operationPrimitive(entry.operation))) return null;
                 capture.active_word = actual.symbol.name;
                 capture.active_index = @intCast(atom_index);
             },
             .word => |expected| {
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
                     !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return null;
-                if (!wordMatches(evaluator, actual.symbol, null)) return null;
+                if (!wordMatches(fiber, actual.symbol, null)) return null;
             },
         }
     }
@@ -301,26 +301,26 @@ fn matchPhrase(evaluator: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture 
 }
 
 pub fn tryApply(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     request: machine.IdiomRequest,
     fallback: machine.IdiomFallback,
 ) MachineError!void {
-    if (evaluator.inherited.idiom_mode == .generic_only) return fallback(evaluator);
-    const candidate = requestCandidate(evaluator, request) orelse return fallback(evaluator);
+    if (fiber.inherited.idiom_mode == .generic_only) return fallback(fiber);
+    const candidate = requestCandidate(fiber, request) orelse return fallback(fiber);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
     // A quotation of any length may be a scalar program.
     if (entries.len == 0 and candidate.context == .lex_cmp)
-        return fallback(evaluator);
+        return fallback(fiber);
     // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
-    const planned = try evaluator.planEntry();
+    const planned = try fiber.planEntry();
     if (planned) |entry| if (entry.offered) |offered| if (offered.request == request and offered.phrase == candidate.phrase.list)
-        return applyMatched(evaluator, candidate.phrase, offered.entry, .{
+        return applyMatched(fiber, candidate.phrase, offered.entry, .{
             .constant = offered.constant,
             .active_word = offered.active_word,
             .active_index = offered.active_index,
         }, fallback);
-    return matchOffered(evaluator, candidate, entries, fallback, request, planned);
+    return matchOffered(fiber, candidate, entries, fallback, request, planned);
 }
 
 /// A quotation offered to a combinator.
@@ -335,7 +335,7 @@ const Capture = struct {
     active_index: ?u32 = null,
 };
 
-fn requestCandidate(evaluator: *Fiber, request: machine.IdiomRequest) ?Candidate {
+fn requestCandidate(fiber: *Fiber, request: machine.IdiomRequest) ?Candidate {
     const context: Context, const depth: usize = switch (request) {
         .each => .{ .each, 2 },
         .fold1 => .{ .fold1, 2 },
@@ -344,8 +344,8 @@ fn requestCandidate(evaluator: *Fiber, request: machine.IdiomRequest) ?Candidate
         .fold => .{ .fold, 3 },
         .scan => .{ .scan, 3 },
     };
-    if (evaluator.available() < depth) return null;
-    const phrase = evaluator.stack.items[evaluator.stack.items.len - 1];
+    if (fiber.available() < depth) return null;
+    const phrase = fiber.stack.items[fiber.stack.items.len - 1];
     if (phrase != .list) return null;
     return .{ .context = context, .phrase = phrase };
 }
@@ -410,10 +410,10 @@ fn phraseAtom(entry: u16, position: usize) error{OutOfMemory}!u32 {
 /// its phrases (see `kernel_support.headed`). Only the word being dispatched
 /// can head one: a primitive reached any other way declines, as does a fiber
 /// that runs generic code only.
-pub fn applyHeaded(evaluator: *Fiber, first: u16) MachineError!bool {
-    if (evaluator.inherited.idiom_mode == .generic_only) return false;
-    if (evaluator.active_word.atom() != try phraseAtom(first, 0)) return false;
-    return applyPhrase(evaluator, first);
+pub fn applyHeaded(fiber: *Fiber, first: u16) MachineError!bool {
+    if (fiber.inherited.idiom_mode == .generic_only) return false;
+    if (fiber.active_word.atom() != try phraseAtom(first, 0)) return false;
+    return applyPhrase(fiber, first);
 }
 
 /// A builtin head continued by the words after it. Each entry the head
@@ -422,50 +422,50 @@ pub fn applyHeaded(evaluator: *Fiber, first: u16) MachineError!bool {
 /// and consumes those words. The fused pass reports a fault as the last
 /// following word would: it is the only word that can fault, and a builtin
 /// has no site inside a body.
-fn applyPhrase(evaluator: *Fiber, first: u16) MachineError!bool {
+fn applyPhrase(fiber: *Fiber, first: u16) MachineError!bool {
     const name = registry[first].source_word.?;
     var index = first;
     while (index < registry.len) : (index += 1) {
         const entry = registry[index];
         if (entry.following.len == 0 or !std.mem.eql(u8, entry.source_word.?, name)) break;
         const count: u32 = @intCast(entry.following.len);
-        const forms = evaluator.followingForms(count) orelse return false;
+        const forms = fiber.followingForms(count) orelse return false;
         var last: ?intern.TraceWord = null;
         const matched = for (0..entry.following.len) |offset| {
             const form = forms.at(@intCast(offset));
             if (form != .symbol or env.isQuoted(form.symbol.slot) or form.symbol.name != try phraseAtom(index, offset + 1)) break false;
-            last = try followingWord(evaluator, form.symbol) orelse break false;
+            last = try followingWord(fiber, form.symbol) orelse break false;
         } else true;
         if (!matched) continue;
         switch (entry.operation.phrase) {
             .where_at => {
-                if (!compressShape(evaluator)) continue;
-                commitPhrase(evaluator, count, last.?);
-                var mask = try evaluator.popValue();
+                if (!compressShape(fiber)) continue;
+                commitPhrase(fiber, count, last.?);
+                var mask = try fiber.popValue();
                 defer mask.deinit();
-                var source = try evaluator.popValue();
+                var source = try fiber.popValue();
                 defer source.deinit();
-                try sequence.compress(evaluator, &source, &mask);
+                try sequence.compress(fiber, &source, &mask);
             },
             .reshape_sum, .reshape_product => |operation| {
-                const shape = columnFoldShape(evaluator, operation) orelse continue;
-                commitPhrase(evaluator, count, last.?);
-                var shape_owner = try evaluator.popValue();
+                const shape = columnFoldShape(fiber, operation) orelse continue;
+                commitPhrase(fiber, count, last.?);
+                var shape_owner = try fiber.popValue();
                 defer shape_owner.deinit();
-                var input = try evaluator.popValue();
+                var input = try fiber.popValue();
                 defer input.deinit();
-                try numeric.foldColumns(evaluator, columnOperation(operation), &input, shape.rows, shape.columns);
+                try numeric.foldColumns(fiber, columnOperation(operation), &input, shape.rows, shape.columns);
             },
             .cons_call => {
-                if (!consShape(evaluator, 2)) continue;
-                commitPhrase(evaluator, count, last.?);
-                var quotation = try evaluator.popValue();
-                try evaluator.callOwned(quotation.take().list);
+                if (!consShape(fiber, 2)) continue;
+                commitPhrase(fiber, count, last.?);
+                var quotation = try fiber.popValue();
+                try fiber.callOwned(quotation.take().list);
             },
             .cons_dip => {
-                if (!consShape(evaluator, 3)) continue;
-                commitPhrase(evaluator, count, last.?);
-                try combinators.dipBelowHead(evaluator);
+                if (!consShape(fiber, 3)) continue;
+                commitPhrase(fiber, count, last.?);
+                try combinators.dipBelowHead(fiber);
             },
         }
         return true;
@@ -479,23 +479,30 @@ fn applyPhrase(evaluator: *Fiber, first: u16) MachineError!bool {
 /// head is unquoted in place, as the built quotation's push would leave it.
 /// Any other shape runs the words as written, which reports `cons`'s own
 /// type error.
-fn consShape(evaluator: *Fiber, depth: usize) bool {
-    if (evaluator.available() < depth) return false;
-    const stack = evaluator.stack.items;
+fn consShape(fiber: *Fiber, depth: usize) bool {
+    if (fiber.available() < depth) return false;
+    const stack = fiber.stack.items;
     if (stack[stack.len - 1] != .list) return false;
     const head = &stack[stack.len - 2];
     if (head.* == .symbol) head.symbol.slot = env.unquoted(head.symbol.slot);
     return true;
 }
 
+/// Counts a recognition in the instrumented build; nothing otherwise.
+inline fn countHit(fiber: *Fiber, comptime kind: enum { application, phrase }) void {
+    if (comptime machine.root_execution_metrics_enabled) {
+        fiber.root_execution_metrics.idiom_hits += 1;
+        if (kind == .phrase) fiber.root_execution_metrics.phrase_hits += 1;
+    }
+}
+
 /// Consumes a matched phrase's following words, whose last one is now the
 /// active word.
-fn commitPhrase(evaluator: *Fiber, count: u32, last: intern.TraceWord) void {
-    evaluator.idiom_hits += 1;
-    evaluator.phrase_hits += 1;
-    evaluator.skipFollowingForms(count);
-    evaluator.commitPhraseTrace();
-    evaluator.active_word = last;
+fn commitPhrase(fiber: *Fiber, count: u32, last: intern.TraceWord) void {
+    countHit(fiber, .phrase);
+    fiber.skipFollowingForms(count);
+    fiber.commitPhraseTrace();
+    fiber.active_word = last;
 }
 
 fn columnOperation(operation: PhraseOp) numeric.BinaryOp {
@@ -508,9 +515,9 @@ fn columnOperation(operation: PhraseOp) numeric.BinaryOp {
 
 /// Whether `list mask where at` can run as one pass over the list: see
 /// `kernel_sequence.compress`. Anything else runs the words as written.
-fn compressShape(evaluator: *Fiber) bool {
-    if (evaluator.available() < 2) return false;
-    const stack = evaluator.stack.items;
+fn compressShape(fiber: *Fiber) bool {
+    if (fiber.available() < 2) return false;
+    const stack = fiber.stack.items;
     return sequence.compressCandidate(stack[stack.len - 2], stack[stack.len - 1]);
 }
 
@@ -518,9 +525,9 @@ fn compressShape(evaluator: *Fiber) bool {
 /// rows can run on the list itself: a two-axis shape of positive ints whose
 /// volume is the list's length, and a numeric leaf the operation keeps typed.
 /// Anything else runs the words as written.
-fn columnFoldShape(evaluator: *Fiber, operation: PhraseOp) ?struct { rows: usize, columns: usize } {
-    if (evaluator.available() < 2) return null;
-    const stack = evaluator.stack.items;
+fn columnFoldShape(fiber: *Fiber, operation: PhraseOp) ?struct { rows: usize, columns: usize } {
+    if (fiber.available() < 2) return null;
+    const stack = fiber.stack.items;
     const shape = stack[stack.len - 1];
     const input = stack[stack.len - 2];
     if (shape != .list or shape.list.length() != 2 or input != .list) return null;
@@ -544,14 +551,14 @@ const Recognized = union(enum) {
 
 /// Every recognized application starts here: it counts the hit and reports
 /// a fault or a continuing driver at the phrase's active word.
-inline fn applyRecognized(evaluator: *Fiber, phrase: Value, recognized: Recognized, capture: Capture) MachineError!void {
-    evaluator.idiom_hits += 1;
+inline fn applyRecognized(fiber: *Fiber, phrase: Value, recognized: Recognized, capture: Capture) MachineError!void {
+    countHit(fiber, .application);
     const attribution: Attribution = .{
         .site = if (capture.active_index) |index| .{ .code = phrase.list, .index = index } else null,
     };
-    return attribution.started(evaluator, switch (recognized) {
-        .entry => |entry| applyEntry(evaluator, entry, capture),
-        .program => |program| startProgram(evaluator, program),
+    return attribution.started(fiber, switch (recognized) {
+        .entry => |entry| applyEntry(fiber, entry, capture),
+        .program => |program| startProgram(fiber, program),
     });
 }
 
@@ -560,12 +567,12 @@ inline fn applyRecognized(evaluator: *Fiber, phrase: Value, recognized: Recogniz
 const Attribution = struct {
     site: ?struct { code: *value.ListHandle, index: u32 } = null,
 
-    fn started(self: Attribution, evaluator: *Fiber, result: MachineError!void) MachineError!void {
+    fn started(self: Attribution, fiber: *Fiber, result: MachineError!void) MachineError!void {
         result catch |err| {
-            if (err == error.Ecl) if (self.site) |site| evaluator.setFailureSite(site.code, site.index);
+            if (err == error.Ecl) if (self.site) |site| fiber.setFailureSite(site.code, site.index);
             return err;
         };
-        if (self.site) |site| evaluator.setWorkDriverSite(site.code, site.index);
+        if (self.site) |site| fiber.setWorkDriverSite(site.code, site.index);
     }
 };
 
@@ -575,7 +582,7 @@ const Attribution = struct {
 /// by the registry's shape and each pattern word is one slot read, so the
 /// whole match runs where the combinator applies.
 fn matchOffered(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     candidate: Candidate,
     entries: []const u16,
     fallback: machine.IdiomFallback,
@@ -584,13 +591,13 @@ fn matchOffered(
 ) MachineError!void {
     var capture: Capture = .{};
     const matched: ?u16 = for (entries) |index| {
-        if (matchPhrase(evaluator, candidate.phrase, registry[index])) |found| {
+        if (matchPhrase(fiber, candidate.phrase, registry[index])) |found| {
             capture = found;
             break index;
         }
     } else null;
-    if (matched == null) if (recognizeProgram(evaluator, candidate)) |program| {
-        return applyRecognized(evaluator, candidate.phrase, .{ .program = &program }, .{});
+    if (matched == null) if (recognizeProgram(fiber, candidate)) |program| {
+        return applyRecognized(fiber, candidate.phrase, .{ .program = &program }, .{});
     };
     if (planned) |entry| if (entry.offered == null) {
         heap.retainValue(candidate.phrase);
@@ -603,7 +610,7 @@ fn matchOffered(
             .active_index = capture.active_index,
         };
     };
-    return applyMatched(evaluator, candidate.phrase, matched, capture, fallback);
+    return applyMatched(fiber, candidate.phrase, matched, capture, fallback);
 }
 
 /// The numeric operations a scalar program may contain, by spelling, each with
@@ -655,18 +662,18 @@ const ProgramForm = union(enum) {
 /// What `form` is to a scalar program where it runs, or null when no program
 /// can hold it: a numeric constant, a stack word, or a numeric operation, each
 /// word bound as the program expects.
-fn programForm(evaluator: *Fiber, form: Value) ?ProgramForm {
+fn programForm(fiber: *Fiber, form: Value) ?ProgramForm {
     if (form != .symbol) return if (form == .int or form == .float) .{ .constant = form } else null;
     const word = form.symbol;
     // A quoted occurrence pushes a symbol, which no program register holds.
     if (env.isQuoted(word.slot)) return null;
     const spelling = intern.get(word.name);
     if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
-        if (!wordMatches(evaluator, word, null)) return null;
+        if (!wordMatches(fiber, word, null)) return null;
         return .{ .stack = stack_word };
     }
     const operation = chainHead(spelling) orelse return null;
-    if (!wordMatches(evaluator, word, operationPrimitive(operation))) return null;
+    if (!wordMatches(fiber, word, operationPrimitive(operation))) return null;
     return .{ .operation = operation };
 }
 
@@ -683,7 +690,7 @@ pub fn chainHead(spelling: []const u8) ?Operation {
 /// form must be a `programForm`, and the forms must leave exactly one value
 /// from their inputs. Operations keep their order, including one whose result
 /// is later popped, so a fault happens where the code's own would.
-fn compileProgram(evaluator: *Fiber, code: Value, start: usize, length: usize, inputs: u8) ?numeric.ScalarProgram {
+fn compileProgram(fiber: *Fiber, code: Value, start: usize, length: usize, inputs: u8) ?numeric.ScalarProgram {
     const Program = numeric.ScalarProgram;
     var program: Program = .{ .inputs = inputs, .registers = inputs };
     // SAFETY: only the first `depth` entries are read.
@@ -692,7 +699,7 @@ fn compileProgram(evaluator: *Fiber, code: Value, start: usize, length: usize, i
     for (0..inputs) |input| stack[input] = @intCast(input);
     for (start..start + length) |position| {
         const form = list.atUnchecked(code, position);
-        switch (programForm(evaluator, form) orelse return null) {
+        switch (programForm(fiber, form) orelse return null) {
             .constant => |constant| {
                 if (program.registers == Program.max_registers or depth == stack.len) return null;
                 program.constants[program.constant_count] = .{ .register = program.registers, .value = constant };
@@ -771,7 +778,7 @@ const ChainExtent = struct { length: usize, inputs: u8 };
 /// follows the head, and the run leaves exactly one value from everything it
 /// read. Inputs are read from beneath as the forms need them. Null when no
 /// such run exists.
-fn chainExtent(evaluator: *Fiber, code: Value, head: usize, operation: Operation) ?ChainExtent {
+fn chainExtent(fiber: *Fiber, code: Value, head: usize, operation: Operation) ?ChainExtent {
     const Program = numeric.ScalarProgram;
     const count: usize = @intCast(code.list.length());
     var depth: usize = 0;
@@ -780,7 +787,7 @@ fn chainExtent(evaluator: *Fiber, code: Value, head: usize, operation: Operation
     var registers: usize = 0;
     var longest: ?ChainExtent = null;
     for (head..count) |position| {
-        const form = programForm(evaluator, list.atUnchecked(code, position)) orelse break;
+        const form = programForm(fiber, list.atUnchecked(code, position)) orelse break;
         if (position == head and !(form == .operation and std.meta.eql(form.operation, operation))) return null;
         const effect = form.effect();
         if (depth < effect.reads) {
@@ -810,25 +817,24 @@ fn chainExtent(evaluator: *Fiber, code: Value, head: usize, operation: Operation
 /// program is observed as the words would be, each pervading the whole list
 /// before the next, so a fault is the one they would meet first. Any other
 /// shape runs the words as written.
-pub fn applyChain(evaluator: *Fiber, operation: Operation) MachineError!bool {
-    if (evaluator.inherited.idiom_mode == .generic_only) return false;
-    const forms = evaluator.followingForms(0) orelse return false;
+pub fn applyChain(fiber: *Fiber, operation: Operation) MachineError!bool {
+    if (fiber.inherited.idiom_mode == .generic_only) return false;
+    const forms = fiber.followingForms(0) orelse return false;
     const code: Value = .{ .list = forms.code };
     const head = forms.start - 1;
-    const extent = chainExtent(evaluator, code, head, operation) orelse return false;
-    if (evaluator.available() < extent.inputs) return false;
-    const stack = evaluator.stack.items;
+    const extent = chainExtent(fiber, code, head, operation) orelse return false;
+    if (fiber.available() < extent.inputs) return false;
+    const stack = fiber.stack.items;
     const operands = stack[stack.len - extent.inputs ..];
     if (!numeric.programCandidate(operands)) return false;
-    const program = compileProgram(evaluator, code, head, extent.length, extent.inputs) orelse return false;
+    const program = compileProgram(fiber, code, head, extent.length, extent.inputs) orelse return false;
     // A result no list operand reaches is scalar code, which the words
     // already run as such.
     if (!numeric.programResultVaries(&program, operands)) return false;
-    evaluator.idiom_hits += 1;
-    evaluator.phrase_hits += 1;
-    evaluator.skipFollowingForms(@intCast(extent.length - 1));
-    evaluator.commitPhraseTrace();
-    try numeric.startProgramChain(evaluator, forms.code, program);
+    countHit(fiber, .phrase);
+    fiber.skipFollowingForms(@intCast(extent.length - 1));
+    fiber.commitPhraseTrace();
+    try numeric.startProgramChain(fiber, forms.code, program);
     return true;
 }
 
@@ -841,14 +847,14 @@ const OfferedProgram = struct {
 /// quotation as a scalar program over the operands it will see. It is
 /// compiled afresh on every call rather than planned: the plan holds a
 /// registry entry, and a program is not one.
-fn recognizeProgram(evaluator: *Fiber, candidate: Candidate) ?OfferedProgram {
-    const stack = evaluator.stack.items;
+fn recognizeProgram(fiber: *Fiber, candidate: Candidate) ?OfferedProgram {
+    const stack = fiber.stack.items;
     const inputs: u8 = switch (candidate.context) {
         .each => 1,
         .zip_with, .fold, .fold1, .scan => 2,
         else => return null,
     };
-    const compiled = compileProgram(evaluator, candidate.phrase, 0, @intCast(candidate.phrase.list.length()), inputs) orelse return null;
+    const compiled = compileProgram(fiber, candidate.phrase, 0, @intCast(candidate.phrase.list.length()), inputs) orelse return null;
     const admitted = switch (candidate.context) {
         .each, .zip_with => numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1]),
         // The accumulator is input 0 and the element input 1.
@@ -860,29 +866,29 @@ fn recognizeProgram(evaluator: *Fiber, candidate: Candidate) ?OfferedProgram {
     return .{ .context = candidate.context, .compiled = compiled };
 }
 
-fn startProgram(evaluator: *Fiber, program: *const OfferedProgram) MachineError!void {
-    var quotation = try evaluator.popValue();
+fn startProgram(fiber: *Fiber, program: *const OfferedProgram) MachineError!void {
+    var quotation = try fiber.popValue();
     defer quotation.deinit();
     switch (program.context) {
         .each => {
-            var input = try evaluator.popValue();
+            var input = try fiber.popValue();
             defer input.deinit();
-            return numeric.startProgramEach(evaluator, &input, &quotation, program.compiled);
+            return numeric.startProgramEach(fiber, &input, &quotation, program.compiled);
         },
         .zip_with => {
-            var right = try evaluator.popValue();
+            var right = try fiber.popValue();
             defer right.deinit();
-            var left = try evaluator.popValue();
+            var left = try fiber.popValue();
             defer left.deinit();
-            return numeric.startProgramZip(evaluator, &left, &right, &quotation, program.compiled);
+            return numeric.startProgramZip(fiber, &left, &right, &quotation, program.compiled);
         },
         .fold, .fold1, .scan => {
-            var initial: ?heap.OwnedValue = if (program.context == .fold1) null else try evaluator.popValue();
+            var initial: ?heap.OwnedValue = if (program.context == .fold1) null else try fiber.popValue();
             defer if (initial) |*owned| owned.deinit();
-            var input = try evaluator.popValue();
+            var input = try fiber.popValue();
             defer input.deinit();
             const seed: ?Value = if (initial) |*owned| owned.borrow() else null;
-            return numeric.startProgramReduce(evaluator, &input, &quotation, program.compiled, seed, program.context == .scan);
+            return numeric.startProgramReduce(fiber, &input, &quotation, program.compiled, seed, program.context == .scan);
         },
         else => unreachable,
     }
@@ -890,15 +896,15 @@ fn startProgram(evaluator: *Fiber, program: *const OfferedProgram) MachineError!
 
 /// Applies a matched entry when this application's operands admit it, and
 /// declines otherwise.
-fn applyMatched(evaluator: *Fiber, phrase: Value, matched: ?u16, capture: Capture, fallback: machine.IdiomFallback) MachineError!void {
-    const index = matched orelse return fallback(evaluator);
+fn applyMatched(fiber: *Fiber, phrase: Value, matched: ?u16, capture: Capture, fallback: machine.IdiomFallback) MachineError!void {
+    const index = matched orelse return fallback(fiber);
     const selected = registry[index];
-    if (!canApplyEntry(evaluator, selected)) return fallback(evaluator);
-    return applyRecognized(evaluator, phrase, .{ .entry = selected }, capture);
+    if (!canApplyEntry(fiber, selected)) return fallback(fiber);
+    return applyRecognized(fiber, phrase, .{ .entry = selected }, capture);
 }
 
-fn canApplyEntry(evaluator: *Fiber, entry: RegistryEntry) bool {
-    const stack = evaluator.stack.items;
+fn canApplyEntry(fiber: *Fiber, entry: RegistryEntry) bool {
+    const stack = fiber.stack.items;
     return switch (entry.operation) {
         .unary => entry.context == .each and stack[stack.len - 2] == .list,
         .binary => switch (entry.context) {
@@ -919,83 +925,83 @@ fn canApplyEntry(evaluator: *Fiber, entry: RegistryEntry) bool {
     };
 }
 
-fn applyEntry(evaluator: *Fiber, entry: RegistryEntry, capture: Capture) MachineError!void {
-    if (capture.active_word) |word| evaluator.active_word = .plain(word);
+fn applyEntry(fiber: *Fiber, entry: RegistryEntry, capture: Capture) MachineError!void {
+    if (capture.active_word) |word| fiber.active_word = .plain(word);
     try switch (entry.operation) {
-        .unary => |operation| applyUnaryEach(evaluator, operation),
+        .unary => |operation| applyUnaryEach(fiber, operation),
         .binary => |operation| switch (entry.context) {
             .each => applyConstantEach(
-                evaluator,
+                fiber,
                 operation,
                 capture.constant.?,
                 entry.constant_left,
             ),
-            .zip_with => applyZipWith(evaluator, operation),
-            .fold, .fold1, .scan => applyReduction(evaluator, operation, entry.context),
+            .zip_with => applyZipWith(fiber, operation),
+            .fold, .fold1, .scan => applyReduction(fiber, operation, entry.context),
             .phrase, .lex_cmp => unreachable,
         },
-        .match => applyMatchEach(evaluator, capture.constant.?),
-        .length => applyLengthEach(evaluator),
-        .conversion => |target| if (evaluator.stack.items[evaluator.stack.items.len - 2].list.length() == 0)
-            finishCollected(evaluator, &.{}, 2)
+        .match => applyMatchEach(fiber, capture.constant.?),
+        .length => applyLengthEach(fiber),
+        .conversion => |target| if (fiber.stack.items[fiber.stack.items.len - 2].list.length() == 0)
+            finishCollected(fiber, &.{}, 2)
         else
-            prims.startConversionEach(evaluator, target),
-        .cmp => applyLexCompare(evaluator),
+            prims.startConversionEach(fiber, target),
+        .cmp => applyLexCompare(fiber),
         .phrase => unreachable, // See `applyPhrase`.
     };
 }
 
 /// `(cmp) lex-cmp-with`: the comparator is consumed with the lists.
-fn applyLexCompare(evaluator: *Fiber) MachineError!void {
-    popRelease(evaluator, 1);
-    return order.lexCompare(evaluator);
+fn applyLexCompare(fiber: *Fiber) MachineError!void {
+    popRelease(fiber, 1);
+    return order.lexCompare(fiber);
 }
 
-fn applyUnaryEach(evaluator: *Fiber, operation: numeric.UnaryOp) MachineError!void {
-    const stack = evaluator.stack.items;
+fn applyUnaryEach(fiber: *Fiber, operation: numeric.UnaryOp) MachineError!void {
+    const stack = fiber.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
     // Over a numeric leaf, applying the operation to each element and pervading
     // over the leaf are the same computation, so the recognizer enters the typed
     // loop rather than driving one cursor and one scheduler turn per element.
     if (numeric.typedUnaryCandidate(input)) {
-        var quotation = try evaluator.popValue();
+        var quotation = try fiber.popValue();
         defer quotation.deinit();
-        var operand = try evaluator.popValue();
+        var operand = try fiber.popValue();
         defer operand.deinit();
-        return numeric.idiomUnaryStart(operation)(evaluator, &operand);
+        return numeric.idiomUnaryStart(operation)(fiber, &operand);
     }
     const count: usize = @intCast(input.list.length());
-    try PervadeEachDriver.install(evaluator, .{ .unary = operation }, input, null, count, 2);
+    try PervadeEachDriver.install(fiber, .{ .unary = operation }, input, null, count, 2);
 }
 
 fn applyConstantEach(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: numeric.BinaryOp,
     constant: Value,
     constant_left: bool,
 ) MachineError!void {
-    const stack = evaluator.stack.items;
+    const stack = fiber.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
     if (numeric.typedConstantCandidate(operation, input, constant, constant_left)) {
-        var quotation = try evaluator.popValue();
+        var quotation = try fiber.popValue();
         defer quotation.deinit();
-        var operand = try evaluator.popValue();
+        var operand = try fiber.popValue();
         defer operand.deinit();
         // The captured constant is an atom, so it needs no reference of its own:
         // the typed loop reads it with stride zero.
-        var scalar = heap.OwnedValue.init(evaluator.releases, constant);
+        var scalar = heap.OwnedValue.init(fiber.releases, constant);
         heap.retainValue(constant);
         defer scalar.deinit();
         return if (constant_left)
-            numeric.idiomBinaryStart(operation)(evaluator, &scalar, &operand)
+            numeric.idiomBinaryStart(operation)(fiber, &scalar, &operand)
         else
-            numeric.idiomBinaryStart(operation)(evaluator, &operand, &scalar);
+            numeric.idiomBinaryStart(operation)(fiber, &operand, &scalar);
     }
     const count: usize = @intCast(input.list.length());
     try PervadeEachDriver.install(
-        evaluator,
+        fiber,
         .{ .constant = .{ .operation = operation, .value = constant, .left = constant_left } },
         input,
         null,
@@ -1004,8 +1010,8 @@ fn applyConstantEach(
     );
 }
 
-fn applyZipWith(evaluator: *Fiber, operation: numeric.BinaryOp) MachineError!void {
-    const stack = evaluator.stack.items;
+fn applyZipWith(fiber: *Fiber, operation: numeric.BinaryOp) MachineError!void {
+    const stack = fiber.stack.items;
     const right = stack[stack.len - 2];
     const left = stack[stack.len - 3];
     const left_list = left == .list;
@@ -1013,17 +1019,17 @@ fn applyZipWith(evaluator: *Fiber, operation: numeric.BinaryOp) MachineError!voi
     std.debug.assert(left_list or right_list);
     std.debug.assert(!left_list or !right_list or left.list.length() == right.list.length());
     if (numeric.typedBinaryCandidate(operation, left, right)) {
-        var quotation = try evaluator.popValue();
+        var quotation = try fiber.popValue();
         defer quotation.deinit();
-        var right_operand = try evaluator.popValue();
+        var right_operand = try fiber.popValue();
         defer right_operand.deinit();
-        var left_operand = try evaluator.popValue();
+        var left_operand = try fiber.popValue();
         defer left_operand.deinit();
-        return numeric.idiomBinaryStart(operation)(evaluator, &left_operand, &right_operand);
+        return numeric.idiomBinaryStart(operation)(fiber, &left_operand, &right_operand);
     }
     const count: usize = if (left_list) @intCast(left.list.length()) else @intCast(right.list.length());
     try PervadeEachDriver.install(
-        evaluator,
+        fiber,
         .{ .zip_with = .{ .operation = operation, .left_list = left_list, .right_list = right_list } },
         left,
         right,
@@ -1049,15 +1055,15 @@ const PervadeEachDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     fn install(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         mode: Mode,
         left: Value,
         right: ?Value,
         count: usize,
         consumed: usize,
     ) error{OutOfMemory}!void {
-        const results = try heap.OwnedValueBuffer.init(evaluator.releases, count);
-        try evaluator.startDriver(PervadeEachDriver{
+        const results = try heap.OwnedValueBuffer.init(fiber.releases, count);
+        try fiber.startDriver(PervadeEachDriver{
             .mode = mode,
             .left = left,
             .right = right,
@@ -1068,16 +1074,16 @@ const PervadeEachDriver = struct {
 
     /// Elements run one after another within a step until the budget is spent,
     /// through one cursor armed in place for each.
-    pub fn advance(evaluator: *Fiber, self: *PervadeEachDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *PervadeEachDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         const count = self.results.borrow().capacity();
         while (self.index != count) {
             if (self.cursor == null) {
-                self.cursor = .init(numeric.PervadeCursor.initIdle(evaluator.releases, evaluator.allocator));
+                self.cursor = .init(numeric.PervadeCursor.initIdle(fiber.releases, fiber.allocator));
                 self.arm(self.cursor.?.borrowMut());
             }
-            switch (try self.cursor.?.borrowMut().advance(evaluator, work)) {
+            switch (try self.cursor.?.borrowMut().advance(fiber, work)) {
                 .pending => return .stepped,
                 .complete => |result| {
                     self.results.borrowMut().appendOwned(result);
@@ -1087,16 +1093,16 @@ const PervadeEachDriver = struct {
             }
         }
         if (self.cursor) |*cursor| {
-            cursor.deinit(evaluator.releases, evaluator.allocator);
+            cursor.deinit(fiber.releases, fiber.allocator);
             self.cursor = null;
         }
         if (self.materializer == null)
-            self.materializer = .init(.init(evaluator.allocator, self.results.borrow().values()));
+            self.materializer = .init(.init(fiber.allocator, self.results.borrow().values()));
         if (work.exhausted()) return .stepped;
         return switch (try self.materializer.?.borrowMut().advance(work)) {
             .pending => .stepped,
             .complete => |result| completed: {
-                popRelease(evaluator, self.consumed);
+                popRelease(fiber, self.consumed);
                 break :completed .{ .output = result };
             },
         };
@@ -1125,13 +1131,13 @@ const PervadeEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn applyLengthEach(evaluator: *Fiber) MachineError!void {
-    const stack = evaluator.stack.items;
+fn applyLengthEach(fiber: *Fiber) MachineError!void {
+    const stack = fiber.stack.items;
     const input = stack[stack.len - 2];
     const count: usize = @intCast(input.list.length());
-    if (count == 0) return finishCollected(evaluator, &.{}, 2);
-    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, count);
-    try evaluator.startDriver(LengthEachDriver{ .input = input, .writer = .init(writer) });
+    if (count == 0) return finishCollected(fiber, &.{}, 2);
+    const writer = try heap.LeafWriter(.leaf_i64).init(fiber.allocator, count);
+    try fiber.startDriver(LengthEachDriver{ .input = input, .writer = .init(writer) });
 }
 
 const LengthEachDriver = struct {
@@ -1141,29 +1147,29 @@ const LengthEachDriver = struct {
     writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
     index: usize = 0,
 
-    pub fn advance(evaluator: *Fiber, self: *LengthEachDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *LengthEachDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const count: usize = @intCast(self.input.list.length());
-        const end = self.index + evaluator.workBudget().take(count - self.index);
+        const end = self.index + fiber.workBudget().take(count - self.index);
         while (self.index < end) : (self.index += 1) {
             const item = list.atUnchecked(self.input, self.index);
-            if (item != .list) return evaluator.typeError("a list");
+            if (item != .list) return fiber.typeError("a list");
             self.writer.borrowMut().fillRange(self.index, 1, @intCast(item.list.length()));
         }
         if (self.index != count) return .stepped;
-        popRelease(evaluator, 2);
+        popRelease(fiber, 2);
         return .{ .output = self.writer.borrowMut().finish() };
     }
 };
 
-fn applyMatchEach(evaluator: *Fiber, constant: Value) MachineError!void {
-    const stack = evaluator.stack.items;
+fn applyMatchEach(fiber: *Fiber, constant: Value) MachineError!void {
+    const stack = fiber.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
     const count: usize = @intCast(input.list.length());
-    if (count == 0) return finishCollected(evaluator, &.{}, 2);
-    const writer = try heap.LeafWriter(.leaf_u8).init(evaluator.allocator, count);
-    try evaluator.startDriver(MatchEachDriver{
+    if (count == 0) return finishCollected(fiber, &.{}, 2);
+    const writer = try heap.LeafWriter(.leaf_u8).init(fiber.allocator, count);
+    try fiber.startDriver(MatchEachDriver{
         .input = input,
         .constant = constant,
         .writer = .init(writer),
@@ -1180,10 +1186,10 @@ const MatchEachDriver = struct {
     index: usize = 0,
     cursor: ?heap.Owned(equal.MatchCursor) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *MatchEachDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *MatchEachDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const count: usize = @intCast(self.input.list.length());
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (self.index != count and work.spend()) {
             const item = list.atUnchecked(self.input, self.index);
             if (self.cursor == null) {
@@ -1192,12 +1198,12 @@ const MatchEachDriver = struct {
                     self.index += 1;
                     continue;
                 }
-                self.cursor = .init(try .init(evaluator.allocator, item, self.constant));
+                self.cursor = .init(try .init(fiber.allocator, item, self.constant));
             }
             switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => return .stepped,
                 .complete => |matches| {
-                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.cursor.?.deinit(fiber.releases, fiber.allocator);
                     self.cursor = null;
                     self.writer.borrowMut().fillRange(self.index, 1, @intFromBool(matches));
                     self.index += 1;
@@ -1208,7 +1214,7 @@ const MatchEachDriver = struct {
             }
         }
         if (self.index != count) return .stepped;
-        popRelease(evaluator, 2);
+        popRelease(fiber, 2);
         return .{ .output = self.writer.borrowMut().finish() };
     }
 
@@ -1216,7 +1222,7 @@ const MatchEachDriver = struct {
 };
 
 fn applyReduction(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: numeric.BinaryOp,
     context: Context,
 ) MachineError!void {
@@ -1224,21 +1230,21 @@ fn applyReduction(
     const from_first = context == .fold1;
     const consumed: usize = if (from_first) 2 else 3;
     const start: usize = if (from_first) 1 else 0;
-    const stack = evaluator.stack.items;
+    const stack = fiber.stack.items;
     const input = stack[stack.len - consumed];
     const initial = if (from_first) list.atUnchecked(input, 0) else stack[stack.len - 2];
-    return numeric.startReduction(evaluator, operation, scan, input, initial, start, consumed);
+    return numeric.startReduction(fiber, operation, scan, input, initial, start, consumed);
 }
 
-fn finishCollected(evaluator: *Fiber, values: []const Value, consumed: usize) MachineError!void {
+fn finishCollected(fiber: *Fiber, values: []const Value, consumed: usize) MachineError!void {
     std.debug.assert(values.len == 0);
-    const result = try list.fromValuesGeneric(evaluator.allocator, values);
-    popRelease(evaluator, consumed);
-    try evaluator.pushOwned(result);
+    const result = try list.fromValuesGeneric(fiber.allocator, values);
+    popRelease(fiber, consumed);
+    try fiber.pushOwned(result);
 }
 
-fn popRelease(evaluator: *Fiber, count: usize) void {
-    evaluator.discard(count);
+fn popRelease(fiber: *Fiber, count: usize) void {
+    fiber.discard(count);
 }
 
 fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {

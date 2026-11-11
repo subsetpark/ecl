@@ -2,7 +2,6 @@
 const std = @import("std");
 const print = @import("print.zig");
 const heap = @import("heap.zig");
-const list = @import("list.zig");
 const reader = @import("reader.zig");
 const spans = @import("spans.zig");
 const env = @import("env.zig");
@@ -79,8 +78,6 @@ pub fn installSource(
             },
         }
     };
-    var arguments = heap.OwnedValue.init(release_domain, try list.fromValuesGeneric(allocator, &.{}));
-    defer arguments.deinit();
     var fiber = machine.Fiber.init(
         allocator,
         release_domain,
@@ -91,8 +88,9 @@ pub fn installSource(
         // Phrases are recognized only once the core is frozen and the session
         // runs; the bootstrap fiber evaluates the prelude generically.
         .{ .registry = registry, .idiom_mode = .generic_only, .phase = .bootstrap },
-        arguments.borrow(),
         cancelled,
+        .bootstrap,
+        .own,
     );
     defer fiber.deinit();
     fiber.replaceRootScope(building.rootScope(allocator));

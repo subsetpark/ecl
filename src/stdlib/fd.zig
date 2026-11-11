@@ -45,18 +45,18 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "bytes?", .effect = "value -- bool", .doc = "Return 1 when the value is a list of integers in `0...255`, what `write` accepts as one piece, and 0 for anything else, including a string.", .primitive = bytesPredicate },
 };
 
-fn bytesPredicate(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn bytesPredicate(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     const source = item.borrow();
-    if (source != .list) return evaluator.pushOwned(.{ .int = 0 });
+    if (source != .list) return fiber.pushOwned(.{ .int = 0 });
     switch (source.list.kind()) {
-        .leaf_u8 => return evaluator.pushOwned(.{ .int = 1 }),
+        .leaf_u8 => return fiber.pushOwned(.{ .int = 1 }),
         .leaf_i64, .generic_spine => {},
-        else => return evaluator.pushOwned(.{ .int = 0 }),
+        else => return fiber.pushOwned(.{ .int = 0 }),
     }
-    if (source.list.length() == 0) return evaluator.pushOwned(.{ .int = 1 });
-    try evaluator.startDriver(BytesPredicate{ .source = .init(item.take()) });
+    if (source.list.length() == 0) return fiber.pushOwned(.{ .int = 1 });
+    try fiber.startDriver(BytesPredicate{ .source = .init(item.take()) });
 }
 
 /// `fd.bytes?` over an int or generic list, a block at a time. An int leaf is
@@ -67,9 +67,9 @@ const BytesPredicate = struct {
     source: heap.Owned(Value),
     index: usize = 0,
 
-    pub fn advance(evaluator: *Fiber, self: *BytesPredicate) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *BytesPredicate) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         const source = self.source.borrow();
         const count: usize = @intCast(source.list.length());
         while (!work.exhausted()) {
@@ -100,20 +100,20 @@ const BytesPredicate = struct {
     }
 };
 
-fn input(evaluator: *Fiber) MachineError!void {
-    return device(evaluator, .input);
+fn input(fiber: *Fiber) MachineError!void {
+    return device(fiber, .input);
 }
-fn output(evaluator: *Fiber) MachineError!void {
-    return device(evaluator, .output);
+fn output(fiber: *Fiber) MachineError!void {
+    return device(fiber, .output);
 }
-fn diagnostics(evaluator: *Fiber) MachineError!void {
-    return device(evaluator, .diagnostics);
+fn diagnostics(fiber: *Fiber) MachineError!void {
+    return device(fiber, .diagnostics);
 }
 
-fn device(evaluator: *Fiber, which: streams.Device) MachineError!void {
-    const item = evaluator.inherited.runtime().standard_streams.value(which) catch |err| switch (err) {
+fn device(fiber: *Fiber, which: streams.Device) MachineError!void {
+    const item = fiber.inherited.runtime().standard_streams.value(which) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.ProgramSource => return evaluator.fail(.io, "stdin is the program source"),
+        error.ProgramSource => return fiber.fail(.io, "stdin is the program source"),
     };
-    try evaluator.pushBorrowed(item);
+    try fiber.pushBorrowed(item);
 }

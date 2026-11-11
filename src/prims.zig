@@ -55,45 +55,45 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try task_prims.install(core);
     try test_prims.install(core);
 }
-fn dup(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(1);
-    try evaluator.pushBorrowed(evaluator.stack.items[evaluator.stack.items.len - 1]);
+fn dup(fiber: *Fiber) MachineError!void {
+    try fiber.require(1);
+    try fiber.pushBorrowed(fiber.stack.items[fiber.stack.items.len - 1]);
 }
-fn swap(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    const items = evaluator.stack.items;
+fn swap(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    const items = fiber.stack.items;
     std.mem.swap(Value, &items[items.len - 1], &items[items.len - 2]);
 }
-fn over(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    try evaluator.pushBorrowed(evaluator.stack.items[evaluator.stack.items.len - 2]);
+fn over(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    try fiber.pushBorrowed(fiber.stack.items[fiber.stack.items.len - 2]);
 }
-fn pop(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn pop(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     item.deinit();
 }
-fn nip(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    try swap(evaluator);
-    try pop(evaluator);
+fn nip(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    try swap(fiber);
+    try pop(fiber);
 }
-fn dup2(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var copies = try evaluator.reserveStack(2);
-    const items = evaluator.stack.items;
+fn dup2(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var copies = try fiber.reserveStack(2);
+    const items = fiber.stack.items;
     const x = items[items.len - 2];
     const y = items[items.len - 1];
     copies.pushBorrowed(x);
     copies.pushBorrowed(y);
 }
-fn rollup(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    const top = evaluator.stack.items[evaluator.stack.items.len - 3 ..];
+fn rollup(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    const top = fiber.stack.items[fiber.stack.items.len - 3 ..];
     std.mem.rotate(Value, top, 2);
 }
-fn rolldown(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    const top = evaluator.stack.items[evaluator.stack.items.len - 3 ..];
+fn rolldown(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    const top = fiber.stack.items[fiber.stack.items.len - 3 ..];
     std.mem.rotate(Value, top, 1);
 }
 
@@ -105,21 +105,21 @@ const StackSnapshot = struct {
     depth: usize,
     index: usize = 0,
 
-    fn init(evaluator: *Fiber) error{OutOfMemory}!StackSnapshot {
-        const depth = evaluator.available();
+    fn init(fiber: *Fiber) error{OutOfMemory}!StackSnapshot {
+        const depth = fiber.available();
         return .{
-            .values = try .init(evaluator.releases, depth),
+            .values = try .init(fiber.releases, depth),
             .depth = depth,
         };
     }
 
-    fn advanceCapture(self: *StackSnapshot, evaluator: *Fiber) bool {
-        std.debug.assert(evaluator.available() == self.depth);
-        const end = self.index + evaluator.workBudget().take(self.depth - self.index);
+    fn advanceCapture(self: *StackSnapshot, fiber: *Fiber) bool {
+        std.debug.assert(fiber.available() == self.depth);
+        const end = self.index + fiber.workBudget().take(self.depth - self.index);
         // The snapshot is a list built from stack values, so each enters as
         // data (`value.datum`), as `cons` would store it.
         while (self.index != end) : (self.index += 1)
-            self.values.appendBorrowed(value.datum(evaluator.visibleOperandBorrowed(self.index)));
+            self.values.appendBorrowed(value.datum(fiber.visibleOperandBorrowed(self.index)));
         return self.index == self.depth;
     }
 
@@ -133,9 +133,9 @@ const StackSnapshot = struct {
     }
 };
 
-fn stack(evaluator: *Fiber) MachineError!void {
-    try evaluator.startDriver(StackSnapshotDriver{
-        .snapshot = .init(try .init(evaluator)),
+fn stack(fiber: *Fiber) MachineError!void {
+    try fiber.startDriver(StackSnapshotDriver{
+        .snapshot = .init(try .init(fiber)),
     });
 }
 
@@ -146,15 +146,15 @@ const StackSnapshotDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
     result: ?heap.Owned(Value) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
+    pub fn advance(fiber: *Fiber, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (!self.snapshot.borrowMut().advanceCapture(fiber)) return .stepped;
 
         if (self.materializer == null) {
-            self.materializer = .init(.init(evaluator.allocator, self.snapshot.borrow().items()));
+            self.materializer = .init(.init(fiber.allocator, self.snapshot.borrow().items()));
             return .stepped;
         }
-        if (self.result == null) switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+        if (self.result == null) switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => return .stepped,
             .complete => |result| {
                 self.result = .init(result);
@@ -162,27 +162,27 @@ const StackSnapshotDriver = struct {
             },
         };
 
-        self.snapshot.deinit(evaluator.releases, evaluator.allocator);
+        self.snapshot.deinit(fiber.releases, fiber.allocator);
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
     }
 };
 
-fn match(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var right = try evaluator.popValue();
+fn match(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var right = try fiber.popValue();
     defer right.deinit();
-    var left = try evaluator.popValue();
+    var left = try fiber.popValue();
     defer left.deinit();
     // Only a list against a list or a dict against a dict has structure to
     // walk; every other pair is one comparison, which the cursor would reach
     // after allocating a worklist and a driver to hold it.
     if (equal.matchWithoutStructure(left.borrow(), right.borrow())) |matches| {
-        return evaluator.pushOwned(.{ .int = @intFromBool(matches) });
+        return fiber.pushOwned(.{ .int = @intFromBool(matches) });
     }
-    const cursor = try equal.MatchCursor.init(evaluator.allocator, left.borrow(), right.borrow());
-    try evaluator.startDriver(MatchDriver{
+    const cursor = try equal.MatchCursor.init(fiber.allocator, left.borrow(), right.borrow());
+    try fiber.startDriver(MatchDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
         .cursor = .init(cursor),
@@ -195,16 +195,16 @@ const MatchDriver = struct {
     right: heap.Owned(Value),
     cursor: heap.Owned(equal.MatchCursor),
 
-    pub fn advance(evaluator: *Fiber, self: *MatchDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *MatchDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |matches| .{ .output = .{ .int = @intFromBool(matches) } },
         };
     }
 };
-fn typeWord(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn typeWord(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     const spelling: []const u8 = switch (item.borrow()) {
         .int => "int",
@@ -217,25 +217,25 @@ fn typeWord(evaluator: *Fiber) MachineError!void {
         .port => "port",
         .address => "address",
     };
-    try evaluator.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
+    try fiber.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
 }
-fn execute(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn execute(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     const word = switch (item.borrow()) {
         // `execute` runs the word a symbol names, quoted occurrence or not.
         .symbol => |word| value.Symbol{ .name = word.name, .slot = env.unquoted(word.slot) },
-        else => return evaluator.typeError("a symbol"),
+        else => return fiber.typeError("a symbol"),
     };
-    try evaluator.executeWord(word);
+    try fiber.executeWord(word);
 }
-fn parse(evaluator: *Fiber) MachineError!void {
-    var source_value = try evaluator.popString();
+fn parse(fiber: *Fiber) MachineError!void {
+    var source_value = try fiber.popString();
     defer source_value.deinit();
     const source = source_value.borrow();
-    try evaluator.startDriver(ParseDriver{
+    try fiber.startDriver(ParseDriver{
         .source_value = .init(source_value.take()),
-        .encoder = .init(.init(evaluator.allocator, source)),
+        .encoder = .init(.init(fiber.allocator, source)),
     });
 }
 const ParseDriver = struct {
@@ -243,19 +243,19 @@ const ParseDriver = struct {
     source_value: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.StringEncoder),
     source: ?heap.Owned([]u8) = null,
-    pub fn advance(evaluator: *Fiber, self: *ParseDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.source == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *ParseDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.source == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return fiber.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
             .pending => return .stepped,
             .complete => |source| self.source = .init(source),
         };
         const source = self.source.?.take();
         self.source = null;
-        evaluator.retireDriver(self);
-        try evaluator.parseSourceOwned(source);
+        fiber.retireDriver(self);
+        try fiber.parseSourceOwned(source);
         return .detached;
     }
 };
@@ -283,32 +283,32 @@ pub const NumericParseTarget = enum {
 
 const chars_expected = "a string, symbol, word, char, or byte list";
 
-fn chars(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn chars(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     switch (item.borrow()) {
         .list => {
-            if (item.borrow().isString()) return evaluator.pushOwned(item.take());
-            const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator, item.borrow());
-            try evaluator.startDriver(BytesToCharsDriver{
+            if (item.borrow().isString()) return fiber.pushOwned(item.take());
+            const encoder = kernel_storage.ByteVectorEncoder.init(fiber.allocator, item.borrow());
+            try fiber.startDriver(BytesToCharsDriver{
                 .source_value = .init(item.take()),
                 .encoder = .init(encoder),
             });
         },
-        .symbol => |id| try startSpellingChars(evaluator, id.name),
+        .symbol => |id| try startSpellingChars(fiber, id.name),
         .char => |codepoint| {
             const one = [_]u32{codepoint};
-            try evaluator.pushOwned(try list.fromCodepoints(evaluator.allocator, &one));
+            try fiber.pushOwned(try list.fromCodepoints(fiber.allocator, &one));
         },
-        else => return evaluator.typeError(chars_expected),
+        else => return fiber.typeError(chars_expected),
     }
 }
 
 /// Spellings are process-lifetime bytes validated as UTF-8 when interned, so
 /// the driver borrows them and owns only the string it builds.
-fn startSpellingChars(evaluator: *Fiber, id: u32) MachineError!void {
-    try evaluator.startDriver(SpellingCharsDriver{
-        .text = .init(.init(evaluator.allocator, intern.get(id))),
+fn startSpellingChars(fiber: *Fiber, id: u32) MachineError!void {
+    try fiber.startDriver(SpellingCharsDriver{
+        .text = .init(.init(fiber.allocator, intern.get(id))),
     });
 }
 
@@ -316,11 +316,11 @@ const SpellingCharsDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     text: heap.Owned(kernel_storage.Utf8Materializer),
 
-    pub fn advance(evaluator: *Fiber, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (self.text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (self.text.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return invalidUtf8(evaluator, "spelling is not valid UTF-8"),
+            error.InvalidUtf8 => return invalidUtf8(fiber, "spelling is not valid UTF-8"),
         }) {
             .pending => .stepped,
             .complete => |text| .{ .output = text },
@@ -328,9 +328,9 @@ const SpellingCharsDriver = struct {
     }
 };
 
-fn invalidUtf8(evaluator: *Fiber, message: []const u8) MachineError {
-    const failure = evaluator.fail(.domain, message);
-    evaluator.addErrorReason(.{ .symbol = .{ .name = intern.intern("invalid-utf8") catch return error.OutOfMemory } });
+fn invalidUtf8(fiber: *Fiber, message: []const u8) MachineError {
+    const failure = fiber.fail(.domain, message);
+    fiber.addErrorReason(.{ .symbol = .{ .name = intern.intern("invalid-utf8") catch return error.OutOfMemory } });
     return failure;
 }
 
@@ -341,22 +341,22 @@ const BytesToCharsDriver = struct {
     bytes: ?heap.Owned(kernel_storage.ByteVector) = null,
     text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.bytes == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.bytes == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidByte => return evaluator.typeError(chars_expected),
+            error.InvalidByte => return fiber.typeError(chars_expected),
         }) {
             .pending => return .stepped,
             .complete => |bytes| {
                 self.bytes = .init(bytes);
-                self.text = .init(.init(evaluator.allocator, self.bytes.?.borrowMut().bytes()));
+                self.text = .init(.init(fiber.allocator, self.bytes.?.borrowMut().bytes()));
                 return .stepped;
             },
         };
-        return switch (self.text.?.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+        return switch (self.text.?.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return invalidUtf8(evaluator, "byte list is not valid UTF-8"),
+            error.InvalidUtf8 => return invalidUtf8(fiber, "byte list is not valid UTF-8"),
         }) {
             .pending => .stepped,
             .complete => |text| .{ .output = text },
@@ -364,19 +364,19 @@ const BytesToCharsDriver = struct {
     }
 };
 
-fn bytesWord(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn bytesWord(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
-    if (item.borrow() != .list) return evaluator.typeError("a string or byte list");
+    if (item.borrow() != .list) return fiber.typeError("a string or byte list");
     if (item.borrow().isString()) {
-        const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, item.borrow());
-        return evaluator.startDriver(StringBytesDriver{
+        const encoder = kernel_storage.StringEncoder.init(fiber.allocator, item.borrow());
+        return fiber.startDriver(StringBytesDriver{
             .source_value = .init(item.take()),
             .encoder = .init(encoder),
         });
     }
-    const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator, item.borrow());
-    try evaluator.startDriver(ByteListIdentityDriver{
+    const encoder = kernel_storage.ByteVectorEncoder.init(fiber.allocator, item.borrow());
+    try fiber.startDriver(ByteListIdentityDriver{
         .source_value = .init(item.take()),
         .encoder = .init(encoder),
     });
@@ -389,20 +389,20 @@ const StringBytesDriver = struct {
     encoded: ?heap.Owned([]u8) = null,
     materializer: ?heap.Owned(list.ByteListMaterializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *StringBytesDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.encoded == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *StringBytesDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.encoded == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return fiber.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
             .pending => return .stepped,
             .complete => |encoded| {
                 self.encoded = .init(encoded);
-                self.materializer = .init(.init(evaluator.allocator, self.encoded.?.borrow()));
+                self.materializer = .init(.init(fiber.allocator, self.encoded.?.borrow()));
                 return .stepped;
             },
         };
-        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+        return switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
@@ -416,16 +416,16 @@ const ByteListIdentityDriver = struct {
     source_value: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.ByteVectorEncoder),
 
-    pub fn advance(evaluator: *Fiber, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidByte => return evaluator.typeError("a string or byte list"),
+            error.InvalidByte => return fiber.typeError("a string or byte list"),
         }) {
             .pending => return .stepped,
             .complete => |vector| {
                 var owned = vector;
-                owned.retire(evaluator.releases, evaluator.allocator);
+                owned.retire(fiber.releases, fiber.allocator);
                 return .{ .output = self.source_value.take() };
             },
         }
@@ -434,29 +434,29 @@ const ByteListIdentityDriver = struct {
 
 const SymbolConversion = enum { lookup, insert };
 
-fn symbolWord(evaluator: *Fiber) MachineError!void {
-    return startSymbolConversion(evaluator, .lookup);
+fn symbolWord(fiber: *Fiber) MachineError!void {
+    return startSymbolConversion(fiber, .lookup);
 }
 
-fn internWord(evaluator: *Fiber) MachineError!void {
-    return startSymbolConversion(evaluator, .insert);
+fn internWord(fiber: *Fiber) MachineError!void {
+    return startSymbolConversion(fiber, .insert);
 }
 
-fn startSymbolConversion(evaluator: *Fiber, mode: SymbolConversion) MachineError!void {
-    var item = try evaluator.popValue();
+fn startSymbolConversion(fiber: *Fiber, mode: SymbolConversion) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     switch (item.borrow()) {
-        .symbol => try evaluator.pushOwned(item.take()),
+        .symbol => try fiber.pushOwned(item.take()),
         .list => {
-            if (!item.borrow().isString()) return evaluator.typeError("a string or symbol");
-            const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, item.borrow());
-            try evaluator.startDriver(SymbolConversionDriver{
+            if (!item.borrow().isString()) return fiber.typeError("a string or symbol");
+            const encoder = kernel_storage.StringEncoder.init(fiber.allocator, item.borrow());
+            try fiber.startDriver(SymbolConversionDriver{
                 .source_value = .init(item.take()),
                 .encoder = .init(encoder),
                 .mode = mode,
             });
         },
-        else => return evaluator.typeError("a string or symbol"),
+        else => return fiber.typeError("a string or symbol"),
     }
 }
 
@@ -477,11 +477,11 @@ const SymbolConversionDriver = struct {
         insert: intern.InternInsertionCursor,
     } = .none,
 
-    pub fn advance(evaluator: *Fiber, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.spelling == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.spelling == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return fiber.fail(.domain, "string contains an invalid Unicode scalar"),
         }) {
             .pending => return .stepped,
             .complete => |spelling| {
@@ -490,12 +490,12 @@ const SymbolConversionDriver = struct {
                 return .stepped;
             },
         };
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         if (self.validation) |*validation| {
             while (work.spend()) switch (validation.advance()) {
                 .pending => {},
                 .complete => |valid| {
-                    if (!valid) return evaluator.fail(.domain, "string is not a valid symbol spelling");
+                    if (!valid) return fiber.fail(.domain, "string is not a valid symbol spelling");
                     self.validation = null;
                     const spelling = self.spelling.?.borrow();
                     self.name = switch (self.mode) {
@@ -513,67 +513,67 @@ const SymbolConversionDriver = struct {
                 .pending => {},
                 .complete => |maybe_id| {
                     const id = maybe_id orelse
-                        return evaluator.fail(.domain, "symbol spelling is not interned; use intern to create it");
-                    return .{ .output = .{ .symbol = try evaluator.linkedWord(id) } };
+                        return fiber.fail(.domain, "symbol spelling is not interned; use intern to create it");
+                    return .{ .output = .{ .symbol = try fiber.linkedWord(id) } };
                 },
             },
             .insert => |*cursor| switch (try cursor.advance()) {
                 .pending => {},
-                .complete => |id| return .{ .output = .{ .symbol = try evaluator.linkedWord(id) } },
+                .complete => |id| return .{ .output = .{ .symbol = try fiber.linkedWord(id) } },
             },
         };
         return .stepped;
     }
 };
 
-fn intWord(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn intWord(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     switch (item.borrow()) {
-        .int => try evaluator.pushOwned(item.take()),
-        .char => |codepoint| try evaluator.pushOwned(.{ .int = codepoint }),
+        .int => try fiber.pushOwned(item.take()),
+        .char => |codepoint| try fiber.pushOwned(.{ .int = codepoint }),
         .list => {
-            if (!item.borrow().isString()) return evaluator.typeError(int_expected);
-            try startNumericParse(evaluator, &item, .integer);
+            if (!item.borrow().isString()) return fiber.typeError(int_expected);
+            try startNumericParse(fiber, &item, .integer);
         },
-        else => return evaluator.typeError(int_expected),
+        else => return fiber.typeError(int_expected),
     }
 }
 
 const int_expected = "an int, char, or integer string (floor, round, or ceil convert a float)";
 const float_expected = "a float, int, or numeric string";
 
-fn floatWord(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn floatWord(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     switch (item.borrow()) {
-        .float => try evaluator.pushOwned(item.take()),
-        .int => |number| try evaluator.pushOwned(.{ .float = @floatFromInt(number) }),
+        .float => try fiber.pushOwned(item.take()),
+        .int => |number| try fiber.pushOwned(.{ .float = @floatFromInt(number) }),
         .list => {
-            if (!item.borrow().isString()) return evaluator.typeError(float_expected);
-            try startNumericParse(evaluator, &item, .float);
+            if (!item.borrow().isString()) return fiber.typeError(float_expected);
+            try startNumericParse(fiber, &item, .float);
         },
-        else => return evaluator.typeError(float_expected),
+        else => return fiber.typeError(float_expected),
     }
 }
 
-fn charWord(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn charWord(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     switch (item.borrow()) {
-        .char => try evaluator.pushOwned(item.take()),
+        .char => try fiber.pushOwned(item.take()),
         .int => |number| {
             const codepoint = std.math.cast(u21, number) orelse
-                return evaluator.fail(.domain, "char expects a Unicode scalar value");
+                return fiber.fail(.domain, "char expects a Unicode scalar value");
             if (!std.unicode.utf8ValidCodepoint(codepoint))
-                return evaluator.fail(.domain, "char expects a Unicode scalar value");
-            try evaluator.pushOwned(.{ .char = codepoint });
+                return fiber.fail(.domain, "char expects a Unicode scalar value");
+            try fiber.pushOwned(.{ .char = codepoint });
         },
         .list => {
-            if (item.borrow().isString()) return evaluator.pushOwned(item.take());
-            try evaluator.startDriver(CodepointsDriver{ .source = .init(item.take()) });
+            if (item.borrow().isString()) return fiber.pushOwned(item.take());
+            try fiber.startDriver(CodepointsDriver{ .source = .init(item.take()) });
         },
-        else => return evaluator.typeError("a char, int, or list of codepoints"),
+        else => return fiber.typeError("a char, int, or list of codepoints"),
     }
 }
 
@@ -590,19 +590,19 @@ const CodepointsDriver = struct {
     max_codepoint: u32 = 0,
     writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
 
-    fn scalar(evaluator: *Fiber, number: i64) MachineError!u32 {
+    fn scalar(fiber: *Fiber, number: i64) MachineError!u32 {
         const narrowed = std.math.cast(u21, number) orelse
-            return evaluator.fail(.domain, "char expects a Unicode scalar value");
+            return fiber.fail(.domain, "char expects a Unicode scalar value");
         if (!std.unicode.utf8ValidCodepoint(narrowed))
-            return evaluator.fail(.domain, "char expects a Unicode scalar value");
+            return fiber.fail(.domain, "char expects a Unicode scalar value");
         return narrowed;
     }
 
-    fn codepoint(evaluator: *Fiber, item: Value) MachineError!u32 {
+    fn codepoint(fiber: *Fiber, item: Value) MachineError!u32 {
         return switch (item) {
             .char => |existing| existing,
-            .int => |number| scalar(evaluator, number),
-            else => evaluator.typeError("a char, int, or list of codepoints"),
+            .int => |number| scalar(fiber, number),
+            else => fiber.typeError("a char, int, or list of codepoints"),
         };
     }
 
@@ -611,7 +611,7 @@ const CodepointsDriver = struct {
     /// fails it, or that reaches the surrogate range, is walked to find the
     /// faulting element. An int leaf is what arithmetic on a string produces,
     /// so this is the usual input.
-    fn profileInts(evaluator: *Fiber, numbers: []const i64) MachineError!u32 {
+    fn profileInts(fiber: *Fiber, numbers: []const i64) MachineError!u32 {
         var low: i64 = std.math.maxInt(i64);
         var high: i64 = std.math.minInt(i64);
         for (numbers) |number| {
@@ -619,21 +619,21 @@ const CodepointsDriver = struct {
             high = @max(high, number);
         }
         if (low < 0 or high > 0x10FFFF or (high >= 0xD800 and low <= 0xDFFF)) {
-            for (numbers) |number| _ = try scalar(evaluator, number);
+            for (numbers) |number| _ = try scalar(fiber, number);
         }
         return @intCast(high);
     }
 
-    pub fn advance(evaluator: *Fiber, self: *CodepointsDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *CodepointsDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         const source = self.source.borrow();
         const count: usize = @intCast(source.list.length());
         const kind = source.list.kind();
         while (!work.exhausted()) switch (self.phase) {
             .profile => {
                 if (self.index == count) {
-                    self.writer = .init(try .init(evaluator.allocator, count, self.max_codepoint));
+                    self.writer = .init(try .init(fiber.allocator, count, self.max_codepoint));
                     self.phase = .fill;
                     self.index = 0;
                     continue;
@@ -642,13 +642,13 @@ const CodepointsDriver = struct {
                 switch (kind) {
                     .leaf_i64 => self.max_codepoint = @max(
                         self.max_codepoint,
-                        try profileInts(evaluator, heap.i64s(source.list)[self.index..end]),
+                        try profileInts(fiber, heap.i64s(source.list)[self.index..end]),
                     ),
                     .leaf_u8 => for (heap.u8s(source.list)[self.index..end]) |byte| {
                         self.max_codepoint = @max(self.max_codepoint, byte);
                     },
                     else => for (self.index..end) |position| {
-                        self.max_codepoint = @max(self.max_codepoint, try codepoint(evaluator, list.atUnchecked(source, position)));
+                        self.max_codepoint = @max(self.max_codepoint, try codepoint(fiber, list.atUnchecked(source, position)));
                     },
                 }
                 self.index = end;
@@ -670,7 +670,7 @@ const CodepointsDriver = struct {
                         slot.* = byte;
                     },
                     else => for (self.index..end, filled) |position, *slot| {
-                        slot.* = try codepoint(evaluator, list.atUnchecked(source, position));
+                        slot.* = try codepoint(fiber, list.atUnchecked(source, position));
                     },
                 }
                 self.writer.?.borrowMut().writeCodepoints(self.index, filled);
@@ -682,25 +682,25 @@ const CodepointsDriver = struct {
 };
 
 fn startNumericParse(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     source_value: *heap.OwnedValue,
     target: NumericParseTarget,
 ) MachineError!void {
     const source = source_value.borrow();
-    if (source.list.kind() != .leaf_char1) return invalidNumericText(evaluator, target);
+    if (source.list.kind() != .leaf_char1) return invalidNumericText(fiber, target);
     const length: usize = @intCast(source.list.length());
     const bytes = heap.chars8(source.list)[0..length];
-    try evaluator.startDriver(NumericParseDriver{
+    try fiber.startDriver(NumericParseDriver{
         .source_value = .init(source_value.take()),
         .classifier = .init(bytes),
         .target = target,
     });
 }
 
-fn invalidNumericText(evaluator: *Fiber, target: NumericParseTarget) MachineError {
+fn invalidNumericText(fiber: *Fiber, target: NumericParseTarget) MachineError {
     return switch (target) {
-        .integer => evaluator.fail(.parse, "int expects an integer literal"),
-        .float => evaluator.fail(.parse, "float expects a numeric literal"),
+        .integer => fiber.fail(.parse, "int expects an integer literal"),
+        .float => fiber.fail(.parse, "float expects a numeric literal"),
     };
 }
 
@@ -711,40 +711,40 @@ const NumericParseDriver = struct {
     classifier: lexer.ClassifyCursor,
     target: NumericParseTarget,
 
-    pub fn advance(evaluator: *Fiber, self: *NumericParseDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *NumericParseDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.classifier.advance()) {
             .pending => {},
-            .complete => |classification| return self.finish(evaluator, classification),
+            .complete => |classification| return self.finish(fiber, classification),
         };
         return .stepped;
     }
 
     fn finish(
         self: *NumericParseDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         classification: lexer.Classification,
     ) MachineError!machine.WorkProgress {
-        return .{ .output = try numericParseResult(evaluator, classification, self.target) };
+        return .{ .output = try numericParseResult(fiber, classification, self.target) };
     }
 };
 
 /// What a classified string converts to for `target`, or the word's fault.
-fn numericParseResult(evaluator: *Fiber, classification: lexer.Classification, target: NumericParseTarget) MachineError!Value {
+fn numericParseResult(fiber: *Fiber, classification: lexer.Classification, target: NumericParseTarget) MachineError!Value {
     return switch (classification) {
         .int => |number| switch (target) {
             .integer => .{ .int = number },
             .float => .{ .float = @floatFromInt(number) },
         },
         .float => |number| switch (target) {
-            .integer => invalidNumericText(evaluator, target),
+            .integer => invalidNumericText(fiber, target),
             .float => .{ .float = number },
         },
-        .symbol => invalidNumericText(evaluator, target),
+        .symbol => invalidNumericText(fiber, target),
         .out_of_range => switch (target) {
-            .integer => evaluator.fail(.overflow, "int result is outside int64"),
-            .float => evaluator.fail(.overflow, "float input is outside the ECL numeric range"),
+            .integer => fiber.fail(.overflow, "int result is outside int64"),
+            .float => fiber.fail(.overflow, "float input is outside the ECL numeric range"),
         },
     };
 }
@@ -754,15 +754,15 @@ fn numericParseResult(evaluator: *Fiber, classification: lexer.Classification, t
 /// that word's, with no list position, as the quotation applied per element
 /// reports it. The caller's stack holds the list and quotation until the
 /// result is published.
-pub fn startConversionEach(evaluator: *Fiber, target: NumericParseTarget) MachineError!void {
-    const items = evaluator.stack.items;
+pub fn startConversionEach(fiber: *Fiber, target: NumericParseTarget) MachineError!void {
+    const items = fiber.stack.items;
     const input = items[items.len - 2];
     const count: usize = @intCast(input.list.length());
     switch (target) {
         inline else => |selected| {
             const Driver = ConversionEachDriver(selected);
-            const writer = try heap.LeafWriter(Driver.kind).init(evaluator.allocator, count);
-            try evaluator.startDriver(Driver{ .input = input, .writer = .init(writer) });
+            const writer = try heap.LeafWriter(Driver.kind).init(fiber.allocator, count);
+            try fiber.startDriver(Driver{ .input = input, .writer = .init(writer) });
         },
     }
 }
@@ -782,19 +782,19 @@ fn ConversionEachDriver(comptime target: NumericParseTarget) type {
         /// The string element being read, across turns.
         classifier: ?lexer.ClassifyCursor = null,
 
-        pub fn advance(evaluator: *Fiber, self: *Self) MachineError!machine.WorkProgress {
-            try evaluator.pollKernel();
-            const work = evaluator.workBudget();
+        pub fn advance(fiber: *Fiber, self: *Self) MachineError!machine.WorkProgress {
+            try fiber.pollKernel();
+            const work = fiber.workBudget();
             const count: usize = @intCast(self.input.list.length());
             while (self.index != count) {
                 if (self.classifier == null) {
                     if (!work.spend()) return .stepped;
                     const item = list.atUnchecked(self.input, self.index);
-                    if (try atom(evaluator, item)) |converted| {
+                    if (try atom(fiber, item)) |converted| {
                         self.store(converted);
                         continue;
                     }
-                    if (item.list.kind() != .leaf_char1) return invalidNumericText(evaluator, target);
+                    if (item.list.kind() != .leaf_char1) return invalidNumericText(fiber, target);
                     self.classifier = .init(heap.chars8(item.list)[0..@intCast(item.list.length())]);
                 }
                 const classification = while (work.spend()) switch (self.classifier.?.advance()) {
@@ -802,9 +802,9 @@ fn ConversionEachDriver(comptime target: NumericParseTarget) type {
                     .complete => |classification| break classification,
                 } else return .stepped;
                 self.classifier = null;
-                self.store(try parsed(evaluator, classification));
+                self.store(try parsed(fiber, classification));
             }
-            evaluator.discard(2);
+            fiber.discard(2);
             return .{ .output = self.writer.borrowMut().finish() };
         }
 
@@ -815,25 +815,25 @@ fn ConversionEachDriver(comptime target: NumericParseTarget) type {
 
         /// A non-string element's conversion, null for a string, or the
         /// word's own type error.
-        fn atom(evaluator: *Fiber, item: Value) MachineError!?heap.LeafElement(kind) {
+        fn atom(fiber: *Fiber, item: Value) MachineError!?heap.LeafElement(kind) {
             return switch (target) {
                 .integer => switch (item) {
                     .int => |number| number,
                     .char => |codepoint| codepoint,
-                    .list => if (item.isString()) null else evaluator.typeError(int_expected),
-                    else => evaluator.typeError(int_expected),
+                    .list => if (item.isString()) null else fiber.typeError(int_expected),
+                    else => fiber.typeError(int_expected),
                 },
                 .float => switch (item) {
                     .float => |number| number,
                     .int => |number| @floatFromInt(number),
-                    .list => if (item.isString()) null else evaluator.typeError(float_expected),
-                    else => evaluator.typeError(float_expected),
+                    .list => if (item.isString()) null else fiber.typeError(float_expected),
+                    else => fiber.typeError(float_expected),
                 },
             };
         }
 
-        fn parsed(evaluator: *Fiber, classification: lexer.Classification) MachineError!heap.LeafElement(kind) {
-            return switch (try numericParseResult(evaluator, classification, target)) {
+        fn parsed(fiber: *Fiber, classification: lexer.Classification) MachineError!heap.LeafElement(kind) {
+            return switch (try numericParseResult(fiber, classification, target)) {
                 .int => |number| if (target == .integer) number else unreachable,
                 .float => |number| if (target == .float) number else unreachable,
                 else => unreachable,
@@ -842,14 +842,14 @@ fn ConversionEachDriver(comptime target: NumericParseTarget) type {
     };
 }
 
-fn attempt(evaluator: *Fiber) MachineError!void {
-    var body = try evaluator.popQuotation();
-    try evaluator.attemptOwned(body.take().list);
+fn attempt(fiber: *Fiber) MachineError!void {
+    var body = try fiber.popQuotation();
+    try fiber.attemptOwned(body.take().list);
 }
-fn raise(evaluator: *Fiber) MachineError!void {
-    var raised = try evaluator.popValue();
+fn raise(fiber: *Fiber) MachineError!void {
+    var raised = try fiber.popValue();
     defer raised.deinit();
-    if (raised.borrow() != .dict) return evaluator.typeError("an error dict");
+    if (raised.borrow() != .dict) return fiber.typeError("an error dict");
     const keys = [5]u32{
         try intern.intern("kind"),
         try intern.intern("msg"),
@@ -857,7 +857,7 @@ fn raise(evaluator: *Fiber) MachineError!void {
         try intern.intern("trace"),
         try intern.intern("data"),
     };
-    try evaluator.startDriver(RaiseDriver{ .raised = .init(raised.take()), .keys = keys });
+    try fiber.startDriver(RaiseDriver{ .raised = .init(raised.take()), .keys = keys });
 }
 const RaiseDriver = struct {
     raised: heap.Owned(Value),
@@ -868,8 +868,8 @@ const RaiseDriver = struct {
     trace_index: usize = 0,
     phase: enum { lookup, trace, finish } = .lookup,
 
-    pub fn advance(evaluator: *Fiber, self: *RaiseDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *RaiseDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         switch (self.phase) {
             .lookup => {
                 if (self.field_index == self.keys.len) {
@@ -877,16 +877,16 @@ const RaiseDriver = struct {
                     return .stepped;
                 }
                 if (self.lookup == null) self.lookup = .init(.initHeader(
-                    evaluator.allocator,
+                    fiber.allocator,
                     self.raised.borrow().dict,
                     .{ .symbol = .{ .name = self.keys[self.field_index] } },
                 ));
-                switch (try self.lookup.?.borrowMut().advance(evaluator.workBudget())) {
+                switch (try self.lookup.?.borrowMut().advance(fiber.workBudget())) {
                     .pending => return .stepped,
                     .complete => |found| {
-                        self.lookup.?.deinit(evaluator.releases, evaluator.allocator);
+                        self.lookup.?.deinit(fiber.releases, fiber.allocator);
                         self.lookup = null;
-                        try self.validateField(evaluator, found);
+                        try self.validateField(fiber, found);
                         if (self.phase == .lookup) self.field_index += 1;
                         return .stepped;
                     },
@@ -895,10 +895,10 @@ const RaiseDriver = struct {
             .trace => {
                 const trace = self.trace.?;
                 const count: usize = @intCast(trace.list.length());
-                const end = self.trace_index + evaluator.workBudget().take(count - self.trace_index);
+                const end = self.trace_index + fiber.workBudget().take(count - self.trace_index);
                 while (self.trace_index != end) : (self.trace_index += 1) {
                     if (list.atUnchecked(trace, self.trace_index) != .symbol)
-                        return evaluator.typeError("an error dict with symbols at `trace");
+                        return fiber.typeError("an error dict with symbols at `trace");
                 }
                 if (self.trace_index == count) {
                     self.trace = null;
@@ -909,43 +909,43 @@ const RaiseDriver = struct {
             },
             .finish => {
                 const raised = self.raised.take();
-                return evaluator.raiseOwned(raised);
+                return fiber.raiseOwned(raised);
             },
         }
     }
-    fn validateField(self: *RaiseDriver, evaluator: *Fiber, found: ?Value) MachineError!void {
+    fn validateField(self: *RaiseDriver, fiber: *Fiber, found: ?Value) MachineError!void {
         switch (self.field_index) {
             0 => if (found == null or found.? != .symbol)
-                return evaluator.typeError("an error dict containing a symbol at `kind"),
+                return fiber.typeError("an error dict containing a symbol at `kind"),
             1 => if (found) |message| {
                 if (!message.isString())
-                    return evaluator.typeError("an error dict with a string at `msg");
+                    return fiber.typeError("an error dict with a string at `msg");
             },
             2 => if (found) |word| {
                 if (word != .symbol)
-                    return evaluator.typeError("an error dict with a symbol at `word");
+                    return fiber.typeError("an error dict with a symbol at `word");
             },
             3 => if (found) |trace| {
                 if (trace != .list)
-                    return evaluator.typeError("an error dict with symbols at `trace");
+                    return fiber.typeError("an error dict with symbols at `trace");
                 self.trace = trace;
                 self.trace_index = 0;
                 self.phase = .trace;
             },
             4 => if (found) |data| {
                 if (data != .dict)
-                    return evaluator.typeError("an error dict with a dict at `data");
+                    return fiber.typeError("an error dict with a dict at `data");
             },
             else => unreachable,
         }
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-pub fn ioPp(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+pub fn ioPp(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
-    const render = try printer.OwnedStringCursor.initDisplay(evaluator.allocator, item.borrow());
-    try evaluator.startDriver(PpDriver{
+    const render = try printer.OwnedStringCursor.initDisplay(fiber.allocator, item.borrow());
+    try fiber.startDriver(PpDriver{
         .item = .init(item.take()),
         .render = .init(render),
     });
@@ -956,24 +956,24 @@ const PpDriver = struct {
     item: heap.Owned(Value),
     render: heap.Owned(printer.OwnedStringCursor),
 
-    pub fn advance(evaluator: *Fiber, self: *PpDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.render.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *PpDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.render.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |rendered| completed: {
-                defer evaluator.allocator.free(rendered);
-                evaluator.inherited.runtime().console.writeOutput(rendered, true) catch
-                    return evaluator.fail(.io, "standard output write failed");
+                defer fiber.allocator.free(rendered);
+                fiber.inherited.runtime().console.writeOutput(rendered, true) catch
+                    return fiber.fail(.io, "standard output write failed");
                 break :completed .completed;
             },
         };
     }
 };
 
-pub fn ioStack(evaluator: *Fiber) MachineError!void {
-    if (evaluator.available() == 0) return;
-    try evaluator.startDriver(StackDisplayDriver{
-        .snapshot = .init(try .init(evaluator)),
+pub fn ioStack(fiber: *Fiber) MachineError!void {
+    if (fiber.available() == 0) return;
+    try fiber.startDriver(StackDisplayDriver{
+        .snapshot = .init(try .init(fiber)),
     });
 }
 
@@ -987,24 +987,24 @@ const StackDisplayDriver = struct {
     prefix_written: bool = false,
     written: usize = 0,
 
-    pub fn advance(evaluator: *Fiber, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
+    pub fn advance(fiber: *Fiber, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (!self.snapshot.borrowMut().advanceCapture(fiber)) return .stepped;
 
         var prefix_buffer: [64]u8 = undefined;
         const prefix = stackDisplayPrefix(&prefix_buffer, self.index);
         if (self.rendered == null) {
             if (self.render == null) {
                 self.render = .init(try printer.OwnedStringCursor.initDisplayAtColumn(
-                    evaluator.allocator,
+                    fiber.allocator,
                     self.snapshot.borrow().items()[self.index],
                     prefix.len,
                 ));
             }
-            switch (try self.render.?.borrowMut().advance(evaluator.workBudget())) {
+            switch (try self.render.?.borrowMut().advance(fiber.workBudget())) {
                 .pending => return .stepped,
                 .complete => |text| {
-                    self.render.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.render.?.deinit(fiber.releases, fiber.allocator);
                     self.render = null;
                     self.rendered = .init(text);
                     return .stepped;
@@ -1013,7 +1013,7 @@ const StackDisplayDriver = struct {
         }
 
         if (!self.prefix_written) {
-            try writeStackDisplayChunk(evaluator, prefix, false);
+            try writeStackDisplayChunk(fiber, prefix, false);
             self.prefix_written = true;
             return .stepped;
         }
@@ -1021,13 +1021,13 @@ const StackDisplayDriver = struct {
         const text = self.rendered.?.borrow();
         // Console output is written in chunks of at most 256 bytes, each
         // charged a unit per byte, so a large display spans turns.
-        const end = self.written + evaluator.workBudget().take(@min(256, text.len - self.written));
+        const end = self.written + fiber.workBudget().take(@min(256, text.len - self.written));
         const complete = end == text.len;
-        try writeStackDisplayChunk(evaluator, text[self.written..end], complete);
+        try writeStackDisplayChunk(fiber, text[self.written..end], complete);
         self.written = end;
         if (!complete) return .stepped;
 
-        self.rendered.?.deinit(evaluator.releases, evaluator.allocator);
+        self.rendered.?.deinit(fiber.releases, fiber.allocator);
         self.rendered = null;
         self.prefix_written = false;
         self.written = 0;
@@ -1043,21 +1043,21 @@ fn stackDisplayPrefix(buffer: *[64]u8, index: usize) []const u8 {
 }
 
 fn writeStackDisplayChunk(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     bytes: []const u8,
     newline: bool,
 ) MachineError!void {
-    evaluator.inherited.runtime().console.writeOutput(bytes, newline) catch
-        return evaluator.fail(.io, "standard output write failed");
+    fiber.inherited.runtime().console.writeOutput(bytes, newline) catch
+        return fiber.fail(.io, "standard output write failed");
 }
 
-pub fn ioPrin(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popString();
+pub fn ioPrin(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popString();
     defer item.deinit();
     const string = item.borrow();
-    try evaluator.startDriver(PrinDriver{
+    try fiber.startDriver(PrinDriver{
         .item = .init(item.take()),
-        .encoder = .init(.init(evaluator.allocator, string)),
+        .encoder = .init(.init(fiber.allocator, string)),
     });
 }
 
@@ -1066,20 +1066,20 @@ const PrinDriver = struct {
     item: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.StringEncoder),
 
-    pub fn advance(evaluator: *Fiber, self: *PrinDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *PrinDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(
+            error.InvalidCodepoint => return fiber.fail(
                 .domain,
                 "string contains an invalid Unicode scalar",
             ),
         }) {
             .pending => .stepped,
             .complete => |encoded| completed: {
-                defer evaluator.allocator.free(encoded);
-                evaluator.inherited.runtime().console.writeOutput(encoded, false) catch
-                    return evaluator.fail(.io, "standard output write failed");
+                defer fiber.allocator.free(encoded);
+                fiber.inherited.runtime().console.writeOutput(encoded, false) catch
+                    return fiber.fail(.io, "standard output write failed");
                 break :completed .completed;
             },
         };
@@ -1088,12 +1088,12 @@ const PrinDriver = struct {
 /// Reads one variable from the immutable session environ snapshot. An unset
 /// variable raises an error because absence has no empty-string representation;
 /// `@attempt`/`result.or-default` is the defaulting idiom.
-fn getenv(evaluator: *Fiber) MachineError!void {
-    var name_value = try evaluator.popValue();
+fn getenv(fiber: *Fiber) MachineError!void {
+    var name_value = try fiber.popValue();
     defer name_value.deinit();
-    if (!name_value.borrow().isString()) return evaluator.typeError("a string variable name");
-    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, name_value.borrow());
-    try evaluator.startDriver(GetenvDriver{
+    if (!name_value.borrow().isString()) return fiber.typeError("a string variable name");
+    const encoder = kernel_storage.StringEncoder.init(fiber.allocator, name_value.borrow());
+    try fiber.startDriver(GetenvDriver{
         .name_value = .init(name_value.take()),
         .encoder = .init(encoder),
     });
@@ -1107,11 +1107,11 @@ const GetenvDriver = struct {
     lookup: ?machine.Environ.LookupCursor = null,
     text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *GetenvDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.name == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *GetenvDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.name == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(
+            error.InvalidCodepoint => return fiber.fail(
                 .domain,
                 "variable name contains an invalid Unicode scalar",
             ),
@@ -1121,22 +1121,22 @@ const GetenvDriver = struct {
         };
         if (self.text == null) {
             if (self.lookup == null)
-                self.lookup = evaluator.environLookup(self.name.?.borrow());
-            switch (self.lookup.?.advance(evaluator.workBudget())) {
+                self.lookup = fiber.environLookup(self.name.?.borrow());
+            switch (self.lookup.?.advance(fiber.workBudget())) {
                 .pending => return .stepped,
                 .complete => |found| {
-                    const bytes = found orelse return evaluator.unsetEnvironVariable(
+                    const bytes = found orelse return fiber.unsetEnvironVariable(
                         self.name.?.borrow(),
                         self.name_value.borrow(),
                     );
-                    self.text = .init(.init(evaluator.allocator, bytes));
+                    self.text = .init(.init(fiber.allocator, bytes));
                     return .stepped;
                 },
             }
         }
-        return switch (self.text.?.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+        return switch (self.text.?.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return evaluator.fail(
+            error.InvalidUtf8 => return fiber.fail(
                 .io,
                 "environment variable value is not valid UTF-8",
             ),
@@ -1147,17 +1147,17 @@ const GetenvDriver = struct {
     }
 };
 
-fn args(evaluator: *Fiber) MachineError!void {
-    try evaluator.pushBorrowed(evaluator.arguments);
+fn args(fiber: *Fiber) MachineError!void {
+    try fiber.pushBorrowed(fiber.inherited.runtime().arguments);
 }
-fn exit(evaluator: *Fiber) MachineError!void {
-    var status = try evaluator.popValue();
+fn exit(fiber: *Fiber) MachineError!void {
+    var status = try fiber.popValue();
     defer status.deinit();
     if (status.borrow() != .int or status.borrow().int < 0 or status.borrow().int > 255) {
-        return evaluator.typeError("an exit status from 0 through 255");
+        return fiber.typeError("an exit status from 0 through 255");
     }
-    if (evaluator.role != .root or evaluator.inAttempt()) {
-        return evaluator.fail(.domain, "exit is available only to the root unit outside @attempt");
+    if (fiber.role == .task or fiber.inAttempt()) {
+        return fiber.fail(.domain, "exit is available only to the root unit outside @attempt");
     }
-    try evaluator.park(.{ .close_scope = @intCast(status.borrow().int) });
+    try fiber.park(.{ .close_scope = @intCast(status.borrow().int) });
 }

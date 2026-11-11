@@ -1,7 +1,7 @@
 //! Allocation-free scheduler policy.
 //!
 //! This module knows nothing about threads, locks, clocks, queues, task
-//! payloads, or the evaluator.  It accepts immutable state plus one event and
+//! payloads, or the fiber.  It accepts immutable state plus one event and
 //! returns the next state and the command an imperative scheduler must carry
 //! out.  The same transition functions drive the runtime shell and the
 //! generated interleaving model tests.

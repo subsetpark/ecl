@@ -418,7 +418,7 @@ fn builderBudget(
             .invalid => return call.fail(.domain, "aggregate append was rejected"),
         }
         // Prepare the input before exhausting whatever allowance this call
-        // inherited; earlier evaluator work may have spent part of the turn.
+        // inherited; earlier fiber work may have spent part of the turn.
         _ = schedule.consume(65_536);
         schedule.state().yielded = true;
         return switch (try build.finishList(0, 1)) {

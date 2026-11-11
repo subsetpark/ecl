@@ -222,7 +222,7 @@ const ListBuild = struct {
             .materializing => {},
         }
         const materializing = &self.state.materializing;
-        switch (try materializing.materializer.advance(call.activeEvaluator().workBudget())) {
+        switch (try materializing.materializer.advance(call.activeFiber().workBudget())) {
             .pending => {
                 call.yield_requested = true;
                 return null;
@@ -333,7 +333,7 @@ const DictBuild = struct {
             .materializing => {},
         }
         const materializing = &self.state.materializing;
-        switch (try materializing.materializer.advance(call.activeEvaluator().workBudget())) {
+        switch (try materializing.materializer.advance(call.activeFiber().workBudget())) {
             .pending => {
                 call.yield_requested = true;
                 return null;
@@ -390,7 +390,7 @@ const Transaction = struct {
     pub const ownership: heap.DriverOwnership = .self_owned;
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    active_evaluator: ?*machine.Fiber = null,
+    active_fiber: ?*machine.Fiber = null,
     instance: *native_module.ModuleInstance,
     definition: *const descriptor_api.ValidatedDefinition,
     host_table: abi.HostTable,
@@ -404,28 +404,28 @@ const Transaction = struct {
     yield_requested: bool = false,
 
     fn create(
-        evaluator: *machine.Fiber,
+        fiber: *machine.Fiber,
         callable: env.NativeCallable,
         definition: *const descriptor_api.ValidatedDefinition,
     ) error{ OutOfMemory, NativeCallsClosed }!*Transaction {
-        const call = try evaluator.allocator.create(Transaction);
+        const call = try fiber.allocator.create(Transaction);
         if (!callable.instance.retainCall()) {
-            evaluator.allocator.destroy(call);
+            fiber.allocator.destroy(call);
             return error.NativeCallsClosed;
         }
         call.* = .{
-            .allocator = evaluator.allocator,
-            .releases = evaluator.releases,
+            .allocator = fiber.allocator,
+            .releases = fiber.releases,
             .instance = callable.instance,
             .definition = definition,
             .host_table = callable.instance.mintHostTable(full_host_table),
         };
         errdefer {
             call.instance.releasePin();
-            evaluator.allocator.destroy(call);
+            fiber.allocator.destroy(call);
         }
         if (definition.body.call.continuation_size != 0) {
-            call.continuation = try evaluator.allocator.alignedAlloc(
+            call.continuation = try fiber.allocator.alignedAlloc(
                 u8,
                 .@"64",
                 definition.body.call.continuation_size,
@@ -547,39 +547,39 @@ const Transaction = struct {
         return result;
     }
 
-    fn activeEvaluator(self: *Transaction) *machine.Fiber {
-        return self.active_evaluator.?;
+    fn activeFiber(self: *Transaction) *machine.Fiber {
+        return self.active_fiber.?;
     }
 
     pub fn advance(
-        evaluator: *machine.Fiber,
+        fiber: *machine.Fiber,
         self: *Transaction,
     ) machine.MachineError!machine.WorkProgress {
-        self.active_evaluator = evaluator;
-        defer self.active_evaluator = null;
-        try evaluator.pollKernel();
+        self.active_fiber = fiber;
+        defer self.active_fiber = null;
+        try fiber.pollKernel();
         self.yield_requested = false;
         self.candidate_generation +%= 1;
         if (self.candidate_generation == 0) self.candidate_generation = 1;
         std.debug.assert(self.candidates.items.len == 0);
         defer self.clearCandidates();
-        const timing = evaluator.beginNativeTiming();
-        defer evaluator.finishNativeTiming(self.instance, timing);
+        const timing = fiber.beginNativeTiming();
+        defer fiber.finishNativeTiming(self.instance, timing);
         var result = abi.InvokeResult{ .tag = .fail, .adapter_status = 2 };
         self.instance.invoke()(&self.host_table, self, self.definition.body.call.callback_index, &result);
         if (result.size != @sizeOf(abi.InvokeResult))
-            return evaluator.fail(.contract, "native callback returned an invalid result record size");
+            return fiber.fail(.contract, "native callback returned an invalid result record size");
         if (result.adapter_status == 1) return error.OutOfMemory;
         if (result.adapter_status != 0)
-            return evaluator.fail(.contract, "native callback returned an invalid adapter result");
+            return fiber.fail(.contract, "native callback returned an invalid adapter result");
         return switch (result.tag) {
             .complete => complete: {
                 if (self.terminal != .complete)
-                    return evaluator.fail(
+                    return fiber.fail(
                         .contract,
                         "native callback returned complete without committing its declared outputs",
                     );
-                var replacement = try evaluator.reserveStackReplacement(
+                var replacement = try fiber.reserveStackReplacement(
                     self.definition.effect.inputs,
                     self.definition.effect.outputs,
                 );
@@ -588,50 +588,50 @@ const Transaction = struct {
                 break :complete .completed;
             },
             .fail => switch (self.terminal) {
-                .fail => |failure| return evaluator.fail(
+                .fail => |failure| return fiber.fail(
                     failure.kind,
                     failure.message[0..failure.message_len],
                 ),
-                .idle, .complete => return evaluator.fail(
+                .idle, .complete => return fiber.fail(
                     .contract,
                     "native callback returned failure without a valid failure payload",
                 ),
             },
             .yield => if (self.terminal != .idle or
                 !self.instance.hasCapability(.reschedule) or !self.yield_requested)
-                return evaluator.fail(
+                return fiber.fail(
                     .contract,
                     "native callback yielded without Reschedule authority",
                 )
             else
                 .{ .yielded = .wait },
-            _ => return evaluator.fail(.contract, "native callback returned an unknown result tag"),
+            _ => return fiber.fail(.contract, "native callback returned an unknown result tag"),
         };
     }
 };
 
 pub fn begin(
-    evaluator: *machine.Fiber,
+    fiber: *machine.Fiber,
     callable: env.NativeCallable,
 ) machine.MachineError!void {
     const definition = callable.instance.definition(callable.definition);
-    try evaluator.require(definition.effect.inputs);
-    for (0..definition.effect.inputs) |index| switch (evaluator.nativeInputBorrowed(
+    try fiber.require(definition.effect.inputs);
+    for (0..definition.effect.inputs) |index| switch (fiber.nativeInputBorrowed(
         definition.effect.inputs,
         @intCast(index),
     )) {
-        .task => return evaluator.fail(.type, "native words cannot observe task capabilities"),
-        .address => return evaluator.fail(.type, "native words cannot observe address capabilities"),
+        .task => return fiber.fail(.type, "native words cannot observe task capabilities"),
+        .address => return fiber.fail(.type, "native words cannot observe address capabilities"),
         else => {},
     };
-    const call = Transaction.create(evaluator, callable, definition) catch |err| switch (err) {
+    const call = Transaction.create(fiber, callable, definition) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.NativeCallsClosed => return evaluator.fail(
+        error.NativeCallsClosed => return fiber.fail(
             .cancelled,
             "native call creation is closed during Session shutdown",
         ),
     };
-    evaluator.adoptDriver(call);
+    fiber.adoptDriver(call);
 }
 
 const full_host_table = abi.HostTable{
@@ -660,7 +660,7 @@ const full_host_table = abi.HostTable{
 fn hostInputResourceKind(context: *anyopaque, index: u32, identity: *const anyopaque) callconv(.c) bool {
     const call = transactionFrom(context);
     if (call.terminal != .idle or index >= call.definition.effect.inputs) return false;
-    const item = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, index);
+    const item = call.activeFiber().nativeInputBorrowed(call.definition.effect.inputs, index);
     return @import("native_port.zig").isResourceKind(item, call.instance, identity);
 }
 
@@ -694,7 +694,7 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
 /// Extension work draws on the calling unit's budget. A request the budget
 /// cannot cover spends what remains and asks the extension to yield.
 fn charge(call: *Transaction, units: u32) abi.HostStatus {
-    if (call.activeEvaluator().workBudget().take(units) == units) return .ok;
+    if (call.activeFiber().workBudget().take(units) == units) return .ok;
     call.yield_requested = true;
     return .yield_required;
 }
@@ -706,14 +706,14 @@ fn hostInput(
 ) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
     if (index >= call.definition.effect.inputs) return .invalid;
-    const item = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, index);
+    const item = call.activeFiber().nativeInputBorrowed(call.definition.effect.inputs, index);
     return writeView(call, item, output);
 }
 
 fn hostReadUnits(context: *anyopaque, input_index: u32, start: u64, output: [*]u32, capacity: u32, count: *u32, bytes: *u32) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
     if (call.terminal != .idle or call.continuation == null or capacity > abi.max_bulk_units or input_index >= call.definition.effect.inputs) return .invalid;
-    const source = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, input_index);
+    const source = call.activeFiber().nativeInputBorrowed(call.definition.effect.inputs, input_index);
     if (source != .list or start > source.list.length()) return .invalid;
     const n: u32 = @intCast(@min(capacity, source.list.length() - start));
     if (charge(call, @max(n, 1)) != .ok) return .yield_required;
@@ -830,7 +830,7 @@ fn hostBulkBuild(context: *anyopaque, slot: u32, action: abi.BulkAction, kind: a
             if (kind != .values or reverse_wire != 0 or n != 5 or builder.state != .writing or builder.appended == count) return .invalid;
             const request = words[0..5];
             if (request[0] >= call.definition.effect.inputs) return .invalid;
-            const source = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, @intCast(request[0]));
+            const source = call.activeFiber().nativeInputBorrowed(call.definition.effect.inputs, @intCast(request[0]));
             if (source != .list or request[1] > source.list.length() or request[2] > source.list.length() - request[1] or request[3] >= std.math.maxInt(u32)) return .invalid;
             const representation: value.HeapKind = switch (request[4]) {
                 @backingInt(abi.BulkKind.char1) => .leaf_char1,
@@ -890,7 +890,7 @@ fn hostListAt(
     if (call.terminal != .idle or call.continuation == null or
         input_index >= call.definition.effect.inputs)
         return .invalid;
-    const source = call.activeEvaluator().nativeInputBorrowed(
+    const source = call.activeFiber().nativeInputBorrowed(
         call.definition.effect.inputs,
         input_index,
     );
@@ -955,7 +955,7 @@ fn readPath(
         return .{ .status = .invalid };
     if (path_len > abi.max_read_path_depth) return .{ .status = .invalid };
     if (charge(call, @max(path_len, 1)) != .ok) return .{ .status = .yield_required };
-    var current = call.activeEvaluator().nativeInputBorrowed(
+    var current = call.activeFiber().nativeInputBorrowed(
         call.definition.effect.inputs,
         input_index,
     );
@@ -988,7 +988,7 @@ fn hostDictAt(
     if (call.terminal != .idle or call.continuation == null or
         input_index >= call.definition.effect.inputs)
         return .invalid;
-    const header = switch (call.activeEvaluator().nativeInputBorrowed(
+    const header = switch (call.activeFiber().nativeInputBorrowed(
         call.definition.effect.inputs,
         input_index,
     )) {
@@ -1009,7 +1009,7 @@ fn hostForward(
 ) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
     if (index >= call.definition.effect.inputs or call.terminal != .idle) return .invalid;
-    const item = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, index);
+    const item = call.activeFiber().nativeInputBorrowed(call.definition.effect.inputs, index);
     heap.retainValue(item);
     const status = call.appendCandidate(item, null);
     if (status == .ok) output.* = call.candidateWire();

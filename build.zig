@@ -981,7 +981,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    differential_mod.addImport("ecl-internal", internal_mod);
+    // The differential asserts that recognition fired, which only the
+    // instrumented runtime counts.
+    differential_mod.addImport("ecl-internal", instrumented_ecl);
     const differential_tests = addEclTest(b, .{ .root_module = differential_mod });
     const run_differential = addTestRun(b, differential_tests);
     const differential_step = b.step("differential", "Compare automatic and generic idiom execution");

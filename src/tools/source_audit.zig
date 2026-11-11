@@ -49,6 +49,12 @@ const source_groups = [_]SourceGroup{
     embeddedGroup(true, &.{
         "machine.zig", "binder.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }),
+    // The machine's own subsystems. Each reaches the fiber through the
+    // public surface or a machine-minted view; none shares the machine's
+    // file-level exemptions.
+    embeddedGroup(true, &.{
+        "error_value.zig", "park.zig", "resolution_plan.zig", "module_lookup.zig", "word_resolutions.zig", "load.zig", "failure.zig", "module_construction.zig", "paging.zig",
+    }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
     // in cancellation-only loops.
@@ -699,6 +705,30 @@ fn auditSourceBodies() bool {
             failed = auditWorkDriverOutputs(file, source) or failed;
         }
     }
+    // A machine view is the authority to edit a fiber's continuation. The
+    // machine alone mints one, but nothing in the type system stops another
+    // file from naming a view and casting a fiber to it, so each view may be
+    // named only by the subsystem it is minted for.
+    const machine_views = [_]struct { view: []const u8, holder: []const u8 }{
+        .{ .view = "Loading", .holder = "load.zig" },
+        .{ .view = "Construction", .holder = "module_construction.zig" },
+        .{ .view = "Unwinding", .holder = "failure.zig" },
+    };
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file| {
+            inline for (machine_views) |entry| {
+                // Independent of the import alias (`const m = @import(..)`),
+                // and of reflective access through a string name.
+                if (!std.mem.eql(u8, file, entry.holder)) {
+                    failed = auditTokens(file, source, &.{
+                        &.{ ".", entry.view },
+                        &.{"\"" ++ entry.view ++ "\""},
+                    }) or failed;
+                }
+            }
+        }
+    }
     // The typed loop boundary. A flat kernel loop reads unboxed slices through
     // heap-issued capabilities and writes typed storage; the two names below are
     // the boxed route — one cell at a time, then a profiling pass to recover a
@@ -1158,7 +1188,7 @@ fn auditErasedCasts(
     return failed;
 }
 
-/// Work drivers may produce owned values, but only the evaluator loop may
+/// Work drivers may produce owned values, but only the machine loop may
 /// commit those values to the operand stack. Checking the declared return
 /// type makes this boundary cover new drivers without maintaining a name list.
 fn auditWorkDriverOutputs(label: []const u8, source: [:0]const u8) bool {

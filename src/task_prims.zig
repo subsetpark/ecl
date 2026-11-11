@@ -49,38 +49,38 @@ pub const words = [_]env.BuiltinWord{
 };
 
 fn spawnTask(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     quotation: *value.ListHandle,
 ) MachineError!Value {
-    return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
-        .parent_fiber = evaluator,
-        .site = .{ .inherited = evaluator.currentScope() },
+    return fiber.scheduling().scheduler.spawn(fiber.scheduling().scope, .{
+        .parent_fiber = fiber,
+        .site = .{ .inherited = fiber.currentScope() },
         .quotation = quotation,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
+        error.Io => fiber.fail(.io, "could not start scheduler worker threads"),
         // Only a request carrying a transfer can refuse, and those callers
         // replace this with the reason they recorded.
-        error.Transfer => evaluator.fail(.domain, "could not give a port to the new unit"),
+        error.Transfer => fiber.fail(.domain, "could not give a port to the new unit"),
     };
 }
 
 /// A module body defines words and starts no tasks. Refusing at the
 /// constructor, before any operand is consumed, keeps every task owned by a
 /// task or the session root and never by an image under construction.
-fn refuseDuringConstruction(evaluator: *Fiber, comptime constructor: []const u8) MachineError!void {
-    if (evaluator.inModuleConstruction()) return evaluator.fail(
+fn refuseDuringConstruction(fiber: *Fiber, comptime constructor: []const u8) MachineError!void {
+    if (fiber.inModuleConstruction()) return fiber.fail(
         .domain,
         constructor ++ " is legal only outside module construction: a module body defines words and starts no tasks",
     );
 }
 
-fn spawn(evaluator: *Fiber) MachineError!void {
-    try refuseDuringConstruction(evaluator, "@spawn");
-    var body = try evaluator.popQuotation();
+fn spawn(fiber: *Fiber) MachineError!void {
+    try refuseDuringConstruction(fiber, "@spawn");
+    var body = try fiber.popQuotation();
     defer body.deinit();
-    const task = try spawnTask(evaluator, body.borrow().list);
-    try evaluator.pushOwned(task);
+    const task = try spawnTask(fiber, body.borrow().list);
+    try fiber.pushOwned(task);
 }
 
 /// The single source of truth for one `@give`: which ports it must move, how
@@ -246,35 +246,35 @@ const GiveDriver = struct {
         releases.releaseValue(self.moved);
     }
 
-    pub fn advance(evaluator: *Fiber, self: *GiveDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *GiveDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.cursor.phase == .validating) {
-            if (self.cursor.advance(evaluator.workBudget()) == .pending) return .stepped;
+            if (self.cursor.advance(fiber.workBudget()) == .pending) return .stepped;
             if (self.cursor.refusal == .not_a_port)
-                return evaluator.typeError("a list of ports to give");
+                return fiber.typeError("a list of ports to give");
             self.cursor.phase = .done;
         }
-        const task = try self.spawn(evaluator);
+        const task = try self.spawn(fiber);
         return .{ .output = task };
     }
 
-    fn spawn(self: *GiveDriver, evaluator: *Fiber) MachineError!Value {
-        return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
-            .parent_fiber = evaluator,
-            .site = .{ .inherited = evaluator.currentScope() },
+    fn spawn(self: *GiveDriver, fiber: *Fiber) MachineError!Value {
+        return fiber.scheduling().scheduler.spawn(fiber.scheduling().scope, .{
+            .parent_fiber = fiber,
+            .site = .{ .inherited = fiber.currentScope() },
             .quotation = self.body.list,
             .transfer = &self.cursor,
         }) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
+            error.Io => fiber.fail(.io, "could not start scheduler worker threads"),
             error.Transfer => switch (self.cursor.refusal.transfer) {
-                error.NotOwner => evaluator.fail(
+                error.NotOwner => fiber.fail(
                     .domain,
                     "@give can only give a port owned by the calling unit",
                 ),
-                error.ScopeClosing => evaluator.fail(.cancelled, "the new unit's scope is closing"),
-                error.Closed => evaluator.fail(.domain, "@give cannot give a closed port"),
-                error.Busy => evaluator.fail(.domain, "@give cannot give the same port twice"),
+                error.ScopeClosing => fiber.fail(.cancelled, "the new unit's scope is closing"),
+                error.Closed => fiber.fail(.domain, "@give cannot give a closed port"),
+                error.Busy => fiber.fail(.domain, "@give cannot give the same port twice"),
                 error.OutOfMemory => error.OutOfMemory,
             },
         };
@@ -283,19 +283,19 @@ const GiveDriver = struct {
 
 /// Takes the body only once the driver owns it; on failure its owner here
 /// still releases it.
-fn give(evaluator: *Fiber) MachineError!void {
-    try refuseDuringConstruction(evaluator, "@give");
-    try evaluator.require(2);
-    var body = try evaluator.popQuotation();
+fn give(fiber: *Fiber) MachineError!void {
+    try refuseDuringConstruction(fiber, "@give");
+    try fiber.require(2);
+    var body = try fiber.popQuotation();
     defer body.deinit();
-    var moved = try evaluator.popList();
+    var moved = try fiber.popList();
     errdefer moved.deinit();
 
     const moved_count: usize = @intCast(moved.borrow().list.length());
     if (moved_count > max_given_ports)
-        return evaluator.fail(.domain, "@give accepts at most 16 ports at once");
+        return fiber.fail(.domain, "@give accepts at most 16 ports at once");
 
-    const driver = try evaluator.allocator.create(GiveDriver);
+    const driver = try fiber.allocator.create(GiveDriver);
     // Bind the list before building the driver: reading `driver.moved` from
     // inside the literal that initializes it would depend on field order.
     const moved_list = moved.take();
@@ -303,61 +303,61 @@ fn give(evaluator: *Fiber) MachineError!void {
         .moved = moved_list,
         .body = body.take(),
         .cursor = .{
-            .origin = evaluator.task_scope.?.identity(),
+            .origin = fiber.scheduling().scope.identity(),
             .moved = moved_list,
             .count = moved_count,
         },
     };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 
-fn await(evaluator: *Fiber) MachineError!void {
-    var task = try evaluator.popValue();
+fn await(fiber: *Fiber) MachineError!void {
+    var task = try fiber.popValue();
     defer task.deinit();
-    if (task.borrow() != .task) return evaluator.typeError("a task");
-    try evaluator.park(.{ .task = task.take() });
+    if (task.borrow() != .task) return fiber.typeError("a task");
+    try fiber.park(.{ .task = task.take() });
 }
 
-fn cancel(evaluator: *Fiber) MachineError!void {
-    var task = try evaluator.popValue();
+fn cancel(fiber: *Fiber) MachineError!void {
+    var task = try fiber.popValue();
     defer task.deinit();
-    if (task.borrow() != .task) return evaluator.typeError("a task");
-    evaluator.scheduler.?.cancelOwned(task.take());
+    if (task.borrow() != .task) return fiber.typeError("a task");
+    fiber.scheduling().scheduler.cancelOwned(task.take());
 }
 
-fn cancelSelf(evaluator: *Fiber) MachineError!void {
-    if (!evaluator.scheduler.?.cancelScopeOwner(evaluator.task_scope.?))
-        return evaluator.fail(.domain, "task.cancel-self is legal only inside a task");
+fn cancelSelf(fiber: *Fiber) MachineError!void {
+    if (!fiber.scheduling().scheduler.cancelScopeOwner(fiber.scheduling().scope))
+        return fiber.fail(.domain, "task.cancel-self is legal only inside a task");
 }
 
-fn address(evaluator: *Fiber) MachineError!void {
-    var task = try evaluator.popValue();
+fn address(fiber: *Fiber) MachineError!void {
+    var task = try fiber.popValue();
     defer task.deinit();
-    if (task.borrow() != .task) return evaluator.typeError("a task");
-    try evaluator.pushOwned(try evaluator.scheduler.?.taskAddress(task.borrow()));
+    if (task.borrow() != .task) return fiber.typeError("a task");
+    try fiber.pushOwned(try fiber.scheduling().scheduler.taskAddress(task.borrow()));
 }
 
-fn selfAddress(evaluator: *Fiber) MachineError!void {
-    const own = try ownMailbox(evaluator, "task.self");
-    try evaluator.pushOwned(try own.createAddress(evaluator.allocator));
+fn selfAddress(fiber: *Fiber) MachineError!void {
+    const own = try ownMailbox(fiber, "task.self");
+    try fiber.pushOwned(try own.createAddress(fiber.allocator));
 }
 
 /// The executing task's mailbox. The root has none: it owns tasks but is
 /// not one, so nothing could ever address it.
-fn ownMailbox(evaluator: *Fiber, comptime word: []const u8) MachineError!*mailbox.Mailbox {
-    return evaluator.scheduler.?.currentMailbox(evaluator.task_scope.?) orelse
-        evaluator.fail(.domain, word ++ " is legal only inside a task");
+fn ownMailbox(fiber: *Fiber, comptime word: []const u8) MachineError!*mailbox.Mailbox {
+    return fiber.scheduling().scheduler.currentMailbox(fiber.scheduling().scope) orelse
+        fiber.fail(.domain, word ++ " is legal only inside a task");
 }
 
-fn send(evaluator: *Fiber) MachineError!void {
-    const pair = try evaluator.popPair();
+fn send(fiber: *Fiber) MachineError!void {
+    const pair = try fiber.popPair();
     var target = pair[0];
     defer target.deinit();
     var payload = pair[1];
     defer payload.deinit();
-    if (target.borrow() != .address) return evaluator.typeError("an address followed by a value");
-    const check = try mailbox.HandleCheck.init(evaluator.allocator, payload.borrow());
-    try evaluator.startDriver(SendDriver{
+    if (target.borrow() != .address) return fiber.typeError("an address followed by a value");
+    const check = try mailbox.HandleCheck.init(fiber.allocator, payload.borrow());
+    try fiber.startDriver(SendDriver{
         .payload = .init(payload.take()),
         .target = .init(target.take()),
         .check = .init(check),
@@ -374,12 +374,12 @@ const SendDriver = struct {
     check: heap.Owned(mailbox.HandleCheck),
     checked: bool = false,
 
-    pub fn advance(evaluator: *Fiber, self: *SendDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *SendDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (!self.checked) {
-            const progress = self.check.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+            const progress = self.check.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.Handle => return evaluator.fail(.type, "task.send cannot carry a task handle"),
+                error.Handle => return fiber.fail(.type, "task.send cannot carry a task handle"),
             };
             if (progress == .pending) return .stepped;
             self.checked = true;
@@ -392,33 +392,33 @@ const SendDriver = struct {
             },
             .closed => {
                 const reason = try intern.intern("closed");
-                const failure = evaluator.fail(.io, "task.send target has ended and its mailbox is closed");
-                evaluator.addErrorReason(.{ .symbol = .{ .name = reason } });
+                const failure = fiber.fail(.io, "task.send target has ended and its mailbox is closed");
+                fiber.addErrorReason(.{ .symbol = .{ .name = reason } });
                 return failure;
             },
             .full => {
-                try evaluator.park(.{ .mailbox = .{ .source = target.readinessSource(.space), .deadline = null } });
+                try fiber.park(.{ .mailbox = .{ .source = target.readinessSource(.space), .deadline = null } });
                 return .{ .yielded = .park };
             },
         }
     }
 };
 
-fn receive(evaluator: *Fiber) MachineError!void {
-    _ = try ownMailbox(evaluator, "task.receive");
-    try evaluator.startDriver(ReceiveDriver{ .deadline = null });
+fn receive(fiber: *Fiber) MachineError!void {
+    _ = try ownMailbox(fiber, "task.receive");
+    try fiber.startDriver(ReceiveDriver{ .deadline = null });
 }
 
-fn receiveFor(evaluator: *Fiber) MachineError!void {
-    var duration = try evaluator.popValue();
+fn receiveFor(fiber: *Fiber) MachineError!void {
+    var duration = try fiber.popValue();
     defer duration.deinit();
-    if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
-    if (duration.borrow().int < 0) return evaluator.fail(.domain, "task.receive-for duration must be nonnegative");
-    _ = try ownMailbox(evaluator, "task.receive-for");
+    if (duration.borrow() != .int) return fiber.typeError("an integer millisecond duration");
+    if (duration.borrow().int < 0) return fiber.fail(.domain, "task.receive-for duration must be nonnegative");
+    _ = try ownMailbox(fiber, "task.receive-for");
     const milliseconds: u63 = @intCast(duration.borrow().int);
-    const deadline = evaluator.scheduler.?.deadlineAfter(milliseconds) catch
-        return evaluator.fail(.overflow, "task.receive-for deadline lies beyond the clock's range");
-    try evaluator.startDriver(ReceiveDriver{ .deadline = deadline });
+    const deadline = fiber.scheduling().scheduler.deadlineAfter(milliseconds) catch
+        return fiber.fail(.overflow, "task.receive-for deadline lies beyond the clock's range");
+    try fiber.startDriver(ReceiveDriver{ .deadline = deadline });
 }
 
 /// Polls the executing task's own mailbox and parks until a message or the
@@ -428,73 +428,73 @@ const ReceiveDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     deadline: ?scheduler_api.Deadline,
 
-    pub fn advance(evaluator: *Fiber, self: *ReceiveDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const own = evaluator.scheduler.?.currentMailbox(evaluator.task_scope.?).?;
+    pub fn advance(fiber: *Fiber, self: *ReceiveDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const own = fiber.scheduling().scheduler.currentMailbox(fiber.scheduling().scope).?;
         if (own.dequeue()) |message| {
             if (self.deadline == null) return .{ .output = message.value };
             return .{ .output = try machine.outcomeDict(
-                evaluator.allocator,
-                evaluator.releases,
+                fiber.allocator,
+                fiber.releases,
                 "ok",
                 message.value,
             ) };
         }
         if (self.deadline) |deadline| {
-            if (deadline.reachedBy(evaluator.scheduler.?.now())) {
+            if (deadline.reachedBy(fiber.scheduling().scheduler.now())) {
                 var timeout = machine.EclErr.init(.timeout, "task.receive-for timed out");
-                defer timeout.retire(evaluator.releases);
+                defer timeout.retire(fiber.releases);
                 const failure = try machine.errorValue(
-                    evaluator.allocator,
-                    evaluator.releases,
+                    fiber.allocator,
+                    fiber.releases,
                     &timeout,
                     .{},
                     null,
                 );
                 return .{ .output = try machine.outcomeDict(
-                    evaluator.allocator,
-                    evaluator.releases,
+                    fiber.allocator,
+                    fiber.releases,
                     "err",
                     failure,
                 ) };
             }
         }
-        try evaluator.park(.{ .mailbox = .{ .source = own.readinessSource(.receive), .deadline = self.deadline } });
+        try fiber.park(.{ .mailbox = .{ .source = own.readinessSource(.receive), .deadline = self.deadline } });
         return .{ .yielded = .park };
     }
 };
 
-fn tasks(evaluator: *Fiber) MachineError!void {
-    try evaluator.scheduler.?.installTasksDriver(evaluator, evaluator.task_scope.?);
+fn tasks(fiber: *Fiber) MachineError!void {
+    try fiber.scheduling().scheduler.installTasksDriver(fiber, fiber.scheduling().scope);
 }
 
-fn awaitAny(evaluator: *Fiber) MachineError!void {
-    var tasks_value = try evaluator.popValue();
+fn awaitAny(fiber: *Fiber) MachineError!void {
+    var tasks_value = try fiber.popValue();
     defer tasks_value.deinit();
     const task_list = tasks_value.borrow();
     if (task_list != .list) {
-        return evaluator.typeError("a nonempty list of tasks");
+        return fiber.typeError("a nonempty list of tasks");
     }
     const count: usize = @intCast(task_list.list.length());
     if (count == 0) {
-        return evaluator.fail(.domain, "task.await-any requires a nonempty list");
+        return fiber.fail(.domain, "task.await-any requires a nonempty list");
     }
-    try evaluator.startDriver(AwaitAnyDriver{ .tasks = .init(tasks_value.take()) });
+    try fiber.startDriver(AwaitAnyDriver{ .tasks = .init(tasks_value.take()) });
 }
 
-fn awaitFor(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var duration = try evaluator.popValue();
+fn awaitFor(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var duration = try fiber.popValue();
     defer duration.deinit();
-    var task = try evaluator.popValue();
+    var task = try fiber.popValue();
     defer task.deinit();
-    if (task.borrow() != .task) return evaluator.typeError("a task followed by milliseconds");
-    if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
-    if (duration.borrow().int < 0) return evaluator.fail(.domain, "task.await-for duration must be nonnegative");
+    if (task.borrow() != .task) return fiber.typeError("a task followed by milliseconds");
+    if (duration.borrow() != .int) return fiber.typeError("an integer millisecond duration");
+    if (duration.borrow().int < 0) return fiber.fail(.domain, "task.await-for duration must be nonnegative");
     const milliseconds: u63 = @intCast(duration.borrow().int);
-    evaluator.scheduler.?.checkDeadline(milliseconds) catch
-        return evaluator.fail(.overflow, "task.await-for deadline lies beyond the clock's range");
-    try evaluator.park(.{ .deadline = .{
+    fiber.scheduling().scheduler.checkDeadline(milliseconds) catch
+        return fiber.fail(.overflow, "task.await-for deadline lies beyond the clock's range");
+    try fiber.park(.{ .deadline = .{
         .task = task.take(),
         .milliseconds = milliseconds,
     } });
@@ -506,16 +506,16 @@ const AwaitAnyDriver = struct {
     index: usize = 0,
 
     pub fn advance(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *AwaitAnyDriver,
     ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+        try fiber.pollKernel();
         const task_values = self.tasks.?.borrow();
         const count: usize = @intCast(task_values.list.length());
-        const end = self.index + evaluator.workBudget().take(count - self.index);
+        const end = self.index + fiber.workBudget().take(count - self.index);
         while (self.index != end) : (self.index += 1) {
             if (list.atUnchecked(task_values, self.index) != .task) {
-                return evaluator.failAtIndex(
+                return fiber.failAtIndex(
                     .type,
                     "task.await-any expected only tasks",
                     self.index,
@@ -525,8 +525,8 @@ const AwaitAnyDriver = struct {
         if (self.index != count) return .stepped;
         _ = self.tasks.?.take();
         self.tasks = null;
-        evaluator.retireDriver(self);
-        try evaluator.park(.{ .any = task_values });
+        fiber.retireDriver(self);
+        try fiber.park(.{ .any = task_values });
         return .detached;
     }
 };

@@ -1953,29 +1953,29 @@ pub const WorkerScheduler = enum(usize) {
 
         const execution = try self.allocator().create(TaskExecution);
         errdefer self.allocator().destroy(execution);
-        execution.* = .{ .fiber = machine.Fiber.init(
-            self.allocator(),
-            self.releaseDomain(),
-            request.parent_fiber.module_access,
-            .empty,
-            request.parent_fiber.environment,
-            request.parent_fiber.archive,
-            request.parent_fiber.inherited,
-            request.parent_fiber.arguments,
-            &cell.cancelled,
-        ) };
+        execution.* = .{
+            .fiber = machine.Fiber.init(
+                self.allocator(),
+                self.releaseDomain(),
+                request.parent_fiber.module_access,
+                .empty,
+                request.parent_fiber.environment,
+                request.parent_fiber.archive,
+                request.parent_fiber.inherited,
+                &cell.cancelled,
+                .{ .task = .{ .scheduler = self, .scope = &cell.scope } },
+                // A task runs in its spawner's scope, which is always a root: the
+                // session, which outlives every task in it, or a module image,
+                // which the generation pin below keeps alive. It may not define
+                // there.
+                switch (request.site) {
+                    .inherited => |scope| .{ .scope = scope },
+                    .module => |home| .{ .image = home },
+                },
+            ),
+        };
         const fiber = &execution.fiber;
         errdefer fiber.deinit();
-        // A task runs in its spawner's scope, which is always a root: the
-        // session, which outlives every task in it, or a module image, which
-        // the generation pin below keeps alive. It may not define there.
-        fiber.root_entry = switch (request.site) {
-            .inherited => |scope| .{ .scope = scope },
-            .module => |home| .{ .image = home },
-        };
-        fiber.role = .task;
-        fiber.scheduler = self;
-        fiber.task_scope = &cell.scope;
         if (modules.homeForModuleRootScope(fiber.lexicalScope())) |generation|
             try fiber.pinGeneration(generation);
         machine.initialize(fiber, request.quotation);
@@ -2183,7 +2183,7 @@ pub const WorkerScheduler = enum(usize) {
         if (request == .close_scope) {
             const status = request.close_scope;
             _ = fiber.takeParkRequest();
-            self.closeRootScope(fiber.task_scope.?);
+            self.closeRootScope(fiber.scheduling().scope);
             fiber.installParkResume(.{ .scope_closed = status });
             return;
         }
@@ -2258,10 +2258,10 @@ pub const WorkerScheduler = enum(usize) {
 
     pub fn installTasksDriver(
         self: *const WorkerScheduler,
-        evaluator: *machine.Fiber,
+        fiber: *machine.Fiber,
         scope: *TaskScope,
     ) error{OutOfMemory}!void {
-        try evaluator.startDriver(TasksDriver{ .scheduler = self, .scope = scope });
+        try fiber.startDriver(TasksDriver{ .scheduler = self, .scope = scope });
     }
 
     fn closeRootScope(self: *const WorkerScheduler, scope: *TaskScope) void {
@@ -3009,10 +3009,10 @@ const TasksDriver = struct {
     filled: usize = 0,
 
     pub fn advance(
-        evaluator: *machine.Fiber,
+        fiber: *machine.Fiber,
         self: *TasksDriver,
     ) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+        try fiber.pollKernel();
         const old_pass = if (self.pass) |*pass| pass.take() else null;
         self.pass = null;
         const scheduler_state = self.scheduler.privateState();
@@ -3035,7 +3035,7 @@ const TasksDriver = struct {
             .start => self.scope.first,
             .retained => |next| next,
         } else self.scope.first;
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         var visited: usize = 0;
         while (current != null and visited < task_snapshot_quantum and work.spend()) : (visited += 1) {
             const cell = current.?;

@@ -27,7 +27,7 @@ pub const Response = struct {
     fields: std.ArrayList(Field) = .empty,
     body: std.ArrayList(u8) = .empty,
 
-    /// Shared by failed execution and successful evaluator materialization.
+    /// Shared by failed execution and successful fiber materialization.
     /// True consumes this response; each call frees at most one owned field.
     pub fn retire(self: *Response, allocator: std.mem.Allocator) bool {
         if (!retireFields(&self.fields, allocator)) return false;

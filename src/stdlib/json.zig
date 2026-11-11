@@ -46,12 +46,12 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn parse(evaluator: *Fiber) MachineError!void {
-    var text = try evaluator.popString();
+fn parse(fiber: *Fiber) MachineError!void {
+    var text = try fiber.popString();
     defer text.deinit();
-    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, text.borrow());
-    try evaluator.startDriver(ParseDriver{
-        .allocator = evaluator.allocator,
+    const encoder = kernel_storage.StringEncoder.init(fiber.allocator, text.borrow());
+    try fiber.startDriver(ParseDriver{
+        .allocator = fiber.allocator,
         .text = .init(text.take()),
         .encoder = .init(encoder),
     });
@@ -93,12 +93,12 @@ const ParseDriver = struct {
         pairs: ?[]dict.Pair = null,
     };
 
-    pub fn advance(evaluator: *Fiber, self: *ParseDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *ParseDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.bytes == null) {
-            switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+            switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidCodepoint => return evaluator.fail(
+                error.InvalidCodepoint => return fiber.fail(
                     .domain,
                     "string contains an invalid Unicode scalar",
                 ),
@@ -112,50 +112,50 @@ const ParseDriver = struct {
                 },
             }
         }
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (!work.exhausted()) {
             if (self.building != null) {
-                if (try self.advanceBuilding(evaluator)) |item| try self.place(evaluator, item);
+                if (try self.advanceBuilding(fiber)) |item| try self.place(fiber, item);
                 continue;
             }
             _ = work.spend();
             if (self.root) |root| {
                 // A well-formed document holds exactly one value; the scanner
                 // still has to confirm nothing follows it.
-                switch (self.scanner.?.next() catch return self.failParse(evaluator)) {
+                switch (self.scanner.?.next() catch return self.failParse(fiber)) {
                     .end_of_document => {
                         self.root = null;
                         return .{ .output = root };
                     },
-                    else => return evaluator.fail(.parse, "json.parse found trailing content"),
+                    else => return fiber.fail(.parse, "json.parse found trailing content"),
                 }
             }
             const token = self.scanner.?.nextAlloc(self.arena.?.allocator(), .alloc_if_needed) catch
-                return self.failParse(evaluator);
+                return self.failParse(fiber);
             switch (token) {
                 .object_begin => try self.frames.append(self.allocator, .{ .kind = .object }),
                 .array_begin => try self.frames.append(self.allocator, .{ .kind = .array }),
-                .object_end, .array_end => try self.closeFrame(evaluator.releases),
-                .null => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("null") } }),
-                .true => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("true") } }),
-                .false => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("false") } }),
+                .object_end, .array_end => try self.closeFrame(fiber.releases),
+                .null => try self.place(fiber, .{ .symbol = .{ .name = try intern.intern("null") } }),
+                .true => try self.place(fiber, .{ .symbol = .{ .name = try intern.intern("true") } }),
+                .false => try self.place(fiber, .{ .symbol = .{ .name = try intern.intern("false") } }),
                 .number, .allocated_number => |text| try self.place(
-                    evaluator,
-                    try numberValue(evaluator, text),
+                    fiber,
+                    try numberValue(fiber, text),
                 ),
                 .string, .allocated_string => |text| self.beginText(text),
-                .end_of_document => return evaluator.fail(.parse, "json.parse found no value"),
+                .end_of_document => return fiber.fail(.parse, "json.parse found no value"),
                 // Partial tokens only occur while streaming; complete input
                 // never produces them.
-                else => return evaluator.fail(.parse, "json.parse could not tokenize the input"),
+                else => return fiber.fail(.parse, "json.parse could not tokenize the input"),
             }
         }
         return .stepped;
     }
 
-    fn failParse(self: *ParseDriver, evaluator: *Fiber) MachineError {
+    fn failParse(self: *ParseDriver, fiber: *Fiber) MachineError {
         _ = self;
-        return evaluator.fail(.parse, "json.parse rejected malformed JSON");
+        return fiber.fail(.parse, "json.parse rejected malformed JSON");
     }
 
     fn beginText(self: *ParseDriver, text: []const u8) void {
@@ -218,23 +218,23 @@ const ParseDriver = struct {
         frame.values.deinit(self.allocator);
     }
 
-    fn advanceBuilding(self: *ParseDriver, evaluator: *Fiber) MachineError!?Value {
+    fn advanceBuilding(self: *ParseDriver, fiber: *Fiber) MachineError!?Value {
         const building = &self.building.?;
         const result: ?Value = switch (building.target) {
-            .values => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
+            .values => |*materializer| switch (try materializer.advance(fiber.workBudget())) {
                 .pending => null,
                 .complete => |item| item,
             },
-            .pairs => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
+            .pairs => |*materializer| switch (try materializer.advance(fiber.workBudget())) {
                 .pending => null,
                 .duplicate_key => {
                     // RFC 8259 leaves duplicate names to the implementation;
                     // ECL dicts have unique keys, so the last one wins.
-                    return evaluator.fail(.domain, "json.parse found a duplicate object name");
+                    return fiber.fail(.domain, "json.parse found a duplicate object name");
                 },
                 .complete => |item| item,
             },
-            .text => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
+            .text => |*materializer| switch (try materializer.advance(fiber.workBudget())) {
                 .pending => null,
                 .complete => |item| item,
             },
@@ -246,7 +246,7 @@ const ParseDriver = struct {
             .pairs => |*materializer| materializer.deinit(),
             .text => |*materializer| materializer.deinit(),
         }
-        self.releaseCollected(evaluator.releases);
+        self.releaseCollected(fiber.releases);
         return built;
     }
 
@@ -270,7 +270,7 @@ const ParseDriver = struct {
     /// Installs one finished value as an object key, an object value, an array
     /// element, or the document root. The value is owned on entry, so a failed
     /// append releases it rather than stranding it.
-    fn place(self: *ParseDriver, evaluator: *Fiber, item: Value) error{OutOfMemory}!void {
+    fn place(self: *ParseDriver, fiber: *Fiber, item: Value) error{OutOfMemory}!void {
         // A parsed `null`, `true`, or `false` is a symbol value entering a list
         // or a dict: data, like every value a word stores.
         const stored = value.datum(item);
@@ -280,7 +280,7 @@ const ParseDriver = struct {
         }
         const frame = &self.frames.items[self.frames.items.len - 1];
         frame.values.append(self.allocator, stored) catch |err| {
-            evaluator.releases.releaseValue(stored);
+            fiber.releases.releaseValue(stored);
             return err;
         };
     }
@@ -319,22 +319,22 @@ const ParseDriver = struct {
 };
 
 /// Integral in-range numbers become ints; everything else becomes a float.
-fn numberValue(evaluator: *Fiber, text: []const u8) MachineError!Value {
+fn numberValue(fiber: *Fiber, text: []const u8) MachineError!Value {
     if (std.json.isNumberFormattedLikeAnInteger(text)) {
         if (std.fmt.parseInt(i64, text, 10)) |number| {
             return .{ .int = number };
         } else |_| {}
     }
     const number = std.fmt.parseFloat(f64, text) catch
-        return evaluator.fail(.parse, "json.parse could not represent a number");
+        return fiber.fail(.parse, "json.parse could not represent a number");
     return .{ .float = number };
 }
 
-fn emit(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn emit(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
-    try evaluator.startDriver(EmitDriver{
-        .allocator = evaluator.allocator,
+    try fiber.startDriver(EmitDriver{
+        .allocator = fiber.allocator,
         .item = .init(item.take()),
     });
 }
@@ -369,10 +369,10 @@ const EmitDriver = struct {
     started: bool = false,
     materializer: ?kernel_storage.TextMaterializer = null,
 
-    pub fn advance(evaluator: *Fiber, self: *EmitDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *EmitDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.materializer) |*materializer| {
-            return switch (try materializer.advance(evaluator.workBudget())) {
+            return switch (try materializer.advance(fiber.workBudget())) {
                 .pending => .stepped,
                 .complete => |text| output: {
                     materializer.deinit();
@@ -385,23 +385,23 @@ const EmitDriver = struct {
             self.started = true;
             try self.frames.append(self.allocator, .{ .value = self.item.borrow() });
         }
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (work.spend()) {
             if (self.frames.items.len == 0) {
                 self.materializer = .init(self.allocator, self.out.items);
                 return .stepped;
             }
-            try self.step(evaluator);
+            try self.step(fiber);
         }
         return .stepped;
     }
 
-    fn step(self: *EmitDriver, evaluator: *Fiber) MachineError!void {
+    fn step(self: *EmitDriver, fiber: *Fiber) MachineError!void {
         const frame = &self.frames.items[self.frames.items.len - 1];
         switch (frame.*) {
             .value => |item| {
                 _ = self.frames.pop().?;
-                try self.begin(evaluator, item);
+                try self.begin(fiber, item);
             },
             .array => |*cursor| {
                 const length: u64 = @intCast(cursor.item.list.length());
@@ -427,7 +427,7 @@ const EmitDriver = struct {
                         if (cursor.index != 0) try self.out.append(self.allocator, ',');
                         const key = dict.keyAt(cursor.item.dict, @intCast(cursor.index));
                         cursor.part = .colon;
-                        try self.beginKey(evaluator, key);
+                        try self.beginKey(fiber, key);
                     },
                     .colon => {
                         try self.out.append(self.allocator, ':');
@@ -450,7 +450,7 @@ const EmitDriver = struct {
                 }
                 const codepoint = list.atUnchecked(cursor.item, @intCast(cursor.index)).char;
                 cursor.index += 1;
-                try self.appendEscaped(evaluator, codepoint);
+                try self.appendEscaped(fiber, codepoint);
             },
             .name => |*cursor| {
                 const bytes = intern.get(cursor.id);
@@ -463,28 +463,28 @@ const EmitDriver = struct {
                 // for everything an escape does not touch.
                 const byte = bytes[cursor.index];
                 cursor.index += 1;
-                if (byte < 0x80) try self.appendEscaped(evaluator, byte) else try self.out.append(self.allocator, byte);
+                if (byte < 0x80) try self.appendEscaped(fiber, byte) else try self.out.append(self.allocator, byte);
             },
         }
     }
 
     /// Starts rendering one value, writing scalars outright and pushing a
     /// cursor for anything user-sized.
-    fn begin(self: *EmitDriver, evaluator: *Fiber, item: Value) MachineError!void {
+    fn begin(self: *EmitDriver, fiber: *Fiber, item: Value) MachineError!void {
         switch (item) {
             .int => |number| {
                 // SAFETY: written by bufPrint before it is read.
                 var buffer: [32]u8 = undefined;
                 const text = std.fmt.bufPrint(&buffer, "{d}", .{number}) catch
-                    return evaluator.fail(.domain, "json.emit cannot represent a number");
+                    return fiber.fail(.domain, "json.emit cannot represent a number");
                 try self.out.appendSlice(self.allocator, text);
             },
             .float => |number| {
                 if (std.math.isNan(number) or std.math.isInf(number))
-                    return evaluator.fail(.domain, "json.emit cannot represent an infinite or NaN number");
+                    return fiber.fail(.domain, "json.emit cannot represent an infinite or NaN number");
                 var buffer: [64]u8 = undefined;
                 const text = std.fmt.bufPrint(&buffer, "{d}", .{number}) catch
-                    return evaluator.fail(.domain, "json.emit cannot represent a number");
+                    return fiber.fail(.domain, "json.emit cannot represent a number");
                 try self.out.appendSlice(self.allocator, text);
             },
             .symbol => |id| {
@@ -497,7 +497,7 @@ const EmitDriver = struct {
                     try self.out.appendSlice(self.allocator, bytes);
                     return;
                 }
-                return evaluator.failFmt(
+                return fiber.failFmt(
                     .type,
                     "json.emit cannot represent the symbol `{s}`",
                     .{bytes},
@@ -516,7 +516,7 @@ const EmitDriver = struct {
                 try self.out.append(self.allocator, '{');
                 try self.frames.append(self.allocator, .{ .object = .{ .item = item, .index = 0 } });
             },
-            .char, .task, .port, .address => return evaluator.fail(
+            .char, .task, .port, .address => return fiber.fail(
                 .type,
                 "json.emit expects numbers, strings, lists, dicts, and the JSON literal symbols",
             ),
@@ -524,7 +524,7 @@ const EmitDriver = struct {
     }
 
     /// Object names are the one place a symbol renders as a string.
-    fn beginKey(self: *EmitDriver, evaluator: *Fiber, key: Value) MachineError!void {
+    fn beginKey(self: *EmitDriver, fiber: *Fiber, key: Value) MachineError!void {
         if (key.isString()) {
             try self.out.append(self.allocator, '"');
             try self.frames.append(self.allocator, .{ .text = .{ .item = key, .index = 0 } });
@@ -535,10 +535,10 @@ const EmitDriver = struct {
             try self.frames.append(self.allocator, .{ .name = .{ .id = key.symbol.name, .index = 0 } });
             return;
         }
-        return evaluator.fail(.type, "json.emit requires string or symbol dictionary keys");
+        return fiber.fail(.type, "json.emit requires string or symbol dictionary keys");
     }
 
-    fn appendEscaped(self: *EmitDriver, evaluator: *Fiber, codepoint: u32) MachineError!void {
+    fn appendEscaped(self: *EmitDriver, fiber: *Fiber, codepoint: u32) MachineError!void {
         switch (codepoint) {
             '"' => try self.out.appendSlice(self.allocator, "\\\""),
             '\\' => try self.out.appendSlice(self.allocator, "\\\\"),
@@ -552,16 +552,16 @@ const EmitDriver = struct {
                     // SAFETY: written by bufPrint before it is read.
                     var buffer: [6]u8 = undefined;
                     const text = std.fmt.bufPrint(&buffer, "\\u{x:0>4}", .{codepoint}) catch
-                        return evaluator.fail(.domain, "json.emit cannot escape a scalar");
+                        return fiber.fail(.domain, "json.emit cannot escape a scalar");
                     try self.out.appendSlice(self.allocator, text);
                     return;
                 }
                 var encoded: [4]u8 = undefined;
                 const length = std.unicode.utf8Encode(
                     value.unicodeScalar(codepoint) orelse
-                        return evaluator.fail(.domain, "json.emit found an invalid Unicode scalar"),
+                        return fiber.fail(.domain, "json.emit found an invalid Unicode scalar"),
                     &encoded,
-                ) catch return evaluator.fail(.domain, "json.emit found an invalid Unicode scalar");
+                ) catch return fiber.fail(.domain, "json.emit found an invalid Unicode scalar");
                 try self.out.appendSlice(self.allocator, encoded[0..length]);
             },
         }

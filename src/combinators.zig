@@ -7,6 +7,7 @@ const dict = @import("dict.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
+const paging = @import("paging.zig");
 const poll = @import("poll.zig");
 const support = @import("kernel_support.zig");
 
@@ -14,7 +15,7 @@ const Value = value.Value;
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
-const Application = machine.IsolatedApplication;
+const Application = machine.Application;
 const ApplicationStep = machine.ApplicationStep;
 const StackWindow = machine.StackWindow;
 
@@ -48,69 +49,57 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try core.installBuiltins(&definitions);
 }
 
-fn call(evaluator: *Fiber) MachineError!void {
-    var quotation = try evaluator.popQuotation();
+fn call(fiber: *Fiber) MachineError!void {
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    try evaluator.callOwned(quotation.take().list);
+    try fiber.callOwned(quotation.take().list);
 }
 
-fn ifWord(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var otherwise = try evaluator.popValue();
+fn ifWord(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var otherwise = try fiber.popValue();
     defer otherwise.deinit();
-    var then = try evaluator.popValue();
+    var then = try fiber.popValue();
     defer then.deinit();
-    var predicate = try evaluator.popValue();
+    var predicate = try fiber.popValue();
     defer predicate.deinit();
     if (then.borrow() != .list or otherwise.borrow() != .list)
-        return evaluator.typeError("two quotation branches");
-    const selected_then = try boolValue(evaluator, &predicate);
-    try evaluator.callOwned(if (selected_then) then.take().list else otherwise.take().list);
+        return fiber.typeError("two quotation branches");
+    const selected_then = try boolValue(fiber, &predicate);
+    try fiber.callOwned(if (selected_then) then.take().list else otherwise.take().list);
 }
 
-fn whileWord(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var body = try evaluator.popValue();
+fn whileWord(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var body = try fiber.popValue();
     defer body.deinit();
-    var condition = try evaluator.popValue();
+    var condition = try fiber.popValue();
     defer condition.deinit();
     if (body.borrow() != .list or condition.borrow() != .list)
-        return evaluator.typeError("two quotations/lists");
-    const provenance_target = try evaluator.applicationProvenanceTarget();
-    const state = try evaluator.allocator.create(WhileState);
+        return fiber.typeError("two quotations/lists");
+    const provenance_target = try fiber.applicationProvenanceTarget();
+    const state = try fiber.allocator.create(WhileState);
     state.* = .{
         .condition = .init(condition.take().list),
         .body = .init(body.take().list),
         .paged = .init(.init(.discarded)),
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
         .provenance_target = provenance_target,
         .phase = .condition,
     };
-    try evaluator.beginPagingApplication(
-        state.application(state.condition.borrow()),
-        &state.paged.borrowMut().floor,
-    );
+    try fiber.beginApplication(state.application(state.condition.borrow()), .{ .paging = &state.paged.borrowMut().floor });
 }
 
 fn selectedProvenance(target: ?*const machine.ApplicationProvenanceTarget) machine.ApplicationProvenance {
     return if (target) |selected| .{ .selected_target = selected } else .boundary;
 }
 
-/// The boolean a test left on top of its region. A test that left nothing
-/// took its result from beneath, like any operand its words required: the
-/// value is paged now, so the restore gives it back.
-fn popTestResult(evaluator: *Fiber, paged: *PagedControl) MachineError!bool {
-    var result = if (evaluator.stack.items.len != paged.base) try evaluator.popValue() else taken: {
-        try paged.floor.originals.ensureUnusedCapacity(evaluator.allocator, 1);
-        var taken = try evaluator.popProtected();
-        heap.retainValue(taken.item.borrow());
-        paged.floor.originals.appendAssumeCapacity(.{ .value = taken.item.borrow(), .shared = taken.original });
-        paged.base -= 1;
-        break :taken taken.item;
-    };
+/// The boolean a test left for its guard.
+fn popTestResult(fiber: *Fiber, paged: *paging.Region) MachineError!bool {
+    var result = try paged.takeTestResult(fiber);
     defer result.deinit();
-    return boolValue(evaluator, &result);
+    return boolValue(fiber, &result);
 }
 
 /// Runs the work a guard's frame has in hand, or suspends the frame under a
@@ -118,13 +107,13 @@ fn popTestResult(evaluator: *Fiber, paged: *PagedControl) MachineError!bool {
 fn finishWork(
     comptime State: type,
     state: *State,
-    evaluator: *Fiber,
+    fiber: *Fiber,
     pending: @FieldType(State, "phase"),
 ) MachineError!?ApplicationStep {
-    if (try state.work(evaluator)) return state.resumeAfter(pending);
+    if (try state.work(fiber)) return state.resumeAfter(pending);
     state.phase = pending;
-    try evaluator.startDriver(SuspendedWork(State){ .state = state });
-    return evaluator.suspendInlineApplication();
+    try fiber.startDriver(SuspendedWork(State){ .state = state });
+    return fiber.suspendInlineApplication();
 }
 
 /// Finishes work for a suspended frame, whose application state the frame
@@ -133,10 +122,10 @@ fn SuspendedWork(comptime State: type) type {
     return struct {
         state: *State,
 
-        pub fn advance(evaluator: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-            evaluator.active_word = self.state.word;
-            try evaluator.pollKernel();
-            return if (try self.state.work(evaluator)) .completed else .stepped;
+        pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
+            fiber.active_word = self.state.word;
+            try fiber.pollKernel();
+            return if (try self.state.work(fiber)) .completed else .stepped;
         }
         pub const ownership: heap.DriverOwnership = .fields;
     };
@@ -151,7 +140,7 @@ fn SuspendedWork(comptime State: type) type {
 const WhileState = struct {
     condition: heap.Owned(*Header),
     body: heap.Owned(*Header),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -180,8 +169,8 @@ const WhileState = struct {
             .launch = .in_place,
         } };
     }
-    fn work(self: *WhileState, evaluator: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(evaluator);
+    fn work(self: *WhileState, fiber: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(fiber);
     }
     fn resumeAfter(self: *WhileState, finished: @FieldType(WhileState, "phase")) ?ApplicationStep {
         return switch (finished) {
@@ -192,19 +181,19 @@ const WhileState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *WhileState,
         window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
         switch (self.phase) {
             .condition => {
                 const paged = self.paged.borrowMut();
                 paged.base = window.base();
-                const selected = try popTestResult(evaluator, paged);
-                return finishWork(WhileState, self, evaluator, if (selected) .restored_true else .restored_false);
+                const selected = try popTestResult(fiber, paged);
+                return finishWork(WhileState, self, fiber, if (selected) .restored_true else .restored_false);
             },
             .body => return self.conditionStep(),
             .restored_true, .restored_false => |finished| return self.resumeAfter(finished),
@@ -223,17 +212,17 @@ const TimesState = struct {
         return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
     }
     fn step(self: *TimesState) ApplicationStep {
-        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = 0 } };
+        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = 0, .launch = .in_place } };
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *TimesState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
         self.remaining -= 1;
         return if (self.remaining == 0) null else self.step();
     }
@@ -241,62 +230,62 @@ const TimesState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn times(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var quotation = try evaluator.popQuotation();
+fn times(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var count_value = try evaluator.popValue();
+    var count_value = try fiber.popValue();
     defer count_value.deinit();
     if (quotation.borrow() != .list or count_value.borrow() != .int)
-        return evaluator.typeError("a nonnegative int and quotation");
+        return fiber.typeError("a nonnegative int and quotation");
     if (count_value.borrow().int < 0)
-        return evaluator.fail(.domain, "times requires a nonnegative count");
+        return fiber.fail(.domain, "times requires a nonnegative count");
     if (count_value.borrow().int == 0) return;
-    const state = try evaluator.allocator.create(TimesState);
+    const state = try fiber.allocator.create(TimesState);
     state.* = .{
         .quotation = .init(quotation.take().list),
-        .site = evaluator.applicationSite(),
+        .site = fiber.applicationSite(),
         .remaining = @intCast(count_value.borrow().int),
-        .word = evaluator.active_word,
+        .word = fiber.active_word,
     };
-    try evaluator.beginInlineApplication(state.application());
+    try fiber.beginApplication(state.application(), .in_place);
 }
 
 /// The protected value rides in a continuation rather than in a capture
 /// quotation composed onto `q`.
-fn dip(evaluator: *Fiber) MachineError!void {
-    var quotation = try evaluator.popQuotation();
+fn dip(fiber: *Fiber) MachineError!void {
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var protected = try evaluator.popProtected();
+    var protected = try paging.takeProtected(fiber);
     defer protected.item.deinit();
-    try startDip(evaluator, &quotation, &protected);
+    try startDip(fiber, &quotation, &protected);
 }
 
 /// `x quotation cons dip` without the list: the value beneath `x` is
 /// protected and `x` stays on the stack for the quotation, as the first form
 /// of `(x quotation...)` would have pushed it. The `cons call` and `cons dip`
 /// phrases in `idioms.zig` reach this.
-pub fn dipBelowHead(evaluator: *Fiber) MachineError!void {
-    var quotation = try evaluator.popQuotation();
+pub fn dipBelowHead(fiber: *Fiber) MachineError!void {
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var head = try evaluator.popValue();
+    var head = try fiber.popValue();
     defer head.deinit();
-    var protected = try evaluator.popProtected();
+    var protected = try paging.takeProtected(fiber);
     defer protected.item.deinit();
-    try evaluator.pushOwned(head.take());
-    try startDip(evaluator, &quotation, &protected);
+    try fiber.pushOwned(head.take());
+    try startDip(fiber, &quotation, &protected);
 }
 
-fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *Fiber.Protected) MachineError!void {
-    const state = try evaluator.allocator.create(DipState);
+fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *paging.Protected) MachineError!void {
+    const state = try fiber.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
         .protected = .init(protected.item.take()),
         .original = protected.original,
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
     };
-    try evaluator.beginInlineApplication(state.application());
+    try fiber.beginApplication(state.application(), .in_place);
 }
 
 const DipState = struct {
@@ -315,60 +304,59 @@ const DipState = struct {
     /// application completes, so a failing quotation leaves it to this
     /// driver's field ownership rather than to the rolled-back stack.
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *DipState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
-        try evaluator.pushReturned(self.protected.take(), self.original);
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
+        try paging.returnProtected(fiber, self.protected.take(), self.original);
         return null;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn dipN(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var count_value = try evaluator.popValue();
+fn dipN(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var count_value = try fiber.popValue();
     defer count_value.deinit();
-    var quotation = try evaluator.popQuotation();
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    if (count_value.borrow() != .int) return evaluator.typeError("an int count");
-    if (count_value.borrow().int < 0) return evaluator.fail(.domain, "dip-n count must be nonnegative");
+    if (count_value.borrow() != .int) return fiber.typeError("an int count");
+    if (count_value.borrow().int < 0) return fiber.fail(.domain, "dip-n count must be nonnegative");
     const count: usize = @intCast(count_value.borrow().int);
-    // Checked before the buffers are sized by it; `require` would page early
-    // and lose which values `popProtected` finds to be originals.
-    if (count > evaluator.reachable()) return evaluator.failShort(count);
+    // Checked before the buffers are sized by it, and without paging.
+    try paging.requireReachable(fiber, count);
     // Each allocation precedes taking the quotation, and a later failure
     // retires the earlier ones: a struct literal would leak them.
     var control = blk: {
-        var protected = heap.Owned(heap.OwnedValueBuffer).init(try .init(evaluator.releases, count));
-        errdefer protected.deinit(evaluator.releases, evaluator.allocator);
-        var originals: std.DynamicBitSetUnmanaged = try .initEmpty(evaluator.allocator, count);
-        errdefer originals.deinit(evaluator.allocator);
+        var protected = heap.Owned(heap.OwnedValueBuffer).init(try .init(fiber.releases, count));
+        errdefer protected.deinit(fiber.releases, fiber.allocator);
+        var originals: std.DynamicBitSetUnmanaged = try .initEmpty(fiber.allocator, count);
+        errdefer originals.deinit(fiber.allocator);
         break :blk heap.Owned(DipControl).init(.{
             .quotation = .init(quotation.take().list),
             .protected = protected,
             .originals = originals,
             .count = count,
-            .site = evaluator.applicationSite(),
-            .word = evaluator.active_word,
+            .site = fiber.applicationSite(),
+            .word = fiber.active_word,
         });
     };
-    defer control.deinit(evaluator.releases, evaluator.allocator);
-    switch (try control.borrowMut().advance(evaluator)) {
+    defer control.deinit(fiber.releases, fiber.allocator);
+    switch (try control.borrowMut().advance(fiber)) {
         .finished => unreachable,
-        .launch => try launchDipN(evaluator, &control),
-        .pending => try evaluator.startDriver(DipDriver{ .control = .init(control.take()) }),
+        .launch => try launchDipN(fiber, &control),
+        .pending => try fiber.startDriver(DipDriver{ .control = .init(control.take()) }),
     }
 }
 
-fn launchDipN(evaluator: *Fiber, control: *heap.Owned(DipControl)) MachineError!void {
-    const state = try evaluator.allocator.create(DipNState);
+fn launchDipN(fiber: *Fiber, control: *heap.Owned(DipControl)) MachineError!void {
+    const state = try fiber.allocator.create(DipNState);
     state.* = .{ .control = .init(control.take()) };
-    try evaluator.beginInlineApplication(state.application());
+    try fiber.beginApplication(state.application(), .in_place);
 }
 
 /// `dip-n` takes its `count` protected values off the stack one at a time,
@@ -390,13 +378,13 @@ const DipControl = struct {
 
     const Progress = union(enum) { pending, launch, finished };
 
-    fn advance(self: *DipControl, evaluator: *Fiber) MachineError!Progress {
-        const work = evaluator.workBudget();
+    fn advance(self: *DipControl, fiber: *Fiber) MachineError!Progress {
+        const work = fiber.workBudget();
         while (true) switch (self.phase) {
             .take => {
                 const end = self.index + work.take(self.count - self.index);
                 while (self.index != end) : (self.index += 1) {
-                    var taken = try evaluator.popProtected();
+                    var taken = try paging.takeProtected(fiber);
                     self.protected.borrowMut().appendOwned(taken.item.take());
                     if (taken.original) self.originals.set(self.index);
                 }
@@ -414,7 +402,7 @@ const DipControl = struct {
                     self.index -= 1;
                     const item = self.protected.borrow().values()[self.index];
                     heap.retainValue(item);
-                    try evaluator.pushReturned(item, self.originals.isSet(self.index));
+                    try paging.returnProtected(fiber, item, self.originals.isSet(self.index));
                 }
                 if (self.index != 0) return .pending;
                 return .finished;
@@ -432,16 +420,16 @@ const DipControl = struct {
 const DipDriver = struct {
     control: heap.Owned(DipControl),
 
-    pub fn advance(evaluator: *Fiber, self: *DipDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.control.borrow().word;
-        try evaluator.pollKernel();
-        const progress = try self.control.borrowMut().advance(evaluator);
+    pub fn advance(fiber: *Fiber, self: *DipDriver) MachineError!machine.WorkProgress {
+        fiber.active_word = self.control.borrow().word;
+        try fiber.pollKernel();
+        const progress = try self.control.borrowMut().advance(fiber);
         if (progress == .pending) return .stepped;
         var control = heap.Owned(DipControl).init(self.control.take());
-        defer control.deinit(evaluator.releases, evaluator.allocator);
-        evaluator.retireDriver(self);
+        defer control.deinit(fiber.releases, fiber.allocator);
+        fiber.retireDriver(self);
         switch (progress) {
-            .launch => try launchDipN(evaluator, &control),
+            .launch => try launchDipN(fiber, &control),
             .finished, .pending => {},
         }
         return .detached;
@@ -461,18 +449,18 @@ const DipNState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *DipNState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.control.borrow().word;
-        evaluator.chargeContinuationStep();
-        switch (try self.control.borrowMut().advance(evaluator)) {
+        fiber.active_word = self.control.borrow().word;
+        fiber.chargeContinuationStep();
+        switch (try self.control.borrowMut().advance(fiber)) {
             .finished => return null,
             .launch => unreachable,
             .pending => {
-                try evaluator.startDriver(DipDriver{ .control = .init(self.control.take()) });
+                try fiber.startDriver(DipDriver{ .control = .init(self.control.take()) });
                 return null;
             },
         }
@@ -481,182 +469,28 @@ const DipNState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn above(evaluator: *Fiber) MachineError!void {
-    return startPaged(evaluator, .above);
+fn above(fiber: *Fiber) MachineError!void {
+    return startPaged(fiber, .above);
 }
-fn below(evaluator: *Fiber) MachineError!void {
-    return startPaged(evaluator, .below);
+fn below(fiber: *Fiber) MachineError!void {
+    return startPaged(fiber, .below);
 }
-fn startPaged(evaluator: *Fiber, placement: Placement) MachineError!void {
-    var quotation = try evaluator.popQuotation();
+fn startPaged(fiber: *Fiber, placement: paging.Placement) MachineError!void {
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    const state = try evaluator.allocator.create(PagedState);
+    const state = try fiber.allocator.create(PagedState);
     state.* = .{
         .quotation = .init(quotation.take().list),
         .paged = .init(.init(placement)),
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
     };
-    try evaluator.beginPagingApplication(state.application(), &state.paged.borrowMut().floor);
+    try fiber.beginApplication(state.application(), .{ .paging = &state.paged.borrowMut().floor });
 }
-
-/// What becomes of the region a paged quotation leaves.
-const Placement = enum {
-    /// The restored originals go on top of the region.
-    above,
-    /// The restored originals go beneath the region.
-    below,
-    /// The region is dropped: a test's result was read from it, and the
-    /// test's only lasting effect on the stack is none.
-    discarded,
-    /// The region moves into the control's `results`, in stack order, for
-    /// a cleave to put back once every quotation has run.
-    collected,
-};
-
-/// A quotation run over a paging floor, and the bounded phases that put the
-/// stack back together once it returns: originals a `dip` returned are swept
-/// to the top of the region and dropped, the region is placed, and the paged
-/// originals come back in their original order. Each phase is user-sized and
-/// advances only as far as the turn's budget allows, and no phase takes a
-/// live value off the stack except to release it or to collect it.
-///
-/// A restored original the floor beneath holds too goes back as that
-/// floor's returned original, so restoring is never producing: a word that
-/// only looked at a value beneath the floor did not produce it.
-const PagedControl = struct {
-    placement: Placement,
-    floor: machine.PagingFloor = .{ .floor = 0, .beneath = .{ .hard = 0 } },
-    /// What a collected region held, in stack order.
-    results: heap.InlineList(Value, 4, .{ .int = 0 }) = .empty,
-    /// The region's base: the floor as the quotation left it.
-    base: usize = 0,
-    /// How many originals come back: the floor's count before they do.
-    restored: usize = 0,
-    sweep: machine.StackSweep = .from(0),
-    /// The reversal that orders a collected region, or the three that rotate
-    /// the restored originals beneath the region.
-    spans: [3]machine.StackReversal = @splat(.none),
-    reversed: usize = 0,
-    phase: Phase = .begin,
-
-    const Phase = enum { begin, sweep, drop, clear, reverse, gather, surface, rotate, finished };
-
-    fn init(placement: Placement) PagedControl {
-        return .{ .placement = placement };
-    }
-    /// Readies the floor for another quotation once a restore has finished.
-    fn reset(self: *PagedControl) void {
-        std.debug.assert(self.floor.paged() == 0 and self.floor.returned.items.len == 0);
-        self.phase = .begin;
-        self.reversed = 0;
-    }
-
-    fn advance(self: *PagedControl, evaluator: *Fiber) MachineError!bool {
-        const work = evaluator.workBudget();
-        while (true) switch (self.phase) {
-            .begin => {
-                self.restored = self.floor.paged();
-                const returned = self.floor.returned.items;
-                if (self.placement == .discarded) {
-                    self.phase = .clear;
-                } else if (returned.len == 0) {
-                    self.placeRegion(evaluator);
-                } else {
-                    // The region lies above the floor beneath, whose returned
-                    // originals all sit below it, so only this floor's records
-                    // name slots in it.
-                    self.sweep = .from(returned[0]);
-                    self.phase = .sweep;
-                }
-            },
-            .sweep => {
-                if (!evaluator.sweepStack(&self.sweep, self.floor.returned.items, work)) return false;
-                self.phase = .drop;
-            },
-            .drop => {
-                const returned = &self.floor.returned;
-                const granted = work.take(returned.items.len);
-                evaluator.discard(granted);
-                returned.shrinkRetainingCapacity(returned.items.len - granted);
-                if (returned.items.len != 0) return false;
-                self.placeRegion(evaluator);
-            },
-            .clear => {
-                const granted = work.take(evaluator.stack.items.len - self.base);
-                evaluator.discard(granted);
-                if (evaluator.stack.items.len != self.base) return false;
-                self.floor.returned.clearRetainingCapacity();
-                self.phase = .surface;
-            },
-            .reverse => {
-                if (!evaluator.reverseStack(&self.spans[0], work)) return false;
-                try self.results.ensureUnusedCapacity(evaluator.allocator, evaluator.stack.items.len - self.base);
-                self.phase = .gather;
-            },
-            .gather => {
-                const granted = work.take(evaluator.stack.items.len - self.base);
-                for (0..granted) |_| {
-                    var item = try evaluator.popValue();
-                    self.results.appendAssumeCapacity(item.take());
-                }
-                if (evaluator.stack.items.len != self.base) return false;
-                self.phase = .surface;
-            },
-            .surface => {
-                const originals = &self.floor.originals;
-                const granted = work.take(originals.len());
-                for (0..granted) |_| {
-                    const index = self.restored - originals.len();
-                    const original = originals.pop().?;
-                    try evaluator.pushOwned(original.value);
-                    // Beneath the region, the originals end up at the base
-                    // once rotated; the records name those slots now.
-                    const position = if (self.placement == .below) self.base + index else evaluator.stack.items.len - 1;
-                    if (original.shared) try evaluator.noteReturned(position);
-                }
-                if (originals.len() != 0) return false;
-                if (self.placement != .below) {
-                    self.phase = .finished;
-                    continue;
-                }
-                const top = evaluator.stack.items.len;
-                const split = top - self.restored;
-                self.spans = .{ .of(self.base, split), .of(split, top), .of(self.base, top) };
-                self.phase = .rotate;
-            },
-            .rotate => {
-                while (self.reversed != self.spans.len) : (self.reversed += 1) {
-                    if (!evaluator.reverseStack(&self.spans[self.reversed], work)) return false;
-                }
-                self.phase = .finished;
-            },
-            .finished => return true,
-        };
-    }
-
-    /// The region holds only results now; what happens to it is the placement.
-    fn placeRegion(self: *PagedControl, evaluator: *const Fiber) void {
-        switch (self.placement) {
-            .above, .below => self.phase = .surface,
-            .collected => {
-                self.spans[0] = .of(self.base, evaluator.stack.items.len);
-                self.phase = .reverse;
-            },
-            .discarded => unreachable,
-        }
-    }
-
-    pub fn retire(self: *PagedControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.results.items()) |item| releases.releaseValue(item);
-        self.results.deinit(allocator);
-        self.floor.retire(releases, allocator);
-    }
-};
 
 const PagedState = struct {
     quotation: heap.Owned(*Header),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     phase: enum { run, restored } = .run,
@@ -664,25 +498,25 @@ const PagedState = struct {
     fn application(self: *PagedState) Application {
         return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
     }
-    fn work(self: *PagedState, evaluator: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(evaluator);
+    fn work(self: *PagedState, fiber: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(fiber);
     }
     fn resumeAfter(_: *PagedState, _: @FieldType(PagedState, "phase")) ?ApplicationStep {
         return null;
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *PagedState,
         window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
         switch (self.phase) {
             .run => {
                 self.paged.borrowMut().base = window.base();
-                return finishWork(PagedState, self, evaluator, .restored);
+                return finishWork(PagedState, self, fiber, .restored);
             },
             .restored => return null,
         }
@@ -691,82 +525,79 @@ const PagedState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn cleave(evaluator: *Fiber) MachineError!void {
-    var quotations = try evaluator.popValue();
+fn cleave(fiber: *Fiber) MachineError!void {
+    var quotations = try fiber.popValue();
     defer quotations.deinit();
-    if (quotations.borrow() != .list) return evaluator.typeError("a list of quotations");
-    return startCleave(evaluator, .{ .list = .init(quotations.take()) }, .validate);
+    if (quotations.borrow() != .list) return fiber.typeError("a list of quotations");
+    return startCleave(fiber, .{ .list = .init(quotations.take()) }, .validate);
 }
-fn bi(evaluator: *Fiber) MachineError!void {
-    return cleaveFixed(evaluator, 2);
+fn bi(fiber: *Fiber) MachineError!void {
+    return cleaveFixed(fiber, 2);
 }
-fn tri(evaluator: *Fiber) MachineError!void {
-    return cleaveFixed(evaluator, 3);
+fn tri(fiber: *Fiber) MachineError!void {
+    return cleaveFixed(fiber, 3);
 }
 /// `bi` and `tri` take their quotations straight off the stack, already
 /// validated, so no list is built and no validation phase runs.
-fn cleaveFixed(evaluator: *Fiber, count: usize) MachineError!void {
-    try evaluator.require(count);
+fn cleaveFixed(fiber: *Fiber, count: usize) MachineError!void {
+    try fiber.require(count);
     var fixed: CleaveQuotations.Fixed = .{};
-    errdefer fixed.retire(evaluator.releases);
+    errdefer fixed.retire(fiber.releases);
     for (0..count) |offset| {
-        const item = evaluator.visibleOperandBorrowed(evaluator.available() - count + offset);
-        if (item != .list) return evaluator.typeError("quotations");
+        const item = fiber.visibleOperandBorrowed(fiber.available() - count + offset);
+        if (item != .list) return fiber.typeError("quotations");
         heap.incRef(item.list);
         fixed.items[offset] = item.list;
         fixed.count += 1;
     }
-    evaluator.discard(count);
-    return startCleave(evaluator, .{ .fixed = fixed }, .run);
+    fiber.discard(count);
+    return startCleave(fiber, .{ .fixed = fixed }, .run);
 }
 fn startCleave(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     quotations: CleaveQuotations,
     phase: @FieldType(CleaveState, "phase"),
 ) MachineError!void {
     var owned_quotations = heap.Owned(CleaveQuotations).init(quotations);
-    const state = evaluator.allocator.create(CleaveState) catch |err| {
-        owned_quotations.deinit(evaluator.releases, evaluator.allocator);
+    const state = fiber.allocator.create(CleaveState) catch |err| {
+        owned_quotations.deinit(fiber.releases, fiber.allocator);
         return err;
     };
     state.* = .{
         .quotations = .init(owned_quotations.take()),
         .paged = .init(.init(.collected)),
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
         .phase = phase,
     };
     var owned = heap.Owned(*CleaveState).init(state);
     // Validation runs where the word is invoked when the turn's budget
     // covers it, so a small cleave launches without installing a driver.
-    if (phase == .validate and !(state.work(evaluator) catch |err| {
-        owned.deinit(evaluator.releases, evaluator.allocator);
+    if (phase == .validate and !(state.work(fiber) catch |err| {
+        owned.deinit(fiber.releases, fiber.allocator);
         return err;
-    })) return evaluator.startDriver(CleaveDriver{ .state = owned });
-    try launchCleave(evaluator, &owned);
+    })) return fiber.startDriver(CleaveDriver{ .state = owned });
+    try launchCleave(fiber, &owned);
 }
 
-fn launchCleave(evaluator: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!void {
+fn launchCleave(fiber: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!void {
     const state = owned.borrow();
-    if (state.phase == .done) return owned.deinit(evaluator.releases, evaluator.allocator);
+    if (state.phase == .done) return owned.deinit(fiber.releases, fiber.allocator);
     state.running = true;
-    try evaluator.beginPagingApplication(
-        owned.take().application(state.quotation()),
-        &state.paged.borrowMut().floor,
-    );
+    try fiber.beginApplication(owned.take().application(state.quotation()), .{ .paging = &state.paged.borrowMut().floor });
 }
 
 /// Finishes a cleave's validation when the turn ran out, then launches it.
 const CleaveDriver = struct {
     state: heap.Owned(*CleaveState),
 
-    pub fn advance(evaluator: *Fiber, self: *CleaveDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.state.borrow().word;
-        try evaluator.pollKernel();
-        if (!try self.state.borrow().work(evaluator)) return .stepped;
+    pub fn advance(fiber: *Fiber, self: *CleaveDriver) MachineError!machine.WorkProgress {
+        fiber.active_word = self.state.borrow().word;
+        try fiber.pollKernel();
+        if (!try self.state.borrow().work(fiber)) return .stepped;
         var owned = heap.Owned(*CleaveState).init(self.state.take());
-        evaluator.retireDriver(self);
-        try launchCleave(evaluator, &owned);
+        fiber.retireDriver(self);
+        try launchCleave(fiber, &owned);
         return .detached;
     }
     pub const ownership: heap.DriverOwnership = .fields;
@@ -825,7 +656,7 @@ const CleaveQuotations = union(enum) {
 /// input stays a value rather than becoming code.
 const CleaveState = struct {
     quotations: heap.Owned(CleaveQuotations),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     /// The most inputs any quotation consumed: consumption is a prefix from
@@ -852,8 +683,8 @@ const CleaveState = struct {
 
     /// Advances the work in hand; true once the next quotation may launch
     /// or the cleave is done.
-    fn work(self: *CleaveState, evaluator: *Fiber) MachineError!bool {
-        const work_budget = evaluator.workBudget();
+    fn work(self: *CleaveState, fiber: *Fiber) MachineError!bool {
+        const work_budget = fiber.workBudget();
         while (true) switch (self.phase) {
             .validate => {
                 const quotations = self.quotations.borrow();
@@ -861,7 +692,7 @@ const CleaveState = struct {
                 const end = self.index + work_budget.take(total - self.index);
                 while (self.index != end) : (self.index += 1) {
                     if (!quotations.isQuotation(self.index))
-                        return evaluator.typeError("a list of quotations");
+                        return fiber.typeError("a list of quotations");
                 }
                 if (self.index != total) return false;
                 self.phase = if (total == 0) .done else .run;
@@ -869,7 +700,7 @@ const CleaveState = struct {
             },
             .restored => {
                 const paged = self.paged.borrowMut();
-                if (!try paged.advance(evaluator)) return false;
+                if (!try paged.advance(fiber)) return false;
                 self.consumed = @max(self.consumed, paged.restored);
                 self.next += 1;
                 if (self.next != self.count()) {
@@ -881,7 +712,7 @@ const CleaveState = struct {
             },
             .drop => {
                 const granted = work_budget.take(self.consumed - self.index);
-                evaluator.discard(granted);
+                fiber.discard(granted);
                 self.index += granted;
                 if (self.index != self.consumed) return false;
                 self.phase = .push;
@@ -889,7 +720,7 @@ const CleaveState = struct {
             .push => {
                 const results = self.paged.borrowMut().results.items();
                 const end = self.pushed + work_budget.take(results.len - self.pushed);
-                while (self.pushed != end) : (self.pushed += 1) try evaluator.pushOwned(results[self.pushed]);
+                while (self.pushed != end) : (self.pushed += 1) try fiber.pushOwned(results[self.pushed]);
                 if (self.pushed != results.len) return false;
                 self.paged.borrowMut().results.clearRetainingCapacity();
                 self.phase = .done;
@@ -912,22 +743,22 @@ const CleaveState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *CleaveState,
         window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
         if (self.running) {
             self.running = false;
             self.paged.borrowMut().base = window.base();
             self.phase = .restored;
             // `work` leaves its own progress in `phase`; `finishWork` would
             // reset it, so a suspension keeps it here.
-            if (try self.work(evaluator)) return self.resumeAfter(self.phase);
-            try evaluator.startDriver(SuspendedWork(CleaveState){ .state = self });
-            return evaluator.suspendInlineApplication();
+            if (try self.work(fiber)) return self.resumeAfter(self.phase);
+            try fiber.startDriver(SuspendedWork(CleaveState){ .state = self });
+            return fiber.suspendInlineApplication();
         }
         // A suspended restore, drop, or push finished under its driver.
         return self.resumeAfter(self.phase);
@@ -942,7 +773,7 @@ const CleaveState = struct {
 /// place.
 const CondState = struct {
     clauses: heap.Owned(Value),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -961,8 +792,8 @@ const CondState = struct {
         if (self.phase == .action) launched.provenance = selectedProvenance(self.provenance_target);
         return launched;
     }
-    fn work(self: *CondState, evaluator: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(evaluator);
+    fn work(self: *CondState, fiber: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(fiber);
     }
     /// The action a true test selected, the else when the tests ran out, or
     /// the next test.
@@ -990,19 +821,19 @@ const CondState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *CondState,
         window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
         switch (self.phase) {
             .predicate => {
                 const paged = self.paged.borrowMut();
                 paged.base = window.base();
-                self.selected = try popTestResult(evaluator, paged);
-                return finishWork(CondState, self, evaluator, .restored);
+                self.selected = try popTestResult(fiber, paged);
+                return finishWork(CondState, self, fiber, .restored);
             },
             // A `cond` action is the clause's whole result.
             .action => return null,
@@ -1013,21 +844,21 @@ const CondState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn cond(evaluator: *Fiber) MachineError!void {
-    var clauses = try evaluator.popValue();
+fn cond(fiber: *Fiber) MachineError!void {
+    var clauses = try fiber.popValue();
     defer clauses.deinit();
     if (clauses.borrow() != .list) {
-        return evaluator.typeError("a clause list");
+        return fiber.typeError("a clause list");
     }
     const count: usize = @intCast(clauses.borrow().list.length());
     if (count == 0 or count % 2 == 0) {
-        return evaluator.fail(.shape, "cond requires a nonempty odd clause list ending in else");
+        return fiber.fail(.shape, "cond requires a nonempty odd clause list ending in else");
     }
-    try evaluator.startDriver(CondDriver{
+    try fiber.startDriver(CondDriver{
         .clauses = .init(clauses.take()),
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
-        .provenance_target = try evaluator.applicationProvenanceTarget(),
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
+        .provenance_target = try fiber.applicationProvenanceTarget(),
     });
 }
 
@@ -1040,17 +871,17 @@ const CondDriver = struct {
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Fiber, self: *CondDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *CondDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const clauses = self.clauses.borrow();
         const count: usize = @intCast(clauses.list.length());
-        const end = self.index + evaluator.workBudget().take(count - self.index);
+        const end = self.index + fiber.workBudget().take(count - self.index);
         while (self.index != end) : (self.index += 1) {
             if (list.atUnchecked(clauses, self.index) != .list)
-                return evaluator.typeError("quotation clauses and else");
+                return fiber.typeError("quotation clauses and else");
         }
         if (self.index != count) return .stepped;
-        const state = try evaluator.allocator.create(CondState);
+        const state = try fiber.allocator.create(CondState);
         state.* = .{
             .clauses = .init(self.clauses.take()),
             .paged = .init(.init(.discarded)),
@@ -1059,12 +890,12 @@ const CondDriver = struct {
             .provenance_target = self.provenance_target,
             .phase = if (count == 1) .action else .predicate,
         };
-        evaluator.retireDriver(self);
+        fiber.retireDriver(self);
         const first = state.clause(0);
         if (count == 1) {
-            try evaluator.beginInlineApplication(state.application(first));
+            try fiber.beginApplication(state.application(first), .in_place);
         } else {
-            try evaluator.beginPagingApplication(state.application(first), &state.paged.borrowMut().floor);
+            try fiber.beginApplication(state.application(first), .{ .paging = &state.paged.borrowMut().floor });
         }
         return .detached;
     }
@@ -1082,7 +913,7 @@ const LinrecState = struct {
     base: heap.Owned(*Header),
     pre: heap.Owned(*Header),
     post: heap.Owned(*Header),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -1094,8 +925,8 @@ const LinrecState = struct {
     fn application(self: *LinrecState) Application {
         return machine.typedApplication(self, self.predicate.borrow(), self.site, 0);
     }
-    fn work(self: *LinrecState, evaluator: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(evaluator);
+    fn work(self: *LinrecState, fiber: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(fiber);
     }
     fn resumeAfter(self: *LinrecState, _: @FieldType(LinrecState, "phase")) ?ApplicationStep {
         return if (self.selected) self.branchStep(.base) else self.branchStep(.pre);
@@ -1126,19 +957,19 @@ const LinrecState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *LinrecState,
         window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
         switch (self.phase) {
             .predicate => {
                 const paged = self.paged.borrowMut();
                 paged.base = window.base();
-                self.selected = try popTestResult(evaluator, paged);
-                return finishWork(LinrecState, self, evaluator, .restored);
+                self.selected = try popTestResult(fiber, paged);
+                return finishWork(LinrecState, self, fiber, .restored);
             },
             .restored => return self.resumeAfter(.restored),
             .pre => {
@@ -1156,34 +987,34 @@ const LinrecState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn linrec(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(4);
-    var post = try evaluator.popValue();
+fn linrec(fiber: *Fiber) MachineError!void {
+    try fiber.require(4);
+    var post = try fiber.popValue();
     defer post.deinit();
-    var pre = try evaluator.popValue();
+    var pre = try fiber.popValue();
     defer pre.deinit();
-    var base = try evaluator.popValue();
+    var base = try fiber.popValue();
     defer base.deinit();
-    var predicate = try evaluator.popValue();
+    var predicate = try fiber.popValue();
     defer predicate.deinit();
     if (predicate.borrow() != .list or base.borrow() != .list or
         pre.borrow() != .list or post.borrow() != .list)
     {
-        return evaluator.typeError("four quotations/lists");
+        return fiber.typeError("four quotations/lists");
     }
-    const provenance_target = try evaluator.applicationProvenanceTarget();
-    const state = try evaluator.allocator.create(LinrecState);
+    const provenance_target = try fiber.applicationProvenanceTarget();
+    const state = try fiber.allocator.create(LinrecState);
     state.* = .{
         .predicate = .init(predicate.take().list),
         .base = .init(base.take().list),
         .pre = .init(pre.take().list),
         .post = .init(post.take().list),
         .paged = .init(.init(.discarded)),
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
         .provenance_target = provenance_target,
     };
-    try evaluator.beginPagingApplication(state.application(), &state.paged.borrowMut().floor);
+    try fiber.beginApplication(state.application(), .{ .paging = &state.paged.borrowMut().floor });
 }
 
 const IterationKind = enum { each, zip_with, for_word, fold, scan, lex_cmp, infra };
@@ -1207,20 +1038,20 @@ const IterationState = struct {
         return application_value;
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
-        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = seeded } };
+        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = seeded, .launch = .isolated } };
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *IterationState,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
         const base: usize = window.base();
-        const observed = window.observed(evaluator.stack.items.len) orelse
-            return evaluator.applicationContractError(
+        const observed = window.observed(fiber.stack.items.len) orelse
+            return fiber.applicationContractError(
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
@@ -1236,23 +1067,23 @@ const IterationState = struct {
                 self.index,
             );
         return switch (self.kind) {
-            .each, .zip_with => self.resumeCollect(evaluator, site, observed),
-            .for_word => self.resumeFor(evaluator, site, observed),
-            .fold, .scan => self.resumeFold(evaluator, site, observed),
-            .lex_cmp => self.resumeLexCompare(evaluator, site, observed),
-            .infra => resumeInfra(evaluator, base),
+            .each, .zip_with => self.resumeCollect(fiber, site, observed),
+            .for_word => self.resumeFor(fiber, site, observed),
+            .fold, .scan => self.resumeFold(fiber, site, observed),
+            .lex_cmp => self.resumeLexCompare(fiber, site, observed),
+            .infra => resumeInfra(fiber, base),
         };
     }
 
     fn resumeCollect(
         self: *IterationState,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         const seeded: usize = if (self.kind == .each) 1 else 2;
         if (observed != 1) {
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
@@ -1260,25 +1091,25 @@ const IterationState = struct {
                 self.index,
             );
         }
-        var result = try evaluator.popDatum();
+        var result = try fiber.popDatum();
         self.results.?.borrowMut().appendOwned(result.take());
         self.index += 1;
         if (self.index == self.count) {
-            try self.installCollected(evaluator);
+            try self.installCollected(fiber);
             return null;
         }
-        try self.pushInputs(evaluator);
+        try self.pushInputs(fiber);
         return self.step(@intCast(seeded));
     }
 
     fn resumeFor(
         self: *IterationState,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         if (observed != 0) {
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
@@ -1288,18 +1119,18 @@ const IterationState = struct {
         }
         self.index += 1;
         if (self.index == self.count) return null;
-        try self.pushInputs(evaluator);
+        try self.pushInputs(fiber);
         return self.step(1);
     }
 
     fn resumeFold(
         self: *IterationState,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         if (observed != 1) {
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
@@ -1307,25 +1138,25 @@ const IterationState = struct {
                 self.index,
             );
         }
-        var accumulator = try evaluator.popValue();
+        var accumulator = try fiber.popValue();
         defer accumulator.deinit();
         const accumulator_value = accumulator.borrow();
         if (self.kind == .scan) self.results.?.borrowMut().appendOwned(value.datum(accumulator.take()));
         self.index += 1;
         if (self.index == self.count) {
             if (self.kind == .scan) {
-                try self.installCollected(evaluator);
+                try self.installCollected(fiber);
             } else {
-                try evaluator.pushOwned(accumulator.take());
+                try fiber.pushOwned(accumulator.take());
             }
             return null;
         }
         if (self.kind == .scan) {
-            try evaluator.pushBorrowed(accumulator_value);
+            try fiber.pushBorrowed(accumulator_value);
         } else {
-            try evaluator.pushOwned(accumulator.take());
+            try fiber.pushOwned(accumulator.take());
         }
-        try evaluator.pushBorrowed(list.atUnchecked(self.left.borrow(), self.index));
+        try fiber.pushBorrowed(list.atUnchecked(self.left.borrow(), self.index));
         return self.step(2);
     }
 
@@ -1333,12 +1164,12 @@ const IterationState = struct {
     /// A shared prefix that is equal throughout orders by length.
     fn resumeLexCompare(
         self: *IterationState,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         if (observed != 1) {
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
@@ -1346,43 +1177,43 @@ const IterationState = struct {
                 self.index,
             );
         }
-        var result = try evaluator.popValue();
+        var result = try fiber.popValue();
         defer result.deinit();
-        if (result.borrow() != .int) return evaluator.typeError("an int comparator result");
+        if (result.borrow() != .int) return fiber.typeError("an int comparator result");
         if (result.borrow().int != 0) {
-            try evaluator.pushOwned(result.take());
+            try fiber.pushOwned(result.take());
             return null;
         }
         self.index += 1;
         if (self.index == self.count) {
-            try pushLengthOrder(evaluator, self.left.borrow(), self.right.?.borrow());
+            try pushLengthOrder(fiber, self.left.borrow(), self.right.?.borrow());
             return null;
         }
-        try self.pushInputs(evaluator);
+        try self.pushInputs(fiber);
         return self.step(2);
     }
 
-    fn resumeInfra(evaluator: *Fiber, base: usize) MachineError!?ApplicationStep {
-        try InfraResultDriver.install(evaluator, base);
+    fn resumeInfra(fiber: *Fiber, base: usize) MachineError!?ApplicationStep {
+        try InfraResultDriver.install(fiber, base);
         return null;
     }
 
-    fn installCollected(self: *IterationState, evaluator: *Fiber) error{OutOfMemory}!void {
+    fn installCollected(self: *IterationState, fiber: *Fiber) error{OutOfMemory}!void {
         const values = self.results.?.take();
         self.results = null;
-        try evaluator.startDriver(CollectedDriver{
-            .materializer = .init(.init(evaluator.allocator, values.values())),
+        try fiber.startDriver(CollectedDriver{
+            .materializer = .init(.init(fiber.allocator, values.values())),
             .values = .init(values),
         });
     }
 
-    fn pushInputs(self: *IterationState, evaluator: *Fiber) MachineError!void {
+    fn pushInputs(self: *IterationState, fiber: *Fiber) MachineError!void {
         const left = self.left.borrow();
-        try evaluator.pushBorrowed(if (self.kind == .for_word and left == .dict)
+        try fiber.pushBorrowed(if (self.kind == .for_word and left == .dict)
             dict.valueAt(left.dict, self.index)
         else
             inputAt(left, self.index));
-        if (self.kind == .zip_with or self.kind == .lex_cmp) try evaluator.pushBorrowed(inputAt(
+        if (self.kind == .zip_with or self.kind == .lex_cmp) try fiber.pushBorrowed(inputAt(
             self.right.?.borrow(),
             self.index,
         ));
@@ -1442,20 +1273,21 @@ const UpdateApplication = struct {
         return .{ .apply = .{
             .quotation = self.state.borrow().quotation.borrow(),
             .seeded = 1,
+            .launch = .isolated,
         } };
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *UpdateApplication,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         const state = self.state.borrow();
-        evaluator.active_word = state.word;
-        evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.stack.items.len) orelse
-            return evaluator.applicationContractError(
+        fiber.active_word = state.word;
+        fiber.chargeContinuationStep();
+        const observed = window.observed(fiber.stack.items.len) orelse
+            return fiber.applicationContractError(
                 site,
                 state.quotation.borrow(),
                 state.expected.borrow(),
@@ -1463,28 +1295,28 @@ const UpdateApplication = struct {
                 state.application_index,
             );
         if (observed != 1)
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 state.quotation.borrow(),
                 state.expected.borrow(),
                 .{ .seeded = 1, .expected = 1, .observed = observed },
                 state.application_index,
             );
-        var result = try evaluator.popValue();
+        var result = try fiber.popValue();
         state.values.borrowMut().replaceOwned(
             state.positions.?.borrow()[state.application_index],
             result.take(),
         );
         state.application_index += 1;
         if (state.application_index != state.positions.?.borrow().len) {
-            try evaluator.pushBorrowed(state.values.borrow().values()[
+            try fiber.pushBorrowed(state.values.borrow().values()[
                 state.positions.?.borrow()[state.application_index]
             ]);
             return self.step();
         }
         if (state.mode != .list_selector) state.copy_index = 0;
         state.phase = if (state.mode == .list_selector) .materialize_list else .fill_pairs;
-        try evaluator.startDriver(UpdateWorkDriver{ .state = .init(self.state.take()) });
+        try fiber.startDriver(UpdateWorkDriver{ .state = .init(self.state.take()) });
         return null;
     }
 };
@@ -1494,57 +1326,57 @@ const UpdateWorkDriver = struct {
     state: heap.Owned(*UpdateState),
 
     fn launchApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *UpdateWorkDriver,
     ) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
         if (state.positions.?.borrow().len == 0)
             return .{ .output = state.collection.take() };
-        var stack = try evaluator.reserveStack(1);
+        var stack = try fiber.reserveStack(1);
         stack.pushBorrowed(state.values.borrow().values()[state.positions.?.borrow()[0]]);
         state.phase = .apply;
-        const application_state = try evaluator.allocator.create(UpdateApplication);
+        const application_state = try fiber.allocator.create(UpdateApplication);
         application_state.* = .{ .state = .init(self.state.take()) };
-        try evaluator.beginIsolatedApplication(application_state.application());
+        try fiber.beginApplication(application_state.application(), .isolated);
         return .completed;
     }
 
-    fn listPosition(evaluator: *Fiber, state: *const UpdateState, selector: Value) MachineError!usize {
-        if (selector != .int) return evaluator.typeError("an integer list index");
-        if (selector.int < 0) return evaluator.fail(.domain, "update index is negative");
+    fn listPosition(fiber: *Fiber, state: *const UpdateState, selector: Value) MachineError!usize {
+        if (selector != .int) return fiber.typeError("an integer list index");
+        if (selector.int < 0) return fiber.fail(.domain, "update index is negative");
         const position = std.math.cast(usize, selector.int) orelse
-            return evaluator.fail(.domain, "update index is out of bounds");
+            return fiber.fail(.domain, "update index is out of bounds");
         if (position >= state.collection.borrow().list.length())
-            return evaluator.fail(.domain, "update index is out of bounds");
+            return fiber.fail(.domain, "update index is out of bounds");
         return position;
     }
 
-    pub fn advance(evaluator: *Fiber, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
+    pub fn advance(fiber: *Fiber, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
-        evaluator.active_word = state.word;
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        fiber.active_word = state.word;
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (state.phase) {
             .count_positions => {
                 const progress = try state.selector_cursor.?.borrowMut().advanceOne();
                 _ = work.spend();
                 switch (progress) {
                     .pending => {},
-                    .depth_exceeded => return evaluator.fail(
+                    .depth_exceeded => return fiber.fail(
                         .domain,
                         "update selector nesting exceeds 256 levels",
                     ),
                     .leaf => |selector| {
                         if (state.mode == .list_selector)
-                            _ = try listPosition(evaluator, state, selector);
+                            _ = try listPosition(fiber, state, selector);
                         state.position_count += 1;
                     },
                     .complete => {
-                        state.selector_cursor.?.deinit(evaluator.releases, evaluator.allocator);
+                        state.selector_cursor.?.deinit(fiber.releases, fiber.allocator);
                         state.selector_cursor = null;
-                        state.positions = .init(try evaluator.allocator.alloc(usize, state.position_count));
+                        state.positions = .init(try fiber.allocator.alloc(usize, state.position_count));
                         state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
-                            evaluator.allocator,
+                            fiber.allocator,
                             state.selector.borrow(),
                         ));
                         state.phase = if (state.mode == .list_selector) .fill_positions else .find_positions;
@@ -1556,14 +1388,14 @@ const UpdateWorkDriver = struct {
                 _ = work.spend();
                 switch (progress) {
                     .pending => {},
-                    .depth_exceeded => return evaluator.fail(.domain, "update selector nesting exceeds 256 levels"),
+                    .depth_exceeded => return fiber.fail(.domain, "update selector nesting exceeds 256 levels"),
                     .leaf => |selector| {
                         state.positions.?.borrow()[state.position_index] =
-                            try listPosition(evaluator, state, selector);
+                            try listPosition(fiber, state, selector);
                         state.position_index += 1;
                     },
                     .complete => {
-                        state.selector_cursor.?.deinit(evaluator.releases, evaluator.allocator);
+                        state.selector_cursor.?.deinit(fiber.releases, fiber.allocator);
                         state.selector_cursor = null;
                         state.phase = .copy_values;
                     },
@@ -1581,7 +1413,7 @@ const UpdateWorkDriver = struct {
                     else
                         state.selector.borrow();
                     state.finder = .init(dict.FindCursor.initHeader(
-                        evaluator.allocator,
+                        fiber.allocator,
                         state.collection.borrow().dict,
                         state.requested_key.?,
                     ));
@@ -1593,9 +1425,9 @@ const UpdateWorkDriver = struct {
                     .pending => {},
                     .complete => |found| {
                         if (found == null)
-                            return evaluator.fail(.domain, "update could not find the dict key");
+                            return fiber.fail(.domain, "update could not find the dict key");
                         positions[state.position_index] = state.finder.?.borrow().foundIndex().?;
-                        state.finder.?.deinit(evaluator.releases, evaluator.allocator);
+                        state.finder.?.deinit(fiber.releases, fiber.allocator);
                         state.finder = null;
                         state.requested_key = null;
                         state.position_index += 1;
@@ -1604,7 +1436,7 @@ const UpdateWorkDriver = struct {
             },
             .copy_values => {
                 const count = state.values.borrow().capacity();
-                if (state.copy_index == count) return launchApplication(evaluator, self);
+                if (state.copy_index == count) return launchApplication(fiber, self);
                 state.values.borrowMut().appendBorrowed(if (state.mode == .list_selector)
                     list.atUnchecked(state.collection.borrow(), state.copy_index)
                 else
@@ -1617,7 +1449,7 @@ const UpdateWorkDriver = struct {
                 const pairs = state.pairs.?.borrow();
                 if (state.copy_index == pairs.len) {
                     state.dict_materializer = .init(try dict.Materializer.init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         pairs,
                         false,
                     ));
@@ -1634,15 +1466,15 @@ const UpdateWorkDriver = struct {
             .materialize_list => {
                 if (state.list_materializer == null)
                     state.list_materializer = .init(.init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         state.values.borrow().values(),
                     ));
                 return switch (try state.list_materializer.?.borrowMut().advance(work)) {
                     .pending => .stepped,
                     .complete => |result| completed: {
                         state.list_materializer.?.deinit(
-                            evaluator.releases,
-                            evaluator.allocator,
+                            fiber.releases,
+                            fiber.allocator,
                         );
                         state.list_materializer = null;
                         break :completed .{ .output = result };
@@ -1663,25 +1495,25 @@ const UpdateWorkDriver = struct {
     }
 };
 
-fn update(evaluator: *Fiber) MachineError!void {
-    return startUpdate(evaluator, .core_selector);
+fn update(fiber: *Fiber) MachineError!void {
+    return startUpdate(fiber, .core_selector);
 }
 
-pub fn updateDictKeysForModule(evaluator: *Fiber) MachineError!void {
-    return startUpdate(evaluator, .dictionary_key_list);
+pub fn updateDictKeysForModule(fiber: *Fiber) MachineError!void {
+    return startUpdate(fiber, .dictionary_key_list);
 }
 
-fn startUpdate(evaluator: *Fiber, policy: UpdatePolicy) MachineError!void {
-    try evaluator.require(3);
-    var quotation = try evaluator.popQuotation();
+fn startUpdate(fiber: *Fiber, policy: UpdatePolicy) MachineError!void {
+    try fiber.require(3);
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var selector = try evaluator.popValue();
+    var selector = try fiber.popValue();
     defer selector.deinit();
-    var collection = try evaluator.popValue();
+    var collection = try fiber.popValue();
     defer collection.deinit();
 
     return startUpdateOwned(
-        evaluator,
+        fiber,
         policy,
         collection.take(),
         selector.take(),
@@ -1690,39 +1522,39 @@ fn startUpdate(evaluator: *Fiber, policy: UpdatePolicy) MachineError!void {
 }
 
 fn startUpdateOwned(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     policy: UpdatePolicy,
     collection_value: Value,
     selector_value: Value,
     quotation_value: Value,
 ) MachineError!void {
-    var quotation = heap.OwnedValue.init(evaluator.releases, quotation_value);
+    var quotation = heap.OwnedValue.init(fiber.releases, quotation_value);
     defer quotation.deinit();
-    var selector = heap.OwnedValue.init(evaluator.releases, selector_value);
+    var selector = heap.OwnedValue.init(fiber.releases, selector_value);
     defer selector.deinit();
-    var collection = heap.OwnedValue.init(evaluator.releases, collection_value);
+    var collection = heap.OwnedValue.init(fiber.releases, collection_value);
     defer collection.deinit();
 
     const mode: UpdateMode = switch (collection.borrow()) {
-        .list => if (policy == .core_selector) .list_selector else return evaluator.typeError("a dict"),
+        .list => if (policy == .core_selector) .list_selector else return fiber.typeError("a dict"),
         .dict => switch (policy) {
             .core_selector => .dictionary_key,
             .dictionary_key_list => .dictionary_key_list,
         },
-        else => return evaluator.typeError(if (policy == .core_selector) "a list or dict" else "a dict"),
+        else => return fiber.typeError(if (policy == .core_selector) "a list or dict" else "a dict"),
     };
     if (policy != .core_selector and selector.borrow() != .list)
-        return evaluator.typeError("a dictionary selector list");
+        return fiber.typeError("a dictionary selector list");
 
     const collection_count: usize = switch (mode) {
         .list_selector => @intCast(collection.borrow().list.length()),
         .dictionary_key, .dictionary_key_list => @intCast(collection.borrow().dict.length()),
     };
-    var values = try heap.OwnedValueBuffer.init(evaluator.releases, collection_count);
+    var values = try heap.OwnedValueBuffer.init(fiber.releases, collection_count);
     defer values.deinit();
     var expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "value", "--", "value" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "value", "--", "value" }),
     );
     defer expected.deinit();
     const initial_phase: UpdatePhase = switch (mode) {
@@ -1731,11 +1563,11 @@ fn startUpdateOwned(
         .dictionary_key_list => .find_positions,
     };
 
-    const state = try evaluator.allocator.create(UpdateState);
+    const state = try fiber.allocator.create(UpdateState);
     var state_owner: ?*UpdateState = state;
     errdefer if (state_owner) |owned| heap.destroyDriver(
-        evaluator.releases,
-        evaluator.allocator,
+        fiber.releases,
+        fiber.allocator,
         owned,
     );
     state.* = .{
@@ -1746,27 +1578,27 @@ fn startUpdateOwned(
         .expected = .init(expected.take()),
         .values = .init(values.take()),
         .phase = initial_phase,
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
     };
 
     if (mode == .list_selector) {
         if (state.selector.borrow() == .list) {
             state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
-                evaluator.allocator,
+                fiber.allocator,
                 state.selector.borrow(),
             ));
             state.phase = .count_positions;
         } else {
             if (state.selector.borrow() != .int)
-                return evaluator.typeError("an integer list index");
+                return fiber.typeError("an integer list index");
             if (state.selector.borrow().int < 0)
-                return evaluator.fail(.domain, "update index is negative");
+                return fiber.fail(.domain, "update index is negative");
             const position = std.math.cast(usize, state.selector.borrow().int) orelse
-                return evaluator.fail(.domain, "update index is out of bounds");
+                return fiber.fail(.domain, "update index is out of bounds");
             if (position >= collection_count)
-                return evaluator.fail(.domain, "update index is out of bounds");
-            state.positions = .init(try evaluator.allocator.alloc(usize, 1));
+                return fiber.fail(.domain, "update index is out of bounds");
+            state.positions = .init(try fiber.allocator.alloc(usize, 1));
             state.positions.?.borrow()[0] = position;
             state.phase = .copy_values;
         }
@@ -1775,12 +1607,12 @@ fn startUpdateOwned(
             @intCast(state.selector.borrow().list.length())
         else
             1;
-        state.positions = .init(try evaluator.allocator.alloc(usize, position_count));
-        state.pairs = .init(try evaluator.allocator.alloc(dict.Pair, collection_count));
+        state.positions = .init(try fiber.allocator.alloc(usize, position_count));
+        state.pairs = .init(try fiber.allocator.alloc(dict.Pair, collection_count));
         state.phase = .find_positions;
     }
     state_owner = null;
-    try evaluator.startDriver(UpdateWorkDriver{ .state = .init(state) });
+    try fiber.startDriver(UpdateWorkDriver{ .state = .init(state) });
 }
 
 const CollectedDriver = struct {
@@ -1788,10 +1620,10 @@ const CollectedDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *CollectedDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *CollectedDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
+            switch (try self.materializer.borrowMut().advance(fiber.workBudget())) {
                 .pending => return .stepped,
                 .complete => |result| {
                     self.result = .init(result);
@@ -1799,7 +1631,7 @@ const CollectedDriver = struct {
                 },
             }
         }
-        self.values.deinit(evaluator.releases, evaluator.allocator);
+        self.values.deinit(fiber.releases, fiber.allocator);
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
@@ -1849,17 +1681,17 @@ const StencilBootstrapDriver = struct {
 
     /// Copies the next granted run of a typed input's window straight into a
     /// window of the input's own representation; null when the input is boxed.
-    fn fillTyped(self: *StencilBootstrapDriver, evaluator: *Fiber) MachineError!?bool {
+    fn fillTyped(self: *StencilBootstrapDriver, fiber: *Fiber) MachineError!?bool {
         const control = self.control.borrow();
         const input = control.input.borrow().list;
         switch (input.kind()) {
             inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
                 if (self.typed_window == null) self.typed_window = .init(.{
-                    .builder = try heap.AnyListBuilder.init(evaluator.allocator, kind, control.width, control.width),
+                    .builder = try heap.AnyListBuilder.init(fiber.allocator, kind, control.width, control.width),
                 });
                 var reader = heap.LeafReader(kind).acquire(input);
-                defer reader.release(evaluator.releases);
-                const run = evaluator.workBudget().take(control.width - self.fill_index);
+                defer reader.release(fiber.releases);
+                const run = fiber.workBudget().take(control.width - self.fill_index);
                 const items = switch (self.typed_window.?.borrowMut().builder) {
                     inline else => |*builder| if (@TypeOf(builder.items()) == []heap.LeafElement(kind)) builder.items() else unreachable,
                 };
@@ -1872,20 +1704,20 @@ const StencilBootstrapDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *StencilBootstrapDriver,
     ) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.control.borrow().word;
-        try evaluator.pollKernel();
+        fiber.active_word = self.control.borrow().word;
+        try fiber.pollKernel();
         const control = self.control.borrow();
-        if (self.materializer == null) if (try self.fillTyped(evaluator)) |complete| {
+        if (self.materializer == null) if (try self.fillTyped(fiber)) |complete| {
             if (!complete) return .stepped;
             var window = self.typed_window.?.take();
             self.typed_window = null;
-            return self.apply(evaluator, .{ .list = window.builder.finish() });
+            return self.apply(fiber, .{ .list = window.builder.finish() });
         };
         if (self.materializer == null) {
-            const end = self.fill_index + evaluator.workBudget().take(control.width - self.fill_index);
+            const end = self.fill_index + fiber.workBudget().take(control.width - self.fill_index);
             while (self.fill_index != end) : (self.fill_index += 1) {
                 self.window_values.borrowMut().appendBorrowed(list.atUnchecked(
                     control.input.borrow(),
@@ -1894,33 +1726,33 @@ const StencilBootstrapDriver = struct {
             }
             if (self.fill_index != control.width) return .stepped;
             self.materializer = .init(.init(
-                evaluator.allocator,
+                fiber.allocator,
                 self.window_values.borrow().values(),
             ));
         }
-        switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+        switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => return .stepped,
-            .complete => |window| return self.apply(evaluator, window),
+            .complete => |window| return self.apply(fiber, window),
         }
     }
 
     /// Hands the finished window to the quotation; consumes `window`.
-    fn apply(self: *StencilBootstrapDriver, evaluator: *Fiber, window: Value) MachineError!machine.WorkProgress {
-        var window_owner = heap.OwnedValue.init(evaluator.releases, window);
+    fn apply(self: *StencilBootstrapDriver, fiber: *Fiber, window: Value) MachineError!machine.WorkProgress {
+        var window_owner = heap.OwnedValue.init(fiber.releases, window);
         defer window_owner.deinit();
-        const state = try evaluator.allocator.create(StencilApplication);
+        const state = try fiber.allocator.create(StencilApplication);
         var state_owner: ?*StencilApplication = state;
         errdefer if (state_owner) |owned| heap.destroyDriver(
-            evaluator.releases,
-            evaluator.allocator,
+            fiber.releases,
+            fiber.allocator,
             owned,
         );
         state.* = .{ .control = .init(self.control.take()) };
         var stack = self.stack;
-        evaluator.retireDriver(self);
+        fiber.retireDriver(self);
         stack.pushBorrowed(window_owner.borrow());
         state_owner = null;
-        try evaluator.beginIsolatedApplication(state.application());
+        try fiber.beginApplication(state.application(), .isolated);
         return .detached;
     }
 
@@ -1941,16 +1773,16 @@ const StencilApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *StencilApplication,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         const control = self.control.borrowMut();
-        evaluator.active_word = control.word;
-        evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.stack.items.len) orelse
-            return evaluator.applicationContractError(
+        fiber.active_word = control.word;
+        fiber.chargeContinuationStep();
+        const observed = window.observed(fiber.stack.items.len) orelse
+            return fiber.applicationContractError(
                 site,
                 control.quotation.borrow(),
                 control.expected.borrow(),
@@ -1958,27 +1790,27 @@ const StencilApplication = struct {
                 control.index,
             );
         if (observed != 1)
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 control.quotation.borrow(),
                 control.expected.borrow(),
                 .{ .seeded = 1, .expected = 1, .observed = observed },
                 control.index,
             );
-        var result = try evaluator.popDatum();
+        var result = try fiber.popDatum();
         control.results.appendOwned(result.take());
         control.index += 1;
         if (control.index == control.count) {
             const values = control.results.take();
-            try evaluator.startDriver(CollectedDriver{
-                .materializer = .init(.init(evaluator.allocator, values.values())),
+            try fiber.startDriver(CollectedDriver{
+                .materializer = .init(.init(fiber.allocator, values.values())),
                 .values = .init(values),
             });
             return null;
         }
-        const stack = try evaluator.reserveStack(1);
+        const stack = try fiber.reserveStack(1);
         const window_values = try heap.OwnedValueBuffer.init(
-            evaluator.releases,
+            fiber.releases,
             control.width,
         );
         const next = StencilBootstrapDriver{
@@ -1986,55 +1818,55 @@ const StencilApplication = struct {
             .window_values = .init(window_values),
             .stack = stack,
         };
-        try evaluator.startDriver(next);
+        try fiber.startDriver(next);
         return null;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn stencil(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var quotation = try evaluator.popQuotation();
+fn stencil(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var width_value = try evaluator.popValue();
+    var width_value = try fiber.popValue();
     defer width_value.deinit();
-    var input = try evaluator.popValue();
+    var input = try fiber.popValue();
     defer input.deinit();
     if (input.borrow() != .list or width_value.borrow() != .int)
-        return evaluator.typeError("a list, positive int width, and quotation");
+        return fiber.typeError("a list, positive int width, and quotation");
     const width_integer = width_value.borrow().int;
     if (width_integer <= 0)
-        return evaluator.fail(.domain, "stencil requires a positive width");
+        return fiber.fail(.domain, "stencil requires a positive width");
     const width = std.math.cast(usize, width_integer) orelse
-        return evaluator.fail(.domain, "stencil width is too large");
+        return fiber.fail(.domain, "stencil width is too large");
     const input_count: usize = @intCast(input.borrow().list.length());
     const count = if (width > input_count) 0 else input_count - width + 1;
     if (count == 0) {
-        try pushGenericEmpty(evaluator);
+        try pushGenericEmpty(fiber);
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "window", "--", "result" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "window", "--", "result" }),
     );
     defer expected.deinit();
-    var results = try heap.OwnedValueBuffer.init(evaluator.releases, count);
+    var results = try heap.OwnedValueBuffer.init(fiber.releases, count);
     defer results.deinit();
-    var window_values = try heap.OwnedValueBuffer.init(evaluator.releases, width);
+    var window_values = try heap.OwnedValueBuffer.init(fiber.releases, width);
     defer window_values.deinit();
-    const stack = try evaluator.reserveStack(1);
+    const stack = try fiber.reserveStack(1);
     const control = StencilControl{
         .input = .init(input.take()),
         .quotation = .init(quotation.take().list),
         .expected = .init(expected.take()),
         .results = results.take(),
-        .site = evaluator.applicationSite(),
+        .site = fiber.applicationSite(),
         .count = count,
         .width = width,
-        .word = evaluator.active_word,
+        .word = fiber.active_word,
     };
-    try evaluator.startDriver(StencilBootstrapDriver{
+    try fiber.startDriver(StencilBootstrapDriver{
         .control = .init(control),
         .window_values = .init(window_values.take()),
         .stack = stack,
@@ -2071,19 +1903,20 @@ const UnfoldState = struct {
                 .step => self.step_quotation.borrow(),
             },
             .seeded = 1,
+            .launch = .isolated,
         } };
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *UnfoldState,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.word;
-        evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.stack.items.len) orelse
-            return evaluator.applicationContractError(
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
+        const observed = window.observed(fiber.stack.items.len) orelse
+            return fiber.applicationContractError(
                 site,
                 switch (self.phase) {
                     .predicate => self.predicate.borrow(),
@@ -2098,37 +1931,37 @@ const UnfoldState = struct {
                 self.index,
             );
         return switch (self.phase) {
-            .predicate => self.resumePredicate(evaluator, site, observed),
-            .step => self.resumeStep(evaluator, site, observed),
+            .predicate => self.resumePredicate(fiber, site, observed),
+            .step => self.resumeStep(fiber, site, observed),
         };
     }
 
     fn resumePredicate(
         self: *UnfoldState,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         if (observed != 1)
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 self.predicate.borrow(),
                 self.predicate_expected.borrow(),
                 .{ .seeded = 1, .expected = 1, .observed = observed },
                 self.index,
             );
-        var predicate_result = try evaluator.popValue();
+        var predicate_result = try fiber.popValue();
         defer predicate_result.deinit();
-        if (try boolValue(evaluator, &predicate_result)) {
-            try evaluator.pushBorrowed(self.current.borrow());
+        if (try boolValue(fiber, &predicate_result)) {
+            try fiber.pushBorrowed(self.current.borrow());
             self.phase = .step;
             return self.nextStep();
         }
         const count = self.items.borrow().count;
-        const buffer = try heap.OwnedValueBuffer.init(evaluator.releases, count);
+        const buffer = try heap.OwnedValueBuffer.init(fiber.releases, count);
         const iterator = self.items.borrow().iterator();
-        try evaluator.pushOwned(self.current.take());
-        try evaluator.startDriver(UnfoldCollectDriver{
+        try fiber.pushOwned(self.current.take());
+        try fiber.startDriver(UnfoldCollectDriver{
             .values = .init(self.values.take()),
             .items = .init(self.items.take()),
             .iterator = iterator,
@@ -2140,29 +1973,29 @@ const UnfoldState = struct {
 
     fn resumeStep(
         self: *UnfoldState,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         if (observed != 2)
-            return evaluator.applicationContractError(
+            return fiber.applicationContractError(
                 site,
                 self.step_quotation.borrow(),
                 self.step_expected.borrow(),
                 .{ .seeded = 1, .expected = 2, .observed = observed },
                 self.index,
             );
-        var item = try evaluator.popDatum();
+        var item = try fiber.popDatum();
         defer item.deinit();
-        var next_state = try evaluator.popValue();
+        var next_state = try fiber.popValue();
         defer next_state.deinit();
         try self.items.borrowMut().append(item.borrow());
         try self.values.borrowMut().appendOwned(item.take());
-        self.current.deinit(evaluator.releases, evaluator.allocator);
+        self.current.deinit(fiber.releases, fiber.allocator);
         self.current = .init(next_state.take());
         self.index += 1;
         self.phase = .predicate;
-        try evaluator.pushBorrowed(self.current.borrow());
+        try fiber.pushBorrowed(self.current.borrow());
         return self.nextStep();
     }
 
@@ -2178,18 +2011,18 @@ const UnfoldCollectDriver = struct {
     count: usize,
 
     pub fn advance(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *UnfoldCollectDriver,
     ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const end = self.copied + evaluator.workBudget().take(self.count - self.copied);
+        try fiber.pollKernel();
+        const end = self.copied + fiber.workBudget().take(self.count - self.copied);
         while (self.copied != end) : (self.copied += 1)
             self.result.borrowMut().appendBorrowed(self.iterator.next().?.*);
         if (self.copied != self.count) return .stepped;
         const result = self.result.take();
-        evaluator.retireDriver(self);
-        try evaluator.startDriver(CollectedDriver{
-            .materializer = .init(.init(evaluator.allocator, result.values())),
+        fiber.retireDriver(self);
+        try fiber.startDriver(CollectedDriver{
+            .materializer = .init(.init(fiber.allocator, result.values())),
             .values = .init(result),
         });
         return .detached;
@@ -2198,33 +2031,33 @@ const UnfoldCollectDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn unfold(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var step_quotation = try evaluator.popQuotation();
+fn unfold(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var step_quotation = try fiber.popQuotation();
     defer step_quotation.deinit();
-    var predicate = try evaluator.popQuotation();
+    var predicate = try fiber.popQuotation();
     defer predicate.deinit();
-    var initial = try evaluator.popValue();
+    var initial = try fiber.popValue();
     defer initial.deinit();
     var predicate_expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "state", "--", "bool" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "state", "--", "bool" }),
     );
     defer predicate_expected.deinit();
     var step_expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "state", "--", "state", "item" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "state", "--", "state", "item" }),
     );
     defer step_expected.deinit();
     var values = heap.Owned(heap.OwnedValueChain).init(
-        try .init(evaluator.releases),
+        try .init(fiber.releases),
     );
-    defer values.deinit(evaluator.releases, evaluator.allocator);
-    const state = try evaluator.allocator.create(UnfoldState);
+    defer values.deinit(fiber.releases, fiber.allocator);
+    const state = try fiber.allocator.create(UnfoldState);
     var state_owner: ?*UnfoldState = state;
     errdefer if (state_owner) |owned| heap.destroyDriver(
-        evaluator.releases,
-        evaluator.allocator,
+        fiber.releases,
+        fiber.allocator,
         owned,
     );
     state.* = .{
@@ -2234,13 +2067,13 @@ fn unfold(evaluator: *Fiber) MachineError!void {
         .predicate_expected = .init(predicate_expected.take()),
         .step_expected = .init(step_expected.take()),
         .values = .init(values.take()),
-        .items = .init(.init(evaluator.allocator)),
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .items = .init(.init(fiber.allocator)),
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
     };
-    try evaluator.pushBorrowed(state.current.borrow());
+    try fiber.pushBorrowed(state.current.borrow());
     state_owner = null;
-    try evaluator.beginIsolatedApplication(state.application());
+    try fiber.beginApplication(state.application(), .isolated);
 }
 
 const InfraResultDriver = struct {
@@ -2248,20 +2081,20 @@ const InfraResultDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
-    fn install(evaluator: *Fiber, base: usize) error{OutOfMemory}!void {
+    fn install(fiber: *Fiber, base: usize) error{OutOfMemory}!void {
         // The isolated stack becomes a list, so each value enters as data
         // (`value.datum`); the operands are discarded once materialized.
-        for (evaluator.stack.items[base..]) |*item| item.* = value.datum(item.*);
-        try evaluator.startDriver(InfraResultDriver{
+        for (fiber.stack.items[base..]) |*item| item.* = value.datum(item.*);
+        try fiber.startDriver(InfraResultDriver{
             .base = base,
-            .materializer = .init(.init(evaluator.allocator, evaluator.stack.items[base..])),
+            .materializer = .init(.init(fiber.allocator, fiber.stack.items[base..])),
         });
     }
 
-    pub fn advance(evaluator: *Fiber, self: *InfraResultDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *InfraResultDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
+            switch (try self.materializer.borrowMut().advance(fiber.workBudget())) {
                 .pending => return .stepped,
                 .complete => |result| {
                     self.result = .init(result);
@@ -2269,12 +2102,12 @@ const InfraResultDriver = struct {
                 },
             }
         }
-        const work = evaluator.workBudget();
-        while (evaluator.stack.items.len != self.base and work.spend()) {
-            var discarded = try evaluator.popValue();
+        const work = fiber.workBudget();
+        while (fiber.stack.items.len != self.base and work.spend()) {
+            var discarded = try fiber.popValue();
             discarded.deinit();
         }
-        if (evaluator.stack.items.len != self.base) return .stepped;
+        if (fiber.stack.items.len != self.base) return .stepped;
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
@@ -2288,10 +2121,10 @@ const InfraBootstrapDriver = struct {
     stack: machine.StackReservation,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Fiber, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const iteration = self.iteration.borrow();
-        const end = self.index + evaluator.workBudget().take(iteration.count - self.index);
+        const end = self.index + fiber.workBudget().take(iteration.count - self.index);
         while (self.index != end) : (self.index += 1) {
             const item = list.atUnchecked(iteration.left.borrow(), self.index);
             self.stack.pushBorrowed(item);
@@ -2300,42 +2133,42 @@ const InfraBootstrapDriver = struct {
         std.debug.assert(self.stack.complete());
         const application = iteration.application(@intCast(iteration.count));
         _ = self.iteration.take();
-        try evaluator.beginIsolatedApplication(application);
+        try fiber.beginApplication(application, .isolated);
         return .completed;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn each(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.each, eachGeneric);
+fn each(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.each, eachGeneric);
 }
-fn eachGeneric(evaluator: *Fiber) MachineError!void {
-    return startUnaryIteration(evaluator, .each);
-}
-
-fn forWord(evaluator: *Fiber) MachineError!void {
-    return startUnaryIteration(evaluator, .for_word);
+fn eachGeneric(fiber: *Fiber) MachineError!void {
+    return startUnaryIteration(fiber, .each);
 }
 
-fn startUnaryIteration(evaluator: *Fiber, kind: IterationKind) MachineError!void {
-    try evaluator.require(2);
-    var quotation = try evaluator.popValue();
+fn forWord(fiber: *Fiber) MachineError!void {
+    return startUnaryIteration(fiber, .for_word);
+}
+
+fn startUnaryIteration(fiber: *Fiber, kind: IterationKind) MachineError!void {
+    try fiber.require(2);
+    var quotation = try fiber.popValue();
     defer quotation.deinit();
-    var input = try evaluator.popValue();
+    var input = try fiber.popValue();
     defer input.deinit();
     if (quotation.borrow() != .list)
-        return evaluator.typeError(if (kind == .each or kind == .for_word)
+        return fiber.typeError(if (kind == .each or kind == .for_word)
             "a list or dict and quotation"
         else
             "a list and quotation");
     if (kind == .each and input.borrow() == .dict) {
         const keys = dict.keysOf(input.borrow().dict);
         heap.retainValue(keys);
-        var selector = heap.OwnedValue.init(evaluator.releases, keys);
+        var selector = heap.OwnedValue.init(fiber.releases, keys);
         defer selector.deinit();
         return startUpdateOwned(
-            evaluator,
+            fiber,
             .dictionary_key_list,
             input.take(),
             selector.take(),
@@ -2343,7 +2176,7 @@ fn startUnaryIteration(evaluator: *Fiber, kind: IterationKind) MachineError!void
         );
     }
     if (input.borrow() != .list and !(kind == .for_word and input.borrow() == .dict))
-        return evaluator.typeError(if (kind == .each or kind == .for_word)
+        return fiber.typeError(if (kind == .each or kind == .for_word)
             "a list or dict and quotation"
         else
             "a list and quotation");
@@ -2353,19 +2186,19 @@ fn startUnaryIteration(evaluator: *Fiber, kind: IterationKind) MachineError!void
         else => unreachable,
     });
     if (count == 0) {
-        if (kind == .each) try pushGenericEmpty(evaluator);
+        if (kind == .each) try pushGenericEmpty(fiber);
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releases,
+        fiber.releases,
         try effectValue(
-            evaluator.allocator,
+            fiber.allocator,
             if (kind == .each) &.{ "a", "--", "b" } else &.{ "a", "--" },
         ),
     );
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
-        evaluator,
+        fiber,
         kind,
         &input,
         null,
@@ -2373,28 +2206,28 @@ fn startUnaryIteration(evaluator: *Fiber, kind: IterationKind) MachineError!void
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
+    errdefer if (state_owner) |state| heap.destroyDriver(fiber.releases, fiber.allocator, state);
     const state = state_owner.?;
-    if (kind == .each) state.results = .init(try .init(evaluator.releases, count));
-    try state.pushInputs(evaluator);
+    if (kind == .each) state.results = .init(try .init(fiber.releases, count));
+    try state.pushInputs(fiber);
     state_owner = null;
-    try evaluator.beginIsolatedApplication(state.application(1));
+    try fiber.beginApplication(state.application(1), .isolated);
 }
 
-fn zipWith(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.zip_with, zipWithGeneric);
+fn zipWith(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.zip_with, zipWithGeneric);
 }
-fn zipWithGeneric(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var quotation = try evaluator.popValue();
+fn zipWithGeneric(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var quotation = try fiber.popValue();
     defer quotation.deinit();
-    var right = try evaluator.popValue();
+    var right = try fiber.popValue();
     defer right.deinit();
-    var left = try evaluator.popValue();
+    var left = try fiber.popValue();
     defer left.deinit();
     const left_list = left.borrow() == .list;
     const right_list = right.borrow() == .list;
-    if (!left_list and !right_list) return evaluator.typeError("at least one list");
+    if (!left_list and !right_list) return fiber.typeError("at least one list");
     const count: usize = if (left_list)
         @intCast(left.borrow().list.length())
     else
@@ -2402,19 +2235,19 @@ fn zipWithGeneric(evaluator: *Fiber) MachineError!void {
     if (left_list and right_list and left.borrow().list.length() != right.borrow().list.length()) {
         const left_len: usize = @intCast(left.borrow().list.length());
         const right_len: usize = @intCast(right.borrow().list.length());
-        return evaluator.conformError(left_len, right_len);
+        return fiber.conformError(left_len, right_len);
     }
     if (count == 0) {
-        try pushGenericEmpty(evaluator);
+        try pushGenericEmpty(fiber);
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "a", "b", "--", "c" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "a", "b", "--", "c" }),
     );
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
-        evaluator,
+        fiber,
         .zip_with,
         &left,
         &right,
@@ -2422,42 +2255,42 @@ fn zipWithGeneric(evaluator: *Fiber) MachineError!void {
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
+    errdefer if (state_owner) |state| heap.destroyDriver(fiber.releases, fiber.allocator, state);
     const state = state_owner.?;
-    state.results = .init(try .init(evaluator.releases, count));
-    try state.pushInputs(evaluator);
+    state.results = .init(try .init(fiber.releases, count));
+    try state.pushInputs(fiber);
     state_owner = null;
-    try evaluator.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
-fn fold(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.fold, foldGeneric);
+fn fold(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.fold, foldGeneric);
 }
-fn foldGeneric(evaluator: *Fiber) MachineError!void {
-    return startFold(evaluator, .fold);
+fn foldGeneric(fiber: *Fiber) MachineError!void {
+    return startFold(fiber, .fold);
 }
 
-fn fold1(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.fold1, fold1Generic);
+fn fold1(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.fold1, fold1Generic);
 }
-fn fold1Generic(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var quotation = try evaluator.popValue();
+fn fold1Generic(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var quotation = try fiber.popValue();
     defer quotation.deinit();
-    var input = try evaluator.popValue();
+    var input = try fiber.popValue();
     defer input.deinit();
     if (quotation.borrow() != .list or input.borrow() != .list)
-        return evaluator.typeError("a list and quotation");
+        return fiber.typeError("a list and quotation");
     const count: usize = @intCast(input.borrow().list.length());
-    if (count == 0) return evaluator.fail(.domain, "fold1 requires a non-empty list");
-    if (count == 1) return evaluator.pushBorrowed(list.atUnchecked(input.borrow(), 0));
+    if (count == 0) return fiber.fail(.domain, "fold1 requires a non-empty list");
+    if (count == 1) return fiber.pushBorrowed(list.atUnchecked(input.borrow(), 0));
     var expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "acc", "a", "--", "acc" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "acc", "a", "--", "acc" }),
     );
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
-        evaluator,
+        fiber,
         .fold,
         &input,
         null,
@@ -2465,38 +2298,38 @@ fn fold1Generic(evaluator: *Fiber) MachineError!void {
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
+    errdefer if (state_owner) |state| heap.destroyDriver(fiber.releases, fiber.allocator, state);
     const state = state_owner.?;
     // The first element is the accumulator, so the walk starts at the second.
     state.index = 1;
-    try evaluator.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
-    try evaluator.pushBorrowed(list.atUnchecked(state.left.borrow(), 1));
+    try fiber.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
+    try fiber.pushBorrowed(list.atUnchecked(state.left.borrow(), 1));
     state_owner = null;
-    try evaluator.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
-fn lexCmpWith(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.lex_cmp, lexCmpWithGeneric);
+fn lexCmpWith(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.lex_cmp, lexCmpWithGeneric);
 }
-fn lexCmpWithGeneric(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var quotation = try evaluator.popValue();
+fn lexCmpWithGeneric(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var quotation = try fiber.popValue();
     defer quotation.deinit();
-    var right = try evaluator.popValue();
+    var right = try fiber.popValue();
     defer right.deinit();
-    var left = try evaluator.popValue();
+    var left = try fiber.popValue();
     defer left.deinit();
     if (quotation.borrow() != .list or left.borrow() != .list or right.borrow() != .list)
-        return evaluator.typeError("two lists and a comparator");
+        return fiber.typeError("two lists and a comparator");
     const shared: usize = @intCast(@min(left.borrow().list.length(), right.borrow().list.length()));
-    if (shared == 0) return pushLengthOrder(evaluator, left.borrow(), right.borrow());
+    if (shared == 0) return pushLengthOrder(fiber, left.borrow(), right.borrow());
     var expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "left-element", "right-element", "--", "order" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "left-element", "right-element", "--", "order" }),
     );
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
-        evaluator,
+        fiber,
         .lex_cmp,
         &left,
         &right,
@@ -2504,55 +2337,55 @@ fn lexCmpWithGeneric(evaluator: *Fiber) MachineError!void {
         &expected,
         shared,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
+    errdefer if (state_owner) |state| heap.destroyDriver(fiber.releases, fiber.allocator, state);
     const state = state_owner.?;
-    try state.pushInputs(evaluator);
+    try state.pushInputs(fiber);
     state_owner = null;
-    try evaluator.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
 /// Two lists whose shared prefix is equal order by length.
-fn pushLengthOrder(evaluator: *Fiber, left: Value, right: Value) error{OutOfMemory}!void {
-    try evaluator.pushOwned(.{ .int = switch (std.math.order(left.list.length(), right.list.length())) {
+fn pushLengthOrder(fiber: *Fiber, left: Value, right: Value) error{OutOfMemory}!void {
+    try fiber.pushOwned(.{ .int = switch (std.math.order(left.list.length(), right.list.length())) {
         .lt => -1,
         .eq => 0,
         .gt => 1,
     } });
 }
 
-fn scan(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.scan, scanGeneric);
+fn scan(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.scan, scanGeneric);
 }
-fn scanGeneric(evaluator: *Fiber) MachineError!void {
-    return startFold(evaluator, .scan);
+fn scanGeneric(fiber: *Fiber) MachineError!void {
+    return startFold(fiber, .scan);
 }
 
-fn startFold(evaluator: *Fiber, kind: IterationKind) MachineError!void {
-    try evaluator.require(3);
-    var quotation = try evaluator.popValue();
+fn startFold(fiber: *Fiber, kind: IterationKind) MachineError!void {
+    try fiber.require(3);
+    var quotation = try fiber.popValue();
     defer quotation.deinit();
-    var accumulator = try evaluator.popValue();
+    var accumulator = try fiber.popValue();
     defer accumulator.deinit();
-    var input = try evaluator.popValue();
+    var input = try fiber.popValue();
     defer input.deinit();
     if (quotation.borrow() != .list or input.borrow() != .list)
-        return evaluator.typeError("a list, accumulator, and quotation");
+        return fiber.typeError("a list, accumulator, and quotation");
     const count: usize = @intCast(input.borrow().list.length());
     if (count == 0) {
         if (kind == .scan) {
-            try pushGenericEmpty(evaluator);
+            try pushGenericEmpty(fiber);
         } else {
-            try evaluator.pushOwned(accumulator.take());
+            try fiber.pushOwned(accumulator.take());
         }
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releases,
-        try effectValue(evaluator.allocator, &.{ "acc", "a", "--", "acc" }),
+        fiber.releases,
+        try effectValue(fiber.allocator, &.{ "acc", "a", "--", "acc" }),
     );
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
-        evaluator,
+        fiber,
         kind,
         &input,
         null,
@@ -2560,38 +2393,38 @@ fn startFold(evaluator: *Fiber, kind: IterationKind) MachineError!void {
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
+    errdefer if (state_owner) |state| heap.destroyDriver(fiber.releases, fiber.allocator, state);
     const state = state_owner.?;
-    if (kind == .scan) state.results = .init(try .init(evaluator.releases, count));
-    try evaluator.pushOwned(accumulator.take());
-    try evaluator.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
+    if (kind == .scan) state.results = .init(try .init(fiber.releases, count));
+    try fiber.pushOwned(accumulator.take());
+    try fiber.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
     state_owner = null;
-    try evaluator.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
-fn infra(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var quotation = try evaluator.popValue();
+fn infra(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var quotation = try fiber.popValue();
     defer quotation.deinit();
-    var input = try evaluator.popValue();
+    var input = try fiber.popValue();
     defer input.deinit();
     if (quotation.borrow() != .list or input.borrow() != .list)
-        return evaluator.typeError("a list and quotation");
+        return fiber.typeError("a list and quotation");
     const count: usize = @intCast(input.borrow().list.length());
-    const state = try createIteration(evaluator, .infra, &input, null, &quotation, null, count);
+    const state = try createIteration(fiber, .infra, &input, null, &quotation, null, count);
     var state_owner: ?*IterationState = state;
     errdefer if (state_owner) |owned| heap.destroyDriver(
-        evaluator.releases,
-        evaluator.allocator,
+        fiber.releases,
+        fiber.allocator,
         owned,
     );
-    const stack = try evaluator.reserveStack(count);
+    const stack = try fiber.reserveStack(count);
     state_owner = null;
-    try evaluator.startDriver(InfraBootstrapDriver{ .iteration = .init(state), .stack = stack });
+    try fiber.startDriver(InfraBootstrapDriver{ .iteration = .init(state), .stack = stack });
 }
 
 fn createIteration(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     kind: IterationKind,
     left: *heap.OwnedValue,
     right: ?*heap.OwnedValue,
@@ -2599,16 +2432,16 @@ fn createIteration(
     expected: ?*heap.OwnedValue,
     count: usize,
 ) error{OutOfMemory}!*IterationState {
-    const state = try evaluator.allocator.create(IterationState);
+    const state = try fiber.allocator.create(IterationState);
     state.* = .{
         .kind = kind,
         .left = .init(left.take()),
         .right = if (right) |item| .init(item.take()) else null,
         .quotation = .init(quotation.take().list),
         .expected = if (expected) |item| .init(item.take()) else null,
-        .site = evaluator.applicationSite(),
+        .site = fiber.applicationSite(),
         .count = count,
-        .word = evaluator.active_word,
+        .word = fiber.active_word,
     };
     state.plan = .init(.init(state.quotation.borrow()));
     return state;
@@ -2618,8 +2451,8 @@ fn inputAt(input: Value, index: usize) Value {
     return if (input == .list) list.atUnchecked(input, index) else input;
 }
 
-fn pushGenericEmpty(evaluator: *Fiber) error{OutOfMemory}!void {
-    try evaluator.pushOwned(try list.fromValuesGeneric(evaluator.allocator, &.{}));
+fn pushGenericEmpty(fiber: *Fiber) error{OutOfMemory}!void {
+    try fiber.pushOwned(try list.fromValuesGeneric(fiber.allocator, &.{}));
 }
 
 fn effectValue(allocator: std.mem.Allocator, names: []const []const u8) error{OutOfMemory}!Value {
@@ -2629,13 +2462,13 @@ fn effectValue(allocator: std.mem.Allocator, names: []const []const u8) error{Ou
     return list.fromValuesGeneric(allocator, forms);
 }
 
-fn boolValue(evaluator: *Fiber, item: *const heap.OwnedValue) MachineError!bool {
+fn boolValue(fiber: *Fiber, item: *const heap.OwnedValue) MachineError!bool {
     return switch (item.borrow()) {
         .int => |integer| switch (integer) {
             0 => false,
             1 => true,
-            else => evaluator.typeError("a 0/1 bool"),
+            else => fiber.typeError("a 0/1 bool"),
         },
-        .float, .char, .symbol, .list, .dict, .task, .port, .address => evaluator.typeError("a 0/1 bool"),
+        .float, .char, .symbol, .list, .dict, .task, .port, .address => fiber.typeError("a 0/1 bool"),
     };
 }

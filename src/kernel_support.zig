@@ -29,25 +29,25 @@ pub fn headed(comptime spelling: []const u8, comptime primitive: env.PrimitiveIm
     const chain = comptime idioms.chainHead(spelling);
     if (found == null and chain == null) return primitive;
     return struct {
-        fn run(evaluator: *Fiber) MachineError!void {
-            if (chain) |operation| if (meetsList(evaluator, operation)) {
-                if (try evaluator.continuesChain(operation)) return;
+        fn run(fiber: *Fiber) MachineError!void {
+            if (chain) |operation| if (meetsList(fiber, operation)) {
+                if (try fiber.continuesChain(operation)) return;
             };
-            if (found) |first| if (try evaluator.continuesPhrase(first)) return;
-            return @call(.always_inline, primitive, .{evaluator});
+            if (found) |first| if (try fiber.continuesPhrase(first)) return;
+            return @call(.always_inline, primitive, .{fiber});
         }
     }.run;
 }
 
 /// Whether a numeric operation's own operands include a list.
-inline fn meetsList(evaluator: *Fiber, comptime operation: idioms.Operation) bool {
+inline fn meetsList(fiber: *Fiber, comptime operation: idioms.Operation) bool {
     const arity: usize = switch (operation) {
         .unary => 1,
         .binary => 2,
         else => unreachable,
     };
-    if (evaluator.available() < arity) return false;
-    const stack = evaluator.stack.items;
+    if (fiber.available() < arity) return false;
+    const stack = fiber.stack.items;
     for (stack[stack.len - arity ..]) |item| if (item == .list) return true;
     return false;
 }
@@ -347,7 +347,7 @@ pub const RandomOp = enum {
 /// - `Params`: what it needs besides its operands.
 /// - `Output`: the result being built; `retire(releases)` abandons it
 ///   unfinished, which is also its `heap.Owned` disposal in a driver.
-/// - `prepare(evaluator, operands, params, length) !Output`: allocates or
+/// - `prepare(fiber, operands, params, length) !Output`: allocates or
 ///   adopts the result before any range runs.
 /// - `chunk(params, operands, *Output, range, context)`: computes one range,
 ///   reporting its first fault.
@@ -393,13 +393,13 @@ pub fn Kernel(comptime Spec: type) type {
 
         /// The output, with the result leaf prepared here when the kernel
         /// declares one.
-        inline fn prepareOutput(evaluator: *Fiber, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) MachineError!Spec.Output {
-            if (comptime shape == null) return Spec.prepare(evaluator, operands, params, length);
+        inline fn prepareOutput(fiber: *Fiber, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) MachineError!Spec.Output {
+            if (comptime shape == null) return Spec.prepare(fiber, operands, params, length);
             const result_length = if (comptime @hasDecl(Spec, "resultLength")) Spec.resultLength(params, operands, length) else length;
-            var result = try prepareResult(evaluator, operands, ownership, params, result_length);
+            var result = try prepareResult(fiber, operands, ownership, params, result_length);
             if (comptime Spec.Output == Result) return result;
-            return Spec.prepare(evaluator, operands, params, length, result) catch |err| {
-                result.retire(evaluator.releases);
+            return Spec.prepare(fiber, operands, params, length, result) catch |err| {
+                result.retire(fiber.releases);
                 return err;
             };
         }
@@ -408,7 +408,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// overwritable operand the call owns, held only through the call's
         /// own references (one operand may appear more than once), wide
         /// enough and of the result's element width. Otherwise a fresh leaf.
-        inline fn prepareResult(evaluator: *Fiber, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) error{OutOfMemory}!Result {
+        inline fn prepareResult(fiber: *Fiber, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) error{OutOfMemory}!Result {
             const declared = shape.?;
             inline for (declared.overwritable) |position| reuse: {
                 switch (ownership) {
@@ -441,7 +441,7 @@ pub fn Kernel(comptime Spec: type) type {
                     return result;
                 }
             }
-            return allocate(declared.kind, evaluator, length);
+            return allocate(declared.kind, fiber, length);
         }
 
         /// The positions left to compute once the output is prepared.
@@ -465,20 +465,20 @@ pub fn Kernel(comptime Spec: type) type {
         /// under the caller's references, which the caller releases after
         /// the result is pushed. Otherwise the references move into a driver
         /// that computes one budgeted range per step.
-        pub fn run(evaluator: *Fiber, owners: Owners, params: Spec.Params, length: usize) MachineError!void {
+        pub fn run(fiber: *Fiber, owners: Owners, params: Spec.Params, length: usize) MachineError!void {
             // SAFETY: the loop below writes every element before any is read.
             var operands: Operands = undefined;
             inline for (&operands, owners) |*operand, owner| operand.* = owner.borrow();
-            var output = try prepareOutput(evaluator, operands, .all, params, length);
+            var output = try prepareOutput(fiber, operands, .all, params, length);
             const work = workLength(params, &output, length);
-            if (comptime stepwise) return runStepwise(evaluator, owners, operands, params, output, work);
-            if (work > evaluator.remainingKernelFuel()) return startDriver(evaluator, owners, params, output, .init(work));
+            if (comptime stepwise) return runStepwise(fiber, owners, operands, params, output, work);
+            if (work > fiber.remainingKernelFuel()) return startDriver(fiber, owners, params, output, .init(work));
             // An unfinished result is abandoned exactly as its `heap.Owned`
             // disposal would abandon it in a driver.
-            errdefer output.retire(evaluator.releases);
-            try evaluator.advanceKernel(work);
-            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, evaluator);
-            return publish(evaluator, owners, &output);
+            errdefer output.retire(fiber.releases);
+            try fiber.advanceKernel(work);
+            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, fiber);
+            return publish(fiber, owners, &output);
         }
 
         fn adoptedOperand(output: *const Spec.Output) ?usize {
@@ -493,12 +493,12 @@ pub fn Kernel(comptime Spec: type) type {
 
         /// Whether positions remain, opening the next phase when the current
         /// one is over.
-        fn pending(evaluator: *Fiber, output: *Spec.Output, cursor: *flat.FlatCursor) MachineError!bool {
+        fn pending(fiber: *Fiber, output: *Spec.Output, cursor: *flat.FlatCursor) MachineError!bool {
             while (true) {
                 const over = cursor.complete() or (early and Spec.done(output));
                 if (!over) return true;
                 if (comptime !phased) return false;
-                cursor.* = .init(try Spec.next(evaluator, output) orelse return false);
+                cursor.* = .init(try Spec.next(fiber, output) orelse return false);
             }
         }
 
@@ -507,7 +507,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// A turn that runs out first continues as the driver from the same
         /// position.
         fn runStepwise(
-            evaluator: *Fiber,
+            fiber: *Fiber,
             owners: Owners,
             operands: Operands,
             params: Spec.Params,
@@ -516,39 +516,39 @@ pub fn Kernel(comptime Spec: type) type {
         ) MachineError!void {
             var output = prepared;
             var cursor = flat.FlatCursor.init(length);
-            while (pending(evaluator, &output, &cursor) catch |err| {
-                output.retire(evaluator.releases);
+            while (pending(fiber, &output, &cursor) catch |err| {
+                output.retire(fiber.releases);
                 return err;
             }) {
-                if (evaluator.remainingKernelFuel() == 0) return startDriver(evaluator, owners, params, output, cursor);
-                const range = (cursor.nextRange(evaluator) catch |err| {
-                    output.retire(evaluator.releases);
+                if (fiber.remainingKernelFuel() == 0) return startDriver(fiber, owners, params, output, cursor);
+                const range = (cursor.nextRange(fiber) catch |err| {
+                    output.retire(fiber.releases);
                     return err;
                 }).?;
-                Spec.chunk(params, operands, &output, range, evaluator) catch |err| {
-                    output.retire(evaluator.releases);
+                Spec.chunk(params, operands, &output, range, fiber) catch |err| {
+                    output.retire(fiber.releases);
                     return err;
                 };
             }
-            return publish(evaluator, owners, &output);
+            return publish(fiber, owners, &output);
         }
 
         /// Publishes a finished kernel's result. When the result republished
         /// an operand's buffer, that operand's reference is the result's now,
         /// not the caller's to release.
-        fn publish(evaluator: *Fiber, owners: Owners, output: *Spec.Output) MachineError!void {
+        fn publish(fiber: *Fiber, owners: Owners, output: *Spec.Output) MachineError!void {
             const consumed = adoptedOperand(output);
             const result = Spec.finish(output);
             if (comptime Spec.arity != 0) if (consumed) |position| {
                 _ = owners[position].take();
             };
-            return evaluator.pushOwned(result);
+            return fiber.pushOwned(result);
         }
 
         /// Kept out of line, so the common inline path carries none of the
         /// driver's construction.
         noinline fn startDriver(
-            evaluator: *Fiber,
+            fiber: *Fiber,
             owners: Owners,
             params: Spec.Params,
             output: Spec.Output,
@@ -563,7 +563,7 @@ pub fn Kernel(comptime Spec: type) type {
                 .output = .init(output),
                 .cursor = cursor,
             };
-            return evaluator.runDriverAt(&driver);
+            return fiber.runDriverAt(&driver);
         }
 
         /// Runs the kernel for a leaf inside pervasion, where the operands
@@ -573,19 +573,19 @@ pub fn Kernel(comptime Spec: type) type {
         /// retains its own references to them. The result is returned rather
         /// than pushed.
         pub fn nested(
-            evaluator: *Fiber,
+            fiber: *Fiber,
             operands: Operands,
             root: ?*heap.OwnedValue,
             params: Spec.Params,
             length: usize,
         ) MachineError!NestedOutcome {
             comptime std.debug.assert(!stepwise); // Pervasion's leaves read every position, once.
-            var output = try prepareOutput(evaluator, operands, if (root != null) .first else .none, params, length);
+            var output = try prepareOutput(fiber, operands, if (root != null) .first else .none, params, length);
             const work = workLength(params, &output, length);
-            if (work > evaluator.remainingKernelFuel()) return .{ .frame = try boxDriver(evaluator, operands, root, params, output, work) };
-            errdefer output.retire(evaluator.releases);
-            try evaluator.advanceKernel(work);
-            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, evaluator);
+            if (work > fiber.remainingKernelFuel()) return .{ .frame = try boxDriver(fiber, operands, root, params, output, work) };
+            errdefer output.retire(fiber.releases);
+            try fiber.advanceKernel(work);
+            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, fiber);
             const consumed = adoptedOperand(&output);
             const result = Spec.finish(&output);
             if (consumed) |position| {
@@ -596,7 +596,7 @@ pub fn Kernel(comptime Spec: type) type {
         }
 
         noinline fn boxDriver(
-            evaluator: *Fiber,
+            fiber: *Fiber,
             operands: Operands,
             root: ?*heap.OwnedValue,
             params: Spec.Params,
@@ -604,9 +604,9 @@ pub fn Kernel(comptime Spec: type) type {
             length: usize,
         ) error{OutOfMemory}!ErasedDriver {
             const held: Held = .{ .values = operands };
-            const driver = evaluator.allocator.create(Driver) catch |err| {
+            const driver = fiber.allocator.create(Driver) catch |err| {
                 var abandoned = output;
-                abandoned.retire(evaluator.releases);
+                abandoned.retire(fiber.releases);
                 return err;
             };
             // Only now can nothing fail: the driver takes its references.
@@ -650,10 +650,10 @@ pub fn Kernel(comptime Spec: type) type {
             output: heap.Owned(Spec.Output),
             cursor: flat.FlatCursor,
 
-            pub fn advance(evaluator: *Fiber, self: *Driver) MachineError!machine.WorkProgress {
-                if (try self.cursor.nextRange(evaluator)) |range|
-                    try Spec.chunk(self.params, self.operands.borrow().values, self.output.borrowMut(), range, evaluator);
-                if (try pending(evaluator, self.output.borrowMut(), &self.cursor)) return .stepped;
+            pub fn advance(fiber: *Fiber, self: *Driver) MachineError!machine.WorkProgress {
+                if (try self.cursor.nextRange(fiber)) |range|
+                    try Spec.chunk(self.params, self.operands.borrow().values, self.output.borrowMut(), range, fiber);
+                if (try pending(fiber, self.output.borrowMut(), &self.cursor)) return .stepped;
                 var finished = self.output.take();
                 self.operands.borrowMut().consumed = adoptedOperand(&finished);
                 return .{ .output = Spec.finish(&finished) };
@@ -682,8 +682,8 @@ pub const ErasedDriver = struct {
         return .{
             .context = driver,
             .advance_fn = struct {
-                fn advance(context: *anyopaque, evaluator: *Fiber) MachineError!machine.WorkProgress {
-                    return Driver.advance(evaluator, @ptrCast(@alignCast(context)));
+                fn advance(context: *anyopaque, fiber: *Fiber) MachineError!machine.WorkProgress {
+                    return Driver.advance(fiber, @ptrCast(@alignCast(context)));
                 }
             }.advance,
             .destroy_fn = struct {
@@ -698,12 +698,12 @@ pub const ErasedDriver = struct {
 
     /// One budgeted range. Returns the result when the kernel completes, and
     /// then the driver is already destroyed.
-    pub fn advance(self: *ErasedDriver, evaluator: *Fiber) MachineError!?Value {
-        const progress = try self.advance_fn(self.context, evaluator);
+    pub fn advance(self: *ErasedDriver, fiber: *Fiber) MachineError!?Value {
+        const progress = try self.advance_fn(self.context, fiber);
         return switch (progress) {
             .stepped => null,
             .output => |result| result: {
-                self.destroy_fn(self.context, evaluator.releases, evaluator.allocator);
+                self.destroy_fn(self.context, fiber.releases, fiber.allocator);
                 break :result result;
             },
             else => unreachable, // A kernel driver only steps or publishes.
@@ -795,6 +795,6 @@ pub fn adopt(comptime kind: value.HeapKind, operand: Value, references: u32, len
 }
 
 /// A fresh result of `length` elements.
-pub fn allocate(comptime kind: value.HeapKind, evaluator: *Fiber, length: usize) error{OutOfMemory}!LeafResult(kind) {
-    return .{ .storage = .{ .fresh = try .init(evaluator.allocator, length) } };
+pub fn allocate(comptime kind: value.HeapKind, fiber: *Fiber, length: usize) error{OutOfMemory}!LeafResult(kind) {
+    return .{ .storage = .{ .fresh = try .init(fiber.allocator, length) } };
 }

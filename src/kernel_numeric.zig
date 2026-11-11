@@ -35,19 +35,19 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// element, so no seed copies a first row or turns a -0.0 total into 0.0.
 fn totalPrimitive(comptime operation: BinaryOp, comptime empty: i64) env.PrimitiveImpl {
     return struct {
-        fn run(evaluator: *Fiber) MachineError!void {
-            try evaluator.require(1);
-            const input = evaluator.stack.items[evaluator.stack.items.len - 1];
+        fn run(fiber: *Fiber) MachineError!void {
+            try fiber.require(1);
+            const input = fiber.stack.items[fiber.stack.items.len - 1];
             if (input != .list) {
-                var item = try evaluator.popValue();
+                var item = try fiber.popValue();
                 defer item.deinit();
-                return evaluator.typeError("a list");
+                return fiber.typeError("a list");
             }
             if (input.list.length() == 0) {
-                evaluator.discard(1);
-                return evaluator.pushOwned(.{ .int = empty });
+                fiber.discard(1);
+                return fiber.pushOwned(.{ .int = empty });
             }
-            return startReduction(evaluator, operation, false, input, list.atUnchecked(input, 0), 1, 1);
+            return startReduction(fiber, operation, false, input, list.atUnchecked(input, 0), 1, 1);
         }
     }.run;
 }
@@ -85,10 +85,10 @@ fn binaryDefinition(comptime operation: BinaryOp) env.BuiltinWord {
 
 fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Fiber) MachineError!void {
+        fn run(fiber: *Fiber) MachineError!void {
             // Each operation already has its own specialized copy, so
             // inlining it removes only the trampoline.
-            return @call(.always_inline, binaryPrimitive, .{ evaluator, operation });
+            return @call(.always_inline, binaryPrimitive, .{ fiber, operation });
         }
     }.run);
 }
@@ -116,8 +116,8 @@ fn unaryDefinition(comptime operation: UnaryOp) env.BuiltinWord {
 
 fn bindUnary(comptime operation: UnaryOp) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Fiber) MachineError!void {
-            return @call(.always_inline, unaryPrimitive, .{ evaluator, operation });
+        fn run(fiber: *Fiber) MachineError!void {
+            return @call(.always_inline, unaryPrimitive, .{ fiber, operation });
         }
     }.run);
 }
@@ -132,8 +132,8 @@ fn isPervadeScalar(item: Value) bool {
     return item != .list and item != .dict;
 }
 
-fn binaryPrimitive(evaluator: *Fiber, comptime operation: BinaryOp) MachineError!void {
-    var left, var right = try evaluator.popPair();
+fn binaryPrimitive(fiber: *Fiber, comptime operation: BinaryOp) MachineError!void {
+    var left, var right = try fiber.popPair();
     defer right.deinit();
     defer left.deinit();
     // Two scalars are the whole operation. `PervadeCursor.startBinary` reaches
@@ -144,42 +144,42 @@ fn binaryPrimitive(evaluator: *Fiber, comptime operation: BinaryOp) MachineError
     // first skips their classification.
     if (isPervadeScalar(left.borrow()) and isPervadeScalar(right.borrow())) {
         const result = scalarBinary(operation, left.borrow(), right.borrow()) catch |fault|
-            return scalarFailure(evaluator, fault, null);
-        return evaluator.pushIntoFreed(result);
+            return scalarFailure(fiber, fault, null);
+        return fiber.pushIntoFreed(result);
     }
-    if (try startTypedBinary(evaluator, operation, &left, &right, .{})) return;
+    if (try startTypedBinary(fiber, operation, &left, &right, .{})) return;
 
     const cursor = try PervadeCursor.initBinary(
-        evaluator.releases,
-        evaluator.allocator,
+        fiber.releases,
+        fiber.allocator,
         operation,
         left.borrow(),
         right.borrow(),
     );
-    try evaluator.startDriver(PervadeDriver{
+    try fiber.startDriver(PervadeDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
         .cursor = .init(cursor),
     });
 }
 
-fn unaryPrimitive(evaluator: *Fiber, comptime operation: UnaryOp) MachineError!void {
-    var operand = try evaluator.popValue();
+fn unaryPrimitive(fiber: *Fiber, comptime operation: UnaryOp) MachineError!void {
+    var operand = try fiber.popValue();
     defer operand.deinit();
     // As for binary operations, a scalar never takes a typed kernel.
     if (isPervadeScalar(operand.borrow())) {
         const result = scalarUnary(operation, operand.borrow()) catch |fault|
-            return scalarFailure(evaluator, fault, null);
-        return evaluator.pushIntoFreed(result);
+            return scalarFailure(fiber, fault, null);
+        return fiber.pushIntoFreed(result);
     }
-    if (try startTypedUnary(evaluator, operation, &operand, .{})) return;
+    if (try startTypedUnary(fiber, operation, &operand, .{})) return;
     const cursor = try PervadeCursor.initUnary(
-        evaluator.releases,
-        evaluator.allocator,
+        fiber.releases,
+        fiber.allocator,
         operation,
         operand.borrow(),
     );
-    try evaluator.startDriver(PervadeDriver{
+    try fiber.startDriver(PervadeDriver{
         .left = .init(operand.take()),
         .cursor = .init(cursor),
     });
@@ -191,9 +191,9 @@ const PervadeDriver = struct {
     right: ?heap.Owned(Value) = null,
     cursor: heap.Owned(PervadeCursor),
 
-    pub fn advance(evaluator: *Fiber, self: *PervadeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *PervadeDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(fiber, fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
@@ -428,7 +428,7 @@ pub const PervadeCursor = struct {
 
     pub fn advance(
         self: *PervadeCursor,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         work: *poll.WorkBudget,
     ) MachineError!PervadeProgress {
         while (true) {
@@ -440,7 +440,7 @@ pub const PervadeCursor = struct {
                 if (self.root_child) |child| {
                     if (!work.spend()) return .pending;
                     self.root_child = null;
-                    _ = try self.start(evaluator, child);
+                    _ = try self.start(fiber, child);
                     continue;
                 }
                 const result = self.last.?;
@@ -451,10 +451,10 @@ pub const PervadeCursor = struct {
             // cursor; spending first would starve it at a one-unit grain.
             if (!delegates(top) and !work.spend()) return .pending;
             const step: FrameStep = switch (top.*) {
-                .list => |*list_frame| try self.advanceList(evaluator, list_frame, work),
-                .dictionary => |dict_frame| try self.advanceDict(evaluator, dict_frame, work),
+                .list => |*list_frame| try self.advanceList(fiber, list_frame, work),
+                .dictionary => |dict_frame| try self.advanceDict(fiber, dict_frame, work),
                 .typed => |*typed| typed: {
-                    self.last = try typed.advance(evaluator) orelse break :typed .pending;
+                    self.last = try typed.advance(fiber) orelse break :typed .pending;
                     // A completed kernel has already destroyed its driver and
                     // published its output; there is nothing left to retire.
                     _ = self.frames.pop();
@@ -473,10 +473,10 @@ pub const PervadeCursor = struct {
         return .pending;
     }
 
-    fn start(self: *PervadeCursor, evaluator: *Fiber, child: Child) MachineError!Started {
+    fn start(self: *PervadeCursor, fiber: *Fiber, child: Child) MachineError!Started {
         return switch (child) {
-            .binary => |node| self.startBinary(evaluator, node),
-            .unary => |node| self.startUnary(evaluator, node),
+            .binary => |node| self.startBinary(fiber, node),
+            .unary => |node| self.startUnary(fiber, node),
         };
     }
 
@@ -498,17 +498,17 @@ pub const PervadeCursor = struct {
         }
     }
 
-    fn startBinary(self: *PervadeCursor, evaluator: *Fiber, node: BinaryNode) MachineError!Started {
+    fn startBinary(self: *PervadeCursor, fiber: *Fiber, node: BinaryNode) MachineError!Started {
         if (node.depth >= support.max_depth and
             (node.left == .list or node.left == .dict or node.right == .list or node.right == .dict))
-            return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
+            return fiber.fail(.domain, "pervasion nesting exceeds 256 levels");
         if (node.left == .dict or node.right == .dict) {
             try self.pushDictBinary(node);
             return .framed;
         }
         if (node.left == .list or node.right == .list) {
             if (try startNestedBinary(
-                evaluator,
+                fiber,
                 node.operation,
                 node.left,
                 node.right,
@@ -518,7 +518,7 @@ pub const PervadeCursor = struct {
             const left_count: usize = if (node.left == .list) @intCast(node.left.list.length()) else 0;
             const right_count: usize = if (node.right == .list) @intCast(node.right.list.length()) else 0;
             if (node.left == .list and node.right == .list and left_count != right_count)
-                return evaluator.conformError(left_count, right_count);
+                return fiber.conformError(left_count, right_count);
             const count = if (node.left == .list) left_count else right_count;
             var values = try heap.OwnedValueBuffer.init(self.releases, count);
             errdefer values.deinit();
@@ -536,7 +536,7 @@ pub const PervadeCursor = struct {
             return .framed;
         }
         self.last = selectScalar(node.operation)(node.left, node.right) catch |fault|
-            return scalarFailure(evaluator, fault, node.logical_index);
+            return scalarFailure(fiber, fault, node.logical_index);
         return .finished;
     }
 
@@ -551,9 +551,9 @@ pub const PervadeCursor = struct {
         return root;
     }
 
-    fn startUnary(self: *PervadeCursor, evaluator: *Fiber, node: UnaryNode) MachineError!Started {
+    fn startUnary(self: *PervadeCursor, fiber: *Fiber, node: UnaryNode) MachineError!Started {
         if (node.depth >= support.max_depth and (node.operand == .list or node.operand == .dict))
-            return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
+            return fiber.fail(.domain, "pervasion nesting exceeds 256 levels");
         if (node.operand == .dict) {
             const count: usize = @intCast(node.operand.dict.length());
             const pairs = try self.allocator.alloc(dict.Pair, count);
@@ -575,7 +575,7 @@ pub const PervadeCursor = struct {
             return .framed;
         }
         if (node.operand == .list) {
-            if (try startNestedUnary(evaluator, node.operation, node.operand, .{})) |typed|
+            if (try startNestedUnary(fiber, node.operation, node.operand, .{})) |typed|
                 return self.runTyped(typed);
             const count: usize = @intCast(node.operand.list.length());
             var values = try heap.OwnedValueBuffer.init(self.releases, count);
@@ -593,13 +593,13 @@ pub const PervadeCursor = struct {
             return .framed;
         }
         self.last = selectUnary(node.operation)(node.operand) catch |fault|
-            return scalarFailure(evaluator, fault, node.logical_index);
+            return scalarFailure(fiber, fault, node.logical_index);
         return .finished;
     }
 
     fn advanceList(
         self: *PervadeCursor,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         frame: *ListFrame,
         work: *poll.WorkBudget,
     ) MachineError!FrameStep {
@@ -617,7 +617,7 @@ pub const PervadeCursor = struct {
                 const left = if (frame.left_scalar) frame.left else list.atUnchecked(frame.left, index);
                 const right = if (frame.right_scalar) frame.right.? else list.atUnchecked(frame.right.?, index);
                 const result = selectScalar(frame.operation.binary)(left, right) catch |fault|
-                    return scalarFailure(evaluator, fault, index);
+                    return scalarFailure(fiber, fault, index);
                 frame.all_lists = false;
                 frame.values.appendOwned(result);
                 frame.index += 1;
@@ -639,9 +639,9 @@ pub const PervadeCursor = struct {
                 } },
             };
             const started = switch (child) {
-                .binary => |node| try self.startNumericRow(evaluator, node),
+                .binary => |node| try self.startNumericRow(fiber, node),
                 .unary => null,
-            } orelse try self.start(evaluator, child);
+            } orelse try self.start(fiber, child);
             switch (started) {
                 .finished => self.acceptListChild(frame),
                 .framed => {
@@ -670,7 +670,7 @@ pub const PervadeCursor = struct {
     /// what `startBinary` would run for it, with the same conformance check
     /// and fault report. A kernel the turn cannot finish becomes the typed
     /// frame `runTyped` would push. Null leaves every other child to `start`.
-    fn startNumericRow(self: *PervadeCursor, evaluator: *Fiber, node: BinaryNode) MachineError!?Started {
+    fn startNumericRow(self: *PervadeCursor, fiber: *Fiber, node: BinaryNode) MachineError!?Started {
         // A leaf is still a list to the depth guard, which `startBinary` owns.
         if (node.depth >= support.max_depth) return null;
         const left_leaf = leafNumber(node.left);
@@ -683,7 +683,7 @@ pub const PervadeCursor = struct {
             .scalar_leaf
         else
             return null;
-        const length = try conformingLength(evaluator, shape, node.left, node.right);
+        const length = try conformingLength(fiber, shape, node.left, node.right);
         if (length == 0) return null;
         const plan = NumericBinaryPlan.select(
             node.operation,
@@ -692,7 +692,7 @@ pub const PervadeCursor = struct {
             shape,
         ) orelse return null;
         const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-        return try self.runTyped(try data.startNested(evaluator, .{ node.left, node.right }, null, .{}, length));
+        return try self.runTyped(try data.startNested(fiber, .{ node.left, node.right }, null, .{}, length));
     }
 
     fn acceptListChild(self: *PervadeCursor, frame: *ListFrame) void {
@@ -734,7 +734,7 @@ pub const PervadeCursor = struct {
 
     fn advanceDict(
         self: *PervadeCursor,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         frame: *DictFrame,
         work: *poll.WorkBudget,
     ) MachineError!FrameStep {
@@ -796,7 +796,7 @@ pub const PervadeCursor = struct {
                     } },
                     .both => unreachable,
                 };
-                return self.startDictChild(evaluator, frame, child, work);
+                return self.startDictChild(fiber, frame, child, work);
             },
             .both => |operation| {
                 const left_count: usize = @intCast(frame.left.dict.length());
@@ -850,7 +850,7 @@ pub const PervadeCursor = struct {
                 const index = frame.index;
                 const candidate = frame.candidate;
                 frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
-                return self.startDictChild(evaluator, frame, .{ .binary = .{
+                return self.startDictChild(fiber, frame, .{ .binary = .{
                     .operation = operation,
                     .left = dict.valueAt(frame.left.dict, index),
                     .right = dict.valueAt(frame.right.?.dict, candidate),
@@ -863,10 +863,10 @@ pub const PervadeCursor = struct {
 
     /// A dict frame still pays for its own visit; this is the unit the child's
     /// node frame used to cost.
-    fn startDictChild(self: *PervadeCursor, evaluator: *Fiber, frame: *DictFrame, child: Child, work: *poll.WorkBudget) MachineError!FrameStep {
+    fn startDictChild(self: *PervadeCursor, fiber: *Fiber, frame: *DictFrame, child: Child, work: *poll.WorkBudget) MachineError!FrameStep {
         if (!work.spend()) return .pending;
         frame.matched = false;
-        switch (try self.start(evaluator, child)) {
+        switch (try self.start(fiber, child)) {
             .finished => self.acceptDictChild(frame),
             .framed => frame.waiting = true,
         }
@@ -913,7 +913,7 @@ fn selectUnary(operation: UnaryOp) ScalarUnary {
 /// The element count a binary shape conforms to, or the conformance failure
 /// that shape reports. `leaf_only` is a unary shape and never reaches here.
 fn conformingLength(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     shape: Shape,
     left_item: Value,
     right_item: Value,
@@ -922,7 +922,7 @@ fn conformingLength(
         .leaf_leaf => blk: {
             const left_count: usize = @intCast(left_item.list.length());
             const right_count: usize = @intCast(right_item.list.length());
-            if (left_count != right_count) return evaluator.conformError(left_count, right_count);
+            if (left_count != right_count) return fiber.conformError(left_count, right_count);
             break :blk left_count;
         },
         .leaf_scalar => @intCast(left_item.list.length()),
@@ -937,7 +937,7 @@ const ScalarDiagnostic = struct {
 };
 
 /// One mapping from a scalar kernel fault to the diagnostic that reports it.
-/// The three reporting surfaces — the evaluator, an indexed kernel context, and
+/// The three reporting surfaces — the fiber, an indexed kernel context, and
 /// a sequential fold — differ in where they send the diagnostic, never in what
 /// it says.
 fn scalarDiagnostic(fault: ScalarError) ScalarDiagnostic {
@@ -949,11 +949,11 @@ fn scalarDiagnostic(fault: ScalarError) ScalarDiagnostic {
     };
 }
 
-fn scalarFailure(evaluator: *Fiber, fault: ScalarError, index: ?usize) MachineError {
+fn scalarFailure(fiber: *Fiber, fault: ScalarError, index: ?usize) MachineError {
     const diagnostic = scalarDiagnostic(fault);
     if (index) |logical_index|
-        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, logical_index);
-    return evaluator.fail(diagnostic.kind, diagnostic.message);
+        return fiber.failAtIndex(diagnostic.kind, diagnostic.message, logical_index);
+    return fiber.fail(diagnostic.kind, diagnostic.message);
 }
 
 /// A char as its codepoint: the scalar authority sees chars as ints.
@@ -1428,14 +1428,14 @@ const NumericParams = struct {
 };
 
 fn failTypedScalar(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     report: FaultReport,
     fault: ScalarError,
     index: usize,
 ) MachineError {
     const diagnostic = scalarDiagnostic(fault);
-    if (report.index) return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, index);
-    return evaluator.fail(diagnostic.kind, diagnostic.message);
+    if (report.index) return fiber.failAtIndex(diagnostic.kind, diagnostic.message, index);
+    return fiber.fail(diagnostic.kind, diagnostic.message);
 }
 
 /// The next piece of a charged range. A vector loop writes its output's own
@@ -1546,8 +1546,8 @@ fn mirroredBinaryKernel(comptime operation: BinaryOp, comptime left_class: Numbe
     const out = comptime binaryResult(operation, left_class, right_class).?;
     comptime std.debug.assert(binaryResult(twin, right_class, left_class).? == out);
     return struct {
-        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
-            return @call(.never_inline, Twin.chunk, .{ params, [2]Value{ operands[1], operands[0] }, output, range, evaluator });
+        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
+            return @call(.never_inline, Twin.chunk, .{ params, [2]Value{ operands[1], operands[0] }, output, range, fiber });
         }
     };
 }
@@ -1837,7 +1837,7 @@ fn binaryKernel(
 
         /// The operation's range loop over these classes, as
         /// `BinaryKernel` calls it.
-        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
             const left: Left = if (shape == .scalar_leaf)
                 left_class.unboxed(operands[0])
             else
@@ -1848,15 +1848,15 @@ fn binaryKernel(
                 heap.leafElements(right_class.kind(), operands[1].list);
             const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
             if (runPieces(left, right, output, placement, range)) |faulted|
-                return replayDirect(evaluator, params.report, left, right, faulted);
+                return replayDirect(fiber, params.report, left, right, faulted);
         }
 
-        noinline fn replayDirect(evaluator: *Fiber, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
+        noinline fn replayDirect(fiber: *Fiber, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
                 const a = if (shape == .scalar_leaf) left else left[index];
                 const b = if (shape == .leaf_scalar) right else right[index];
                 _ = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch |fault|
-                    return failTypedScalar(evaluator, report, fault, index);
+                    return failTypedScalar(fiber, report, fault, index);
             }
             unreachable;
         }
@@ -1951,17 +1951,17 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
 
         /// The operation's range loop over this class, as `UnaryKernel`
         /// calls it.
-        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
             const elements = heap.leafElements(operand_class.kind(), operands[0].list);
             const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
             if (runPieces(elements, output, placement, range)) |faulted|
-                return replayDirect(evaluator, params.report, elements, faulted);
+                return replayDirect(fiber, params.report, elements, faulted);
         }
 
-        noinline fn replayDirect(evaluator: *Fiber, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
+        noinline fn replayDirect(fiber: *Fiber, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
                 _ = scalarUnary(operation, operand_class.boxed(elements[index])) catch |fault|
-                    return failTypedScalar(evaluator, report, fault, index);
+                    return failTypedScalar(fiber, report, fault, index);
             }
             unreachable;
         }
@@ -2049,9 +2049,9 @@ fn BinaryKernel(comptime out: Number) type {
             /// list and is passed over.
             pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{ 0, 1 } };
 
-            pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+            pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
                 const loop: BinaryLoop(out) = @ptrCast(@alignCast(params.chunk));
-                return loop(params.numeric, operands, output, range, evaluator);
+                return loop(params.numeric, operands, output, range, fiber);
             }
 
             pub const finish = Output.finish;
@@ -2086,9 +2086,9 @@ fn UnaryKernel(comptime out: Number) type {
 
             pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{0} };
 
-            pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+            pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
                 const loop: UnaryLoop(out) = @ptrCast(@alignCast(params.chunk));
-                return loop(params.numeric, operands, output, range, evaluator);
+                return loop(params.numeric, operands, output, range, fiber);
             }
 
             pub const finish = Output.finish;
@@ -2117,13 +2117,13 @@ const NumericBinaryPlan = opaque {
         chunk: BinaryChunk,
 
         /// Runs the operation inline or as a driver.
-        fn start(self: *const Data, evaluator: *Fiber, owners: [2]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
-            return self.run(evaluator, owners, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn start(self: *const Data, fiber: *Fiber, owners: [2]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
+            return self.run(fiber, owners, .{ .numeric = params, .chunk = self.chunk }, length);
         }
 
         /// Runs the operation for a leaf inside pervasion.
-        fn startNested(self: *const Data, evaluator: *Fiber, operands: [2]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
-            return self.nested(evaluator, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn startNested(self: *const Data, fiber: *Fiber, operands: [2]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
+            return self.nested(fiber, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
         }
     };
 
@@ -2199,7 +2199,7 @@ fn firstFlatElement(item: Value) ?Value {
 /// and no traversal. This closes the typed boundary for character/symbol and
 /// nonnumeric combinations without manufacturing a boxed fallback loop.
 fn rejectUnsupportedFlatBinary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: BinaryOp,
     left: Value,
     right: Value,
@@ -2214,30 +2214,30 @@ fn rejectUnsupportedFlatBinary(
     if (left == .list and right == .list) {
         const left_count: usize = @intCast(left.list.length());
         const right_count: usize = @intCast(right.list.length());
-        if (left_count != right_count) return evaluator.conformError(left_count, right_count);
+        if (left_count != right_count) return fiber.conformError(left_count, right_count);
         if (left_count == 0) return false;
     } else if ((left == .list and left.list.length() == 0) or
         (right == .list and right.list.length() == 0)) return false;
     _ = (switch (operation) {
         inline else => |selected| scalarBinary(selected, left_first orelse left, right_first orelse right),
-    }) catch |fault| return scalarFailure(evaluator, fault, if (report.index) 0 else null);
+    }) catch |fault| return scalarFailure(fiber, fault, if (report.index) 0 else null);
     return false;
 }
 
 fn rejectUnsupportedFlatUnary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: UnaryOp,
     operand: Value,
     report: FaultReport,
 ) MachineError!bool {
     const first = firstFlatElement(operand) orelse return false;
     _ = selectUnary(operation)(first) catch |fault|
-        return scalarFailure(evaluator, fault, if (report.index) 0 else null);
+        return scalarFailure(fiber, fault, if (report.index) 0 else null);
     return false;
 }
 
 fn startNestedNumericBinary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: BinaryOp,
     left_item: Value,
     right_item: Value,
@@ -2256,28 +2256,28 @@ fn startNestedNumericBinary(
         .scalar_leaf
     else
         return null;
-    const length = try conformingLength(evaluator, shape, left_item, right_item);
+    const length = try conformingLength(fiber, shape, left_item, right_item);
     if (length == 0) return null;
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    return try data.startNested(evaluator, .{ left_item, right_item }, root, .{ .report = report }, length);
+    return try data.startNested(fiber, .{ left_item, right_item }, root, .{ .report = report }, length);
 }
 
 /// A typed leaf inside pervasion. `root`, when present, owns `left` and is
 /// the operation's own operand, so its buffer may become the output; every
 /// other leaf is only borrowed from the structure being descended.
 fn startNestedBinary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: BinaryOp,
     left: Value,
     right: Value,
     root: ?*heap.OwnedValue,
     report: FaultReport,
 ) MachineError!?support.NestedOutcome {
-    if (try startNestedNumericBinary(evaluator, operation, left, right, root, report)) |typed| return typed;
-    _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
+    if (try startNestedNumericBinary(fiber, operation, left, right, root, report)) |typed| return typed;
+    _ = try rejectUnsupportedFlatBinary(fiber, operation, left, right, report);
     return null;
 }
 
@@ -2295,13 +2295,13 @@ const NumericUnaryPlan = opaque {
         chunk: UnaryChunk,
 
         /// Runs the operation inline or as a driver.
-        fn start(self: *const Data, evaluator: *Fiber, owners: [1]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
-            return self.run(evaluator, owners, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn start(self: *const Data, fiber: *Fiber, owners: [1]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
+            return self.run(fiber, owners, .{ .numeric = params, .chunk = self.chunk }, length);
         }
 
         /// Runs the operation for a leaf inside pervasion.
-        fn startNested(self: *const Data, evaluator: *Fiber, operands: [1]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
-            return self.nested(evaluator, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn startNested(self: *const Data, fiber: *Fiber, operands: [1]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
+            return self.nested(fiber, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
         }
     };
 
@@ -2328,26 +2328,26 @@ const NumericUnaryPlan = opaque {
 };
 
 fn startNestedUnary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: UnaryOp,
     operand: Value,
     report: FaultReport,
 ) MachineError!?support.NestedOutcome {
     const class = leafNumber(operand) orelse {
-        _ = try rejectUnsupportedFlatUnary(evaluator, operation, operand, report);
+        _ = try rejectUnsupportedFlatUnary(fiber, operation, operand, report);
         return null;
     };
     const length: usize = @intCast(operand.list.length());
     if (length == 0) return null;
     const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
-    return try data.startNested(evaluator, .{operand}, null, .{ .report = report }, length);
+    return try data.startNested(fiber, .{operand}, null, .{ .report = report }, length);
 }
 
 /// A numeric operation runs through its plan's kernel, inline or as a
 /// driver. It classifies exactly as the numeric builder does, so a pair it
 /// declines reaches the builder unchanged.
 fn startNumericBinary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: BinaryOp,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
@@ -2365,7 +2365,7 @@ fn startNumericBinary(
         .scalar_leaf
     else
         return false;
-    const length = try conformingLength(evaluator, shape, left_item, right_item);
+    const length = try conformingLength(fiber, shape, left_item, right_item);
     if (length == 0) return false;
     const plan = NumericBinaryPlan.select(
         operation,
@@ -2374,39 +2374,39 @@ fn startNumericBinary(
         shape,
     ) orelse return false;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    try data.start(evaluator, .{ left, right }, .{ .report = report }, length);
+    try data.start(fiber, .{ left, right }, .{ .report = report }, length);
     return true;
 }
 
 /// Dispatches one binary operation. Returns false when the operand shapes belong
 /// to the generic route, having consumed nothing.
 fn startTypedBinary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: BinaryOp,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
-    if (try startNumericBinary(evaluator, operation, left, right, report)) return true;
+    if (try startNumericBinary(fiber, operation, left, right, report)) return true;
     // An empty result's representation is the generic route's to choose, and
     // so is a pair no plan admits.
-    _ = try rejectUnsupportedFlatBinary(evaluator, operation, left.borrow(), right.borrow(), report);
+    _ = try rejectUnsupportedFlatBinary(fiber, operation, left.borrow(), right.borrow(), report);
     return false;
 }
 
 fn startTypedUnary(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: UnaryOp,
     operand: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
     const item = operand.borrow();
     const class = leafNumber(item) orelse
-        return rejectUnsupportedFlatUnary(evaluator, operation, item, report);
+        return rejectUnsupportedFlatUnary(fiber, operation, item, report);
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
     const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
-    try data.start(evaluator, .{operand}, .{ .report = report }, length);
+    try data.start(fiber, .{operand}, .{ .report = report }, length);
     return true;
 }
 
@@ -2528,28 +2528,28 @@ pub fn programCandidate(operands: []const Value) bool {
 /// instruction before the next starts, so the first fault is the one that
 /// order meets, reported by its own word. An atom operand is the same at every
 /// element. The quotation is held as an operand for that report.
-pub fn startProgramEach(evaluator: *Fiber, input: *heap.OwnedValue, phrase: *heap.OwnedValue, program: ScalarProgram) MachineError!void {
+pub fn startProgramEach(fiber: *Fiber, input: *heap.OwnedValue, phrase: *heap.OwnedValue, program: ScalarProgram) MachineError!void {
     const count: usize = @intCast(input.borrow().list.length());
-    return startProgram(1, .each, evaluator, .{ input, phrase }, &program, count);
+    return startProgram(1, .each, fiber, .{ input, phrase }, &program, count);
 }
 
 /// A program is too large to travel by value in a driver; the kernel's output
 /// owns this copy from `prepare` on.
-fn ownProgram(evaluator: *Fiber, program: ScalarProgram) error{OutOfMemory}!*ScalarProgram {
-    const owned = try evaluator.allocator.create(ScalarProgram);
+fn ownProgram(fiber: *Fiber, program: ScalarProgram) error{OutOfMemory}!*ScalarProgram {
+    const owned = try fiber.allocator.create(ScalarProgram);
     owned.* = program;
     return owned;
 }
 
 pub fn startProgramZip(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
     phrase: *heap.OwnedValue,
     program: ScalarProgram,
 ) MachineError!void {
     const count: usize = @intCast(if (left.borrow() == .list) left.borrow().list.length() else right.borrow().list.length());
-    return startProgram(2, .each, evaluator, .{ left, right, phrase }, &program, count);
+    return startProgram(2, .each, fiber, .{ left, right, phrase }, &program, count);
 }
 
 /// The most stack values a straight-line chain may read.
@@ -2558,28 +2558,28 @@ pub const max_chain_inputs = 4;
 /// Runs a program compiled from straight-line `code` over the top
 /// `program.inputs` stack values, which `programCandidate` admitted, as its
 /// words would run one at a time.
-pub fn startProgramChain(evaluator: *Fiber, code: *value.ListHandle, program: ScalarProgram) MachineError!void {
+pub fn startProgramChain(fiber: *Fiber, code: *value.ListHandle, program: ScalarProgram) MachineError!void {
     return switch (program.inputs) {
-        inline 1...max_chain_inputs => |inputs| startChain(inputs, evaluator, code, &program),
+        inline 1...max_chain_inputs => |inputs| startChain(inputs, fiber, code, &program),
         else => unreachable, // The compiler refuses a chain with more inputs.
     };
 }
 
-fn startChain(comptime inputs: usize, evaluator: *Fiber, code: *value.ListHandle, program: *const ScalarProgram) MachineError!void {
+fn startChain(comptime inputs: usize, fiber: *Fiber, code: *value.ListHandle, program: *const ScalarProgram) MachineError!void {
     // SAFETY: every owner is set below before the kernel reads it.
     var owners: [inputs + 1]heap.OwnedValue = undefined;
     heap.retainValue(.{ .list = code });
-    owners[inputs] = .init(evaluator.releases, .{ .list = code });
+    owners[inputs] = .init(fiber.releases, .{ .list = code });
     var popped: usize = 0;
     defer for (owners[inputs - popped ..]) |*owner| owner.deinit();
-    while (popped != inputs) : (popped += 1) owners[inputs - 1 - popped] = try evaluator.popValue();
+    while (popped != inputs) : (popped += 1) owners[inputs - 1 - popped] = try fiber.popValue();
     // SAFETY: every pointer is set below.
     var pointers: [inputs + 1]*heap.OwnedValue = undefined;
     for (&pointers, &owners) |*pointer, *owner| pointer.* = owner;
     const count: usize = for (owners[0..inputs]) |*owner| {
         if (owner.borrow() == .list) break @intCast(owner.borrow().list.length());
     } else unreachable; // `programCandidate` requires a leaf.
-    return startProgram(inputs, .pervade, evaluator, pointers, program, count);
+    return startProgram(inputs, .pervade, fiber, pointers, program, count);
 }
 
 /// Runs `program` over its inputs, the last owner being the code it was
@@ -2588,7 +2588,7 @@ fn startChain(comptime inputs: usize, evaluator: *Fiber, code: *value.ListHandle
 fn startProgram(
     comptime inputs: usize,
     comptime mode: ProgramMode,
-    evaluator: *Fiber,
+    fiber: *Fiber,
     owners: [inputs + 1]*heap.OwnedValue,
     program: *const ScalarProgram,
     length: usize,
@@ -2597,11 +2597,11 @@ fn startProgram(
     var operands: [inputs]Value = undefined;
     for (&operands, owners[0..inputs]) |*operand, owner| operand.* = owner.borrow();
     const classes = programClasses(program, &operands) orelse
-        return support.Kernel(ProgramValuesKernel(inputs, mode)).run(evaluator, owners, program, length);
+        return support.Kernel(ProgramValuesKernel(inputs, mode)).run(fiber, owners, program, length);
     return switch (classes[program.result]) {
-        .integer => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_i64)).run(evaluator, owners, program, length),
-        .real => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_f64)).run(evaluator, owners, program, length),
-        .byte => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_u8)).run(evaluator, owners, program, length),
+        .integer => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_i64)).run(fiber, owners, program, length),
+        .real => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_f64)).run(fiber, owners, program, length),
+        .byte => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_u8)).run(fiber, owners, program, length),
         .char1, .char2, .char4 => unreachable, // A program reads numeric leaves only.
     };
 }
@@ -2959,24 +2959,24 @@ fn ProgramFaults(comptime inputs: usize, comptime mode: ProgramMode) type {
 
         /// Runs position `index` through the whole program. Null when it
         /// faulted and the fault was recorded.
-        fn runAt(self: *Self, program: *const ScalarProgram, registers: *[ScalarProgram.max_registers]Value, operands: [inputs + 1]Value, index: usize, evaluator: *Fiber) MachineError!?Value {
+        fn runAt(self: *Self, program: *const ScalarProgram, registers: *[ScalarProgram.max_registers]Value, operands: [inputs + 1]Value, index: usize, fiber: *Fiber) MachineError!?Value {
             inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
             var failed: u8 = 0;
             return program.run(registers, &failed) catch |fault| {
-                try self.met(program, .{ .instruction = failed, .index = index, .fault = fault }, evaluator);
+                try self.met(program, .{ .instruction = failed, .index = index, .fault = fault }, fiber);
                 return null;
             };
         }
 
         /// Records a fault, or reports it when nothing can precede it: in
         /// `each` mode always, in `pervade` mode at the first instruction.
-        fn met(self: *Self, program: *const ScalarProgram, fault: ProgramFault, evaluator: *Fiber) MachineError!void {
-            if (mode == .each or fault.instruction == 0) return self.report(program, fault, evaluator);
+        fn met(self: *Self, program: *const ScalarProgram, fault: ProgramFault, fiber: *Fiber) MachineError!void {
+            if (mode == .each or fault.instruction == 0) return self.report(program, fault, fiber);
             self.fault = fault;
         }
 
         /// `pervade`'s search over positions `start..end`.
-        fn search(self: *Self, program: *const ScalarProgram, operands: [inputs + 1]Value, start: usize, end: usize, evaluator: *Fiber) MachineError!void {
+        fn search(self: *Self, program: *const ScalarProgram, operands: [inputs + 1]Value, start: usize, end: usize, fiber: *Fiber) MachineError!void {
             if (mode == .each) unreachable else { // `met` reported the first fault.
                 // SAFETY: `load` fills the constants; inputs are set per position.
                 var registers: [ScalarProgram.max_registers]Value = undefined;
@@ -2985,20 +2985,20 @@ fn ProgramFaults(comptime inputs: usize, comptime mode: ProgramMode) type {
                     inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
                     var failed: u8 = 0;
                     program.runPrefix(&registers, self.fault.?.instruction, &failed) catch |fault|
-                        try self.met(program, .{ .instruction = failed, .index = index, .fault = fault }, evaluator);
+                        try self.met(program, .{ .instruction = failed, .index = index, .fault = fault }, fiber);
                 }
             }
         }
 
         /// Reports the fault the search settled on, once every position ran.
-        fn settle(self: *const Self, program: *const ScalarProgram, evaluator: *Fiber) MachineError!void {
-            if (self.fault) |fault| return self.report(program, fault, evaluator);
+        fn settle(self: *const Self, program: *const ScalarProgram, fiber: *Fiber) MachineError!void {
+            if (self.fault) |fault| return self.report(program, fault, fiber);
         }
 
-        fn report(self: *const Self, program: *const ScalarProgram, fault: ProgramFault, evaluator: *Fiber) MachineError {
+        fn report(self: *const Self, program: *const ScalarProgram, fault: ProgramFault, fiber: *Fiber) MachineError {
             const instruction = program.instructions[fault.instruction];
             const positioned = mode == .pervade and !self.scalar[instruction.destination];
-            return failProgram(evaluator, self.phrase, instruction, fault.fault, if (positioned) fault.index else null);
+            return failProgram(fiber, self.phrase, instruction, fault.fault, if (positioned) fault.index else null);
         }
     };
 }
@@ -3050,9 +3050,9 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
             return &output.leaf;
         }
 
-        pub fn prepare(evaluator: *Fiber, operands: [arity]Value, borrowed: Params, length: usize, leaf: Leaf) error{OutOfMemory}!Output {
-            const allocator = evaluator.allocator;
-            const program = try ownProgram(evaluator, borrowed.*);
+        pub fn prepare(fiber: *Fiber, operands: [arity]Value, borrowed: Params, length: usize, leaf: Leaf) error{OutOfMemory}!Output {
+            const allocator = fiber.allocator;
+            const program = try ownProgram(fiber, borrowed.*);
             errdefer allocator.destroy(program);
             return .{
                 .allocator = allocator,
@@ -3063,9 +3063,9 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
             };
         }
 
-        pub fn chunk(_: Params, operands: [arity]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+        pub fn chunk(_: Params, operands: [arity]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
             const program = output.program;
-            if (output.faults.fault != null) return output.faults.search(program, operands, range.start, range.end, evaluator);
+            if (output.faults.fault != null) return output.faults.search(program, operands, range.start, range.end, fiber);
             const plan = output.plan;
             var start = range.start;
             while (start != range.end) {
@@ -3077,8 +3077,8 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
                     var registers: [ScalarProgram.max_registers]Value = undefined;
                     program.load(&registers);
                     for (out, start..) |*slot, index| {
-                        const item = try output.faults.runAt(program, &registers, operands, index, evaluator) orelse
-                            return output.faults.search(program, operands, index + 1, range.end, evaluator);
+                        const item = try output.faults.runAt(program, &registers, operands, index, fiber) orelse
+                            return output.faults.search(program, operands, index + 1, range.end, fiber);
                         slot.* = switch (Element) {
                             u8 => @intCast(item.int),
                             i64 => item.int,
@@ -3091,8 +3091,8 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
             }
         }
 
-        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
-            try output.faults.settle(output.program, evaluator);
+        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
+            try output.faults.settle(output.program, fiber);
             return null;
         }
 
@@ -3132,9 +3132,9 @@ fn ProgramValuesKernel(comptime inputs: usize, comptime mode: ProgramMode) type 
             }
         };
 
-        pub fn prepare(evaluator: *Fiber, operands: [arity]Value, borrowed: Params, length: usize) error{OutOfMemory}!Output {
-            const allocator = evaluator.allocator;
-            const program = try ownProgram(evaluator, borrowed.*);
+        pub fn prepare(fiber: *Fiber, operands: [arity]Value, borrowed: Params, length: usize) error{OutOfMemory}!Output {
+            const allocator = fiber.allocator;
+            const program = try ownProgram(fiber, borrowed.*);
             errdefer allocator.destroy(program);
             return .{
                 .allocator = allocator,
@@ -3144,10 +3144,10 @@ fn ProgramValuesKernel(comptime inputs: usize, comptime mode: ProgramMode) type 
             };
         }
 
-        pub fn chunk(_: Params, operands: [arity]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+        pub fn chunk(_: Params, operands: [arity]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
             if (output.builder) |*builder| return builder.writeValues(range.start, output.results[range.start..range.end]);
             const program = output.program;
-            if (output.faults.fault != null) return output.faults.search(program, operands, range.start, range.end, evaluator);
+            if (output.faults.fault != null) return output.faults.search(program, operands, range.start, range.end, fiber);
             // SAFETY: `load` fills the constants; inputs and results are
             // written before they are read.
             var registers: [ScalarProgram.max_registers]Value = undefined;
@@ -3155,14 +3155,14 @@ fn ProgramValuesKernel(comptime inputs: usize, comptime mode: ProgramMode) type 
             var profile = output.profile;
             defer output.profile = profile;
             for (output.results[range.start..range.end], range.start..) |*slot, index| {
-                slot.* = try output.faults.runAt(program, &registers, operands, index, evaluator) orelse
-                    return output.faults.search(program, operands, index + 1, range.end, evaluator);
+                slot.* = try output.faults.runAt(program, &registers, operands, index, fiber) orelse
+                    return output.faults.search(program, operands, index + 1, range.end, fiber);
                 profile = profile.add(slot.*);
             }
         }
 
-        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
-            try output.faults.settle(output.program, evaluator);
+        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
+            try output.faults.settle(output.program, fiber);
             if (output.builder != null) return null;
             const length = output.results.len;
             output.builder = try heap.AnyListBuilder.init(output.allocator, output.profile.heapKind(), length, length);
@@ -3193,7 +3193,7 @@ pub fn programReduceCandidate(input: Value, initial: ?Value) bool {
 /// order, so the first fault is the one the generic route meets. A null
 /// `initial` starts from the list's first element.
 pub fn startProgramReduce(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     input: *heap.OwnedValue,
     phrase: *heap.OwnedValue,
     program: ScalarProgram,
@@ -3203,12 +3203,12 @@ pub fn startProgramReduce(
     const count: usize = @intCast(input.borrow().list.length());
     const start: usize = if (initial == null) 1 else 0;
     const params: ProgramReduceParams = .{
-        .program = try ownProgram(evaluator, program),
+        .program = try ownProgram(fiber, program),
         .initial = initial orelse programElement(input.borrow(), 0),
         .start = start,
     };
-    if (scan) return support.Kernel(ProgramReduceKernel(true)).run(evaluator, .{ input, phrase }, params, count - start);
-    return support.Kernel(ProgramReduceKernel(false)).run(evaluator, .{ input, phrase }, params, count - start);
+    if (scan) return support.Kernel(ProgramReduceKernel(true)).run(fiber, .{ input, phrase }, params, count - start);
+    return support.Kernel(ProgramReduceKernel(false)).run(fiber, .{ input, phrase }, params, count - start);
 }
 
 const ProgramReduceParams = struct {
@@ -3243,8 +3243,8 @@ fn ProgramReduceKernel(comptime scan: bool) type {
             }
         };
 
-        pub fn prepare(evaluator: *Fiber, _: [2]Value, params: Params, length: usize) error{OutOfMemory}!Output {
-            const allocator = evaluator.allocator;
+        pub fn prepare(fiber: *Fiber, _: [2]Value, params: Params, length: usize) error{OutOfMemory}!Output {
+            const allocator = fiber.allocator;
             errdefer allocator.destroy(params.program);
             return .{
                 .allocator = allocator,
@@ -3254,7 +3254,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
             };
         }
 
-        pub fn chunk(params: Params, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+        pub fn chunk(params: Params, operands: [2]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
             if (output.builder) |*builder| return builder.writeValues(range.start, output.results[range.start..range.end]);
             const program = output.program;
             // SAFETY: `load` fills the constants; inputs and results are
@@ -3269,7 +3269,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
                 registers[1] = programElement(operands[0], params.start + position);
                 var failed: u8 = 0;
                 accumulator = program.run(&registers, &failed) catch |fault|
-                    return failProgram(evaluator, operands[1], program.instructions[failed], fault, null);
+                    return failProgram(fiber, operands[1], program.instructions[failed], fault, null);
                 if (scan) {
                     output.results[position] = accumulator;
                     profile = profile.add(accumulator);
@@ -3298,11 +3298,11 @@ fn ProgramReduceKernel(comptime scan: bool) type {
 /// Reports a program's fault as the faulting word would: that word active, at
 /// its position in the code, with the shared scalar diagnostic, and at the
 /// list position a pervading word reports.
-fn failProgram(evaluator: *Fiber, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError, index: ?usize) MachineError {
+fn failProgram(fiber: *Fiber, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError, index: ?usize) MachineError {
     @setEvalBranchQuota(10_000);
-    evaluator.active_word = .plain(instruction.word);
-    const failure = scalarFailure(evaluator, fault, index);
-    evaluator.setFailureSite(phrase.list, instruction.index);
+    fiber.active_word = .plain(instruction.word);
+    const failure = scalarFailure(fiber, fault, index);
+    fiber.setFailureSite(phrase.list, instruction.index);
     return failure;
 }
 
@@ -3312,8 +3312,8 @@ fn failProgram(evaluator: *Fiber, phrase: Value, instruction: ScalarProgram.Inst
 pub fn idiomUnaryStart(operation: UnaryOp) IdiomStart.Unary {
     return switch (operation) {
         inline else => |selected| struct {
-            fn run(evaluator: *Fiber, operand: *heap.OwnedValue) MachineError!void {
-                const started = try startTypedUnary(evaluator, selected, operand, .{ .index = false });
+            fn run(fiber: *Fiber, operand: *heap.OwnedValue) MachineError!void {
+                const started = try startTypedUnary(fiber, selected, operand, .{ .index = false });
                 std.debug.assert(started);
             }
         }.run,
@@ -3324,11 +3324,11 @@ pub fn idiomBinaryStart(operation: BinaryOp) IdiomStart.Binary {
     return switch (operation) {
         inline else => |selected| struct {
             fn run(
-                evaluator: *Fiber,
+                fiber: *Fiber,
                 left: *heap.OwnedValue,
                 right: *heap.OwnedValue,
             ) MachineError!void {
-                const started = try startTypedBinary(evaluator, selected, left, right, .{ .index = false });
+                const started = try startTypedBinary(fiber, selected, left, right, .{ .index = false });
                 std.debug.assert(started);
             }
         }.run,
@@ -3511,7 +3511,7 @@ fn reduceKernel(
         }
 
         /// Folds list indices `range` into the accumulator, in order.
-        fn accumulate(output: *ReduceOutput, elements: []const element_class.Element(), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+        fn accumulate(output: *ReduceOutput, elements: []const element_class.Element(), range: flat.Chunk, fiber: *Fiber) MachineError!void {
             var block = Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
@@ -3549,7 +3549,7 @@ fn reduceKernel(
                         // combinator's fault carries no list index, exactly as
                         // the per-element route reported it.
                         const diagnostic = scalarDiagnostic(fault);
-                        return evaluator.fail(diagnostic.kind, diagnostic.message);
+                        return fiber.fail(diagnostic.kind, diagnostic.message);
                     };
                     accumulator = accumulator_class.unboxed(next);
                     if (scan) block.items[index - piece.start] = if (stored_class == .byte) @intCast(accumulator) else accumulator;
@@ -3565,12 +3565,12 @@ fn reduceKernel(
 
         /// The reduction's loop over these classes, as `ReduceKernel` calls
         /// it. Its positions are the list indices after the seed.
-        fn chunk(operands: [1]Value, output: *ReduceOutput, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+        fn chunk(operands: [1]Value, output: *ReduceOutput, range: flat.Chunk, fiber: *Fiber) MachineError!void {
             return accumulate(
                 output,
                 heap.leafElements(element_class.kind(), operands[0].list),
                 .{ .start = output.base + range.start, .end = output.base + range.end },
-                evaluator,
+                fiber,
             );
         }
     };
@@ -3616,8 +3616,8 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime stored_class: Numbe
 
             pub const prepare = if (scan) prepareScan else prepareFold;
 
-            fn prepareScan(evaluator: *Fiber, operands: [1]Value, params: ReduceKernelParams, length: usize, prepared: support.LeafResult(stored_class.kind())) MachineError!Output {
-                var output = try prepareFold(evaluator, operands, params, length);
+            fn prepareScan(fiber: *Fiber, operands: [1]Value, params: ReduceKernelParams, length: usize, prepared: support.LeafResult(stored_class.kind())) MachineError!Output {
+                var output = try prepareFold(fiber, operands, params, length);
                 output.scan = .wrap(stored_class, prepared);
                 if (seeded) output.scan.?.leaf(accumulator_class).store(params.reduce.cursor_start, &.{switch (output.accumulator) {
                     .integer => |number| if (accumulator_class == .integer) number else unreachable,
@@ -3626,7 +3626,7 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime stored_class: Numbe
                 return output;
             }
 
-            fn prepareFold(evaluator: *Fiber, operands: [1]Value, params: ReduceKernelParams, _: usize) MachineError!Output {
+            fn prepareFold(fiber: *Fiber, operands: [1]Value, params: ReduceKernelParams, _: usize) MachineError!Output {
                 const input = operands[0];
                 const start = params.reduce.cursor_start;
                 const seed = if (seeded) first: {
@@ -3634,10 +3634,10 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime stored_class: Numbe
                     // short reductions must not evade cancellation. Do not
                     // pre-cast initial; mixed numeric comparisons in particular
                     // would lose information.
-                    try evaluator.advanceKernel(1);
+                    try fiber.advanceKernel(1);
                     break :first params.step(params.reduce.initial, list.atUnchecked(input, start)) catch |fault| {
                         const diagnostic = scalarDiagnostic(fault);
-                        return evaluator.fail(diagnostic.kind, diagnostic.message);
+                        return fiber.fail(diagnostic.kind, diagnostic.message);
                     };
                 } else ordinal(params.reduce.initial);
                 const output: Output = .{
@@ -3652,8 +3652,8 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime stored_class: Numbe
                 return output;
             }
 
-            pub fn chunk(params: ReduceKernelParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
-                return params.chunk(operands, output, range, evaluator);
+            pub fn chunk(params: ReduceKernelParams, operands: [1]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
+                return params.chunk(operands, output, range, fiber);
             }
 
             pub fn finish(output: *Output) Value {
@@ -3755,13 +3755,13 @@ const NumericReducePlan = opaque {
     /// list's own element, valid while the list is held. The combinator
     /// handles empty folds/scans and singleton fold1 before entry, so
     /// cursor_start always identifies a remaining input element.
-    fn start(self: *const NumericReducePlan, evaluator: *Fiber, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
+    fn start(self: *const NumericReducePlan, fiber: *Fiber, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
         const data: *const Data = @ptrCast(@alignCast(self));
         std.debug.assert(consumed >= 1 and consumed <= 3);
         var popped: [3]heap.OwnedValue = undefined;
         var count: usize = 0;
         defer for (popped[0..count]) |*owner| owner.deinit();
-        while (count != consumed) : (count += 1) popped[count] = try evaluator.popValue();
+        while (count != consumed) : (count += 1) popped[count] = try fiber.popValue();
         const list_owner = &popped[consumed - 1];
         std.debug.assert(list_owner.borrow().list == input.list);
         const first = cursor_start + @intFromBool(data.seeded);
@@ -3770,15 +3770,15 @@ const NumericReducePlan = opaque {
             .step = data.step,
             .chunk = data.chunk,
         };
-        try data.run(evaluator, .{list_owner}, params, @as(usize, @intCast(input.list.length())) - first);
+        try data.run(fiber, .{list_owner}, params, @as(usize, @intCast(input.list.length())) - first);
     }
 };
 
 /// Reached only if a guard and a dispatch disagreed, which the candidate
 /// predicate exists to prevent; it is a domain error rather than a silent
 /// second classification.
-fn unexpectedReduceShape(evaluator: *Fiber) MachineError {
-    return evaluator.fail(.domain, "typed reduction reached an unclassified operand shape");
+fn unexpectedReduceShape(fiber: *Fiber) MachineError {
+    return fiber.fail(.domain, "typed reduction reached an unclassified operand shape");
 }
 
 /// The result of applying one row of a leading-axis fold.
@@ -3801,7 +3801,7 @@ pub const RowFold = union(enum) {
 /// machine turn. The whole row is charged before it runs, and a row larger
 /// than the remaining budget is declined rather than split.
 pub fn foldLeafRow(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: BinaryOp,
     accumulator: Value,
     accumulator_owned: bool,
@@ -3812,12 +3812,12 @@ pub fn foldLeafRow(
     const row_class = leafNumber(row) orelse return .declined;
     const length: usize = @intCast(row.list.length());
     if (length == 0 or accumulator.list.length() != length) return .declined;
-    if (length > evaluator.remainingKernelFuel()) return .declined;
+    if (length > fiber.remainingKernelFuel()) return .declined;
     return switch (operation) {
         inline else => |selected| switch (accumulator_class) {
             inline else => |selected_accumulator| switch (row_class) {
                 inline else => |selected_row| if (comptime rowFoldAccepts(selected, selected_accumulator, selected_row))
-                    rowFoldStep(selected, selected_accumulator, selected_row).run(evaluator, accumulator, accumulator_owned, row, length)
+                    rowFoldStep(selected, selected_accumulator, selected_row).run(fiber, accumulator, accumulator_owned, row, length)
                 else
                     .declined,
             },
@@ -3872,7 +3872,7 @@ pub fn columnFoldCandidate(operation: BinaryOp, input: Value) bool {
 /// result is pushed; the caller releases `input` as on any decline. The
 /// caller guards with `columnFoldCandidate` and has checked that
 /// `rows · columns` is the input's length.
-pub fn foldColumns(evaluator: *Fiber, operation: BinaryOp, input: *heap.OwnedValue, rows: usize, columns: usize) MachineError!void {
+pub fn foldColumns(fiber: *Fiber, operation: BinaryOp, input: *heap.OwnedValue, rows: usize, columns: usize) MachineError!void {
     @setEvalBranchQuota(10_000);
     const shape: ColumnShape = .{ .rows = rows, .width = columns };
     return switch (operation) {
@@ -3880,9 +3880,9 @@ pub fn foldColumns(evaluator: *Fiber, operation: BinaryOp, input: *heap.OwnedVal
             inline else => |selected_class| if (comptime columnAccumulator(selected, selected_class) == null)
                 unreachable
             else if (rows == 1)
-                support.Kernel(columnFold(selected, selected_class).CopySpec).run(evaluator, .{input}, shape, columns)
+                support.Kernel(columnFold(selected, selected_class).CopySpec).run(fiber, .{input}, shape, columns)
             else
-                support.Kernel(columnFold(selected, selected_class).FoldSpec).run(evaluator, .{input}, shape, rows * columns),
+                support.Kernel(columnFold(selected, selected_class).FoldSpec).run(fiber, .{input}, shape, rows * columns),
         },
     };
 }
@@ -3934,7 +3934,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 return shape.width;
             }
 
-            pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+            pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
                 const width = shape.width;
                 const elements = heap.leafElements(element.kind(), operands[0].list);
                 const columns = output.range(0, width);
@@ -3942,7 +3942,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 // Rows 0 and 1 in one step, as `foldLeafRow` folds a first
                 // pair, whenever the range holds both whole.
                 if (position == 0 and range.end >= 2 * width) {
-                    try step(element, evaluator, elements[0..width], elements[width..][0..width], columns, 0);
+                    try step(element, fiber, elements[0..width], elements[width..][0..width], columns, 0);
                     position = 2 * width;
                 }
                 var row = position / width;
@@ -3957,7 +3957,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                             .integer => if (element == .real) unreachable else @intCast(item),
                             .real => if (element == .real) item else @floatFromInt(item),
                         };
-                    } else try step(accumulator, evaluator, target, items, target, column);
+                    } else try step(accumulator, fiber, target, items, target, column);
                     position += count;
                     row += 1;
                     column = 0;
@@ -3973,7 +3973,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
         /// `rowFoldStep` does.
         fn step(
             comptime left_class: Number,
-            evaluator: *Fiber,
+            fiber: *Fiber,
             left: []const left_class.Element(),
             right: []const element.Element(),
             out: []Out,
@@ -4011,7 +4011,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                         element.boxed(right[index]),
                     }) catch |fault| {
                         const diagnostic = scalarDiagnostic(fault);
-                        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, base + index);
+                        return fiber.failAtIndex(diagnostic.kind, diagnostic.message, base + index);
                     };
                     block[slot] = accumulator.unboxed(next);
                 }
@@ -4034,30 +4034,30 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
         const unchecked = accumulator_class == .real and row_class == .real and
             (operation == .add or operation == .sub or operation == .mul);
 
-        fn run(evaluator: *Fiber, accumulator: Value, accumulator_owned: bool, row: Value, length: usize) MachineError!RowFold {
-            try evaluator.advanceKernel(length);
+        fn run(fiber: *Fiber, accumulator: Value, accumulator_owned: bool, row: Value, length: usize) MachineError!RowFold {
+            try fiber.advanceKernel(length);
             var right = heap.LeafReader(row_class.kind()).acquire(row.list);
-            defer right.release(evaluator.releases);
+            defer right.release(fiber.releases);
             // The accumulator may become the next one through the one
             // adoption every result producer uses; the step reads each
             // position of it before storing that position.
             if (out == accumulator_class and accumulator_owned) if (support.adopt(out.kind(), accumulator, 1, length)) |adopted| {
                 var result = adopted;
-                errdefer result.retire(evaluator.releases);
-                try apply(evaluator, heap.leafElements(out.kind(), accumulator.list)[0..length], right.slice(), result.range(0, length));
+                errdefer result.retire(fiber.releases);
+                try apply(fiber, heap.leafElements(out.kind(), accumulator.list)[0..length], right.slice(), result.range(0, length));
                 return .{ .in_place = result.finish() };
             };
             var left = heap.LeafReader(accumulator_class.kind()).acquire(accumulator.list);
-            defer left.release(evaluator.releases);
-            var writer = try heap.LeafWriter(out.kind()).init(evaluator.allocator, length);
-            errdefer writer.retirePartial(evaluator.releases);
-            try apply(evaluator, left.slice(), right.slice(), writer.unpublishedRange(0, length));
+            defer left.release(fiber.releases);
+            var writer = try heap.LeafWriter(out.kind()).init(fiber.allocator, length);
+            errdefer writer.retirePartial(fiber.releases);
+            try apply(fiber, left.slice(), right.slice(), writer.unpublishedRange(0, length));
             return .{ .fresh = writer.finish() };
         }
 
         /// `out` may alias `left`: each block is computed from operands not
         /// yet stored over, then stored.
-        fn apply(evaluator: *Fiber, left: []const Left, right: []const Right, out_items: []Element) MachineError!void {
+        fn apply(fiber: *Fiber, left: []const Left, right: []const Right, out_items: []Element) MachineError!void {
             var block = Staging.init();
             var start: usize = 0;
             while (start != out_items.len) {
@@ -4087,7 +4087,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
                         row_class.boxed(right[index]),
                     }) catch |fault| {
                         const diagnostic = scalarDiagnostic(fault);
-                        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, index);
+                        return fiber.failAtIndex(diagnostic.kind, diagnostic.message, index);
                     };
                     block.items[slot] = out.unboxed(next);
                 }
@@ -4101,7 +4101,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
 /// `consumed` stack values lie under the result: the list is the deepest,
 /// and `start` is 1 when `initial` is its first element.
 pub fn startReduction(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     operation: BinaryOp,
     scan: bool,
     input: Value,
@@ -4114,22 +4114,22 @@ pub fn startReduction(
     const count: usize = @intCast(input.list.length());
     if (count == start) {
         if (from_first) {
-            try evaluator.pushBorrowed(initial);
-            var result = try evaluator.popValue();
+            try fiber.pushBorrowed(initial);
+            var result = try fiber.popValue();
             defer result.deinit();
-            evaluator.discard(consumed);
-            return evaluator.pushOwned(result.take());
+            fiber.discard(consumed);
+            return fiber.pushOwned(result.take());
         }
         if (scan) {
-            const result = try list.fromValuesGeneric(evaluator.allocator, &.{});
-            evaluator.discard(3);
-            return evaluator.pushOwned(result);
+            const result = try list.fromValuesGeneric(fiber.allocator, &.{});
+            fiber.discard(3);
+            return fiber.pushOwned(result);
         }
-        evaluator.discard(1);
-        var accumulator = try evaluator.popValue();
+        fiber.discard(1);
+        var accumulator = try fiber.popValue();
         defer accumulator.deinit();
-        evaluator.discard(1);
-        try evaluator.pushOwned(accumulator.take());
+        fiber.discard(1);
+        try fiber.pushOwned(accumulator.take());
         return;
     }
     // Over a numeric leaf with an accumulator that stabilizes after at most
@@ -4137,13 +4137,13 @@ pub fn startReduction(
     // cursor and one scheduler turn per element. Association stays left-to-right, so
     // float sums keep the generic route's bits.
     if (typedReduceCandidate(operation, input, initial)) {
-        return idiomReduceStart(operation)(evaluator, input, initial, scan, start, consumed);
+        return idiomReduceStart(operation)(fiber, input, initial, scan, start, consumed);
     }
     const results: ?heap.OwnedValueBuffer = if (scan)
-        try .init(evaluator.releases, count)
+        try .init(fiber.releases, count)
     else
         null;
-    try evaluator.startDriver(ReductionDriver{
+    try fiber.startDriver(ReductionDriver{
         .operation = operation,
         .scan = scan,
         .input = input,
@@ -4176,10 +4176,10 @@ const ReductionDriver = struct {
     cursor: heap.Owned(PervadeCursor) = .none,
 
     pub fn advance(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *ReductionDriver,
     ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+        try fiber.pollKernel();
         // A fold whose accumulator and next row are typed leaves of one class
         // and length applies whole rows here, each charged before it runs,
         // without a cursor or a machine turn per row. Anything else, and any
@@ -4188,7 +4188,7 @@ const ReductionDriver = struct {
             const accumulator = self.accumulator.borrowMut();
             const owned = accumulator.* == .owned;
             switch (try foldLeafRow(
-                evaluator,
+                fiber,
                 self.operation,
                 accumulator.value(),
                 owned,
@@ -4196,10 +4196,10 @@ const ReductionDriver = struct {
             )) {
                 .declined => break,
                 .in_place => |next| accumulator.* = .{ .owned = next },
-                .fresh => |next| accumulator.replaceOwned(evaluator.releases, next),
+                .fresh => |next| accumulator.replaceOwned(fiber.releases, next),
             }
             self.initialized += 1;
-            if (evaluator.remainingKernelFuel() == 0) return .stepped;
+            if (fiber.remainingKernelFuel() == 0) return .stepped;
         };
         if (!self.materializing and self.initialized < self.input.list.length()) {
             if (!self.cursor.isPresent()) {
@@ -4210,50 +4210,50 @@ const ReductionDriver = struct {
                 // output; both are only lent.
                 self.cursor = .init(if (!self.scan and self.accumulator.borrow() == .owned)
                     try .initBinaryOwningLeft(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                         self.operation,
-                        .init(evaluator.releases, self.accumulator.borrowMut().takeOwned()),
+                        .init(fiber.releases, self.accumulator.borrowMut().takeOwned()),
                         row,
                     )
                 else
                     try .initBinary(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                         self.operation,
                         self.accumulator.borrow().value(),
                         row,
                     ));
             }
-            const next = switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+            const next = switch (try self.cursor.borrowMut().advance(fiber, fiber.workBudget())) {
                 .pending => return .stepped,
                 .complete => |result| result,
             };
-            self.cursor.deinit(evaluator.releases, evaluator.allocator);
+            self.cursor.deinit(fiber.releases, fiber.allocator);
             if (self.scan) {
                 self.results.?.borrowMut().appendOwned(next);
                 self.accumulator.borrowMut().* = .{ .borrowed = next };
             } else {
-                self.accumulator.borrowMut().replaceOwned(evaluator.releases, next);
+                self.accumulator.borrowMut().replaceOwned(fiber.releases, next);
             }
             self.initialized += 1;
             return .stepped;
         }
         if (!self.scan) {
-            evaluator.discard(self.consumed);
+            fiber.discard(self.consumed);
             return .{ .output = self.accumulator.borrowMut().takeOwned() };
         }
         if (!self.materializing) {
             self.materializer = .init(.init(
-                evaluator.allocator,
+                fiber.allocator,
                 self.results.?.borrow().values(),
             ));
             self.materializing = true;
         }
-        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+        return switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| completed: {
-                evaluator.discard(3);
+                fiber.discard(3);
                 break :completed .{ .output = result };
             },
         };
@@ -4313,7 +4313,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
     return switch (operation) {
         inline else => |selected| struct {
             fn run(
-                evaluator: *Fiber,
+                fiber: *Fiber,
                 input: Value,
                 initial: Value,
                 scan: bool,
@@ -4323,8 +4323,8 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                 const element_class = leafNumber(input).?;
                 const accumulator_class = scalarNumber(initial).?;
                 const plan = NumericReducePlan.select(selected, accumulator_class, element_class, scan) orelse
-                    return unexpectedReduceShape(evaluator);
-                return plan.start(evaluator, input, initial, start, consumed);
+                    return unexpectedReduceShape(fiber);
+                return plan.start(fiber, input, initial, start, consumed);
             }
         }.run,
     };

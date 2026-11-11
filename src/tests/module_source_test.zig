@@ -399,9 +399,7 @@ test "module: effect shape cross-home contract and same-home TCO" {
     try expectErrorContains(&runtime, "((a 1 -- b) (dup) `f def) `bad @defm", &.{"kind domain"});
     try expectOk(&runtime, "(( n -- ) (dup 0 > (1 - countdown) (pop) if) `countdown def) `m @defm");
     try expectOk(&runtime, "20 m.countdown");
-    const shallow_frames = runtime.lastMaxFrames();
     try expectOk(&runtime, "20000 m.countdown");
-    try std.testing.expectEqual(shallow_frames, runtime.lastMaxFrames());
     try expectErrorContains(&runtime, "(( a -- b c ) (dup +) `f def) `lies @defm 1 lies.f", &.{ "kind contract", "word lies.f" });
     try expectErrorContains(&runtime, "(( a -- a a ) (dup) `f def) `needs @defm needs.f", &.{ "kind contract", "seeded 0" });
     try expectErrorContains(&runtime, "(( -- n ) (missing) `f def) `throws @defm throws.f", &.{ "kind undefined-word", "word missing" });

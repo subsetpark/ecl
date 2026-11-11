@@ -20,10 +20,10 @@ pub const words = [_]env.BuiltinWord{.{
     .primitive = declarations,
 }};
 
-fn declarations(evaluator: *machine.Fiber) machine.MachineError!void {
-    var forms = try evaluator.popQuotation();
+fn declarations(fiber: *machine.Fiber) machine.MachineError!void {
+    var forms = try fiber.popQuotation();
     defer forms.deinit();
-    try evaluator.startDriver(DeclarationsDriver{ .forms = .init(forms.take()) });
+    try fiber.startDriver(DeclarationsDriver{ .forms = .init(forms.take()) });
 }
 
 const DeclarationsDriver = struct {
@@ -35,10 +35,10 @@ const DeclarationsDriver = struct {
     // The counting pass fixes the allocation size before materialization.
     output: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
-    pub fn advance(evaluator: *machine.Fiber, self: *DeclarationsDriver) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *machine.Fiber, self: *DeclarationsDriver) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const forms = self.forms.borrow();
-        const end = self.index + evaluator.workBudget().take(forms.list.length() - self.index);
+        const end = self.index + fiber.workBudget().take(forms.list.length() - self.index);
         while (self.index < end) : (self.index += 1) {
             if (self.scan.feed(list.atUnchecked(forms, self.index))) |name| {
                 if (self.output) |*output| {
@@ -52,7 +52,7 @@ const DeclarationsDriver = struct {
             self.output = null;
             return .{ .output = result };
         }
-        self.output = .init(try .init(evaluator.releases, self.count));
+        self.output = .init(try .init(fiber.releases, self.count));
         self.index = 0;
         self.scan = .{};
         return .stepped;

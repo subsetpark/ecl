@@ -59,7 +59,7 @@ The main components are these:
 | Reader and source archive | Turn source into executable values while retaining optional diagnostic spans | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
 | Names and modules | Resolution at dispatch, validated and immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
-| Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
+| Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, load and construct modules, and construct errors | `machine.zig`, `load.zig`, `module_construction.zig`, `failure.zig`, `error_value.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green fibers, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
@@ -131,7 +131,7 @@ allocation failure restores the checkpoint.
 
 The transaction covers the operand stack. Output already written, native side
 effects, filesystem changes, and other host effects remain committed. The
-evaluator restores the values it owns and leaves effects owned by other systems
+Session restores the values it owns and leaves effects owned by other systems
 to those systems.
 
 The same unit abstraction supports calculator input, script execution,
@@ -442,7 +442,7 @@ provenance stays focused on diagnostics.
 
 ## 3. Values and storage
 
-The evaluator moves one closed `Value` union. The layout is fixed at 16 bytes:
+The machine moves one closed `Value` union. The layout is fixed at 16 bytes:
 integers, floats, Unicode scalars, symbols, and word references are inline;
 lists, dictionaries, tasks, and ports carry kind-specific
 opaque handles. External code inspects handles through their public semantic surfaces.
@@ -484,7 +484,7 @@ capability whose lifetime keeps the list alive.
 The arrangement follows the array-language instinct that homogeneous data
 deserves homogeneous storage, while retaining the concatenative rule that any
 list may also be a quotation. Generic spines are the universal fallback; flat
-leaves optimize storage and execution through the same evaluator.
+leaves optimize storage and execution through the same machine.
 
 ### Dictionaries preserve insertion and ignore it for identity
 
@@ -929,6 +929,17 @@ the current quotation, the environment is the `ExecutionSite`, and the
 continuation is a tagged `Frame`. ecl adds its visible operand stack and the
 application, scheduler, module, and error boundaries required by the language.
 
+Only the machine edits the continuation. Its own subsystems — module loading,
+module construction, and failure delivery — live outside `machine.zig` and
+need more of the continuation than a primitive may have: opening a load or
+construction boundary, running a registering source in place of its caller,
+taking the pending failure and unwinding. Each reaches those operations
+through an opaque view of the Fiber (`Loading`, `Construction`, `Unwinding`)
+that only the machine mints. A work driver names the view it needs as the
+first parameter of its `advance`; the public start paths hold only the Fiber
+and refuse such a driver at compile time, so a view is obtained only from the
+machine or from a driver already holding it.
+
 ### Explicit frames carry continuation
 
 `Frame` is one exhaustive tagged union. Its variants represent:
@@ -1008,8 +1019,13 @@ The window is a nominal value derived from a real stack depth. A callback
 cannot pair an arbitrary base with a count, and a nested application that
 suspends carries the exact continuation it must resume.
 
-A paging application is the third floor kind beside the caller's stack and
-the isolated substack. Its substack starts empty, and an operand check that
+An application names how its quotation meets the stack beneath it: in place
+on the caller's stack, isolated behind a hard floor, or over a paging floor.
+The three differ only in that floor, so they share one launch vocabulary,
+used when the application starts and for each quotation it applies next, and
+the floor and everything that moves it have one owner, `paging.zig`.
+
+A paging application's substack starts empty, and an operand check that
 comes up short pages the missing values across the floor: the frame retains
 a copy of each and the floor lowers to include it, so a quotation's
 consumption is the sum of what its words required, which is the stack effect
@@ -1027,17 +1043,18 @@ collected for a cleave), and pushes the originals back in order, in place on
 the stack. The guards therefore keep no checkpoint: a test takes what it
 requires and the finalize gives it back. Paging floors nest by chaining
 through the floor beneath, and the hard floor beneath them all is where
-underflow still happens. Every site that saves or restores the stack base
-also saves which paging floor is innermost, so a boundary or isolated
-application inside one blocks paging while it is open and restores it when
-it closes. A frame alternates its applications between a paging floor its
+underflow still happens. Whatever sets a floor over another, whether a
+boundary, an isolated application, or a paging one, keeps the floor beneath as
+one value, a hard depth or a paging floor, so a boundary or isolated
+application inside a paging floor blocks paging while it is open and restores
+it when it closes. A frame alternates its applications between a paging floor its
 context keeps in place and the caller's stack by naming the launch of each,
 so a guard runs its tests and actions under one frame.
 
 ### Failure is a bounded machine transition
 
 Language errors are ordinary dictionary values at observation boundaries, but
-the live evaluator carries a compact internal `EclErr`. On failure, one
+the live Fiber carries a compact internal `EclErr`. On failure, one
 `FailureDriver`:
 
 1. walks explicit frames to collect the language trace;
@@ -1110,7 +1127,7 @@ outstanding admissions are bounded by the executor count, including the root.
 Cancellation withdraws a pressure waiter without acquiring admission. Wait
 delivery and terminal task work remain runnable. Root and worker evaluation
 use the same admission protocol, and relieving pressure wakes idle executors.
-An admitted evaluation makes at least one transition, then yields at evaluator
+An admitted evaluation makes at least one transition, then yields at machine
 step boundaries if pressure has risen. Thus in-flight producers cannot keep
 allocating for an entire instruction quantum after the backlog fills, and a
 reserved admission always carries progress even if pressure rises again.
@@ -1374,7 +1391,7 @@ only legal decision. `scheduler.zig` owns mutexes, atomics, queues, workers,
 timer infrastructure, and the effects of those decisions. `turn_core.zig` does
 the same for a fiber's turn: the budget charge, whether more work may start,
 whether a cancellable completion observes cancellation before handing
-execution onward, and what the evaluator does after a driver steps or yields,
+execution onward, and what the Fiber does after a driver steps or yields,
 where every yield names whether the driver parked, waits on something outside
 its own work, or is settling work that must not observe cancellation.
 
@@ -1793,7 +1810,7 @@ as ordinary ecl definitions and modules.
 ### Prelude and standard modules retain source authority
 
 `prelude.ecl` is embedded and evaluated during Session construction to populate
-core. It runs through the ordinary incremental evaluator in a root whose
+core. It runs through the ordinary frame machine in a root whose
 storage is the core-building authority, so each definition is validated as it
 is made against the core built so far and the prelude needs no forward
 references; core is then frozen before any ordinary unit
@@ -2095,7 +2112,7 @@ failures, and byte transport with ports, without creating language port values o
 participating in capability transfer. The Session's opaque HTTP service owns
 configuration, admission, and execution authority; inherited runtime context
 carries submission access. Each admitted request progresses from preparation to
-owned active input, joined response, and consumed response. Execution and evaluator
+owned active input, joined response, and consumed response. Execution and Fiber
 materialization transfer one response representation whose bounded retirement
 also owns request storage; failure and success use the same cleanup contract. One host controller
 exclusively owns the cancellable I/O future. Scheduler cancellation only changes
@@ -2113,7 +2130,7 @@ already-ready sources; progress never establishes a new deadline. Untimed
 external waits retain their existing behavior. Network execution receives owned
 bytes and immutable service inputs. Encoded bytes are counted before decompression
 and decoded bytes afterward, including redirect bodies; an accounting allocator
-bounds backend scratch separately from allocation failure. The evaluator drains
+bounds backend scratch separately from allocation failure. The Fiber drains
 bounded transport during execution into fixed chunks and performs one polled,
 exact-size materialization. HTTP retains its own header normalization and ordinary
 dictionary/text/byte-list construction, with no port-message node limits.
@@ -2240,10 +2257,10 @@ snapshot requires reacquisition. Revoked child authority instead detaches the
 undeliverable envelope under the source lock and transfers its cleanup to
 bounded retirement after unlocking. It can never leave that envelope available
 as a retry candidate. A scope that has begun closing refuses a claim without
-consuming its source. The receiving evaluator reserves stack capacity before that
+consuming its source. The receiving Fiber reserves stack capacity before that
 transition, so allocation failure cannot consume a result without publishing it.
 The driver's completion carries that reservation with its owned output; only
-the evaluator commits it after driver retirement, without further allocation.
+the machine loop commits it after driver retirement, without further allocation.
 
 An external-child scope owns provisional resources and separately
 represents permanent parent dependencies. It admits only external members and
@@ -2638,7 +2655,7 @@ stack values, definitions, modules, and history survive into the next
 successful turn.
 
 Non-TTY stdin, files, `-e`, explicit output words, and formatting are CLI
-policies around these shared evaluator surfaces.
+policies around these shared Session surfaces.
 
 ## 12. Cross-cutting architectural rules
 

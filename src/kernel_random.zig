@@ -36,28 +36,28 @@ const MachineError = machine.MachineError;
 /// per-counter stride so consecutive counters land in unrelated sub-streams.
 const gamma: u64 = 0x9E3779B97F4A7C15;
 
-pub fn intForModule(evaluator: *Fiber) MachineError!void {
-    return randInt(evaluator);
+pub fn intForModule(fiber: *Fiber) MachineError!void {
+    return randInt(fiber);
 }
 
-pub fn intsForModule(evaluator: *Fiber) MachineError!void {
-    return randInts(evaluator);
+pub fn intsForModule(fiber: *Fiber) MachineError!void {
+    return randInts(fiber);
 }
 
-pub fn floatForModule(evaluator: *Fiber) MachineError!void {
-    return randFloat(evaluator);
+pub fn floatForModule(fiber: *Fiber) MachineError!void {
+    return randFloat(fiber);
 }
 
-pub fn entropyForModule(evaluator: *Fiber) MachineError!void {
-    return entropy(evaluator);
+pub fn entropyForModule(fiber: *Fiber) MachineError!void {
+    return entropy(fiber);
 }
 
-pub fn dealForModule(evaluator: *Fiber) MachineError!void {
-    return randDeal(evaluator);
+pub fn dealForModule(fiber: *Fiber) MachineError!void {
+    return randDeal(fiber);
 }
 
-pub fn shuffleForModule(evaluator: *Fiber) MachineError!void {
-    return randShuffle(evaluator);
+pub fn shuffleForModule(fiber: *Fiber) MachineError!void {
+    return randShuffle(fiber);
 }
 
 /// One decoded generator state. The ECL representation stays a plain list;
@@ -101,71 +101,71 @@ fn floatDraw(state: State, index: u64) f64 {
     return @as(f64, @floatFromInt(stream.next() >> 11)) * 0x1.0p-53;
 }
 
-fn stateValue(evaluator: *Fiber, state: State) error{OutOfMemory}!Value {
+fn stateValue(fiber: *Fiber, state: State) error{OutOfMemory}!Value {
     const items = [2]Value{
         .{ .int = @bitCast(state.key) },
         .{ .int = @bitCast(state.counter) },
     };
-    var materializer = list.ValueMaterializer.init(evaluator.allocator, &items);
-    defer materializer.retire(evaluator.releases);
+    var materializer = list.ValueMaterializer.init(fiber.allocator, &items);
+    defer materializer.retire(fiber.releases);
     var work = poll_api.unbounded();
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
 
-fn popState(evaluator: *Fiber) MachineError!State {
-    var item = try evaluator.popValue();
+fn popState(fiber: *Fiber) MachineError!State {
+    var item = try fiber.popValue();
     defer item.deinit();
     return State.decode(item.borrow()) orelse
-        evaluator.typeError("a generator state of two integers");
+        fiber.typeError("a generator state of two integers");
 }
 
 /// The two rejections read differently: a non-integer never could have been a
 /// count, while an integer below the minimum is a count that is out of range.
-fn popCount(evaluator: *Fiber, minimum: i64, what: []const u8) MachineError!u64 {
-    var item = try evaluator.popValue();
+fn popCount(fiber: *Fiber, minimum: i64, what: []const u8) MachineError!u64 {
+    var item = try fiber.popValue();
     defer item.deinit();
-    if (item.borrow() != .int) return evaluator.typeError(what);
-    if (item.borrow().int < minimum) return evaluator.failFmt(
+    if (item.borrow() != .int) return fiber.typeError(what);
+    if (item.borrow().int < minimum) return fiber.failFmt(
         .domain,
         "{s} expected {s}, not {d}",
-        .{ evaluator.activeWordName(), what, item.borrow().int },
+        .{ fiber.activeWordName(), what, item.borrow().int },
     );
     return @intCast(item.borrow().int);
 }
 
-fn randInt(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    const bound = try popCount(evaluator, 1, "a positive bound");
-    const state = try popState(evaluator);
-    try evaluator.pushOwned(try stateValue(evaluator, state.advanced(1)));
-    try evaluator.pushOwned(.{ .int = @bitCast(boundedDraw(state, 0, bound)) });
+fn randInt(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    const bound = try popCount(fiber, 1, "a positive bound");
+    const state = try popState(fiber);
+    try fiber.pushOwned(try stateValue(fiber, state.advanced(1)));
+    try fiber.pushOwned(.{ .int = @bitCast(boundedDraw(state, 0, bound)) });
 }
 
-fn randFloat(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(1);
-    const state = try popState(evaluator);
-    try evaluator.pushOwned(try stateValue(evaluator, state.advanced(1)));
-    try evaluator.pushOwned(.{ .float = floatDraw(state, 0) });
+fn randFloat(fiber: *Fiber) MachineError!void {
+    try fiber.require(1);
+    const state = try popState(fiber);
+    try fiber.pushOwned(try stateValue(fiber, state.advanced(1)));
+    try fiber.pushOwned(.{ .float = floatDraw(state, 0) });
 }
 
-fn randInts(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    const bound = try popCount(evaluator, 1, "a positive bound");
-    const count = try popCount(evaluator, 0, "a nonnegative draw count");
-    const state = try popState(evaluator);
+fn randInts(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    const bound = try popCount(fiber, 1, "a positive bound");
+    const count = try popCount(fiber, 0, "a nonnegative draw count");
+    const state = try popState(fiber);
     // The advanced state is pushed before the vector so the driver's single
     // output lands on top, matching ( state n m -- state' list ).
-    try evaluator.pushOwned(try stateValue(evaluator, state.advanced(count)));
+    try fiber.pushOwned(try stateValue(fiber, state.advanced(count)));
     // A zero-length draw has no element to type, and the representation of an
     // empty result is the value layer's existing choice: it stays the generic
     // empty list this word has always produced.
     if (count == 0) {
-        return evaluator.pushOwned(try list.fromValues(evaluator.allocator, &.{}));
+        return fiber.pushOwned(try list.fromValues(fiber.allocator, &.{}));
     }
     // Every element of a draw vector is an int: the output representation is
     // known before the first draw, so the fill writes the typed buffer directly
     // and nothing is profiled afterwards.
-    try support.Kernel(DrawKernel).run(evaluator, .{}, .{ .state = state, .bound = bound }, @intCast(count));
+    try support.Kernel(DrawKernel).run(fiber, .{}, .{ .state = state, .bound = bound }, @intCast(count));
 }
 
 /// Fills an exact-size typed draw vector under the ordinary kernel budget.
@@ -277,17 +277,17 @@ const DealOutput = struct {
 };
 
 /// `( state count pool -- state results )`: `count` distinct ints below `pool`.
-fn randDeal(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    const pool = try popCount(evaluator, 0, "a nonnegative pool size");
-    const count = try popCount(evaluator, 0, "a nonnegative draw count");
-    if (count > pool) return evaluator.fail(.domain, "rand.deal cannot draw more values than the pool holds");
-    const state = try popState(evaluator);
-    try evaluator.pushOwned(try stateValue(evaluator, state.advanced(count)));
+fn randDeal(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    const pool = try popCount(fiber, 0, "a nonnegative pool size");
+    const count = try popCount(fiber, 0, "a nonnegative draw count");
+    if (count > pool) return fiber.fail(.domain, "rand.deal cannot draw more values than the pool holds");
+    const state = try popState(fiber);
+    try fiber.pushOwned(try stateValue(fiber, state.advanced(count)));
     if (count == 0) {
-        return evaluator.pushOwned(try list.fromValues(evaluator.allocator, &.{}));
+        return fiber.pushOwned(try list.fromValues(fiber.allocator, &.{}));
     }
-    try support.Kernel(DealKernel).run(evaluator, .{}, .{ .state = state, .pool = pool }, @intCast(count));
+    try support.Kernel(DealKernel).run(fiber, .{}, .{ .state = state, .pool = pool }, @intCast(count));
 }
 
 /// The dealer as a kernel: ranges are charged to the budget in order, and the
@@ -297,10 +297,10 @@ const DealKernel = struct {
     pub const Params = struct { state: State, pool: u64 };
     pub const Output = DealOutput;
 
-    pub fn prepare(evaluator: *Fiber, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
-        var dealer = try Dealer.init(evaluator.allocator, length);
+    pub fn prepare(fiber: *Fiber, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
+        var dealer = try Dealer.init(fiber.allocator, length);
         errdefer dealer.deinit();
-        return .{ .dealer = dealer, .writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, length) };
+        return .{ .dealer = dealer, .writer = try heap.LeafWriter(.leaf_i64).init(fiber.allocator, length) };
     }
 
     pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: *Fiber) MachineError!void {
@@ -318,21 +318,21 @@ const DealKernel = struct {
 /// a gather of the elements through that permutation, so every element kind
 /// is permuted and a typed leaf keeps its representation. The state advances
 /// by the length.
-fn randShuffle(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var values = try evaluator.popValue();
+fn randShuffle(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var values = try fiber.popValue();
     defer values.deinit();
-    if (values.borrow() != .list) return evaluator.typeError("a list to shuffle");
-    const state = try popState(evaluator);
+    if (values.borrow() != .list) return fiber.typeError("a list to shuffle");
+    const state = try popState(fiber);
     const length: usize = @intCast(values.borrow().list.length());
-    try evaluator.pushOwned(try stateValue(evaluator, state.advanced(@intCast(length))));
-    if (length == 0) return evaluator.pushOwned(values.take());
+    try fiber.pushOwned(try stateValue(fiber, state.advanced(@intCast(length))));
+    if (length == 0) return fiber.pushOwned(values.take());
     const source_kind = values.borrow().list.kind();
     inline for (leaf_kinds) |candidate| {
         if (candidate == source_kind)
-            return support.Kernel(ShuffleKernel(candidate)).run(evaluator, .{&values}, state, length);
+            return support.Kernel(ShuffleKernel(candidate)).run(fiber, .{&values}, state, length);
     }
-    return support.Kernel(ShuffleKernel(null)).run(evaluator, .{&values}, state, length);
+    return support.Kernel(ShuffleKernel(null)).run(fiber, .{&values}, state, length);
 }
 
 const leaf_kinds = [_]value.HeapKind{
@@ -364,20 +364,20 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Fiber, _: [1]Value, _: State, length: usize) error{OutOfMemory}!Output {
-            var dealer = try Dealer.init(evaluator.allocator, length);
+        pub fn prepare(fiber: *Fiber, _: [1]Value, _: State, length: usize) error{OutOfMemory}!Output {
+            var dealer = try Dealer.init(fiber.allocator, length);
             errdefer dealer.deinit();
-            const permutation = try evaluator.allocator.alloc(i64, length);
-            errdefer evaluator.allocator.free(permutation);
+            const permutation = try fiber.allocator.alloc(i64, length);
+            errdefer fiber.allocator.free(permutation);
             return .{
-                .allocator = evaluator.allocator,
+                .allocator = fiber.allocator,
                 .dealer = dealer,
                 .permutation = permutation,
                 .phase = .deal,
                 .result = if (kind) |leaf|
-                    try heap.LeafWriter(leaf).init(evaluator.allocator, length)
+                    try heap.LeafWriter(leaf).init(fiber.allocator, length)
                 else
-                    try heap.OwnedValueBuffer.init(evaluator.releases, length),
+                    try heap.OwnedValueBuffer.init(fiber.releases, length),
             };
         }
 
@@ -420,10 +420,10 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
 }
 
 /// The one impure word reads the process CSPRNG through runtime I/O.
-fn entropy(evaluator: *Fiber) MachineError!void {
-    const io = evaluator.inherited.runtime().host_io;
+fn entropy(fiber: *Fiber) MachineError!void {
+    const io = fiber.inherited.runtime().host_io;
     var bytes: [8]u8 = undefined;
     std.Io.randomSecure(io, &bytes) catch
-        return evaluator.fail(.io, "entropy is unavailable");
-    try evaluator.pushOwned(.{ .int = @bitCast(std.mem.readInt(u64, &bytes, .little)) });
+        return fiber.fail(.io, "entropy is unavailable");
+    try fiber.pushOwned(.{ .int = @bitCast(std.mem.readInt(u64, &bytes, .little)) });
 }
