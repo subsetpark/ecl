@@ -207,7 +207,21 @@ test "modules: *module* reports the running module's name" {
     // name rather than the spelling used at the call site.
     try expectStack(&runtime, "`short `left alias short.name", "left");
 
-    // The root has no home and therefore no module name to manufacture.
+    // A module's code runs as that module wherever it runs: under `@attempt`
+    // and in a task the module spawns alike.
+    try expectStack(
+        &runtime,
+        "(((*module*) @attempt `ok at first) `attempted def " ++
+            "((*module*) @spawn task.await `ok at first) `spawned def) `nested @defm " ++
+            "nested.attempted nested.spawned",
+        "nested nested",
+    );
+    // The root has no home and therefore no module name to manufacture, and
+    // neither does a task spawned there.
+    try expectErrorContains(&runtime, "(*module*) @spawn task.await `err at raise", &.{
+        "kind domain",
+        "registered module",
+    });
     try expectErrorContains(&runtime, "*module*", &.{
         "kind domain",
         "registered module",

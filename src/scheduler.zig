@@ -1518,10 +1518,9 @@ const ScopeCancellationCursor = struct {
 };
 
 pub const SpawnSite = union(enum) {
-    inherited: struct {
-        scope: *env.Scope,
-        home: ?*modules.ModuleHome,
-    },
+    /// The child applies its quotation in the spawner's current root.
+    inherited: *env.Scope,
+    /// The child runs one registered module generation's own code.
     module: *modules.ModuleHome,
 };
 
@@ -1967,24 +1966,18 @@ pub const WorkerScheduler = enum(usize) {
         ) };
         const fiber = &execution.fiber;
         errdefer fiber.deinit();
-        const parent_scope = switch (request.site) {
-            .inherited => |site| site.scope,
-            .module => |home| home.scope(request.parent_fiber.module_access),
-        };
         // A task runs in its spawner's scope, which is always a root: the
         // session, which outlives every task in it, or a module image, which
         // the generation pin below keeps alive. It may not define there.
-        fiber.execution_scope = parent_scope;
+        fiber.root_entry = switch (request.site) {
+            .inherited => |scope| .{ .scope = scope },
+            .module => |home| .{ .image = home },
+        };
         fiber.role = .task;
         fiber.scheduler = self;
         fiber.task_scope = &cell.scope;
-        switch (request.site) {
-            .inherited => |site| if (site.home) |generation| try fiber.pinGeneration(generation),
-            .module => |generation| {
-                try fiber.pinGeneration(generation);
-                fiber.executeRootAtModule(generation);
-            },
-        }
+        if (modules.homeForModuleRootScope(fiber.lexicalScope())) |generation|
+            try fiber.pinGeneration(generation);
         machine.initialize(fiber, request.quotation);
         // Attach the moved resources to the child's scope while the scope is
         // still private: nothing can reach it, so a failure here unwinds by

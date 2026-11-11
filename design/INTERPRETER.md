@@ -744,21 +744,27 @@ since nothing binds it. An iteration's applications borrow the quotation the
 combinator holds for the whole invocation. The bootstrap fiber keeps no
 resolutions, because core's directory changes without a publication.
 
-### An execution site correlates its contexts
+### An execution site is the current root
 
-An activation needs two related but non-identical facts:
+An activation runs in one root, and its `ExecutionSite` names it by that
+root's scope. The scope is where the activation's own definitions land. When
+it is a module image's root scope, the image is the module whose code is
+running, and the site derives it from the scope instead of carrying it: an
+activation cannot run in one module's scope as another module, or as none.
 
-- `scope`: the root its own definitions land in, and whether they may; and
-- `home`: the module image whose privacy it may use.
+A module word runs in its image's scope. Every other word runs at its caller's
+site unchanged, and a quotation applied as a value, by `call`, a combinator,
+`@attempt`, or a resumed load, runs in its caller's root without the caller's
+embedded registration trust. A task runs in its spawner's root; a protected
+test invocation runs as its module's image. A fiber records which of these
+its root activation is as one tagged value.
 
 Whether definitions may land is a flag on the site, set only where a root is
 entered: a root fiber and module construction set it, and a task clears it,
 because a task runs in its spawner's root without owning it. Everything else,
 every combinator application and `@attempt` included, inherits it unchanged,
-so whether a word may define never depends on which combinator reached it. `ExecutionSite` carries these together and exposes named
-constructors for root, image, inherited, and resumed execution; they cannot
-safely be reconstructed from one another. Where a word resolves is carried by
-the word.
+so whether a word may define never depends on which combinator reached it.
+Where a word resolves is carried by the word.
 
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.

@@ -152,7 +152,7 @@ const WhileState = struct {
     condition: heap.Owned(*Header),
     body: heap.Owned(*Header),
     paged: heap.Owned(PagedControl),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     /// The quotation that last finished, or the restore a suspension completes.
@@ -215,7 +215,7 @@ const WhileState = struct {
 
 const TimesState = struct {
     quotation: heap.Owned(*Header),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     remaining: usize,
     word: intern.TraceWord,
 
@@ -304,7 +304,7 @@ const DipState = struct {
     protected: heap.Owned(Value),
     /// Whether the value came across a paging floor, so it returns as one.
     original: bool,
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
 
     fn application(self: *DipState) Application {
@@ -383,7 +383,7 @@ const DipControl = struct {
     /// Which of them are originals of a paging floor, by `protected` index.
     originals: std.DynamicBitSetUnmanaged,
     count: usize,
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
     index: usize = 0,
     phase: enum { take, run, restore } = .take,
@@ -657,7 +657,7 @@ const PagedControl = struct {
 const PagedState = struct {
     quotation: heap.Owned(*Header),
     paged: heap.Owned(PagedControl),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
     phase: enum { run, restored } = .run,
 
@@ -826,7 +826,7 @@ const CleaveQuotations = union(enum) {
 const CleaveState = struct {
     quotations: heap.Owned(CleaveQuotations),
     paged: heap.Owned(PagedControl),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
     /// The most inputs any quotation consumed: consumption is a prefix from
     /// the top, so the sets nest.
@@ -943,7 +943,7 @@ const CleaveState = struct {
 const CondState = struct {
     clauses: heap.Owned(Value),
     paged: heap.Owned(PagedControl),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     pair_index: usize = 0,
@@ -1035,7 +1035,7 @@ fn cond(evaluator: *Fiber) MachineError!void {
 /// lone else.
 const CondDriver = struct {
     clauses: heap.Owned(Value),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     index: usize = 0,
@@ -1083,7 +1083,7 @@ const LinrecState = struct {
     pre: heap.Owned(*Header),
     post: heap.Owned(*Header),
     paged: heap.Owned(PagedControl),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     /// Descents whose `post` has yet to run.
@@ -1194,7 +1194,7 @@ const IterationState = struct {
     quotation: heap.Owned(*Header),
     expected: ?heap.Owned(Value),
     results: ?heap.Owned(heap.OwnedValueBuffer) = null,
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     index: usize = 0,
     count: usize,
     word: intern.TraceWord,
@@ -1425,7 +1425,7 @@ const UpdateState = struct {
     position_index: usize = 0,
     copy_index: usize = 0,
     application_index: usize = 0,
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
 };
 
@@ -1813,7 +1813,7 @@ const StencilControl = struct {
     quotation: heap.Owned(*Header),
     expected: heap.Owned(Value),
     results: heap.OwnedValueBuffer,
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     index: usize = 0,
     count: usize,
     width: usize,
@@ -2052,7 +2052,7 @@ const UnfoldState = struct {
     step_expected: heap.Owned(Value),
     values: heap.Owned(heap.OwnedValueChain),
     items: heap.Owned(UnfoldItems),
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     index: usize = 0,
     word: intern.TraceWord,
 

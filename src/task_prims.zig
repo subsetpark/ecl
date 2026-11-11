@@ -54,10 +54,7 @@ fn spawnTask(
 ) MachineError!Value {
     return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
         .parent_fiber = evaluator,
-        .site = .{ .inherited = .{
-            .scope = evaluator.currentScope(),
-            .home = evaluator.currentHome(),
-        } },
+        .site = .{ .inherited = evaluator.currentScope() },
         .quotation = quotation,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -264,10 +261,7 @@ const GiveDriver = struct {
     fn spawn(self: *GiveDriver, evaluator: *Fiber) MachineError!Value {
         return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
             .parent_fiber = evaluator,
-            .site = .{ .inherited = .{
-                .scope = evaluator.currentScope(),
-                .home = evaluator.currentHome(),
-            } },
+            .site = .{ .inherited = evaluator.currentScope() },
             .quotation = self.body.list,
             .transfer = &self.cursor,
         }) catch |err| switch (err) {
