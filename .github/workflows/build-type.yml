@@ -87,7 +87,7 @@ jobs:
       OPTIMIZE: ${{ inputs.optimize }}
       OOM_TARGET: ${{ inputs.oom_target }}
       OOM_FILTER: ${{ inputs.oom_filter }}
-      PANT_VERSION: 0.24.0
+      PANT_VERSION: 0.25.1
       ZIG_VERSION: 0.17.0
       VALGRIND_VERSION: 3.27.1
       VALGRIND_SHA256: 5d589152eb8071c02feab8ce6ab719e431a1fbc3e2b1700f5432632a8b9264dc
@@ -161,7 +161,7 @@ jobs:
             tar -C /opt/zig --strip-components=1 -xf /tmp/zig.tar.xz
             ln -s /opt/zig/zig /usr/local/bin/zig
             curl -fsSLo /tmp/pant.tar.gz https://github.com/subsetpark/pantagruel/releases/download/v$PANT_VERSION/pant-linux-x86_64.tar.gz
-            echo "2ef13d67a597fd62f165a332e0dea37fe9ae206ec43f248af8c24501a0167221  /tmp/pant.tar.gz" | sha256sum -c -
+            echo "d02a64b2acf05072ff40216c75be6ef5a0e7bc50246a958ced4defd3b9a90a46  /tmp/pant.tar.gz" | sha256sum -c -
             tar -C /usr/local/bin -xzf /tmp/pant.tar.gz
             pant --version
             cp -a /work/. /build/
