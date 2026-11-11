@@ -1857,20 +1857,19 @@ test "e2e: entropy is the one draw that differs between processes" {
     try seeded.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
 }
 
-test "e2e: the unit boundary error guides" {
-    // The trap the convention exists to make visible: the caller's value is
-    // on screen and out of reach, so the error names the isolation.
+test "e2e: a constructed unit starts on an empty stack" {
+    // The caller's value is out of reach: the body underflows at its own floor.
     var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @attempt io.pp" });
     defer isolated.deinit();
     try isolated.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "isolation @attempt", "`values (q) cat @attempt`" },
+        .stdout_contains = &.{ "kind underflow", "+ needs 2 stack values, but found 1\"" },
     });
     var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] (+ +) @each io.pp" });
     defer child.deinit();
     try child.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "isolation @spawn", "`values (q) cat @spawn`" },
+        .stderr_contains = &.{ "kind underflow", "+ needs 2 stack values, but found 1\"" },
     });
     // And the composition that fixes it: build the values into the body.
     var built = try run(&.{ build_options.ecl_exe, "-e", "3 wrap (1 +) cat @attempt io.pp" });

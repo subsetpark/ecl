@@ -59,7 +59,6 @@ fn spawnTask(
             .home = evaluator.currentHome(),
         } },
         .quotation = quotation,
-        .constructor = .spawn,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
@@ -270,7 +269,6 @@ const GiveDriver = struct {
                 .home = evaluator.currentHome(),
             } },
             .quotation = self.body.list,
-            .constructor = .spawn,
             .transfer = &self.cursor,
         }) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,

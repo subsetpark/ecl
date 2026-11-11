@@ -1101,13 +1101,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\  {
         \\    err {
         \\      kind underflow
-        \\      msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — build initial values into the quotation: `values (q) cat @attempt`"
+        \\      msg "+ needs 2 stack values, but found 1"
         \\      word +
         \\      trace (`+)
         \\      data {
         \\        needed 2
         \\        available 1
-        \\        isolation @attempt
         \\        source "<command>"
         \\        line 1
         \\        col 6
@@ -1122,7 +1121,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind underflow msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — build initial values into the quotation: `values (q) cat @spawn`" word + trace (`+) data {needed 2 available 1 isolation @spawn source "<command>" line 1 col 10}}
+        \\{kind underflow msg "+ needs 2 stack values, but found 1" word + trace (`+) data {needed 2 available 1 source "<command>" line 1 col 10}}
         \\=== values in the body ===
         \\source: (3 1 +) @attempt
         \\exit: 0

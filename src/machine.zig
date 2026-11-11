@@ -166,23 +166,15 @@ const FailureSite = union(enum) {
         self.* = undefined;
     }
 };
-pub const FiberConstructor = enum { spawn, @"test" };
 /// A fiber runs in one of two roles, and everything that differs between them
 /// follows from which. A root fiber runs a submission, the prelude, or host-driven loading and may
 /// define. A task fiber runs in its spawner's scope without being a root of
-/// its own, so it may not define; it records the word that constructed it.
-pub const FiberRole = union(enum) {
-    root,
-    task: struct {
-        /// The `@` word that constructed the task, for isolation diagnostics.
-        constructor: FiberConstructor,
-    },
-};
+/// its own, so it may not define.
+pub const FiberRole = enum { root, task };
 
 const ErrorDataKey = enum {
     needed,
     available,
-    isolation,
     name,
     path,
     seeded,
@@ -5183,22 +5175,7 @@ pub const Fiber = struct {
         return self.failUnderflowOf(self.activeWordName(), count);
     }
     fn failUnderflowOf(self: *Fiber, subject: []const u8, count: usize) MachineError {
-        // Underflow against the floor of a unit constructor's substack is the
-        // one underflow whose cause is invisible: the values the caller meant
-        // to pass are right there and unreachable. Name the isolation and how
-        // to pass values, rather than reporting a bare shortfall.
-        const isolation = self.isolationGuidance(self.hardFloor());
-        const failure = if (isolation) |guidance| self.failFmt(
-            .underflow,
-            "{s} needs {d} stack value{s}, but found {d}; {s}",
-            .{
-                subject,
-                count,
-                if (count == 1) "" else "s",
-                self.available(),
-                guidance.advice,
-            },
-        ) else self.failFmt(
+        const failure = self.failFmt(
             .underflow,
             "{s} needs {d} stack value{s}, but found {d}",
             .{
@@ -5210,14 +5187,8 @@ pub const Fiber = struct {
         );
         self.pendingFailure().addData(.needed, .{ .int = @intCast(count) });
         self.pendingFailure().addData(.available, .{ .int = @intCast(self.available()) });
-        if (isolation) |guidance| self.pendingFailure().addData(
-            .isolation,
-            .{ .symbol = .{ .name = intern.intern(guidance.constructor) catch return failure } },
-        );
         return failure;
     }
-    const IsolationGuidance = struct { constructor: []const u8, advice: []const u8 };
-    /// Which unit constructor, if any, owns the floor this underflow hit.
     /// The hard floor beneath every paging floor: where underflow happens.
     fn hardFloor(self: *const Fiber) usize {
         var floor = self.paging orelse return self.stack_base;
@@ -5233,48 +5204,6 @@ pub const Fiber = struct {
     /// Fails as an operand check short by `count` values would.
     pub fn failShort(self: *Fiber, count: usize) MachineError {
         return self.failUnderflow(count);
-    }
-    fn isolationGuidance(self: *Fiber, base: usize) ?IsolationGuidance {
-        if (base > 0) {
-            const boundary = self.boundary_index orelse return null;
-            // During an unwind the index momentarily names the frame that was
-            // just popped, so only bounds determine whether it may be read.
-            const index: usize = @backingInt(boundary);
-            if (index >= self.frames.items.len) return null;
-            const frame = self.frames.items[index];
-            if (frame != .boundary) return null;
-            if (frame.boundary.stack_base != base) return null;
-            return switch (frame.boundary.mode) {
-                .attempt => .{
-                    .constructor = "@attempt",
-                    .advice = "the substack is isolated from the caller's stack — " ++
-                        "build initial values into the quotation: `values (q) cat @attempt`",
-                },
-                .module => .{
-                    .constructor = "@defm",
-                    .advice = "a module body starts on an empty stack and cannot read the caller's",
-                },
-                .load => .{
-                    .constructor = "@load",
-                    .advice = "a loaded file starts on an empty stack and cannot read the caller's",
-                },
-            };
-        }
-        const task = switch (self.role) {
-            .root => return null,
-            .task => |task| task,
-        };
-        return switch (task.constructor) {
-            .spawn => .{
-                .constructor = "@spawn",
-                .advice = "the child unit's stack is isolated from the caller's stack — " ++
-                    "build initial values into the quotation: `values (q) cat @spawn`",
-            },
-            .@"test" => .{
-                .constructor = "@test",
-                .advice = "the test unit's stack is isolated from the runner stack",
-            },
-        };
     }
     pub fn popValue(self: *Fiber) MachineError!heap.OwnedValue {
         try self.require(1);

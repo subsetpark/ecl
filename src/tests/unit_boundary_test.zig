@@ -91,39 +91,31 @@ test "unit boundaries: initial values reach every unit constructor in list order
     try expectStack(&runtime, "() @attempt", "{ok ()}");
 }
 
-test "unit boundaries: isolation underflow says how to pass initial values" {
+test "unit boundaries: a constructed unit starts on an empty stack" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
+    // The caller's 9 is out of reach: the body underflows against its own floor.
     try expectStack(
         &runtime,
-        "9 (1 +) @attempt nip `err at dup `data at `isolation at swap `msg at",
-        "@attempt \"+ needs 2 stack values, but found 1; the substack is isolated from " ++
-            "the caller's stack — build initial values into the quotation: `values (q) cat @attempt`\"",
+        "9 (1 +) @attempt nip `err at `msg at",
+        "\"+ needs 2 stack values, but found 1\"",
     );
-}
-
-test "unit boundaries: every constructor diagnoses its own boundary" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-
     try expectErrorContains(&runtime, "9 (1 +) `missing @defm", &.{
-        "isolation @defm",
-        "a module body starts on an empty stack",
+        "kind underflow",
+        "+ needs 2 stack values, but found 1\"",
         "trace (`+)",
     });
-    try expectErrorContains(&runtime, "(1 +) @spawn task.await `err at raise", &.{
-        "isolation @spawn",
-        "`values (q) cat @spawn`\"",
+    try expectErrorContains(&runtime, "9 (1 +) @spawn task.await `err at raise", &.{
+        "kind underflow",
+        "+ needs 2 stack values, but found 1\"",
     });
-    // `@each` is prelude code over `@spawn`, which owns each child's floor.
-    try expectErrorContains(&runtime, "[1] (+) @each", &.{
-        "isolation @spawn",
-        "`values (q) cat @spawn`",
+    // `@each` is prelude code over `@spawn`: each child holds only its element.
+    try expectErrorContains(&runtime, "9 [1] (+) @each", &.{
+        "kind underflow",
+        "+ needs 2 stack values, but found 1\"",
         "trace (`+)",
     });
 }

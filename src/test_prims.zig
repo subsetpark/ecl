@@ -310,7 +310,6 @@ const InvocationDriver = struct {
                         .parent_fiber = evaluator,
                         .site = .{ .module = home },
                         .quotation = target.quotation(),
-                        .constructor = .@"test",
                     }) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Io => return evaluator.fail(
