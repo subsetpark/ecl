@@ -854,7 +854,7 @@ initially ∀ *candidate*: `Unit` · ¬**unit-active?** *candidate* ∧ ¬**unit
 
 > `Complete unit successfully` accepts the result produced by the omitted evaluator, makes the active unit terminal, and retains that result as the unit's result stack. The evaluator supplies the result; it is not chosen by the ECL operation that launched the unit.
 
-**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: `Value`, **unit-active?** *unit*, **value-type** *result* = **list-type**, (∀ *child*: `Unit`, **unit-nested?** *child*, **unit-parent** *child* = *unit* · ¬**unit-active?** *child* ∧ (¬**unit-failed?** *child* ∨ **unit-reifying?** *child* ∧ ¬**cancelled-error?** (**unit-error** *child*))).
+**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: `Value`, **unit-active?** *unit*, **value-type** *result* = **list-type**, (∀ *child*: `Unit`, **unit-nested?** *child*, **unit-parent** *child* = *unit* · ¬**unit-active?** *child*), (∀ *child*: `Unit`, **unit-nested?** *child*, **unit-parent** *child* = *unit*, **unit-failed?** *child* · **unit-reifying?** *child* ∧ ¬**cancelled-error?** (**unit-error** *child*)).
 
 ---
 

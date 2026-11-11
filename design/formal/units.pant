@@ -115,9 +115,10 @@ Units ~> Complete unit successfully @
   result: Value, 
   unit-active? unit, 
   value-type result = list-type, 
-  (all child: Unit, unit-nested? child, unit-parent child = unit 
-    | ~unit-active? child and 
-      (~unit-failed? child or (unit-reifying? child and ~cancelled-error? (unit-error child)))).
+  (all child: Unit, unit-nested? child, unit-parent child = unit
+    | ~unit-active? child),
+  (all child: Unit, unit-nested? child, unit-parent child = unit, unit-failed? child
+    | unit-reifying? child and ~cancelled-error? (unit-error child)).
 ---
 > Successful completion makes the unit terminal and exposes the evaluator's
 > complete result stack.
