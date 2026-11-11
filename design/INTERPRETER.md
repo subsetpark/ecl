@@ -131,7 +131,7 @@ allocation failure restores the checkpoint.
 
 The transaction covers the operand stack. Output already written, native side
 effects, filesystem changes, and other host effects remain committed. The
-evaluator restores the values it owns and leaves effects owned by other systems
+Session restores the values it owns and leaves effects owned by other systems
 to those systems.
 
 The same unit abstraction supports calculator input, script execution,
@@ -442,7 +442,7 @@ provenance stays focused on diagnostics.
 
 ## 3. Values and storage
 
-The evaluator moves one closed `Value` union. The layout is fixed at 16 bytes:
+The machine moves one closed `Value` union. The layout is fixed at 16 bytes:
 integers, floats, Unicode scalars, symbols, and word references are inline;
 lists, dictionaries, tasks, and ports carry kind-specific
 opaque handles. External code inspects handles through their public semantic surfaces.
@@ -484,7 +484,7 @@ capability whose lifetime keeps the list alive.
 The arrangement follows the array-language instinct that homogeneous data
 deserves homogeneous storage, while retaining the concatenative rule that any
 list may also be a quotation. Generic spines are the universal fallback; flat
-leaves optimize storage and execution through the same evaluator.
+leaves optimize storage and execution through the same machine.
 
 ### Dictionaries preserve insertion and ignore it for identity
 
@@ -1048,7 +1048,7 @@ so a guard runs its tests and actions under one frame.
 ### Failure is a bounded machine transition
 
 Language errors are ordinary dictionary values at observation boundaries, but
-the live evaluator carries a compact internal `EclErr`. On failure, one
+the live Fiber carries a compact internal `EclErr`. On failure, one
 `FailureDriver`:
 
 1. walks explicit frames to collect the language trace;
@@ -1121,7 +1121,7 @@ outstanding admissions are bounded by the executor count, including the root.
 Cancellation withdraws a pressure waiter without acquiring admission. Wait
 delivery and terminal task work remain runnable. Root and worker evaluation
 use the same admission protocol, and relieving pressure wakes idle executors.
-An admitted evaluation makes at least one transition, then yields at evaluator
+An admitted evaluation makes at least one transition, then yields at machine
 step boundaries if pressure has risen. Thus in-flight producers cannot keep
 allocating for an entire instruction quantum after the backlog fills, and a
 reserved admission always carries progress even if pressure rises again.
@@ -1385,7 +1385,7 @@ only legal decision. `scheduler.zig` owns mutexes, atomics, queues, workers,
 timer infrastructure, and the effects of those decisions. `turn_core.zig` does
 the same for a fiber's turn: the budget charge, whether more work may start,
 whether a cancellable completion observes cancellation before handing
-execution onward, and what the evaluator does after a driver steps or yields,
+execution onward, and what the Fiber does after a driver steps or yields,
 where every yield names whether the driver parked, waits on something outside
 its own work, or is settling work that must not observe cancellation.
 
@@ -1804,7 +1804,7 @@ as ordinary ecl definitions and modules.
 ### Prelude and standard modules retain source authority
 
 `prelude.ecl` is embedded and evaluated during Session construction to populate
-core. It runs through the ordinary incremental evaluator in a root whose
+core. It runs through the ordinary frame machine in a root whose
 storage is the core-building authority, so each definition is validated as it
 is made against the core built so far and the prelude needs no forward
 references; core is then frozen before any ordinary unit
@@ -2106,7 +2106,7 @@ failures, and byte transport with ports, without creating language port values o
 participating in capability transfer. The Session's opaque HTTP service owns
 configuration, admission, and execution authority; inherited runtime context
 carries submission access. Each admitted request progresses from preparation to
-owned active input, joined response, and consumed response. Execution and evaluator
+owned active input, joined response, and consumed response. Execution and Fiber
 materialization transfer one response representation whose bounded retirement
 also owns request storage; failure and success use the same cleanup contract. One host controller
 exclusively owns the cancellable I/O future. Scheduler cancellation only changes
@@ -2124,7 +2124,7 @@ already-ready sources; progress never establishes a new deadline. Untimed
 external waits retain their existing behavior. Network execution receives owned
 bytes and immutable service inputs. Encoded bytes are counted before decompression
 and decoded bytes afterward, including redirect bodies; an accounting allocator
-bounds backend scratch separately from allocation failure. The evaluator drains
+bounds backend scratch separately from allocation failure. The Fiber drains
 bounded transport during execution into fixed chunks and performs one polled,
 exact-size materialization. HTTP retains its own header normalization and ordinary
 dictionary/text/byte-list construction, with no port-message node limits.
@@ -2251,10 +2251,10 @@ snapshot requires reacquisition. Revoked child authority instead detaches the
 undeliverable envelope under the source lock and transfers its cleanup to
 bounded retirement after unlocking. It can never leave that envelope available
 as a retry candidate. A scope that has begun closing refuses a claim without
-consuming its source. The receiving evaluator reserves stack capacity before that
+consuming its source. The receiving Fiber reserves stack capacity before that
 transition, so allocation failure cannot consume a result without publishing it.
 The driver's completion carries that reservation with its owned output; only
-the evaluator commits it after driver retirement, without further allocation.
+the machine loop commits it after driver retirement, without further allocation.
 
 An external-child scope owns provisional resources and separately
 represents permanent parent dependencies. It admits only external members and
@@ -2649,7 +2649,7 @@ stack values, definitions, modules, and history survive into the next
 successful turn.
 
 Non-TTY stdin, files, `-e`, explicit output words, and formatting are CLI
-policies around these shared evaluator surfaces.
+policies around these shared Session surfaces.
 
 ## 12. Cross-cutting architectural rules
 

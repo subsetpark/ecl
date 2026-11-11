@@ -37,7 +37,7 @@ on retirement timing. The fixed build passed one warmup and five repetitions of
 the error. The preserved direct candidate also reproduced it at 4,096 resources.
 
 The native SDK and ABI remain at version 24. Network and process backends keep
-their SDK implementations. Filesystem calls use evaluator drivers as before the
+their SDK implementations. Filesystem calls use work drivers as before the
 SDK migration; they do not promise that host filesystem syscalls cannot block.
 This decision removes the per-call ECL composition and native marshalling cost
 without introducing a second resource cleanup or worker lifecycle.
