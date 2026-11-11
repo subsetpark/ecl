@@ -17,6 +17,8 @@
   {"ab" 9} "ab" dict.has? 1 equal
   {[1 2] 9} [1 2] dict.has? 1 equal
   {missing 9} (missing) first dict.has? 1 equal
+  {`a `b} {a b} equal
+  {`a `b} dict.vals [b] equal
   {{a 1} 9} {a 1} dict.has? 1 equal
   {1 9} 1.0 dict.has? 1 equal
   {"ab" 9} "a" dict.has? 0 equal

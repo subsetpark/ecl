@@ -698,9 +698,8 @@ test "quotes: one quoted occurrence that pushes its symbol" {
         // A quoted operation pushes its symbol; no idiom takes it as the word,
         // and the collected symbols are data in the result.
         .{ .name = "no idiom", .source = "[1 2] (pop `+) each", .expected = "(`+ `+)" },
-    });
-    try support.expectErrors(&.{
-        .{ .name = "dict entry", .source = "{`a 1}", .kind = "parse" },
+        // A dict entry is data either way, so the quote changes nothing.
+        .{ .name = "dict entry", .source = "{`a `b}", .expected = "{a b}" },
     });
 }
 

@@ -1645,10 +1645,6 @@ const ParserCursor = struct {
             self.diag.setFmt(token.span, "quote must name a symbol, not `{s}`", .{token.bytes});
             return error.Parse;
         }
-        if (self.contexts.topPtr()) |context| if (context.kind == .dictionary) {
-            self.diag.set(token.span, "a quote cannot be a dict entry; write the symbol bare");
-            return error.Parse;
-        };
         try self.beginScalar(token);
     }
     fn eof(self: *ParserCursor) ParseProgress {
