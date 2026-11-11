@@ -279,7 +279,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > A list is a finite ordered sequence. Its length and positional elements determine its value identity.
 
-**list-length** *left* = **list-length** *right* ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **list-element** *left* *index* = **list-element** *right* *index*) → *left* = *right*.
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **list-type**, **value-type** *right* = **list-type**, **list-length** *left* = **list-length** *right*, (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **list-element** *left* *index* = **list-element** *right* *index*) · *left* = *right*.
 
 > Booleans are exactly the int values 0 and 1.
 
