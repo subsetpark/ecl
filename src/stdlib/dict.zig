@@ -122,16 +122,16 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn get(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var fallback = try evaluator.popValue();
+fn get(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var fallback = try fiber.popValue();
     defer fallback.deinit();
-    var key = try evaluator.popValue();
+    var key = try fiber.popValue();
     defer key.deinit();
-    var dictionary = try evaluator.popDict();
+    var dictionary = try fiber.popDict();
     defer dictionary.deinit();
-    const cursor = dict_storage.FindCursor.initHeader(evaluator.allocator, dictionary.borrow().dict, key.borrow());
-    try evaluator.startDriver(GetDriver{
+    const cursor = dict_storage.FindCursor.initHeader(fiber.allocator, dictionary.borrow().dict, key.borrow());
+    try fiber.startDriver(GetDriver{
         .dictionary = .init(dictionary.take()),
         .key = .init(key.take()),
         .fallback = .init(fallback.take()),
@@ -149,9 +149,9 @@ const GetDriver = struct {
     fallback: heap.Owned(Value),
     cursor: heap.Owned(dict_storage.FindCursor),
 
-    pub fn advance(evaluator: *Fiber, self: *GetDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *GetDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |found| if (found) |item| present: {
                 heap.retainValue(item);
@@ -161,24 +161,24 @@ const GetDriver = struct {
     }
 };
 
-fn valuesAtOr(evaluator: *Fiber) MachineError!void {
-    return lookupKeys(evaluator, true);
+fn valuesAtOr(fiber: *Fiber) MachineError!void {
+    return lookupKeys(fiber, true);
 }
 
-fn valuesAt(evaluator: *Fiber) MachineError!void {
-    return lookupKeys(evaluator, false);
+fn valuesAt(fiber: *Fiber) MachineError!void {
+    return lookupKeys(fiber, false);
 }
 
-fn lookupKeys(evaluator: *Fiber, comptime with_default: bool) MachineError!void {
-    try evaluator.require(if (with_default) 3 else 2);
-    var fallback: ?heap.OwnedValue = if (with_default) try evaluator.popValue() else null;
+fn lookupKeys(fiber: *Fiber, comptime with_default: bool) MachineError!void {
+    try fiber.require(if (with_default) 3 else 2);
+    var fallback: ?heap.OwnedValue = if (with_default) try fiber.popValue() else null;
     defer if (fallback) |*owned| owned.deinit();
-    var keys = try evaluator.popList();
+    var keys = try fiber.popList();
     defer keys.deinit();
-    var dictionary = try evaluator.popValue();
+    var dictionary = try fiber.popValue();
     defer dictionary.deinit();
-    if (dictionary.borrow() != .dict) return evaluator.typeError("a dictionary");
-    try evaluator.startDriver(DictLookupDriver{
+    if (dictionary.borrow() != .dict) return fiber.typeError("a dictionary");
+    try fiber.startDriver(DictLookupDriver{
         .dictionary = .init(dictionary.take()),
         .keys = .init(keys.take()),
         .fallback = if (fallback) |*owned| .init(owned.take()) else null,
@@ -194,22 +194,22 @@ const DictLookupDriver = struct {
     cursor: ?heap.Owned(dict_storage.FindCursor) = null,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Fiber, self: *DictLookupDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *DictLookupDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const count: usize = @intCast(self.keys.borrow().list.length());
-        if (self.output == null) self.output = .init(try .init(evaluator.releases, count));
-        const work = evaluator.workBudget();
+        if (self.output == null) self.output = .init(try .init(fiber.releases, count));
+        const work = fiber.workBudget();
         while (self.index < count and work.spend()) {
             if (self.cursor == null) self.cursor = .init(dict_storage.FindCursor.initHeader(
-                evaluator.allocator,
+                fiber.allocator,
                 self.dictionary.borrow().dict,
                 list.atUnchecked(self.keys.borrow(), self.index),
             ));
             switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |found| {
-                    self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return evaluator.fail(.domain, "dict.at could not find the dict key"));
-                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return fiber.fail(.domain, "dict.at could not find the dict key"));
+                    self.cursor.?.deinit(fiber.releases, fiber.allocator);
                     self.cursor = null;
                     self.index += 1;
                 },
@@ -222,19 +222,19 @@ const DictLookupDriver = struct {
     }
 };
 
-fn associate(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var associated_value = try evaluator.popValue();
+fn associate(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var associated_value = try fiber.popValue();
     defer associated_value.deinit();
-    var key = try evaluator.popValue();
+    var key = try fiber.popValue();
     defer key.deinit();
     const pair = [1]dict_storage.Pair{.{ key.borrow(), associated_value.borrow() }};
     const materializer = try dict_storage.Materializer.init(
-        evaluator.allocator,
+        fiber.allocator,
         &pair,
         false,
     );
-    try evaluator.startDriver(AssociateDriver{
+    try fiber.startDriver(AssociateDriver{
         .key = .init(key.take()),
         .associated_value = .init(associated_value.take()),
         .materializer = .init(materializer),
@@ -247,9 +247,9 @@ const AssociateDriver = struct {
     associated_value: heap.Owned(Value),
     materializer: heap.Owned(dict_storage.Materializer),
 
-    pub fn advance(evaluator: *Fiber, self: *AssociateDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *AssociateDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.materializer.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .duplicate_key => unreachable,
             .complete => |dictionary| .{ .output = dictionary },
@@ -257,16 +257,16 @@ const AssociateDriver = struct {
     }
 };
 
-fn fromFlat(evaluator: *Fiber) MachineError!void {
-    var entries = try evaluator.popValue();
+fn fromFlat(fiber: *Fiber) MachineError!void {
+    var entries = try fiber.popValue();
     defer entries.deinit();
-    if (entries.borrow() != .list) return evaluator.typeError("a flat key/value list");
+    if (entries.borrow() != .list) return fiber.typeError("a flat key/value list");
     const count: usize = @intCast(entries.borrow().list.length());
     if (count % 2 != 0) {
-        return evaluator.fail(.contract, "dict.from-flat requires an even-length key/value list");
+        return fiber.fail(.contract, "dict.from-flat requires an even-length key/value list");
     }
-    const flat_pairs = try evaluator.allocator.alloc(dict_storage.Pair, count / 2);
-    try evaluator.startDriver(FromFlatDriver{
+    const flat_pairs = try fiber.allocator.alloc(dict_storage.Pair, count / 2);
+    try fiber.startDriver(FromFlatDriver{
         .entries = .init(entries.take()),
         .pairs = .init(flat_pairs),
     });
@@ -279,44 +279,44 @@ const FromFlatDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(dict_storage.Materializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *FromFlatDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *FromFlatDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.materializer == null) {
             const flat_pairs = self.pairs.borrow();
-            const end = self.index + evaluator.workBudget().take(flat_pairs.len - self.index);
+            const end = self.index + fiber.workBudget().take(flat_pairs.len - self.index);
             while (self.index != end) : (self.index += 1) flat_pairs[self.index] = .{
                 list.atUnchecked(self.entries.borrow(), self.index * 2),
                 list.atUnchecked(self.entries.borrow(), self.index * 2 + 1),
             };
             if (self.index != flat_pairs.len) return .stepped;
-            self.materializer = .init(try .init(evaluator.allocator, flat_pairs, true));
+            self.materializer = .init(try .init(fiber.allocator, flat_pairs, true));
             return .stepped;
         }
-        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+        return switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
-            .duplicate_key => evaluator.fail(.domain, "dict.from-flat received a duplicate key"),
+            .duplicate_key => fiber.fail(.domain, "dict.from-flat received a duplicate key"),
             .complete => |dictionary| .{ .output = dictionary },
         };
     }
 };
 
-fn take(evaluator: *Fiber) MachineError!void {
-    return selectKeys(evaluator, true);
+fn take(fiber: *Fiber) MachineError!void {
+    return selectKeys(fiber, true);
 }
 
-fn del(evaluator: *Fiber) MachineError!void {
-    return selectKeys(evaluator, false);
+fn del(fiber: *Fiber) MachineError!void {
+    return selectKeys(fiber, false);
 }
 
-fn selectKeys(evaluator: *Fiber, keep: bool) MachineError!void {
-    try evaluator.require(2);
-    var selector = try evaluator.popList();
+fn selectKeys(fiber: *Fiber, keep: bool) MachineError!void {
+    try fiber.require(2);
+    var selector = try fiber.popList();
     defer selector.deinit();
-    var dictionary = try evaluator.popDict();
+    var dictionary = try fiber.popDict();
     defer dictionary.deinit();
     const count: usize = @intCast(dictionary.borrow().dict.length());
-    const selected = try evaluator.allocator.alloc(bool, count);
-    try evaluator.startDriver(DictSelectDriver{
+    const selected = try fiber.allocator.alloc(bool, count);
+    try fiber.startDriver(DictSelectDriver{
         .dictionary = .init(dictionary.take()),
         .selector = .init(selector.take()),
         .selected = .init(selected),
@@ -342,9 +342,9 @@ const DictSelectDriver = struct {
     selected_count: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Fiber, self: *DictSelectDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *DictSelectDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .initialize => {
                 if (self.index == self.selected.borrow().len) {
@@ -360,12 +360,12 @@ const DictSelectDriver = struct {
                 if (self.finder == null) {
                     if (self.key_index == self.selector.borrow().list.length()) {
                         const count = if (self.keep) self.selected_count else self.selected.borrow().len - self.selected_count;
-                        self.pairs = .init(try evaluator.allocator.alloc(dict_storage.Pair, count));
+                        self.pairs = .init(try fiber.allocator.alloc(dict_storage.Pair, count));
                         self.phase = .copy;
                         continue;
                     }
                     self.finder = .init(dict_storage.FindCursor.initHeader(
-                        evaluator.allocator,
+                        fiber.allocator,
                         self.dictionary.borrow().dict,
                         list.atUnchecked(self.selector.borrow(), self.key_index),
                     ));
@@ -383,7 +383,7 @@ const DictSelectDriver = struct {
                                 self.selected_count += 1;
                             }
                         }
-                        self.finder.?.deinit(evaluator.releases, evaluator.allocator);
+                        self.finder.?.deinit(fiber.releases, fiber.allocator);
                         self.finder = null;
                     },
                 }
@@ -391,7 +391,7 @@ const DictSelectDriver = struct {
             .copy => {
                 if (self.index == self.selected.borrow().len) {
                     self.materializer = .init(try dict_storage.Materializer.initBorrowedPairs(
-                        evaluator.allocator,
+                        fiber.allocator,
                         self.pairs.?.borrow(),
                         false,
                     ));
@@ -422,22 +422,22 @@ const DictSelectDriver = struct {
     }
 };
 
-fn mergeWith(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var conflict = try evaluator.popQuotation();
+fn mergeWith(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var conflict = try fiber.popQuotation();
     defer conflict.deinit();
-    var right = try evaluator.popDict();
+    var right = try fiber.popDict();
     defer right.deinit();
-    var left = try evaluator.popDict();
+    var left = try fiber.popDict();
     defer left.deinit();
     const left_count: usize = @intCast(left.borrow().dict.length());
     const right_count: usize = @intCast(right.borrow().dict.length());
-    const pairs_buffer = try evaluator.allocator.alloc(dict_storage.Pair, left_count + right_count);
+    const pairs_buffer = try fiber.allocator.alloc(dict_storage.Pair, left_count + right_count);
     var pairs_locally_owned = true;
-    errdefer if (pairs_locally_owned) evaluator.allocator.free(pairs_buffer);
-    var collision_values = try heap.OwnedValueBuffer.init(evaluator.releases, right_count);
+    errdefer if (pairs_locally_owned) fiber.allocator.free(pairs_buffer);
+    var collision_values = try heap.OwnedValueBuffer.init(fiber.releases, right_count);
     defer collision_values.deinit();
-    const state = try evaluator.allocator.create(MergeWithState);
+    const state = try fiber.allocator.create(MergeWithState);
     state.* = .{
         .left = .init(left.take()),
         .right = .init(right.take()),
@@ -445,11 +445,11 @@ fn mergeWith(evaluator: *Fiber) MachineError!void {
         .pairs = .init(pairs_buffer),
         .collision_values = .init(collision_values.take()),
         .pair_count = left_count,
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
     };
     pairs_locally_owned = false;
-    try evaluator.startDriver(MergeWithWorkDriver{ .state = .init(state) });
+    try fiber.startDriver(MergeWithWorkDriver{ .state = .init(state) });
 }
 
 const MergeWithPhase = enum { copy_left, merge_right, materialize };
@@ -496,24 +496,24 @@ const MergeWithApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *MergeWithApplication,
         window: machine.StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?machine.ApplicationStep {
-        evaluator.active_word = self.state.borrow().word;
-        evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.stack.items.len) orelse 0;
+        fiber.active_word = self.state.borrow().word;
+        fiber.chargeContinuationStep();
+        const observed = window.observed(fiber.stack.items.len) orelse 0;
         if (observed != 1)
-            return evaluator.fail(.contract, "dict.merge-with quotation must return one value");
-        var result = try evaluator.popValue();
+            return fiber.fail(.contract, "dict.merge-with quotation must return one value");
+        var result = try fiber.popValue();
         const state = self.state.borrow();
         state.collision_values.borrowMut().appendOwned(result.take());
         const values = state.collision_values.borrow().values();
         state.pairs.borrow()[state.collision_index.?][1] = values[values.len - 1];
         state.collision_index = null;
         state.index += 1;
-        try evaluator.startDriver(MergeWithWorkDriver{ .state = .init(self.state.take()) });
+        try fiber.startDriver(MergeWithWorkDriver{ .state = .init(self.state.take()) });
         return null;
     }
 };
@@ -522,10 +522,10 @@ const MergeWithWorkDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     state: heap.Owned(*MergeWithState),
 
-    pub fn advance(evaluator: *Fiber, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.state.borrow().word;
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
+        fiber.active_word = self.state.borrow().word;
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         const state = self.state.borrow();
         while (!work.exhausted()) switch (state.phase) {
             .copy_left => {
@@ -545,7 +545,7 @@ const MergeWithWorkDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(state.right.borrow().dict.length());
                 if (state.index == count) {
-                    const materializer: dict_storage.Materializer = try .init(evaluator.allocator, state.pairs.borrow()[0..state.pair_count], false);
+                    const materializer: dict_storage.Materializer = try .init(fiber.allocator, state.pairs.borrow()[0..state.pair_count], false);
                     state.work.borrowMut().* = .{ .materializing = materializer };
                     state.phase = .materialize;
                     continue;
@@ -553,7 +553,7 @@ const MergeWithWorkDriver = struct {
                 const key = dict_storage.keyAt(state.right.borrow().dict, state.index);
                 if (state.work.borrowMut().* != .finding) state.work.borrowMut().* = .{
                     .finding = dict_storage.FindCursor.initHeader(
-                        evaluator.allocator,
+                        fiber.allocator,
                         state.left.borrow().dict,
                         key,
                     ),
@@ -562,17 +562,17 @@ const MergeWithWorkDriver = struct {
                     .pending => _ = work.spend(),
                     .complete => {
                         const found = state.work.borrowMut().finding.foundIndex();
-                        state.work.borrowMut().retire(evaluator.releases);
+                        state.work.borrowMut().retire(fiber.releases);
                         const right_value = dict_storage.valueAt(state.right.borrow().dict, state.index);
                         if (found) |destination| {
                             state.collision_index = destination;
-                            var stack = try evaluator.reserveStack(3);
+                            var stack = try fiber.reserveStack(3);
                             stack.pushBorrowed(key);
                             stack.pushBorrowed(state.pairs.borrow()[destination][1]);
                             stack.pushBorrowed(right_value);
-                            const application_state = try evaluator.allocator.create(MergeWithApplication);
+                            const application_state = try fiber.allocator.create(MergeWithApplication);
                             application_state.* = .{ .state = .init(self.state.take()) };
-                            try evaluator.beginIsolatedApplication(application_state.application());
+                            try fiber.beginIsolatedApplication(application_state.application());
                             return .completed;
                         }
                         state.pairs.borrow()[state.pair_count] = .{ key, right_value };
@@ -585,7 +585,7 @@ const MergeWithWorkDriver = struct {
                 .pending => .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
-                    state.work.borrowMut().retire(evaluator.releases);
+                    state.work.borrowMut().retire(fiber.releases);
                     break :completed .{ .output = result };
                 },
             },

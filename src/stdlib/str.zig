@@ -32,8 +32,8 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn kind(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn kind(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     const spelling: []const u8 = switch (item.borrow()) {
         .list => |header| if (header.length() == 0) "string" else switch (header.kind()) {
@@ -43,5 +43,5 @@ fn kind(evaluator: *Fiber) MachineError!void {
         },
         else => "other",
     };
-    try evaluator.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
+    try fiber.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
 }

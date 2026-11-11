@@ -691,7 +691,7 @@ test "http: cancellation interrupts a completely full response transport" {
     try request.start(.{ .url = url }, .GET, false, &scope);
     ready.event.waitUncancelable(std.testing.io);
     // One accepted byte fills this pipe. The producer cannot finish until the
-    // evaluator reads or cancellation interrupts its transport wait.
+    // fiber reads or cancellation interrupts its transport wait.
     request.cancel();
 }
 

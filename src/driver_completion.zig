@@ -12,9 +12,9 @@ pub const Progress = union(enum) { stepped, yielded, completed, output: Value };
 pub const Completion = struct {
     phase: union(enum) { running, success: ?Value, failure: machine.MachineError, abandoned, settled } = .running,
 
-    pub fn advance(self: *Completion, evaluator: *machine.Fiber, driver: anytype) machine.MachineError!machine.WorkProgress {
+    pub fn advance(self: *Completion, fiber: *machine.Fiber, driver: anytype) machine.MachineError!machine.WorkProgress {
         if (self.phase == .running) {
-            const progress: Progress = driver.advanceOperation(evaluator) catch |err| {
+            const progress: Progress = driver.advanceOperation(fiber) catch |err| {
                 self.phase = .{ .failure = err };
                 return .{ .yielded = .settle };
             };
@@ -22,7 +22,7 @@ pub const Completion = struct {
                 .stepped => return .stepped,
                 // An explicit yield ends the turn: it parks when the operation
                 // waits on the host, and otherwise waits for its next turn.
-                .yielded => return if (evaluator.hasParkRequest()) .{ .yielded = .park } else .{ .yielded = .wait },
+                .yielded => return if (fiber.hasParkRequest()) .{ .yielded = .park } else .{ .yielded = .wait },
                 .completed => self.phase = .{ .success = null },
                 .output => |value| self.phase = .{ .success = value },
             }
@@ -30,15 +30,15 @@ pub const Completion = struct {
         // Cleanup draws on the fiber's budget but yields rather than stepping
         // when it is spent: it must finish whether or not the fiber is
         // cancelled.
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (work.spend()) {
-            if (!driver.advanceCleanup(evaluator.releases, evaluator.allocator)) continue;
+            if (!driver.advanceCleanup(fiber.releases, fiber.allocator)) continue;
             const outcome = self.phase;
             self.phase = .settled;
             return switch (outcome) {
                 .success => |value| result: {
-                    evaluator.pollKernel() catch |err| {
-                        if (value) |owned| evaluator.releases.releaseValue(owned);
+                    fiber.pollKernel() catch |err| {
+                        if (value) |owned| fiber.releases.releaseValue(owned);
                         return err;
                     };
                     break :result if (value) |owned| .{ .output = owned } else .completed;

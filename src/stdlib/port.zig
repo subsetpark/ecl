@@ -36,53 +36,53 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "result", .effect = "exchange -- value", .doc = "Wait and claim a result once; a later claim raises `contract.", .primitive = result },
 };
 
-fn endpoint(evaluator: *machine.Fiber) machine.MachineError!void {
-    var selector = try evaluator.popValue();
+fn endpoint(fiber: *machine.Fiber) machine.MachineError!void {
+    var selector = try fiber.popValue();
     defer selector.deinit();
-    var source = try evaluator.popValue();
+    var source = try fiber.popValue();
     defer source.deinit();
-    const capability = endpoints.Selector.fromValue(selector.borrow()) orelse return evaluator.typeError("an endpoint selector");
+    const capability = endpoints.Selector.fromValue(selector.borrow()) orelse return fiber.typeError("an endpoint selector");
     const item = capability.borrow(source.borrow()) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.WrongKind => evaluator.typeError("a source of the endpoint selector's issuing kind"),
-        error.Unsupported => evaluator.fail(.domain, "source does not support this endpoint"),
+        error.WrongKind => fiber.typeError("a source of the endpoint selector's issuing kind"),
+        error.Unsupported => fiber.fail(.domain, "source does not support this endpoint"),
     };
-    try evaluator.pushOwned(item);
+    try fiber.pushOwned(item);
 }
 
 /// The byte-stream primitives are published as `fd.core`; `port` keeps the
 /// resource and exchange words. They live here because they share the
 /// endpoint and transfer machinery with the message words.
-pub fn read(evaluator: *machine.Fiber) machine.MachineError!void {
-    var maximum = try evaluator.popValue();
+pub fn read(fiber: *machine.Fiber) machine.MachineError!void {
+    var maximum = try fiber.popValue();
     defer maximum.deinit();
-    if (maximum.borrow() != .int) return evaluator.typeError("a positive byte count");
-    if (maximum.borrow().int <= 0) return evaluator.fail(.domain, "fd.read count must be positive");
-    var item = try evaluator.popValue();
+    if (maximum.borrow() != .int) return fiber.typeError("a positive byte count");
+    if (maximum.borrow().int <= 0) return fiber.fail(.domain, "fd.read count must be positive");
+    var item = try fiber.popValue();
     errdefer item.deinit();
-    const backend = ReadBackend.fromValue(item.borrow()) orelse return evaluator.typeError("a readable byte endpoint");
-    backend.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending reader");
+    const backend = ReadBackend.fromValue(item.borrow()) orelse return fiber.typeError("a readable byte endpoint");
+    backend.beginRead() catch return fiber.fail(.contract, "endpoint already has a pending reader");
     errdefer backend.endRead();
-    const buffer = try evaluator.allocator.alloc(u8, @min(@as(usize, @intCast(maximum.borrow().int)), backend.readCapacity()));
-    errdefer evaluator.allocator.free(buffer);
-    const driver = try evaluator.allocator.create(ReadDriver);
-    driver.* = .{ .allocator = evaluator.allocator, .port = item.take(), .backend = backend, .buffer = buffer };
-    evaluator.adoptDriver(driver);
+    const buffer = try fiber.allocator.alloc(u8, @min(@as(usize, @intCast(maximum.borrow().int)), backend.readCapacity()));
+    errdefer fiber.allocator.free(buffer);
+    const driver = try fiber.allocator.create(ReadDriver);
+    driver.* = .{ .allocator = fiber.allocator, .port = item.take(), .backend = backend, .buffer = buffer };
+    fiber.adoptDriver(driver);
 }
 
 /// `fd.read-line`: the bytes through the next newline, read a transport
 /// chunk at a time into the endpoint's read-ahead; what follows the newline
 /// stays there for the next read. At EOF the rest of the stream is the line,
 /// so `[]` means EOF and only EOF.
-pub fn readLine(evaluator: *machine.Fiber) machine.MachineError!void {
-    var item = try evaluator.popValue();
+pub fn readLine(fiber: *machine.Fiber) machine.MachineError!void {
+    var item = try fiber.popValue();
     errdefer item.deinit();
-    const backend = ReadBackend.fromValue(item.borrow()) orelse return evaluator.typeError("a readable byte endpoint");
-    backend.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending reader");
+    const backend = ReadBackend.fromValue(item.borrow()) orelse return fiber.typeError("a readable byte endpoint");
+    backend.beginRead() catch return fiber.fail(.contract, "endpoint already has a pending reader");
     errdefer backend.endRead();
-    const driver = try evaluator.allocator.create(LineReadDriver);
-    driver.* = .{ .allocator = evaluator.allocator, .port = item.take(), .backend = backend };
-    evaluator.adoptDriver(driver);
+    const driver = try fiber.allocator.create(LineReadDriver);
+    driver.* = .{ .allocator = fiber.allocator, .port = item.take(), .backend = backend };
+    fiber.adoptDriver(driver);
 }
 
 const LineReadDriver = struct {
@@ -119,9 +119,9 @@ const LineReadDriver = struct {
         self.state = .{ .materializing = .{ .line = line, .materializer = .init(self.allocator, line) } };
     }
 
-    pub fn advance(evaluator: *machine.Fiber, self: *LineReadDriver) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *machine.Fiber, self: *LineReadDriver) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (self.state == .reading) {
             const waiting = self.backend.reader.buffered();
             if (std.mem.indexOfScalarPos(u8, waiting, self.scanned, '\n')) |newline| {
@@ -129,9 +129,9 @@ const LineReadDriver = struct {
                 break;
             }
             self.scanned = waiting.len;
-            switch (try self.backend.fill(evaluator, @min(chunk, self.backend.readCapacity()))) {
+            switch (try self.backend.fill(fiber, @min(chunk, self.backend.readCapacity()))) {
                 .pending => {
-                    try evaluator.park(.{ .external = self.backend.readSource() });
+                    try fiber.park(.{ .external = self.backend.readSource() });
                     return .{ .yielded = .park };
                 },
                 .eof => {
@@ -173,76 +173,76 @@ const ReadBackend = struct {
     pub fn readSource(self: ReadBackend) @import("../external.zig").ReadinessSource {
         return self.reader.readSource();
     }
-    pub fn read(self: ReadBackend, evaluator: *machine.Fiber, buffer: []u8) machine.MachineError!transfer.ReadProgress {
+    pub fn read(self: ReadBackend, fiber: *machine.Fiber, buffer: []u8) machine.MachineError!transfer.ReadProgress {
         return switch (self.reader.read(buffer)) {
             .pending => .pending,
             .eof => .eof,
             .data => |count| .{ .data = count },
-            .failed => |failure| transportFailure(evaluator, failure),
+            .failed => |failure| transportFailure(fiber, failure),
         };
     }
-    fn fill(self: ReadBackend, evaluator: *machine.Fiber, max: usize) machine.MachineError!transfer.ReadProgress {
+    fn fill(self: ReadBackend, fiber: *machine.Fiber, max: usize) machine.MachineError!transfer.ReadProgress {
         return switch (try self.reader.fill(max)) {
             .pending => .pending,
             .eof => .eof,
             .data => |count| .{ .data = count },
-            .failed => |failure| transportFailure(evaluator, failure),
+            .failed => |failure| transportFailure(fiber, failure),
         };
     }
 };
 
-pub fn write(evaluator: *machine.Fiber) machine.MachineError!void {
-    var input = try evaluator.popValue();
+pub fn write(fiber: *machine.Fiber) machine.MachineError!void {
+    var input = try fiber.popValue();
     errdefer input.deinit();
-    if (input.borrow() != .list) return evaluator.typeError("a byte list");
+    if (input.borrow() != .list) return fiber.typeError("a byte list");
     if (input.borrow().list.length() > 0 and input.borrow().isString())
-        return evaluator.typeError("a byte list; encode text with io.write");
-    var item = try evaluator.popValue();
+        return fiber.typeError("a byte list; encode text with io.write");
+    var item = try fiber.popValue();
     errdefer item.deinit();
-    const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return evaluator.typeError("a writable byte endpoint");
-    const writer = capability.writer() orelse return evaluator.typeError("a writable byte endpoint");
+    const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return fiber.typeError("a writable byte endpoint");
+    const writer = capability.writer() orelse return fiber.typeError("a writable byte endpoint");
     const permit = writer.beginWrite() catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.Finished => evaluator.fail(.io, "endpoint input is finished"),
+        error.Finished => fiber.fail(.io, "endpoint input is finished"),
     };
     errdefer permit.cancel();
-    const driver = try evaluator.allocator.create(WriteDriver);
-    driver.* = .init(evaluator.allocator, item.take(), input.take(), .{}, permit);
-    evaluator.adoptDriver(driver);
+    const driver = try fiber.allocator.create(WriteDriver);
+    driver.* = .init(fiber.allocator, item.take(), input.take(), .{}, permit);
+    fiber.adoptDriver(driver);
 }
 
 const WriteDriver = transfer.WriteDriver(WriteBackend);
 const WriteBackend = struct {
     pub const WritePermit = *endpoints.WritePermit;
     pub const invalid_byte_message = "fd.write contains a value outside 0...255";
-    pub fn write(_: WriteBackend, evaluator: *machine.Fiber, permit: WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
+    pub fn write(_: WriteBackend, fiber: *machine.Fiber, permit: WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
         return switch (permit.write(buffer)) {
             .pending => .pending,
             .written => |count| .{ .written = count },
-            .failed => |failure| transportFailure(evaluator, failure),
+            .failed => |failure| transportFailure(fiber, failure),
         };
     }
 };
 
-pub fn finish(evaluator: *machine.Fiber) machine.MachineError!void {
-    var item = try evaluator.popValue();
+pub fn finish(fiber: *machine.Fiber) machine.MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
-    const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return evaluator.typeError("a writable endpoint");
-    if (capability.writer()) |writer| writer.finish() else if (capability.sender()) |queue| queue.finish() else return evaluator.typeError("a writable endpoint");
+    const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return fiber.typeError("a writable endpoint");
+    if (capability.writer()) |writer| writer.finish() else if (capability.sender()) |queue| queue.finish() else return fiber.typeError("a writable endpoint");
 }
 
-fn send(evaluator: *machine.Fiber) machine.MachineError!void {
-    var input = try evaluator.popValue();
+fn send(fiber: *machine.Fiber) machine.MachineError!void {
+    var input = try fiber.popValue();
     defer input.deinit();
-    var endpoint_value = try evaluator.popValue();
+    var endpoint_value = try fiber.popValue();
     defer endpoint_value.deinit();
-    const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message sender");
-    const queue = capability.sender() orelse return evaluator.typeError("a message sender");
-    const driver = try evaluator.allocator.create(SendDriver);
-    errdefer evaluator.allocator.destroy(driver);
-    const validating = try message.Message.create(evaluator.allocator, input.borrow(), .{});
+    const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return fiber.typeError("a message sender");
+    const queue = capability.sender() orelse return fiber.typeError("a message sender");
+    const driver = try fiber.allocator.create(SendDriver);
+    errdefer fiber.allocator.destroy(driver);
+    const validating = try message.Message.create(fiber.allocator, input.borrow(), .{});
     driver.* = .{ .endpoint = endpoint_value.take(), .queue = queue, .state = .{ .validating = validating } };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 
 const SendDriver = struct {
@@ -260,43 +260,43 @@ const SendDriver = struct {
         }
         releases.releaseValue(self.endpoint);
     }
-    pub fn advance(evaluator: *machine.Fiber, self: *SendDriver) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *machine.Fiber, self: *SendDriver) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.state == .validating) {
             const input = self.state.validating;
-            const progress = input.advance(evaluator.workBudget()) catch |err| return switch (err) {
+            const progress = input.advance(fiber.workBudget()) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.InvalidValue => evaluator.typeError("a structured message without executable words, tasks, or modules"),
-                error.Overflow => evaluator.fail(.overflow, "port message exceeds its structured value limits"),
+                error.InvalidValue => fiber.typeError("a structured message without executable words, tasks, or modules"),
+                error.Overflow => fiber.fail(.overflow, "port message exceeds its structured value limits"),
             };
             if (progress == .pending) return .stepped;
             const envelope = try self.queue.envelope(input.validated().?);
             self.state = .{ .ready = envelope };
-            input.retire(evaluator.releases);
+            input.retire(fiber.releases);
         }
         switch (self.queue.send(self.state.ready)) {
             .accepted => {
                 self.state = .consumed;
                 return .completed;
             },
-            .pending => |source| try evaluator.park(.{ .external = source }),
-            .overflow => return evaluator.fail(.overflow, "message exceeds the resource queue byte budget"),
-            .failed => |failure| return transportFailure(evaluator, failure),
+            .pending => |source| try fiber.park(.{ .external = source }),
+            .overflow => return fiber.fail(.overflow, "message exceeds the resource queue byte budget"),
+            .failed => |failure| return transportFailure(fiber, failure),
         }
-        return evaluator.afterStep();
+        return fiber.afterStep();
     }
 };
 
-fn receive(evaluator: *machine.Fiber) machine.MachineError!void {
-    var endpoint_value = try evaluator.popValue();
+fn receive(fiber: *machine.Fiber) machine.MachineError!void {
+    var endpoint_value = try fiber.popValue();
     defer endpoint_value.deinit();
-    const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message receiver");
-    const queue = capability.receiver() orelse return evaluator.typeError("a message receiver");
-    queue.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending receiver");
+    const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return fiber.typeError("a message receiver");
+    const queue = capability.receiver() orelse return fiber.typeError("a message receiver");
+    queue.beginRead() catch return fiber.fail(.contract, "endpoint already has a pending receiver");
     errdefer queue.endRead();
-    const driver = try evaluator.allocator.create(ReceiveDriver);
+    const driver = try fiber.allocator.create(ReceiveDriver);
     driver.* = .{ .endpoint = endpoint_value.take(), .queue = queue };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 
 const ReceiveDriver = struct {
@@ -310,62 +310,62 @@ const ReceiveDriver = struct {
     }
     const Preparation = struct {
         pub const Error = machine.MachineError;
-        evaluator: *machine.Fiber,
+        fiber: *machine.Fiber,
         pub fn prepare(self: *@This(), value: Value) Error!Value {
-            return dict.fromUniquePairs(self.evaluator.allocator, self.evaluator.releases, &.{
+            return dict.fromUniquePairs(self.fiber.allocator, self.fiber.releases, &.{
                 .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("message") } } },
                 .{ .{ .symbol = .{ .name = try intern.intern("value") } }, value },
             });
         }
         pub fn release(self: *@This(), value: Value) void {
-            self.evaluator.releases.releaseValue(value);
+            self.fiber.releases.releaseValue(value);
         }
     };
-    pub fn advance(evaluator: *machine.Fiber, self: *ReceiveDriver) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const scope = try callingScope(evaluator);
-        const output = try evaluator.reserveStack(1);
-        var preparation: Preparation = .{ .evaluator = evaluator };
+    pub fn advance(fiber: *machine.Fiber, self: *ReceiveDriver) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const scope = try callingScope(fiber);
+        const output = try fiber.reserveStack(1);
+        var preparation: Preparation = .{ .fiber = fiber };
         const delivery = self.queue.receive(scope, &preparation) catch |err| return switch (err) {
-            error.ScopeClosing => publicationFailure(evaluator, error.ScopeClosing),
-            error.Overflow => publicationFailure(evaluator, error.Overflow),
+            error.ScopeClosing => publicationFailure(fiber, error.ScopeClosing),
+            error.Overflow => publicationFailure(fiber, error.Overflow),
             else => |failure| failure,
         };
         switch (delivery) {
-            .pending => try evaluator.park(.{ .external = self.queue.source() }),
-            .failed => |failure| return transportFailure(evaluator, failure),
-            .eof => return output.output(try dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{.{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("eof") } } }})),
+            .pending => try fiber.park(.{ .external = self.queue.source() }),
+            .failed => |failure| return transportFailure(fiber, failure),
+            .eof => return output.output(try dict.fromUniquePairs(fiber.allocator, fiber.releases, &.{.{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("eof") } } }})),
             .message => |event| return output.output(event),
         }
-        return evaluator.afterStep();
+        return fiber.afterStep();
     }
 };
 
-fn open(evaluator: *machine.Fiber) machine.MachineError!void {
-    try startRequest(evaluator, .factory);
+fn open(fiber: *machine.Fiber) machine.MachineError!void {
+    try startRequest(fiber, .factory);
 }
 
-fn begin(evaluator: *machine.Fiber) machine.MachineError!void {
-    try startRequest(evaluator, .operation_selector);
+fn begin(fiber: *machine.Fiber) machine.MachineError!void {
+    try startRequest(fiber, .operation_selector);
 }
 
-fn startRequest(evaluator: *machine.Fiber, comptime role: @import("../value.zig").PortVariant) machine.MachineError!void {
-    var input = try evaluator.popValue();
+fn startRequest(fiber: *machine.Fiber, comptime role: @import("../value.zig").PortVariant) machine.MachineError!void {
+    var input = try fiber.popValue();
     defer input.deinit();
-    var capability = try evaluator.popValue();
+    var capability = try fiber.popValue();
     defer capability.deinit();
     const factory: ?*factories.Factory = if (role == .factory) factories.Factory.fromValue(capability.borrow()) else null;
     const operation_selector: ?*exchanges.Selector = if (role == .operation_selector) exchanges.Selector.fromValue(capability.borrow()) else null;
     if (factory == null and operation_selector == null)
-        return evaluator.typeError(if (role == .factory) "a factory" else "an operation selector");
-    var resource: ?heap.OwnedValue = if (role == .operation_selector) try evaluator.popValue() else null;
+        return fiber.typeError(if (role == .factory) "a factory" else "an operation selector");
+    var resource: ?heap.OwnedValue = if (role == .operation_selector) try fiber.popValue() else null;
     defer if (resource) |*owned| owned.deinit();
     if (role == .operation_selector) {
-        if (!operation_selector.?.accepts(resource.?.borrow())) return evaluator.typeError("a resource of the selector's issuing kind");
+        if (!operation_selector.?.accepts(resource.?.borrow())) return fiber.typeError("a resource of the selector's issuing kind");
     }
-    const driver = try evaluator.allocator.create(Request);
-    errdefer evaluator.allocator.destroy(driver);
-    const validated = try message.Message.create(evaluator.allocator, input.borrow(), if (role == .factory) factory.?.messageLimits() else operation_selector.?.messageLimits());
+    const driver = try fiber.allocator.create(Request);
+    errdefer fiber.allocator.destroy(driver);
+    const validated = try message.Message.create(fiber.allocator, input.borrow(), if (role == .factory) factory.?.messageLimits() else operation_selector.?.messageLimits());
     driver.* = .{
         .capability = capability.take(),
         .kind = if (role == .operation_selector)
@@ -374,7 +374,7 @@ fn startRequest(evaluator: *machine.Fiber, comptime role: @import("../value.zig"
             .{ .factory = factory.? },
         .message = validated,
     };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 
 const Request = struct {
@@ -407,45 +407,45 @@ const Request = struct {
         }
     }
 
-    pub fn advance(evaluator: *machine.Fiber, self: *Request) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *machine.Fiber, self: *Request) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.state == .validating) {
-            const progress = self.message.advance(evaluator.workBudget()) catch |err| return switch (err) {
+            const progress = self.message.advance(fiber.workBudget()) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.InvalidValue => evaluator.fail(.type, "port messages cannot contain executable words, tasks, or modules"),
-                error.Overflow => evaluator.fail(.overflow, "port message exceeds its structured value limits"),
+                error.InvalidValue => fiber.fail(.type, "port messages cannot contain executable words, tasks, or modules"),
+                error.Overflow => fiber.fail(.overflow, "port message exceeds its structured value limits"),
             };
             if (progress == .pending) return .stepped;
             self.state = .ready;
         }
         if (self.state == .preparing) {
             const opening = self.state.preparing;
-            switch (try opening.advance(evaluator.workBudget())) {
+            switch (try opening.advance(fiber.workBudget())) {
                 .yielded => {},
-                .pending => |source| try evaluator.park(.{ .external = source }),
-                .failed => |failure| return factoryFailure(evaluator, failure),
+                .pending => |source| try fiber.park(.{ .external = source }),
+                .failed => |failure| return factoryFailure(fiber, failure),
                 .resource => |item| {
                     self.state = .{ .opening = item };
                     opening.release();
                 },
             }
-            return evaluator.afterStep();
+            return fiber.afterStep();
         }
         if (self.state == .failed_open) {
             const failed = self.state.failed_open;
             const resource = Resource.fromValue(failed.resource).?;
             if (!resource.joined()) {
-                try evaluator.park(.{ .external = resource.source() });
+                try fiber.park(.{ .external = resource.source() });
                 return .{ .yielded = .park };
             }
-            return evaluator.failWithErrorData(failed.failure);
+            return fiber.failWithErrorData(failed.failure);
         }
         if (self.state == .opening) {
             const item = self.state.opening;
             const resource = Resource.fromValue(item).?;
             switch (resource.initialization()) {
                 .pending => |source| {
-                    try evaluator.park(.{ .external = source });
+                    try fiber.park(.{ .external = source });
                     return .{ .yielded = .park };
                 },
                 .failed => |failure| {
@@ -454,70 +454,70 @@ const Request = struct {
                     return .stepped;
                 },
                 .ready => {
-                    const output = try evaluator.reserveStack(1);
+                    const output = try fiber.reserveStack(1);
                     self.state = .consumed;
                     return output.output(item);
                 },
             }
         }
-        const scope = try callingScope(evaluator);
+        const scope = try callingScope(fiber);
         switch (self.kind) {
             .operation => |request| {
-                const output = try evaluator.reserveStack(1);
+                const output = try fiber.reserveStack(1);
                 switch (request.selector.begin(request.resource, scope, self.message.validated().?) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
-                    error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
-                    error.WrongKind => evaluator.typeError("a resource of the selector's issuing kind"),
+                    error.ScopeClosing => fiber.fail(.cancelled, "port scope is closing"),
+                    error.WrongKind => fiber.typeError("a resource of the selector's issuing kind"),
                 }) {
                     .exchange => |exchange| {
                         self.state = .consumed;
                         return output.output(exchange);
                     },
-                    .pending => |source| try evaluator.park(.{ .external = source }),
-                    .closed => return evaluator.fail(.io, "resource is closed"),
-                    .unsupported => return evaluator.fail(.domain, "operation lane is unavailable"),
+                    .pending => |source| try fiber.park(.{ .external = source }),
+                    .closed => return fiber.fail(.io, "resource is closed"),
+                    .unsupported => return fiber.fail(.domain, "operation lane is unavailable"),
                 }
             },
             .factory => |factory| switch (try factory.open(.{ .scope = scope }, self.message.validated().?)) {
                 .resource => |item| self.state = .{ .opening = item },
                 .opening => |opening| self.state = .{ .preparing = opening },
-                .failed => |failure| return factoryFailure(evaluator, failure),
+                .failed => |failure| return factoryFailure(fiber, failure),
             },
         }
-        return evaluator.afterStep();
+        return fiber.afterStep();
     }
 };
 
-fn factoryFailure(evaluator: *machine.Fiber, failure: factories.Failure) machine.MachineError {
-    return evaluator.failWithErrorData(failure);
+fn factoryFailure(fiber: *machine.Fiber, failure: factories.Failure) machine.MachineError {
+    return fiber.failWithErrorData(failure);
 }
-fn transportFailure(evaluator: *machine.Fiber, failure: bytes.Failure) machine.MachineError {
+fn transportFailure(fiber: *machine.Fiber, failure: bytes.Failure) machine.MachineError {
     return switch (failure) {
         .out_of_memory => error.OutOfMemory,
-        .report => |report| evaluator.fail(report.kind, report.message[0..report.len]),
+        .report => |report| fiber.fail(report.kind, report.message[0..report.len]),
     };
 }
 
-fn cancel(evaluator: *machine.Fiber) machine.MachineError!void {
-    var item = try evaluator.popValue();
+fn cancel(fiber: *machine.Fiber) machine.MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
-    const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
+    const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return fiber.typeError("an exchange");
     exchange.cancel();
 }
 
-fn shutdown(evaluator: *machine.Fiber) machine.MachineError!void {
-    var item = try evaluator.popValue();
+fn shutdown(fiber: *machine.Fiber) machine.MachineError!void {
+    var item = try fiber.popValue();
     errdefer item.deinit();
-    const resource = Resource.fromValue(item.borrow()) orelse return evaluator.typeError("a resource");
-    try evaluator.startDriver(Observe{ .owner = .init(item.take()), .target = .{ .resource = resource }, .mode = .shutdown });
+    const resource = Resource.fromValue(item.borrow()) orelse return fiber.typeError("a resource");
+    try fiber.startDriver(Observe{ .owner = .init(item.take()), .target = .{ .resource = resource }, .mode = .shutdown });
 }
 
-fn close(evaluator: *machine.Fiber) machine.MachineError!void {
-    var item = try evaluator.popValue();
+fn close(fiber: *machine.Fiber) machine.MachineError!void {
+    var item = try fiber.popValue();
     errdefer item.deinit();
     if (endpoints.Endpoint.fromValue(item.borrow())) |capability| {
-        if (!capability.closable()) return evaluator.typeError("a resource or exchange; a borrowed endpoint closes with its source");
-        try evaluator.startDriver(CloseEndpoint{ .owner = .init(item.take()), .endpoint = capability });
+        if (!capability.closable()) return fiber.typeError("a resource or exchange; a borrowed endpoint closes with its source");
+        try fiber.startDriver(CloseEndpoint{ .owner = .init(item.take()), .endpoint = capability });
         return;
     }
     const target: Target = if (exchanges.Exchange.fromValue(item.borrow())) |exchange|
@@ -525,8 +525,8 @@ fn close(evaluator: *machine.Fiber) machine.MachineError!void {
     else if (Resource.fromValue(item.borrow())) |resource|
         .{ .resource = resource }
     else
-        return evaluator.typeError("a resource or exchange");
-    try evaluator.startDriver(Observe{
+        return fiber.typeError("a resource or exchange");
+    try fiber.startDriver(Observe{
         .owner = .init(item.take()),
         .target = target,
         .mode = .close,
@@ -541,33 +541,33 @@ const CloseEndpoint = struct {
     endpoint: *endpoints.Endpoint,
     requested: bool = false,
 
-    pub fn advance(evaluator: *machine.Fiber, self: *CloseEndpoint) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *machine.Fiber, self: *CloseEndpoint) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (!self.requested) {
             self.endpoint.close();
             self.requested = true;
         }
         if (!self.endpoint.closeJoined()) {
-            try evaluator.park(.{ .external = self.endpoint.closeSource() });
+            try fiber.park(.{ .external = self.endpoint.closeSource() });
             return .{ .yielded = .park };
         }
         return .completed;
     }
 };
 
-fn awaitExchange(evaluator: *machine.Fiber) machine.MachineError!void {
-    return observe(evaluator, .observe);
+fn awaitExchange(fiber: *machine.Fiber) machine.MachineError!void {
+    return observe(fiber, .observe);
 }
 
-fn result(evaluator: *machine.Fiber) machine.MachineError!void {
-    return observe(evaluator, .claim);
+fn result(fiber: *machine.Fiber) machine.MachineError!void {
+    return observe(fiber, .claim);
 }
 
-fn observe(evaluator: *machine.Fiber, mode: Observe.Mode) machine.MachineError!void {
-    var item = try evaluator.popValue();
+fn observe(fiber: *machine.Fiber, mode: Observe.Mode) machine.MachineError!void {
+    var item = try fiber.popValue();
     errdefer item.deinit();
-    const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
-    try evaluator.startDriver(Observe{
+    const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return fiber.typeError("an exchange");
+    try fiber.startDriver(Observe{
         .owner = .init(item.take()),
         .target = .{ .exchange = exchange },
         .mode = mode,
@@ -582,56 +582,56 @@ const Observe = struct {
     target: Target,
     mode: Mode,
 
-    pub fn advance(evaluator: *machine.Fiber, self: *Observe) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *machine.Fiber, self: *Observe) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         switch (self.target) {
             .resource => |resource| {
                 if (self.mode == .shutdown) {
                     switch (resource.shutdown()) {
                         .pending => {},
                         .ready => return .completed,
-                        .unsupported => return evaluator.fail(.domain, "resource does not support graceful shutdown"),
-                        .failed => |failure| return transportFailure(evaluator, failure),
+                        .unsupported => return fiber.fail(.domain, "resource does not support graceful shutdown"),
+                        .failed => |failure| return transportFailure(fiber, failure),
                     }
                 } else {
                     resource.close();
                     if (resource.joined()) return .completed;
                 }
-                try evaluator.park(.{ .external = resource.source() });
+                try fiber.park(.{ .external = resource.source() });
             },
             .exchange => |exchange| {
                 if (self.mode == .close) {
                     exchange.close();
                     if (exchange.closed()) return .completed;
-                    try evaluator.park(.{ .external = exchange.source(.cleanup) });
+                    try fiber.park(.{ .external = exchange.source(.cleanup) });
                 } else if (self.mode == .claim) {
-                    const output = try evaluator.reserveStack(1);
-                    switch (exchange.claimResult(try callingScope(evaluator)) catch |err| return publicationFailure(evaluator, err)) {
-                        .pending => try evaluator.park(.{ .external = exchange.source(.completion) }),
+                    const output = try fiber.reserveStack(1);
+                    switch (exchange.claimResult(try callingScope(fiber)) catch |err| return publicationFailure(fiber, err)) {
+                        .pending => try fiber.park(.{ .external = exchange.source(.completion) }),
                         .value => |item| return output.output(item),
-                        .claimed => return evaluator.fail(.contract, "exchange result has already been claimed"),
-                        .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                        .failed => |failure| return evaluator.failWithErrorData(failure),
+                        .claimed => return fiber.fail(.contract, "exchange result has already been claimed"),
+                        .cancelled => return fiber.fail(.cancelled, "exchange was cancelled"),
+                        .failed => |failure| return fiber.failWithErrorData(failure),
                     }
                 } else switch (exchange.completion()) {
-                    .pending => try evaluator.park(.{ .external = exchange.source(.completion) }),
+                    .pending => try fiber.park(.{ .external = exchange.source(.completion) }),
                     .ready => return .completed,
-                    .cancelled => return evaluator.fail(.cancelled, "exchange was cancelled"),
-                    .failed => |failure| return evaluator.failWithErrorData(failure),
+                    .cancelled => return fiber.fail(.cancelled, "exchange was cancelled"),
+                    .failed => |failure| return fiber.failWithErrorData(failure),
                 }
             },
         }
-        return evaluator.afterStep();
+        return fiber.afterStep();
     }
 };
 
-fn callingScope(evaluator: *machine.Fiber) machine.MachineError!*scheduler.TaskScope {
-    return evaluator.task_scope orelse evaluator.fail(.cancelled, "port scope is closing");
+fn callingScope(fiber: *machine.Fiber) machine.MachineError!*scheduler.TaskScope {
+    return fiber.task_scope orelse fiber.fail(.cancelled, "port scope is closing");
 }
-fn publicationFailure(evaluator: *machine.Fiber, err: error{ OutOfMemory, ScopeClosing, Overflow }) machine.MachineError {
+fn publicationFailure(fiber: *machine.Fiber, err: error{ OutOfMemory, ScopeClosing, Overflow }) machine.MachineError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),
-        error.Overflow => evaluator.fail(.overflow, "too many resource owners in one port publication"),
+        error.ScopeClosing => fiber.fail(.cancelled, "port scope is closing"),
+        error.Overflow => fiber.fail(.overflow, "too many resource owners in one port publication"),
     };
 }

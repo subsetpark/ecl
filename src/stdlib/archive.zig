@@ -50,29 +50,29 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn openTgz(evaluator: *Fiber) MachineError!void {
-    var bytes = try evaluator.popValue();
+fn openTgz(fiber: *Fiber) MachineError!void {
+    var bytes = try fiber.popValue();
     errdefer bytes.deinit();
-    if (bytes.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const encoder = storage.ByteVectorEncoder.init(evaluator.allocator, bytes.borrow());
-    try evaluator.startDriver(UnpackDriver{
-        .allocator = evaluator.allocator,
+    if (bytes.borrow() != .list) return fiber.typeError("an integer byte list");
+    const encoder = storage.ByteVectorEncoder.init(fiber.allocator, bytes.borrow());
+    try fiber.startDriver(UnpackDriver{
+        .allocator = fiber.allocator,
         .io = null,
         .authority = .none,
         .bytes_value = .init(bytes.take()),
         .source = .init(.view),
-        .entries = .init(.init(evaluator.allocator)),
+        .entries = .init(.init(fiber.allocator)),
         .state = .{ .parsing = .{ .encode_bytes = .{ .byte = .init(encoder), .target = .view } } },
     });
 }
-fn nextMember(evaluator: *Fiber) MachineError!void {
-    var archive = try evaluator.popValue();
+fn nextMember(fiber: *Fiber) MachineError!void {
+    var archive = try fiber.popValue();
     errdefer archive.deinit();
-    if (!document.isArchive(archive.borrow())) return evaluator.typeError("an archive resource");
-    const driver = try evaluator.allocator.create(MemberDriver);
+    if (!document.isArchive(archive.borrow())) return fiber.typeError("an archive resource");
+    const driver = try fiber.allocator.create(MemberDriver);
     // SAFETY: reading initializes path and metadata before the text phase uses them.
     driver.* = .{ .archive = archive.take(), .path = undefined, .metadata = undefined };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 const MemberDriver = struct {
     pub const address_stable_driver = {};
@@ -85,28 +85,28 @@ const MemberDriver = struct {
         if (self.state == .text) self.state.text.retire(releases);
         releases.releaseValue(self.archive);
     }
-    pub fn advance(evaluator: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.state == .reading) {
             self.metadata = (document.next(self.archive, &self.path) catch |err| switch (err) {
-                error.Closed => return evaluator.fail(.io, "archive resource is closed"),
-                error.Invalid => return evaluator.fail(.domain, "archive member range is invalid"),
+                error.Closed => return fiber.fail(.io, "archive resource is closed"),
+                error.Invalid => return fiber.fail(.domain, "archive member range is invalid"),
             }) orelse {
                 self.state = .complete;
-                return .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator, evaluator.releases, &.{}) };
+                return .{ .output = try @import("../dict.zig").fromUniquePairs(fiber.allocator, fiber.releases, &.{}) };
             };
-            self.state = .{ .text = .init(evaluator.allocator, self.path[0..self.metadata.length]) };
+            self.state = .{ .text = .init(fiber.allocator, self.path[0..self.metadata.length]) };
         }
-        return switch (self.state.text.advance(evaluator.workBudget()) catch |err| switch (err) {
+        return switch (self.state.text.advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return evaluator.fail(.domain, "archive member path is not UTF-8"),
+            error.InvalidUtf8 => return fiber.fail(.domain, "archive member path is not UTF-8"),
         }) {
             .pending => .stepped,
             .complete => |path| result: {
                 self.state.text.deinit();
                 self.state = .complete;
-                defer evaluator.releases.releaseValue(path);
-                break :result .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator, evaluator.releases, &.{
+                defer fiber.releases.releaseValue(path);
+                break :result .{ .output = try @import("../dict.zig").fromUniquePairs(fiber.allocator, fiber.releases, &.{
                     .{ .{ .symbol = .{ .name = try intern.intern("path") } }, path },
                     .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern(@tagName(self.metadata.kind)) } } },
                     .{ .{ .symbol = .{ .name = try intern.intern("size") } }, .{ .int = @intCast(self.metadata.size) } },
@@ -115,20 +115,20 @@ const MemberDriver = struct {
         };
     }
 };
-fn readMember(evaluator: *Fiber) MachineError!void {
-    var maximum_value = try evaluator.popValue();
+fn readMember(fiber: *Fiber) MachineError!void {
+    var maximum_value = try fiber.popValue();
     defer maximum_value.deinit();
-    if (maximum_value.borrow() != .int) return evaluator.typeError("an integer read maximum");
+    if (maximum_value.borrow() != .int) return fiber.typeError("an integer read maximum");
     const maximum = maximum_value.borrow().int;
-    if (maximum < 1 or maximum > document.read_limit) return evaluator.fail(.domain, "archive read maximum must be from 1 through 65536");
-    var archive = try evaluator.popValue();
+    if (maximum < 1 or maximum > document.read_limit) return fiber.fail(.domain, "archive read maximum must be from 1 through 65536");
+    var archive = try fiber.popValue();
     errdefer archive.deinit();
-    if (!document.isArchive(archive.borrow())) return evaluator.typeError("an archive resource");
-    const driver = try evaluator.allocator.create(MemberReadDriver);
-    errdefer evaluator.allocator.destroy(driver);
-    const buffer = try evaluator.allocator.alloc(u8, @intCast(maximum));
+    if (!document.isArchive(archive.borrow())) return fiber.typeError("an archive resource");
+    const driver = try fiber.allocator.create(MemberReadDriver);
+    errdefer fiber.allocator.destroy(driver);
+    const buffer = try fiber.allocator.alloc(u8, @intCast(maximum));
     driver.* = .{ .archive = archive.take(), .buffer = buffer };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 const MemberReadDriver = struct {
     pub const address_stable_driver = {};
@@ -141,13 +141,13 @@ const MemberReadDriver = struct {
         allocator.free(self.buffer);
         releases.releaseValue(self.archive);
     }
-    pub fn advance(evaluator: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.state == .reading) {
-            const count = document.read(self.archive, self.buffer) catch return evaluator.fail(.io, "archive resource is closed");
-            self.state = .{ .bytes = .init(evaluator.allocator, self.buffer[0..count]) };
+            const count = document.read(self.archive, self.buffer) catch return fiber.fail(.io, "archive resource is closed");
+            self.state = .{ .bytes = .init(fiber.allocator, self.buffer[0..count]) };
         }
-        return switch (try self.state.bytes.advance(evaluator.workBudget())) {
+        return switch (try self.state.bytes.advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |bytes| result: {
                 self.state.bytes.deinit();
@@ -158,12 +158,12 @@ const MemberReadDriver = struct {
     }
 };
 
-fn sha256(evaluator: *Fiber) MachineError!void {
-    var bytes_value = try evaluator.popValue();
+fn sha256(fiber: *Fiber) MachineError!void {
+    var bytes_value = try fiber.popValue();
     errdefer bytes_value.deinit();
-    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const encoder = storage.ByteVectorEncoder.init(evaluator.allocator, bytes_value.borrow());
-    try evaluator.startDriver(Sha256Driver{
+    if (bytes_value.borrow() != .list) return fiber.typeError("an integer byte list");
+    const encoder = storage.ByteVectorEncoder.init(fiber.allocator, bytes_value.borrow());
+    try fiber.startDriver(Sha256Driver{
         .bytes_value = .init(bytes_value.take()),
         .encoder = .init(encoder),
     });
@@ -181,11 +181,11 @@ const Sha256Driver = struct {
     rendered: [64]u8 = @splat(0),
     text: ?heap.Owned(storage.ByteStringMaterializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *Sha256Driver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.bytes == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+    pub fn advance(fiber: *Fiber, self: *Sha256Driver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.bytes == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidByte => return evaluator.failAtIndex(
+            error.InvalidByte => return fiber.failAtIndex(
                 .domain,
                 "archive.sha256 expects integers from 0 through 255",
                 self.encoder.borrow().invalid_index.?,
@@ -196,7 +196,7 @@ const Sha256Driver = struct {
         };
         const input = self.bytes.?.borrow().bytes();
         if (self.index != input.len) {
-            const end = self.index + evaluator.workBudget().take(input.len - self.index);
+            const end = self.index + fiber.workBudget().take(input.len - self.index);
             self.hasher.update(input[self.index..end]);
             self.index = end;
             return .stepped;
@@ -204,32 +204,32 @@ const Sha256Driver = struct {
         if (self.text == null) {
             self.hasher.final(&self.digest);
             self.rendered = std.fmt.bytesToHex(self.digest, .lower);
-            self.text = .init(.init(evaluator.allocator, &self.rendered));
+            self.text = .init(.init(fiber.allocator, &self.rendered));
         }
-        return switch (try self.text.?.borrowMut().advance(evaluator.workBudget())) {
+        return switch (try self.text.?.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
     }
 };
 
-fn unpackTgz(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var bytes_value = try evaluator.popValue();
+fn unpackTgz(fiber: *Fiber) MachineError!void {
+    try fiber.require(3);
+    var bytes_value = try fiber.popValue();
     errdefer bytes_value.deinit();
-    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    var destination = try evaluator.popValue();
+    if (bytes_value.borrow() != .list) return fiber.typeError("an integer byte list");
+    var destination = try fiber.popValue();
     errdefer destination.deinit();
-    if (!destination.borrow().isString()) return evaluator.typeError("a string destination path");
-    var root = try evaluator.popValue();
+    if (!destination.borrow().isString()) return fiber.typeError("a string destination path");
+    var root = try fiber.popValue();
     errdefer root.deinit();
-    if (!fsport.isRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
-    const access = evaluator.inherited.runtime().filesystem_access;
-    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator, bytes_value.borrow());
-    const path_encoder = storage.StringEncoder.init(evaluator.allocator, destination.borrow());
-    const entries = poll.ChunkList(Entry).init(evaluator.allocator);
-    try evaluator.startDriver(UnpackDriver{
-        .allocator = evaluator.allocator,
+    if (!fsport.isRoot(root.borrow())) return fiber.typeError("a root symbol or directory resource");
+    const access = fiber.inherited.runtime().filesystem_access;
+    const byte_encoder = storage.ByteVectorEncoder.init(fiber.allocator, bytes_value.borrow());
+    const path_encoder = storage.StringEncoder.init(fiber.allocator, destination.borrow());
+    const entries = poll.ChunkList(Entry).init(fiber.allocator);
+    try fiber.startDriver(UnpackDriver{
+        .allocator = fiber.allocator,
         .io = fsport.hostIo(access),
         .authority = .{ .filesystem = access },
         .bytes_value = .init(bytes_value.take()),
@@ -539,15 +539,15 @@ const UnpackDriver = struct {
         cleanup: CleanupWork,
     };
 
-    pub fn advance(evaluator: *Fiber, self: *UnpackDriver) MachineError!machine.WorkProgress {
-        return self.completion.advance(evaluator, self);
+    pub fn advance(fiber: *Fiber, self: *UnpackDriver) MachineError!machine.WorkProgress {
+        return self.completion.advance(fiber, self);
     }
 
-    pub fn advanceOperation(self: *UnpackDriver, evaluator: *Fiber) MachineError!driver_completion.Progress {
-        try evaluator.pollKernel();
+    pub fn advanceOperation(self: *UnpackDriver, fiber: *Fiber) MachineError!driver_completion.Progress {
+        try fiber.pollKernel();
         return switch (self.state) {
-            .parsing => |*parsing| self.advanceParsing(evaluator, parsing),
-            .active => |*active| self.advanceActive(evaluator, active),
+            .parsing => |*parsing| self.advanceParsing(fiber, parsing),
+            .active => |*active| self.advanceActive(fiber, active),
             .rollback_reopen,
             .rollback,
             .cleanup_archive,
@@ -559,54 +559,54 @@ const UnpackDriver = struct {
 
     fn advanceParsing(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         parsing: *Parsing,
     ) MachineError!driver_completion.Progress {
         return switch (parsing.*) {
-            .encode_bytes => |*encoding| self.encodeBytes(evaluator, encoding),
-            .encode_destination => |*encoding| self.encodeDestination(evaluator, encoding),
-            .allocate_tar => |*allocation| self.allocateTar(evaluator, allocation),
+            .encode_bytes => |*encoding| self.encodeBytes(fiber, encoding),
+            .encode_destination => |*encoding| self.encodeDestination(fiber, encoding),
+            .allocate_tar => |*allocation| self.allocateTar(fiber, allocation),
             .allocate_decoder => |*allocation| self.allocateDecoder(allocation),
-            .decompress => |*decompression| self.decompress(evaluator, decompression),
-            .verify => |*verification| self.verifyGzip(evaluator, verification),
+            .decompress => |*decompression| self.decompress(fiber, decompression),
+            .verify => |*verification| self.verifyGzip(fiber, verification),
             .allocate_slots => |*allocation| self.allocateSlots(allocation),
-            .initialize_slots => |*initialization| self.initializeSlots(evaluator, initialization),
+            .initialize_slots => |*initialization| self.initializeSlots(fiber, initialization),
         };
     }
 
     fn advanceActive(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         active: *Active,
     ) MachineError!driver_completion.Progress {
         return switch (active.work) {
             .scanning => |*scanning| switch (scanning.work) {
-                .publish_view => self.publishView(evaluator, &active.archive),
-                .tar_header => self.readTarHeader(evaluator, &active.archive, scanning),
+                .publish_view => self.publishView(fiber, &active.archive),
+                .tar_header => self.readTarHeader(fiber, &active.archive, scanning),
                 .insert_member => |*insertion| self.insertMember(
-                    evaluator,
+                    fiber,
                     &active.archive,
                     scanning,
                     insertion,
                 ),
-                .parse_pax => |*pax| self.parsePaxRecord(evaluator, &active.archive, scanning, pax),
-                .scan_pax => |*scan| self.scanPaxRecord(evaluator, &active.archive, scanning, scan),
-                .trailing_zeroes => self.trailingZeroes(evaluator, &active.archive, scanning),
+                .parse_pax => |*pax| self.parsePaxRecord(fiber, &active.archive, scanning, pax),
+                .scan_pax => |*scan| self.scanPaxRecord(fiber, &active.archive, scanning, scan),
+                .trailing_zeroes => self.trailingZeroes(fiber, &active.archive, scanning),
                 .allocate_results => self.allocateResults(scanning),
-                .materialize_paths => |*paths| self.materializePaths(evaluator, scanning, paths),
+                .materialize_paths => |*paths| self.materializePaths(fiber, scanning, paths),
                 .materialize_result => |*materialization| materializeResult(
-                    evaluator,
+                    fiber,
                     active,
                     materialization,
                 ),
                 .release_result_inputs => |*release| try self.releaseResultInputs(
-                    evaluator,
+                    fiber,
                     active,
                     release,
                 ),
                 .complete => unreachable,
             },
-            .publication => |*publication| self.advancePublication(evaluator, &active.archive, publication),
+            .publication => |*publication| self.advancePublication(fiber, &active.archive, publication),
         };
     }
 
@@ -665,12 +665,12 @@ const UnpackDriver = struct {
 
     fn encodeBytes(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         encoding: *@FieldType(Parsing, "encode_bytes"),
     ) MachineError!driver_completion.Progress {
-        switch (encoding.byte.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+        switch (encoding.byte.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidByte => return evaluator.failAtIndex(
+            error.InvalidByte => return fiber.failAtIndex(
                 .domain,
                 "archive.unpack-tgz expects integers from 0 through 255",
                 encoding.byte.borrow().invalid_index.?,
@@ -679,7 +679,7 @@ const UnpackDriver = struct {
             .pending => return .stepped,
             .complete => |bytes| {
                 const target = takeEncodeTarget(&encoding.target);
-                encoding.byte.deinit(evaluator.releases, self.allocator);
+                encoding.byte.deinit(fiber.releases, self.allocator);
                 self.state = .{ .parsing = switch (target) {
                     .view => .{ .allocate_tar = .{ .bytes = .init(bytes), .target = .view } },
                     .unpack => |path| .{ .encode_destination = .{
@@ -694,28 +694,28 @@ const UnpackDriver = struct {
 
     fn encodeDestination(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         encoding: *@FieldType(Parsing, "encode_destination"),
     ) MachineError!driver_completion.Progress {
-        switch (encoding.destination.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+        switch (encoding.destination.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "destination contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return self.failDomain(fiber, "destination contains an invalid Unicode scalar"),
         }) {
             .pending => return .stepped,
             .complete => |path| {
                 if (path.len == 0) {
                     self.allocator.free(path);
-                    return self.failDomain(evaluator, "destination is empty");
+                    return self.failDomain(fiber, "destination is empty");
                 }
                 switch (self.authority) {
-                    .filesystem => |access| self.authorizeExtraction(evaluator, access, path) catch |err| {
+                    .filesystem => |access| self.authorizeExtraction(fiber, access, path) catch |err| {
                         self.allocator.free(path);
                         return err;
                     },
                     .none => unreachable,
                 }
                 const bytes = encoding.bytes.take();
-                encoding.destination.deinit(evaluator.releases, self.allocator);
+                encoding.destination.deinit(fiber.releases, self.allocator);
                 self.state = .{ .parsing = .{ .allocate_tar = .{
                     .bytes = .init(bytes),
                     .target = .{ .unpack = .init(path) },
@@ -729,36 +729,36 @@ const UnpackDriver = struct {
     /// archive byte is decompressed.
     fn authorizeExtraction(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         access: *external.FilesystemAccess,
         path: []const u8,
     ) MachineError!void {
         const class = fsport.classifyPath(path) catch
-            return self.failReason(evaluator, .domain, .invalid_path, "destination is not a canonical relative path");
+            return self.failReason(fiber, .domain, .invalid_path, "destination is not a canonical relative path");
         if (class == .root)
-            return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
+            return self.failReason(fiber, .domain, .invalid_path, "destination must name a child entry, not the root");
         const root_value = self.source.borrow().unpack.root.borrow();
         self.root = fsport.selectRoot(access, root_value) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.UnknownRoot => return self.failReason(evaluator, .domain, .unknown_root, "unknown filesystem root"),
-            error.Closed => return self.failReason(evaluator, .io, .io, "directory resource is closed"),
-            error.Io => return self.failReason(evaluator, .io, .changed, "directory resource changed"),
+            error.UnknownRoot => return self.failReason(fiber, .domain, .unknown_root, "unknown filesystem root"),
+            error.Closed => return self.failReason(fiber, .io, .io, "directory resource is closed"),
+            error.Io => return self.failReason(fiber, .io, .changed, "directory resource changed"),
         };
         self.slot = fsport.reserveSelected(access, self.root.?) orelse
-            return self.failReason(evaluator, .overflow, .limit, "filesystem operation limit reached");
+            return self.failReason(fiber, .overflow, .limit, "filesystem operation limit reached");
     }
 
     fn allocateTar(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         allocation: *EncodedInputs,
     ) MachineError!driver_completion.Progress {
         const compressed = allocation.bytes.borrow().bytes();
         if (compressed.len < 18 or compressed[0] != 0x1f or compressed[1] != 0x8b)
-            return self.failDomain(evaluator, "malformed gzip archive");
+            return self.failDomain(fiber, "malformed gzip archive");
         const expected: usize = std.mem.readInt(u32, compressed[compressed.len - 4 ..][0..4], .little);
         if (expected > max_uncompressed_bytes)
-            return self.failDomain(evaluator, "archive exceeds the 1 GiB uncompressed limit");
+            return self.failDomain(fiber, "archive exceeds the 1 GiB uncompressed limit");
         const tar = try self.allocator.alloc(u8, expected);
         const inputs = takeEncodedInputs(allocation);
         self.state = .{ .parsing = .{ .allocate_decoder = .{
@@ -785,26 +785,26 @@ const UnpackDriver = struct {
 
     fn decompress(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         decompression: *@FieldType(Parsing, "decompress"),
     ) MachineError!driver_completion.Progress {
         const output = decompression.tar.borrow();
         if (decompression.index != output.len) {
-            const end = decompression.index + evaluator.workBudget().take(output.len - decompression.index);
+            const end = decompression.index + fiber.workBudget().take(output.len - decompression.index);
             const read = decompression.decoder.borrowMut().read(output[decompression.index..end]) catch
-                return self.failDomain(evaluator, "malformed gzip archive");
-            if (read == 0) return self.failDomain(evaluator, "gzip size does not match its footer");
+                return self.failDomain(fiber, "malformed gzip archive");
+            if (read == 0) return self.failDomain(fiber, "gzip size does not match its footer");
             decompression.index += read;
             return .stepped;
         }
         var extra: [1]u8 = undefined;
         const read = decompression.decoder.borrowMut().read(&extra) catch
-            return self.failDomain(evaluator, "malformed gzip archive");
+            return self.failDomain(fiber, "malformed gzip archive");
         if (read != 0 or !decompression.decoder.borrow().consumedAllInput())
-            return self.failDomain(evaluator, "gzip size does not match its footer");
+            return self.failDomain(fiber, "gzip size does not match its footer");
         const inputs = takeEncodedInputs(&decompression.inputs);
         const tar = decompression.tar.take();
-        decompression.decoder.deinit(evaluator.releases, self.allocator);
+        decompression.decoder.deinit(fiber.releases, self.allocator);
         self.state = .{ .parsing = .{ .verify = .{
             .inputs = inputs,
             .tar = .init(tar),
@@ -814,12 +814,12 @@ const UnpackDriver = struct {
 
     fn verifyGzip(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         verification: *@FieldType(Parsing, "verify"),
     ) MachineError!driver_completion.Progress {
         const output = verification.tar.borrow();
         if (verification.index != output.len) {
-            const end = verification.index + evaluator.workBudget().take(output.len - verification.index);
+            const end = verification.index + fiber.workBudget().take(output.len - verification.index);
             verification.crc.update(output[verification.index..end]);
             verification.index = end;
             return .stepped;
@@ -827,7 +827,7 @@ const UnpackDriver = struct {
         const compressed = verification.inputs.bytes.borrow().bytes();
         const expected_crc = std.mem.readInt(u32, compressed[compressed.len - 8 ..][0..4], .little);
         if (verification.crc.final() != expected_crc)
-            return self.failDomain(evaluator, "gzip checksum does not match its payload");
+            return self.failDomain(fiber, "gzip checksum does not match its payload");
         const inputs = takeEncodedInputs(&verification.inputs);
         const tar = verification.tar.take();
         self.state = .{ .parsing = .{ .allocate_slots = .{
@@ -854,11 +854,11 @@ const UnpackDriver = struct {
 
     fn initializeSlots(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         initialization: *@FieldType(Parsing, "initialize_slots"),
     ) MachineError!driver_completion.Progress {
         const slots = initialization.slots.borrow();
-        const end = initialization.index + evaluator.workBudget().take(slots.len - initialization.index);
+        const end = initialization.index + fiber.workBudget().take(slots.len - initialization.index);
         @memset(slots[initialization.index..end], null);
         initialization.index = end;
         if (end != slots.len) return .stepped;
@@ -877,11 +877,11 @@ const UnpackDriver = struct {
         return .stepped;
     }
 
-    fn publishView(self: *UnpackDriver, evaluator: *Fiber, archive: *Archive) MachineError!driver_completion.Progress {
-        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "archive scope is closing");
+    fn publishView(self: *UnpackDriver, fiber: *Fiber, archive: *Archive) MachineError!driver_completion.Progress {
+        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "archive scope is closing");
         const result = document.adopt(scope, archive.tar.borrow(), self.entries.borrow()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return evaluator.fail(.cancelled, "archive scope is closing"),
+            error.ScopeClosing => return fiber.fail(.cancelled, "archive scope is closing"),
         };
         // Scope publication consumes both inputs. Replace them without any
         // allocation or cancellation point before driver retirement can run.
@@ -894,14 +894,14 @@ const UnpackDriver = struct {
 
     fn readTarHeader(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         archive: *Archive,
         scanning: *Scanning,
     ) MachineError!driver_completion.Progress {
         const context = &scanning.context;
         const tar = archive.tar.borrow();
         if (context.tar_offset == tar.len) {
-            if (context.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
+            if (context.zero_blocks < 2) return self.failDomain(fiber, "tar archive has no end marker");
             scanning.work = switch (self.operationMode()) {
                 .view => .publish_view,
                 .unpack => .allocate_results,
@@ -909,28 +909,28 @@ const UnpackDriver = struct {
             return .stepped;
         }
         if (context.tar_offset + tar_block_bytes > tar.len)
-            return self.failDomain(evaluator, "truncated tar header");
+            return self.failDomain(fiber, "truncated tar header");
         const header: *const [tar_block_bytes]u8 = @ptrCast(tar[context.tar_offset..][0..tar_block_bytes]);
         if (allZero(header)) {
             if (context.pending_path != null or context.pending_size != null)
-                return self.failDomain(evaluator, "tar extension has no following member");
+                return self.failDomain(fiber, "tar extension has no following member");
             context.zero_blocks += 1;
             context.tar_offset += tar_block_bytes;
             if (context.zero_blocks == 2) scanning.work = .trailing_zeroes;
             return .stepped;
         }
-        if (context.zero_blocks != 0) return self.failDomain(evaluator, "tar data follows an end marker");
-        if (!validChecksum(header)) return self.failDomain(evaluator, "tar header checksum is invalid");
+        if (context.zero_blocks != 0) return self.failDomain(fiber, "tar data follows an end marker");
+        if (!validChecksum(header)) return self.failDomain(fiber, "tar header checksum is invalid");
         const header_size = parseTarNumber(header[124..136]) orelse
-            return self.failDomain(evaluator, "tar member size is malformed");
+            return self.failDomain(fiber, "tar member size is malformed");
         const typeflag = header[156];
         const data_offset = context.tar_offset + tar_block_bytes;
         const header_data_end = std.math.add(usize, data_offset, std.math.cast(usize, header_size) orelse
-            return self.failDomain(evaluator, "tar member size exceeds addressable memory")) catch
-            return self.failDomain(evaluator, "tar member size overflows");
+            return self.failDomain(fiber, "tar member size exceeds addressable memory")) catch
+            return self.failDomain(fiber, "tar member size overflows");
         const header_next = paddedTarOffset(header_data_end) orelse
-            return self.failDomain(evaluator, "tar member padding overflows");
-        if (header_next > tar.len) return self.failDomain(evaluator, "truncated tar member");
+            return self.failDomain(fiber, "tar member padding overflows");
+        if (header_next > tar.len) return self.failDomain(fiber, "truncated tar member");
 
         if (typeflag == 'x') {
             scanning.work = .{ .parse_pax = .{
@@ -942,8 +942,8 @@ const UnpackDriver = struct {
         }
         if (typeflag == 'L') {
             if (header_size == 0 or header_size > max_path_bytes + 1)
-                return self.failDomain(evaluator, "GNU long name exceeds the path limit");
-            if (context.pending_path) |*old| old.deinit(evaluator.releases, self.allocator);
+                return self.failDomain(fiber, "GNU long name exceeds the path limit");
+            if (context.pending_path) |*old| old.deinit(fiber.releases, self.allocator);
             const raw = tar[data_offset..header_data_end];
             const trimmed = std.mem.trimEnd(u8, raw, "\x00");
             context.pending_path = .init(try self.allocator.dupe(u8, trimmed));
@@ -954,28 +954,28 @@ const UnpackDriver = struct {
         const kind: EntryKind = switch (typeflag) {
             0, '0' => .file,
             '5' => .directory,
-            '1', '2' => return self.failDomain(evaluator, "tar links are not permitted"),
-            '3', '4', '6' => return self.failDomain(evaluator, "tar special nodes are not permitted"),
-            else => return self.failDomain(evaluator, "tar member kind is unsupported"),
+            '1', '2' => return self.failDomain(fiber, "tar links are not permitted"),
+            '3', '4', '6' => return self.failDomain(fiber, "tar special nodes are not permitted"),
+            else => return self.failDomain(fiber, "tar member kind is unsupported"),
         };
         const effective_size = context.pending_size orelse header_size;
         context.pending_size = null;
         if (effective_size > max_uncompressed_bytes)
-            return self.failDomain(evaluator, "tar member exceeds the 1 GiB uncompressed limit");
+            return self.failDomain(fiber, "tar member exceeds the 1 GiB uncompressed limit");
         if (kind == .directory and effective_size != 0)
-            return self.failDomain(evaluator, "tar directory has file content");
+            return self.failDomain(fiber, "tar directory has file content");
         const effective_end = std.math.add(usize, data_offset, std.math.cast(usize, effective_size) orelse
-            return self.failDomain(evaluator, "tar member size exceeds addressable memory")) catch
-            return self.failDomain(evaluator, "tar member size overflows");
+            return self.failDomain(fiber, "tar member size exceeds addressable memory")) catch
+            return self.failDomain(fiber, "tar member size overflows");
         const next_offset = paddedTarOffset(effective_end) orelse
-            return self.failDomain(evaluator, "tar member padding overflows");
-        if (next_offset > tar.len) return self.failDomain(evaluator, "truncated tar member");
+            return self.failDomain(fiber, "tar member padding overflows");
+        if (next_offset > tar.len) return self.failDomain(fiber, "truncated tar member");
         const path = try self.memberPath(context, header);
         errdefer self.allocator.free(path);
-        if (!validMemberPath(path)) return self.failDomain(evaluator, "tar member path is unsafe");
+        if (!validMemberPath(path)) return self.failDomain(fiber, "tar member path is unsafe");
         context.member_count += 1;
         if (context.member_count > max_members)
-            return self.failDomain(evaluator, "archive exceeds the 100000 member limit");
+            return self.failDomain(fiber, "archive exceeds the 100000 member limit");
         const entry = Entry{
             .path = path,
             .kind = kind,
@@ -994,7 +994,7 @@ const UnpackDriver = struct {
 
     fn parsePaxRecord(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         archive: *Archive,
         scanning: *Scanning,
         pax: *Pax,
@@ -1008,15 +1008,15 @@ const UnpackDriver = struct {
         var space = pax.offset;
         while (space != pax.end and tar[space] != ' ') : (space += 1) {
             if (space - pax.offset >= 20 or tar[space] < '0' or tar[space] > '9')
-                return self.failDomain(evaluator, "PAX record length is malformed");
+                return self.failDomain(fiber, "PAX record length is malformed");
         }
-        if (space == pax.end) return self.failDomain(evaluator, "PAX record is truncated");
+        if (space == pax.end) return self.failDomain(fiber, "PAX record is truncated");
         const record_len = std.fmt.parseInt(usize, tar[pax.offset..space], 10) catch
-            return self.failDomain(evaluator, "PAX record length is malformed");
+            return self.failDomain(fiber, "PAX record length is malformed");
         if (record_len <= space - pax.offset + 2 or record_len > pax.end - pax.offset)
-            return self.failDomain(evaluator, "PAX record length is invalid");
+            return self.failDomain(fiber, "PAX record length is invalid");
         const record_end = pax.offset + record_len;
-        if (tar[record_end - 1] != '\n') return self.failDomain(evaluator, "PAX record lacks a newline");
+        if (tar[record_end - 1] != '\n') return self.failDomain(fiber, "PAX record lacks a newline");
         const moved = pax.*;
         scanning.work = .{ .scan_pax = .{
             .pax = moved,
@@ -1029,17 +1029,17 @@ const UnpackDriver = struct {
 
     fn scanPaxRecord(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         archive: *Archive,
         scanning: *Scanning,
         scan: *@FieldType(ScanWork, "scan_pax"),
     ) MachineError!driver_completion.Progress {
         const tar = archive.tar.borrow();
         const payload_end = scan.record_end - 1;
-        const end = scan.scan_offset + evaluator.workBudget().take(payload_end - scan.scan_offset);
+        const end = scan.scan_offset + fiber.workBudget().take(payload_end - scan.scan_offset);
         const equals_relative = std.mem.indexOfScalar(u8, tar[scan.scan_offset..end], '=') orelse {
             scan.scan_offset = end;
-            if (end == payload_end) return self.failDomain(evaluator, "PAX record lacks a value");
+            if (end == payload_end) return self.failDomain(fiber, "PAX record lacks a value");
             return .stepped;
         };
         const equals = equals_relative + scan.scan_offset;
@@ -1047,14 +1047,14 @@ const UnpackDriver = struct {
         const field = tar[equals + 1 .. payload_end];
         if (std.mem.eql(u8, key, "path")) {
             if (field.len == 0 or field.len > max_path_bytes)
-                return self.failDomain(evaluator, "PAX path exceeds the path limit");
-            if (scanning.context.pending_path) |*old| old.deinit(evaluator.releases, self.allocator);
+                return self.failDomain(fiber, "PAX path exceeds the path limit");
+            if (scanning.context.pending_path) |*old| old.deinit(fiber.releases, self.allocator);
             scanning.context.pending_path = .init(try self.allocator.dupe(u8, field));
         } else if (std.mem.eql(u8, key, "size")) {
             if (field.len == 0 or field.len > 20)
-                return self.failDomain(evaluator, "PAX size is malformed");
+                return self.failDomain(fiber, "PAX size is malformed");
             scanning.context.pending_size = std.fmt.parseInt(u64, field, 10) catch
-                return self.failDomain(evaluator, "PAX size is malformed");
+                return self.failDomain(fiber, "PAX size is malformed");
         }
         const pax = scan.pax;
         scanning.work = .{ .parse_pax = .{
@@ -1086,21 +1086,21 @@ const UnpackDriver = struct {
 
     fn insertMember(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         archive: *Archive,
         scanning: *Scanning,
         insertion: *@FieldType(ScanWork, "insert_member"),
     ) MachineError!driver_completion.Progress {
         const entry = &insertion.entry;
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (work.spend()) {
             const slot = &archive.slots.borrow()[insertion.slot];
             if (slot.*) |prior| {
                 if (std.mem.eql(u8, prior.path, entry.path))
-                    return self.failDomain(evaluator, "tar archive contains a duplicate member path");
+                    return self.failDomain(fiber, "tar archive contains a duplicate member path");
                 insertion.probes += 1;
                 if (insertion.probes == member_slots)
-                    return self.failDomain(evaluator, "tar member table is full");
+                    return self.failDomain(fiber, "tar member table is full");
                 insertion.slot = (insertion.slot + 1) & (member_slots - 1);
                 continue;
             }
@@ -1115,14 +1115,14 @@ const UnpackDriver = struct {
 
     fn trailingZeroes(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         archive: *Archive,
         scanning: *Scanning,
     ) MachineError!driver_completion.Progress {
         const tar = archive.tar.borrow();
-        const end = scanning.context.tar_offset + evaluator.workBudget().take(tar.len - scanning.context.tar_offset);
+        const end = scanning.context.tar_offset + fiber.workBudget().take(tar.len - scanning.context.tar_offset);
         for (tar[scanning.context.tar_offset..end]) |byte| if (byte != 0)
-            return self.failDomain(evaluator, "tar data follows its end marker");
+            return self.failDomain(fiber, "tar data follows its end marker");
         scanning.context.tar_offset = end;
         if (end != tar.len) return .stepped;
         scanning.work = switch (self.operationMode()) {
@@ -1143,14 +1143,14 @@ const UnpackDriver = struct {
 
     fn materializePaths(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         scanning: *Scanning,
         paths: *@FieldType(ScanWork, "materialize_paths"),
     ) MachineError!driver_completion.Progress {
         switch (paths.work) {
-            .text => |*materializer| switch (materializer.advance(evaluator.workBudget()) catch |err| switch (err) {
+            .text => |*materializer| switch (materializer.advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidUtf8 => return self.failDomain(evaluator, "tar member path is not valid UTF-8"),
+                error.InvalidUtf8 => return self.failDomain(fiber, "tar member path is not valid UTF-8"),
             }) {
                 .pending => return .stepped,
                 .complete => |path_value| {
@@ -1164,7 +1164,7 @@ const UnpackDriver = struct {
             },
             .next => {},
         }
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (work.spend()) {
             const entry = paths.iterator.next() orelse {
                 const inputs = paths.inputs;
@@ -1182,11 +1182,11 @@ const UnpackDriver = struct {
     }
 
     fn materializeResult(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         active: *Active,
         materialization: *@FieldType(ScanWork, "materialize_result"),
     ) MachineError!driver_completion.Progress {
-        return switch (try materialization.materializer.advance(evaluator.workBudget())) {
+        return switch (try materialization.materializer.advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| result: {
                 var completed = materialization.materializer;
@@ -1206,12 +1206,12 @@ const UnpackDriver = struct {
 
     fn releaseResultInputs(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         active: *Active,
         release: *@FieldType(ScanWork, "release_result_inputs"),
     ) MachineError!driver_completion.Progress {
         if (release.release.index != release.release.built) {
-            evaluator.releases.releaseValue(
+            fiber.releases.releaseValue(
                 release.release.values[release.release.index],
             );
             release.release.index += 1;
@@ -1232,7 +1232,7 @@ const UnpackDriver = struct {
                     .no_follow_final,
                 ) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.PathTooLong => return self.failReason(evaluator, .overflow, .limit, "destination exceeds the resolver byte limit"),
+                    error.PathTooLong => return self.failReason(fiber, .overflow, .limit, "destination exceeds the resolver byte limit"),
                 };
                 break :publication .{ .resolve = .{ .result = release.result, .resolver = resolver } };
             },
@@ -1245,7 +1245,7 @@ const UnpackDriver = struct {
 
     fn advancePublication(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         archive: *Archive,
         publication: *Publication,
     ) MachineError!driver_completion.Progress {
@@ -1254,13 +1254,13 @@ const UnpackDriver = struct {
             .resolve => |*resolving| switch (try resolving.resolver.step()) {
                 .pending => return .yielded,
                 .failed => |reason| return self.failReason(
-                    evaluator,
+                    fiber,
                     if (reason == .limit) .overflow else .io,
                     reason,
                     reason.message(),
                 ),
                 .complete => |resolved| {
-                    resolving.resolver.retire(evaluator.releases);
+                    resolving.resolver.retire(fiber.releases);
                     const result = resolving.result;
                     switch (resolved) {
                         .entry => self.destination = resolved,
@@ -1268,7 +1268,7 @@ const UnpackDriver = struct {
                             var closing = handle.*;
                             closing.close(io);
                             publication.* = .{ .destination_check = result };
-                            return self.failReason(evaluator, .domain, .invalid_path, "destination must name a child entry, not the root");
+                            return self.failReason(fiber, .domain, .invalid_path, "destination must name a child entry, not the root");
                         },
                     }
                     publication.* = .{ .destination_check = result };
@@ -1282,9 +1282,9 @@ const UnpackDriver = struct {
                         publication.* = .{ .stage_path = result };
                         return .yielded;
                     },
-                    else => return self.failIo(evaluator, "cannot inspect archive destination", err),
+                    else => return self.failIo(fiber, "cannot inspect archive destination", err),
                 };
-                return self.failDestinationExists(evaluator, "archive destination already exists");
+                return self.failDestinationExists(fiber, "archive destination already exists");
             },
             .stage_path => |result| {
                 var name_buffer: [24]u8 = undefined;
@@ -1300,11 +1300,11 @@ const UnpackDriver = struct {
                 target.parent.dir.createDir(io, staged.path.borrow(), .default_dir) catch |err| switch (err) {
                     error.PathAlreadyExists => {
                         const result = staged.result;
-                        staged.path.deinit(evaluator.releases, self.allocator);
+                        staged.path.deinit(fiber.releases, self.allocator);
                         publication.* = .{ .stage_path = result };
                         return .yielded;
                     },
-                    else => return self.failIo(evaluator, "cannot create archive staging directory", err),
+                    else => return self.failIo(fiber, "cannot create archive staging directory", err),
                 };
                 const moved = staged.*;
                 publication.* = .{ .open_stage = moved };
@@ -1314,7 +1314,7 @@ const UnpackDriver = struct {
                 const directory = target.parent.dir.openDir(io, staged.path.borrow(), .{
                     .follow_symlinks = false,
                 }) catch |err|
-                    return self.failIo(evaluator, "cannot open archive staging directory", err);
+                    return self.failIo(fiber, "cannot open archive staging directory", err);
                 const moved = staged.*;
                 publication.* = .{ .extract = .{
                     .staged = moved,
@@ -1337,24 +1337,24 @@ const UnpackDriver = struct {
                     extraction.created_count += 1;
                     if (entry.kind == .directory) {
                         extraction.dir.createDirPath(io, entry.path) catch |err|
-                            return self.failIo(evaluator, "cannot create archive directory", err);
+                            return self.failIo(fiber, "cannot create archive directory", err);
                         return .yielded;
                     }
                     if (entry.size > fsport.limitsOf(self.authority.filesystem).max_stream_transfer_bytes)
-                        return self.failReason(evaluator, .overflow, .limit, "archive member exceeds the streaming transfer limit");
+                        return self.failReason(fiber, .overflow, .limit, "archive member exceeds the streaming transfer limit");
                     if (lastSlash(entry.path)) |slash|
                         extraction.dir.createDirPath(io, entry.path[0..slash]) catch |err|
-                            return self.failIo(evaluator, "cannot create archive parent directory", err);
+                            return self.failIo(fiber, "cannot create archive parent directory", err);
                     const file = extraction.dir.createFile(io, entry.path, .{ .exclusive = true }) catch |err|
-                        return self.failIo(evaluator, "cannot create archive file", err);
+                        return self.failIo(fiber, "cannot create archive file", err);
                     extraction.work = .{ .file = .{ .entry = entry, .file = file } };
                 },
                 .file => |*file_state| {
                     if (file_state.written != file_state.entry.size) {
-                        const end = file_state.written + evaluator.workBudget().take(file_state.entry.size - file_state.written);
+                        const end = file_state.written + fiber.workBudget().take(file_state.entry.size - file_state.written);
                         const source = archive.tar.borrow()[file_state.entry.data_offset + file_state.written .. file_state.entry.data_offset + end];
                         file_state.file.writePositionalAll(io, source, file_state.written) catch |err|
-                            return self.failIo(evaluator, "cannot write archive file", err);
+                            return self.failIo(fiber, "cannot write archive file", err);
                         file_state.written = end;
                     } else {
                         file_state.file.close(io);
@@ -1372,10 +1372,10 @@ const UnpackDriver = struct {
                     target.name,
                 ) catch |err| switch (err) {
                     error.PathAlreadyExists => return self.failDestinationExists(
-                        evaluator,
+                        fiber,
                         "archive destination already exists",
                     ),
-                    else => return self.failIo(evaluator, "cannot publish archive destination", err),
+                    else => return self.failIo(fiber, "cannot publish archive destination", err),
                 };
                 const result = commit_state.staged.result;
                 const path = commit_state.staged.path.take();
@@ -1387,25 +1387,25 @@ const UnpackDriver = struct {
         return .yielded;
     }
 
-    fn failDomain(self: *UnpackDriver, evaluator: *Fiber, message: []const u8) MachineError {
+    fn failDomain(self: *UnpackDriver, fiber: *Fiber, message: []const u8) MachineError {
         _ = self;
-        return evaluator.fail(.domain, message);
+        return fiber.fail(.domain, message);
     }
 
     /// Authority and resolution failures carry the same provenance the `fs`
     /// words attach: the operation, root, path, and portable reason.
     fn failReason(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         kind: machine.ErrorKind,
         reason: fsport.Reason,
         message: []const u8,
     ) MachineError {
         const operation = try intern.intern("unpack-tgz");
         const reason_symbol = try intern.intern(reason.symbol());
-        const failure = evaluator.fail(kind, message);
+        const failure = fiber.fail(kind, message);
         const unpack = self.source.borrow().unpack;
-        evaluator.addErrorFilesystem(.{
+        fiber.addErrorFilesystem(.{
             .operation = .{ .symbol = .{ .name = operation } },
             .reason = .{ .symbol = .{ .name = reason_symbol } },
             .target = .{ .single = .{ .root = unpack.root.borrow(), .path = unpack.destination.borrow() } },
@@ -1413,17 +1413,17 @@ const UnpackDriver = struct {
         return failure;
     }
 
-    fn failIo(self: *UnpackDriver, evaluator: *Fiber, message: []const u8, err: anyerror) MachineError {
-        return self.failReason(evaluator, .io, fsport.reasonForError(err), message);
+    fn failIo(self: *UnpackDriver, fiber: *Fiber, message: []const u8, err: anyerror) MachineError {
+        return self.failReason(fiber, .io, fsport.reasonForError(err), message);
     }
 
     fn failDestinationExists(
         self: *UnpackDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         message: []const u8,
     ) MachineError {
-        const failure = self.failReason(evaluator, .io, .already_exists, message);
-        evaluator.addErrorDestinationExists();
+        const failure = self.failReason(fiber, .io, .already_exists, message);
+        fiber.addErrorDestinationExists();
         return failure;
     }
 

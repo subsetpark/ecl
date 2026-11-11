@@ -51,42 +51,42 @@ fn definition(comptime operation: Op) env.BuiltinWord {
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Fiber) MachineError!void {
-            return primitive(evaluator, operation);
+        fn run(fiber: *Fiber) MachineError!void {
+            return primitive(fiber, operation);
         }
     }.run);
 }
 
-fn primitive(evaluator: *Fiber, comptime operation: Op) MachineError!void {
+fn primitive(fiber: *Fiber, comptime operation: Op) MachineError!void {
     return switch (operation) {
-        .at => atPrimitive(evaluator),
-        .where => wherePrimitive(evaluator),
-        .first_where => firstWherePrimitive(evaluator),
-        .in_word => inPrimitive(evaluator),
-        .raze => razePrimitive(evaluator),
-        .cat => catPrimitive(evaluator),
-        .take => takePrimitive(evaluator),
-        .drop => dropPrimitive(evaluator),
-        .reverse => reversePrimitive(evaluator),
-        .first => firstPrimitive(evaluator),
-        .rest => restPrimitive(evaluator),
-        .find => findPrimitive(evaluator),
-        .cons => consPrimitive(evaluator),
-        .range => rangePrimitive(evaluator),
-        .shape => shapePrimitive(evaluator),
-        .len => lenPrimitive(evaluator),
-        .flip => flipPrimitive(evaluator),
-        .reshape => reshapePrimitive(evaluator),
-        .cut => cutPrimitive(evaluator),
-        .rotate => rotatePrimitive(evaluator),
+        .at => atPrimitive(fiber),
+        .where => wherePrimitive(fiber),
+        .first_where => firstWherePrimitive(fiber),
+        .in_word => inPrimitive(fiber),
+        .raze => razePrimitive(fiber),
+        .cat => catPrimitive(fiber),
+        .take => takePrimitive(fiber),
+        .drop => dropPrimitive(fiber),
+        .reverse => reversePrimitive(fiber),
+        .first => firstPrimitive(fiber),
+        .rest => restPrimitive(fiber),
+        .find => findPrimitive(fiber),
+        .cons => consPrimitive(fiber),
+        .range => rangePrimitive(fiber),
+        .shape => shapePrimitive(fiber),
+        .len => lenPrimitive(fiber),
+        .flip => flipPrimitive(fiber),
+        .reshape => reshapePrimitive(fiber),
+        .cut => cutPrimitive(fiber),
+        .rotate => rotatePrimitive(fiber),
     };
 }
 
-fn atPrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var index = try evaluator.popValue();
+fn atPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var index = try fiber.popValue();
     defer index.deinit();
-    var collection = try evaluator.popValue();
+    var collection = try fiber.popValue();
     defer collection.deinit();
     // A typed index vector over a typed source is one gather: the result's
     // representation is the source's, known before the first read.
@@ -94,15 +94,15 @@ fn atPrimitive(evaluator: *Fiber) MachineError!void {
         (index.borrow().list.kind() == .leaf_u8 or index.borrow().list.kind() == .leaf_i64))
     {
         if (try startTypedGather(
-            evaluator,
+            fiber,
             &collection,
             &index,
             @intCast(index.borrow().list.length()),
         )) return;
         if (collection.borrow() == .list and index.borrow().list.length() != 0) {
             const count: usize = @intCast(index.borrow().list.length());
-            const values = try heap.OwnedValueBuffer.init(evaluator.releases, count);
-            return evaluator.runDriver(FlatGatherDriver{
+            const values = try heap.OwnedValueBuffer.init(fiber.releases, count);
+            return fiber.runDriver(FlatGatherDriver{
                 .source = .init(collection.take()),
                 .indices = .init(index.take()),
                 .values = .init(values),
@@ -116,12 +116,12 @@ fn atPrimitive(evaluator: *Fiber) MachineError!void {
     // here in full rather than approximated: same order, same error kinds,
     // same messages.
     if (collection.borrow() == .list and index.borrow() == .int) {
-        if (index.borrow().int < 0) return evaluator.fail(.domain, "at index is negative");
+        if (index.borrow().int < 0) return fiber.fail(.domain, "at index is negative");
         const position = std.math.cast(usize, index.borrow().int) orelse
-            return evaluator.fail(.domain, "at index is out of bounds");
+            return fiber.fail(.domain, "at index is out of bounds");
         if (position >= collection.borrow().list.length())
-            return evaluator.fail(.domain, "at index is out of bounds");
-        return evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), position));
+            return fiber.fail(.domain, "at index is out of bounds");
+        return fiber.pushBorrowed(list.atUnchecked(collection.borrow(), position));
     }
     // A dict has one key to find and nothing to descend into, so it needs the
     // find cursor and not the index cursor's frame stack -- which is sized by
@@ -130,23 +130,23 @@ fn atPrimitive(evaluator: *Fiber) MachineError!void {
     // and falls back to its own worklists for one that has some.
     if (collection.borrow() == .dict) {
         const find = dict.FindCursor.initHeader(
-            evaluator.allocator,
+            fiber.allocator,
             collection.borrow().dict,
             index.borrow(),
         );
-        return evaluator.runDriver(DictAtDriver{
+        return fiber.runDriver(DictAtDriver{
             .collection = .init(collection.take()),
             .key = .init(index.take()),
             .cursor = .init(find),
         });
     }
     const cursor = try IndexCursor.init(
-        evaluator.releases,
-        evaluator.allocator,
+        fiber.releases,
+        fiber.allocator,
         collection.borrow(),
         index.borrow(),
     );
-    try evaluator.runDriver(IndexDriver{
+    try fiber.runDriver(IndexDriver{
         .collection = .init(collection.take()),
         .index = .init(index.take()),
         .cursor = .init(cursor),
@@ -158,9 +158,9 @@ const IndexDriver = struct {
     collection: heap.Owned(Value),
     index: heap.Owned(Value),
     cursor: heap.Owned(IndexCursor),
-    pub fn advance(evaluator: *Fiber, self: *IndexDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *IndexDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(fiber, fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
@@ -177,24 +177,24 @@ const FlatGatherDriver = struct {
     cursor: kernel_flat.FlatCursor,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *FlatGatherDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (try self.cursor.nextRange(evaluator)) |range| {
+    pub fn advance(fiber: *Fiber, self: *FlatGatherDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (try self.cursor.nextRange(fiber)) |range| {
             const source = self.source.borrow();
             for (range.start..range.end) |index| {
                 const position = list.atUnchecked(self.indices.borrow(), index).int;
-                if (position < 0) return evaluator.fail(.domain, "at index is negative");
+                if (position < 0) return fiber.fail(.domain, "at index is negative");
                 const offset = std.math.cast(usize, position) orelse
-                    return evaluator.fail(.domain, "at index is out of bounds");
-                if (offset >= source.list.length()) return evaluator.fail(.domain, "at index is out of bounds");
+                    return fiber.fail(.domain, "at index is out of bounds");
+                if (offset >= source.list.length()) return fiber.fail(.domain, "at index is out of bounds");
                 self.values.borrowMut().appendBorrowed(list.atUnchecked(source, offset));
             }
             return .stepped;
         }
         if (!self.cursor.complete()) return .stepped;
         if (self.materializer == null)
-            self.materializer = .init(.initOwned(evaluator.allocator, self.values.borrowMut().take()));
-        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            self.materializer = .init(.initOwned(fiber.allocator, self.values.borrowMut().take()));
+        return switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
@@ -245,11 +245,11 @@ fn byteBlockSum(counts: []const u8) BlockSum {
 /// fault, as the words would report it; nothing else can fault. Counting
 /// charges one unit per mask position, filling one per position and one per
 /// element written, as `where` charges its fill.
-pub fn compress(evaluator: *Fiber, source: *heap.OwnedValue, mask: *heap.OwnedValue) MachineError!void {
+pub fn compress(fiber: *Fiber, source: *heap.OwnedValue, mask: *heap.OwnedValue) MachineError!void {
     const source_kind = source.borrow().list.kind();
     const length: usize = if (mask.borrow().list.kind() == .leaf_u8) @intCast(mask.borrow().list.length()) else 0;
     inline for (leaf_kinds) |candidate| if (candidate == source_kind) {
-        return support.Kernel(CompressKernel(candidate)).run(evaluator, .{ source, mask }, {}, length);
+        return support.Kernel(CompressKernel(candidate)).run(fiber, .{ source, mask }, {}, length);
     };
     unreachable;
 }
@@ -301,7 +301,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
             return heap.leafElements(.leaf_u8, mask.list)[0..@intCast(mask.list.length())];
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
             const source = operands[0];
             const length: usize = @intCast(source.list.length());
             const all = counts(operands[1]);
@@ -320,7 +320,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
                         offset += piece;
                     }
                     for (block[inside..]) |count| {
-                        if (count != 0) return evaluator.fail(.domain, "at index is out of bounds");
+                        if (count != 0) return fiber.fail(.domain, "at index is out of bounds");
                     }
                     output.index = range.end;
                 },
@@ -357,15 +357,15 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
             }
         }
 
-        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
+        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
             if (output.phase == .fill) return null;
             output.phase = .fill;
             output.index = 0;
             if (output.total == 0) {
-                output.empty = try list.fromValues(evaluator.allocator, &.{});
+                output.empty = try list.fromValues(fiber.allocator, &.{});
                 return null;
             }
-            output.writer = try .init(evaluator.allocator, output.total);
+            output.writer = try .init(fiber.allocator, output.total);
             // A bound on the fill's work; done ends it once every position is read.
             return output.positions +| output.total;
         }
@@ -393,13 +393,13 @@ const DictAtDriver = struct {
     collection: heap.Owned(Value),
     key: heap.Owned(Value),
     cursor: heap.Owned(dict.FindCursor),
-    pub fn advance(evaluator: *Fiber, self: *DictAtDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *DictAtDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |maybe_result| result: {
                 const found = maybe_result orelse
-                    return evaluator.fail(.domain, "at could not find the dict key");
+                    return fiber.fail(.domain, "at could not find the dict key");
                 heap.retainValue(found);
                 break :result .{ .output = found };
             },
@@ -467,7 +467,7 @@ const IndexCursor = struct {
             .node => false,
         };
     }
-    pub fn advance(self: *IndexCursor, evaluator: *Fiber, work: *poll.WorkBudget) MachineError!IndexProgress {
+    pub fn advance(self: *IndexCursor, fiber: *Fiber, work: *poll.WorkBudget) MachineError!IndexProgress {
         while (true) {
             // A frame handing work to a nested cursor is charged by that
             // cursor; spending first would starve it at a one-unit grain.
@@ -484,13 +484,13 @@ const IndexCursor = struct {
             switch (frame) {
                 .node => |node| {
                     if (node.depth >= support.max_depth and node.index == .list)
-                        return evaluator.fail(.domain, "index nesting exceeds 256 levels");
+                        return fiber.fail(.domain, "index nesting exceeds 256 levels");
                     // A dict never arrives here: `at` answers a dict itself,
                     // and a nested node inherits its parent's collection, so
                     // the only collection this cursor ever descends is a list.
-                    if (node.collection != .list) return evaluator.typeError("a list or dict");
+                    if (node.collection != .list) return fiber.typeError("a list or dict");
                     {
-                        if (try startNestedGather(evaluator, node.collection, node.index)) |outcome| switch (outcome) {
+                        if (try startNestedGather(fiber, node.collection, node.index)) |outcome| switch (outcome) {
                             .value => |result| self.last = result,
                             .frame => |driver| {
                                 var typed = driver;
@@ -512,12 +512,12 @@ const IndexCursor = struct {
                                 .values = values.take(),
                             } });
                         } else {
-                            if (node.index != .int) return evaluator.typeError("an integer index");
-                            if (node.index.int < 0) return evaluator.fail(.domain, "at index is negative");
+                            if (node.index != .int) return fiber.typeError("an integer index");
+                            if (node.index.int < 0) return fiber.fail(.domain, "at index is negative");
                             const position = std.math.cast(usize, node.index.int) orelse
-                                return evaluator.fail(.domain, "at index is out of bounds");
+                                return fiber.fail(.domain, "at index is out of bounds");
                             if (position >= node.collection.list.length())
-                                return evaluator.fail(.domain, "at index is out of bounds");
+                                return fiber.fail(.domain, "at index is out of bounds");
                             const result = list.atUnchecked(node.collection, position);
                             heap.retainValue(result);
                             self.last = result;
@@ -526,7 +526,7 @@ const IndexCursor = struct {
                 },
                 .typed => |*typed| {
                     try self.frames.reserve(1);
-                    if (try typed.advance(evaluator)) |result| {
+                    if (try typed.advance(fiber)) |result| {
                         self.last = result;
                     } else {
                         self.frames.pushReserved(frame);
@@ -578,16 +578,16 @@ const IndexCursor = struct {
     }
 };
 
-fn wherePrimitive(evaluator: *Fiber) MachineError!void {
-    var counts = try evaluator.popValue();
+fn wherePrimitive(fiber: *Fiber) MachineError!void {
+    var counts = try fiber.popValue();
     defer counts.deinit();
-    if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
+    if (counts.borrow() != .list) return fiber.typeError("a non-negative integer count list");
     const count: usize = @intCast(counts.borrow().list.length());
     // An integer leaf is read as a slice and validated a block at a time;
     // a boxed one keeps the per-element read.
     switch (counts.borrow().list.kind()) {
-        inline .leaf_u8, .leaf_i64 => |kind| return support.Kernel(WhereKernel(kind)).run(evaluator, .{&counts}, {}, count),
-        else => return support.Kernel(WhereKernel(null)).run(evaluator, .{&counts}, {}, count),
+        inline .leaf_u8, .leaf_i64 => |kind| return support.Kernel(WhereKernel(kind)).run(fiber, .{&counts}, {}, count),
+        else => return support.Kernel(WhereKernel(null)).run(fiber, .{&counts}, {}, count),
     }
 }
 
@@ -629,12 +629,12 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
             return .{};
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
             switch (output.phase) {
                 .count => if (typed)
-                    try countTyped(output, evaluator, heap.leafElements(kind.?, operands[0].list)[range.start..range.end])
+                    try countTyped(output, fiber, heap.leafElements(kind.?, operands[0].list)[range.start..range.end])
                 else for (range.start..range.end) |index|
-                    try countOne(output, evaluator, list.atUnchecked(operands[0], index)),
+                    try countOne(output, fiber, list.atUnchecked(operands[0], index)),
                 .fill => if (typed) {
                     const items = heap.leafElements(kind.?, operands[0].list);
                     if (output.mask) fillMask(output, range.len(), items) else fill(output, range.len(), TypedCounts{ .items = items });
@@ -642,12 +642,12 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
             }
         }
 
-        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
+        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
             if (output.phase == .fill) return null;
             // Every index the fill stores is below the count of counts.
             if (output.index != 0 and std.math.cast(i64, output.index - 1) == null)
-                return evaluator.fail(.overflow, "where index exceeds integer range");
-            output.writer = try .init(evaluator.allocator, output.total);
+                return fiber.fail(.overflow, "where index exceeds integer range");
+            output.writer = try .init(fiber.allocator, output.total);
             // A bound on the fill's work; done ends it once the result is full.
             const units = output.index +| output.total;
             output.index = 0;
@@ -718,19 +718,19 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
 
         /// Validates and adds the count at `index`: the exact per-element
         /// check, which reports the first failing position.
-        fn countOne(output: *Output, evaluator: *Fiber, item: Value) MachineError!void {
-            if (item != .int) return evaluator.failAtIndex(.type, "where expected integer counts", output.index);
-            if (item.int < 0) return evaluator.failAtIndex(.domain, "where counts must be non-negative", output.index);
+        fn countOne(output: *Output, fiber: *Fiber, item: Value) MachineError!void {
+            if (item != .int) return fiber.failAtIndex(.type, "where expected integer counts", output.index);
+            if (item.int < 0) return fiber.failAtIndex(.domain, "where counts must be non-negative", output.index);
             const repetitions = std.math.cast(usize, item.int) orelse
-                return evaluator.failAtIndex(.overflow, "where count exceeds addressable size", output.index);
+                return fiber.failAtIndex(.overflow, "where count exceeds addressable size", output.index);
             if (repetitions > 1) output.mask = false;
             output.total = std.math.add(usize, output.total, repetitions) catch
-                return evaluator.fail(.overflow, "where result is too large");
+                return fiber.fail(.overflow, "where result is too large");
             output.index += 1;
         }
 
         /// Counts one range of a typed list, a block at a time.
-        fn countTyped(output: *Output, evaluator: *Fiber, counts: []const Count) MachineError!void {
+        fn countTyped(output: *Output, fiber: *Fiber, counts: []const Count) MachineError!void {
             var offset: usize = 0;
             while (offset != counts.len) {
                 const block = counts[offset..][0..@min(kernel_flat.block_size, counts.len - offset)];
@@ -743,7 +743,7 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
                         continue;
                     } else |_| {}
                 }
-                for (block) |item| try countOne(output, evaluator, .{ .int = item });
+                for (block) |item| try countOne(output, fiber, .{ .int = item });
             }
         }
 
@@ -823,16 +823,16 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
     };
 }
 
-fn firstWherePrimitive(evaluator: *Fiber) MachineError!void {
-    var counts = try evaluator.popValue();
+fn firstWherePrimitive(fiber: *Fiber) MachineError!void {
+    var counts = try fiber.popValue();
     defer counts.deinit();
-    if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
+    if (counts.borrow() != .list) return fiber.typeError("a non-negative integer count list");
     const count: usize = @intCast(counts.borrow().list.length());
     const kind = counts.borrow().list.kind();
     inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate| {
-        if (kind == candidate) return support.Kernel(FirstWhereKernel(candidate)).run(evaluator, .{&counts}, {}, count);
+        if (kind == candidate) return support.Kernel(FirstWhereKernel(candidate)).run(fiber, .{&counts}, {}, count);
     }
-    try support.Kernel(FirstWhereKernel(null)).run(evaluator, .{&counts}, {}, count);
+    try support.Kernel(FirstWhereKernel(null)).run(fiber, .{&counts}, {}, count);
 }
 
 /// The first index whose count is positive, or the input length when none is.
@@ -860,17 +860,17 @@ fn FirstWhereKernel(comptime kind: ?value.HeapKind) type {
             return .{ .index = length };
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
             if (kind) |typed| {
                 for (heap.leafElements(typed, operands[0].list)[range.start..range.end], range.start..) |item, index| {
                     if (typed == .leaf_i64 and item < 0)
-                        return evaluator.failAtIndex(.domain, "first-where counts must be non-negative", index);
+                        return fiber.failAtIndex(.domain, "first-where counts must be non-negative", index);
                     if (item != 0) return output.find(index);
                 }
             } else for (range.start..range.end) |index| {
                 const item = list.atUnchecked(operands[0], index);
-                if (item != .int) return evaluator.failAtIndex(.type, "first-where expected integer counts", index);
-                if (item.int < 0) return evaluator.failAtIndex(.domain, "first-where counts must be non-negative", index);
+                if (item != .int) return fiber.failAtIndex(.type, "first-where expected integer counts", index);
+                if (item.int < 0) return fiber.failAtIndex(.domain, "first-where counts must be non-negative", index);
                 if (item.int != 0) return output.find(index);
             }
         }
@@ -885,35 +885,35 @@ fn FirstWhereKernel(comptime kind: ?value.HeapKind) type {
     };
 }
 
-fn inPrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var collection = try evaluator.popValue();
+fn inPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var collection = try fiber.popValue();
     defer collection.deinit();
-    var needle = try evaluator.popValue();
+    var needle = try fiber.popValue();
     defer needle.deinit();
-    if (collection.borrow() != .list) return evaluator.typeError("a list haystack");
-    if (try startTypedMembership(evaluator, &needle, &collection)) return;
+    if (collection.borrow() != .list) return fiber.typeError("a list haystack");
+    if (try startTypedMembership(fiber, &needle, &collection)) return;
     const cursor = try MembershipCursor.init(
-        evaluator.releases,
-        evaluator.allocator,
+        fiber.releases,
+        fiber.allocator,
         needle.borrow(),
         collection.borrow(),
     );
-    try evaluator.runDriver(MembershipDriver{
+    try fiber.runDriver(MembershipDriver{
         .needle = .init(needle.take()),
         .collection = .init(collection.take()),
         .cursor = .init(cursor),
     });
 }
 
-fn findPrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var needle = try evaluator.popValue();
+fn findPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var needle = try fiber.popValue();
     defer needle.deinit();
-    var collection = try evaluator.popValue();
+    var collection = try fiber.popValue();
     defer collection.deinit();
-    if (collection.borrow() != .list) return evaluator.typeError("a list and a needle");
-    try evaluator.runDriver(FindDriver{
+    if (collection.borrow() != .list) return fiber.typeError("a list and a needle");
+    try fiber.runDriver(FindDriver{
         .collection = .init(collection.take()),
         .needle = .init(needle.take()),
     });
@@ -930,34 +930,34 @@ const FindDriver = struct {
     index: usize = 0,
     cursor: ?heap.Owned(equal.MatchCursor) = null,
 
-    fn finish(self: *FindDriver, evaluator: *Fiber, index: usize) machine.WorkProgress {
-        if (self.cursor) |*cursor| cursor.deinit(evaluator.releases, evaluator.allocator);
+    fn finish(self: *FindDriver, fiber: *Fiber, index: usize) machine.WorkProgress {
+        if (self.cursor) |*cursor| cursor.deinit(fiber.releases, fiber.allocator);
         self.cursor = null;
         return .{ .output = .{ .int = @intCast(index) } };
     }
 
-    pub fn advance(evaluator: *Fiber, self: *FindDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *FindDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const input = self.collection.borrow();
         const needle = self.needle.borrow();
         const count: usize = @intCast(input.list.length());
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (self.index != count and work.spend()) {
             const item = list.atUnchecked(input, self.index);
             if (self.cursor == null) {
                 if (equal.matchWithoutStructure(item, needle)) |matches| {
-                    if (matches) return self.finish(evaluator, self.index);
+                    if (matches) return self.finish(fiber, self.index);
                     self.index += 1;
                     continue;
                 }
-                self.cursor = .init(try .init(evaluator.allocator, item, needle));
+                self.cursor = .init(try .init(fiber.allocator, item, needle));
             }
             switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => return .stepped,
                 .complete => |matches| {
-                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.cursor.?.deinit(fiber.releases, fiber.allocator);
                     self.cursor = null;
-                    if (matches) return self.finish(evaluator, self.index);
+                    if (matches) return self.finish(fiber, self.index);
                     self.index += 1;
                     // The comparison drew on the same budget, so the next
                     // element continues within the turn while it lasts.
@@ -966,7 +966,7 @@ const FindDriver = struct {
             }
         }
         if (self.index != count) return .stepped;
-        return self.finish(evaluator, count);
+        return self.finish(fiber, count);
     }
 };
 
@@ -1124,9 +1124,9 @@ fn LeafMembershipKernel(
             }
         };
 
-        pub fn prepare(evaluator: *Fiber, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
-            var writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, length);
-            errdefer writer.retirePartial(evaluator.releases);
+        pub fn prepare(fiber: *Fiber, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
+            var writer = try heap.LeafWriter(.leaf_i64).init(fiber.allocator, length);
+            errdefer writer.retirePartial(fiber.releases);
             const candidates: usize = @intCast(operands[1].list.length());
             const searching = compatible and candidates != 0;
             return .{
@@ -1135,8 +1135,8 @@ fn LeafMembershipKernel(
                 .needles = length,
                 .candidates = candidates,
                 .writer = writer,
-                .table = try NeedleTable.init(evaluator.allocator, length),
-                .allocator = evaluator.allocator,
+                .table = try NeedleTable.init(fiber.allocator, length),
+                .allocator = fiber.allocator,
             };
         }
 
@@ -1187,19 +1187,19 @@ fn LeafMembershipKernel(
 /// is a stride-zero register value; a flat needle list writes its final i64
 /// mask directly. Generic-spine needles retain the recursive structural cursor
 /// because their result shape is itself recursive.
-fn startTypedMembership(evaluator: *Fiber, needle: *heap.OwnedValue, haystack: *heap.OwnedValue) MachineError!bool {
+fn startTypedMembership(fiber: *Fiber, needle: *heap.OwnedValue, haystack: *heap.OwnedValue) MachineError!bool {
     const haystack_kind = haystack.borrow().list.kind();
     if (haystack_kind == .generic_spine) return false;
     const candidates: usize = @intCast(haystack.borrow().list.length());
 
     if (needle.borrow() != .list) {
         if (!scalarCanMatchKind(needle.borrow(), haystack_kind)) {
-            try evaluator.pushOwned(.{ .int = 0 });
+            try fiber.pushOwned(.{ .int = 0 });
             return true;
         }
         inline for (leaf_kinds) |candidate_haystack| {
             if (haystack_kind == candidate_haystack) {
-                try support.Kernel(ScalarMembershipKernel(candidate_haystack)).run(evaluator, .{haystack}, needle.borrow(), candidates);
+                try support.Kernel(ScalarMembershipKernel(candidate_haystack)).run(fiber, .{haystack}, needle.borrow(), candidates);
                 return true;
             }
         }
@@ -1212,7 +1212,7 @@ fn startTypedMembership(evaluator: *Fiber, needle: *heap.OwnedValue, haystack: *
     inline for (leaf_kinds) |candidate_needle| {
         if (needle_kind == candidate_needle) inline for (leaf_kinds) |candidate_haystack| {
             if (haystack_kind == candidate_haystack) {
-                try support.Kernel(LeafMembershipKernel(candidate_needle, candidate_haystack)).run(evaluator, .{ needle, haystack }, {}, needles);
+                try support.Kernel(LeafMembershipKernel(candidate_needle, candidate_haystack)).run(fiber, .{ needle, haystack }, {}, needles);
                 return true;
             }
         };
@@ -1230,9 +1230,9 @@ const MembershipDriver = struct {
     needle: heap.Owned(Value),
     collection: heap.Owned(Value),
     cursor: heap.Owned(MembershipCursor),
-    pub fn advance(evaluator: *Fiber, self: *MembershipDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *MembershipDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(fiber, fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
@@ -1301,7 +1301,7 @@ const MembershipCursor = struct {
             .node => false,
         };
     }
-    pub fn advance(self: *MembershipCursor, evaluator: *Fiber, work: *poll.WorkBudget) MachineError!IndexProgress {
+    pub fn advance(self: *MembershipCursor, fiber: *Fiber, work: *poll.WorkBudget) MachineError!IndexProgress {
         while (true) {
             // A frame handing work to a nested cursor is charged by that
             // cursor; spending first would starve it at a one-unit grain.
@@ -1318,7 +1318,7 @@ const MembershipCursor = struct {
             switch (frame) {
                 .node => |node| {
                     if (node.depth >= support.max_depth and node.needle == .list)
-                        return evaluator.fail(.domain, "membership nesting exceeds 256 levels");
+                        return fiber.fail(.domain, "membership nesting exceeds 256 levels");
                     if (node.needle != .list) {
                         try self.frames.push(.{ .search = .{ .needle = node.needle } });
                     } else {
@@ -1426,10 +1426,10 @@ const MembershipCursor = struct {
     }
 };
 
-fn razePrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn razePrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
-    try evaluator.runDriver(RazeDriver{ .collection = .init(collection.take()) });
+    try fiber.runDriver(RazeDriver{ .collection = .init(collection.take()) });
 }
 
 /// The typed result buffer, held so a cancelled raze retires it.
@@ -1488,10 +1488,10 @@ const RazeDriver = struct {
         }
     }
 
-    pub fn advance(evaluator: *Fiber, self: *RazeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *RazeDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const count: usize = @intCast(self.collection.borrow().list.length());
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .count => {
                 if (self.index == count) {
@@ -1499,7 +1499,7 @@ const RazeDriver = struct {
                     const kind = self.profile.heapKind();
                     if (kind != .generic_spine) {
                         self.output = .init(.{ .builder = try heap.AnyListBuilder.init(
-                            evaluator.allocator,
+                            fiber.allocator,
                             kind,
                             self.total,
                             self.total,
@@ -1507,7 +1507,7 @@ const RazeDriver = struct {
                         self.phase = .typed_fill;
                         continue;
                     }
-                    self.values = .init(try evaluator.allocator.alloc(Value, self.total));
+                    self.values = .init(try fiber.allocator.alloc(Value, self.total));
                     self.phase = .fill;
                     continue;
                 }
@@ -1515,7 +1515,7 @@ const RazeDriver = struct {
                 self.classify(item);
                 const contribution: usize = if (item == .list) @intCast(item.list.length()) else 1;
                 self.total = std.math.add(usize, self.total, contribution) catch
-                    return evaluator.fail(.overflow, "raze result is too large");
+                    return fiber.fail(.overflow, "raze result is too large");
                 self.index += 1;
                 _ = work.spend();
             },
@@ -1541,7 +1541,7 @@ const RazeDriver = struct {
                         builder.items()[self.destination..][0..run],
                         child,
                         self.child_index,
-                        evaluator.releases,
+                        fiber.releases,
                     ),
                 }
                 self.destination += run;
@@ -1550,7 +1550,7 @@ const RazeDriver = struct {
             .fill => {
                 if (self.index == count) {
                     self.materializer = .init(list.ValueMaterializer.init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         self.values.?.borrow(),
                     ));
                     self.phase = .materialize;
@@ -1582,101 +1582,101 @@ const RazeDriver = struct {
     }
 };
 
-fn catPrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var right = try evaluator.popValue();
+fn catPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var right = try fiber.popValue();
     defer right.deinit();
-    var left = try evaluator.popValue();
+    var left = try fiber.popValue();
     defer left.deinit();
-    if (left.borrow() != .list or right.borrow() != .list) return evaluator.typeError("two lists");
+    if (left.borrow() != .list or right.borrow() != .list) return fiber.typeError("two lists");
     const left_count: usize = @intCast(left.borrow().list.length());
     const right_count: usize = @intCast(right.borrow().list.length());
     if (left_count == 0 and right_count == 0 and (left.borrow().isString() or right.borrow().isString())) {
-        return evaluator.pushOwned(try emptyLike(
-            evaluator.allocator,
+        return fiber.pushOwned(try emptyLike(
+            fiber.allocator,
             if (left.borrow().isString()) left.borrow() else right.borrow(),
         ));
     }
-    try ListCopyDriver.installCat(evaluator, &left, &right, left_count, right_count);
+    try ListCopyDriver.installCat(fiber, &left, &right, left_count, right_count);
 }
 
-fn firstPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn firstPrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
-    if (collection.borrow().list.length() == 0) return evaluator.fail(.domain, "first requires a non-empty list");
-    try evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), 0));
+    if (collection.borrow().list.length() == 0) return fiber.fail(.domain, "first requires a non-empty list");
+    try fiber.pushBorrowed(list.atUnchecked(collection.borrow(), 0));
 }
 
-fn restPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn restPrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
-    if (count == 0) return evaluator.fail(.domain, "rest requires a non-empty list");
-    if (count == 1) return evaluator.pushOwned(try emptyLike(evaluator.allocator, collection.borrow()));
-    try ListCopyDriver.installOne(evaluator, &collection, 1, count, false);
+    if (count == 0) return fiber.fail(.domain, "rest requires a non-empty list");
+    if (count == 1) return fiber.pushOwned(try emptyLike(fiber.allocator, collection.borrow()));
+    try ListCopyDriver.installOne(fiber, &collection, 1, count, false);
 }
 
-fn takePrimitive(evaluator: *Fiber) MachineError!void {
-    var collection, var count_value = try evaluator.popPair();
+fn takePrimitive(fiber: *Fiber) MachineError!void {
+    var collection, var count_value = try fiber.popPair();
     defer count_value.deinit();
     defer collection.deinit();
     if (collection.borrow() != .list or count_value.borrow() != .int) {
-        return evaluator.typeError("a list and an integer count");
+        return fiber.typeError("a list and an integer count");
     }
     const source_count: usize = @intCast(collection.borrow().list.length());
     const result_count = std.math.cast(usize, unsignedMagnitude(count_value.borrow().int)) orelse
-        return evaluator.fail(.overflow, "take length exceeds addressable size");
+        return fiber.fail(.overflow, "take length exceeds addressable size");
     if (result_count == 0) {
-        return evaluator.pushOwned(try emptyLike(evaluator.allocator, collection.borrow()));
+        return fiber.pushOwned(try emptyLike(fiber.allocator, collection.borrow()));
     }
     if (result_count != 0 and source_count == 0) {
-        return evaluator.fail(.domain, "take cannot cycle an empty list");
+        return fiber.fail(.domain, "take cannot cycle an empty list");
     }
     const start = if (result_count == 0 or count_value.borrow().int >= 0)
         0
     else
         (source_count - (result_count % source_count)) % source_count;
     if (try startTypedSlice(
-        evaluator,
+        fiber,
         &collection,
         .{ .cyclic = .{ .start = start } },
         result_count,
     )) return;
-    const values = try evaluator.allocator.alloc(Value, result_count);
-    try evaluator.runDriver(TakeDriver{
+    const values = try fiber.allocator.alloc(Value, result_count);
+    try fiber.runDriver(TakeDriver{
         .collection = .init(collection.take()),
         .values = .init(values),
         .source_index = start,
         .source_count = source_count,
-        .materializer = .init(list.ValueMaterializer.init(evaluator.allocator, values)),
+        .materializer = .init(list.ValueMaterializer.init(fiber.allocator, values)),
     });
 }
 
 /// A rotation is a cyclic copy of the whole list from the element the count
 /// lands on, so it shares `take`'s typed and boxed copy paths.
-fn rotatePrimitive(evaluator: *Fiber) MachineError!void {
-    var collection, var count_value = try evaluator.popPair();
+fn rotatePrimitive(fiber: *Fiber) MachineError!void {
+    var collection, var count_value = try fiber.popPair();
     defer count_value.deinit();
     defer collection.deinit();
     if (collection.borrow() != .list or count_value.borrow() != .int) {
-        return evaluator.typeError("a list and an integer count");
+        return fiber.typeError("a list and an integer count");
     }
     const count: usize = @intCast(collection.borrow().list.length());
-    if (count == 0) return evaluator.pushOwned(collection.take());
+    if (count == 0) return fiber.pushOwned(collection.take());
     const start: usize = @intCast(@mod(count_value.borrow().int, @as(i64, @intCast(count))));
     if (try startTypedSlice(
-        evaluator,
+        fiber,
         &collection,
         .{ .cyclic = .{ .start = start } },
         count,
     )) return;
-    const values = try evaluator.allocator.alloc(Value, count);
-    try evaluator.runDriver(TakeDriver{
+    const values = try fiber.allocator.alloc(Value, count);
+    try fiber.runDriver(TakeDriver{
         .collection = .init(collection.take()),
         .values = .init(values),
         .source_index = start,
         .source_count = count,
-        .materializer = .init(list.ValueMaterializer.init(evaluator.allocator, values)),
+        .materializer = .init(list.ValueMaterializer.init(fiber.allocator, values)),
     });
 }
 
@@ -1691,11 +1691,11 @@ const TakeDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
 
     pub fn advance(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *TakeDriver,
     ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         const values = self.values.borrow();
         while (!self.materializing and !work.exhausted() and self.result_index < values.len) {
             values[self.result_index] = list.atUnchecked(self.collection.borrow(), self.source_index);
@@ -1714,12 +1714,12 @@ const TakeDriver = struct {
     }
 };
 
-fn dropPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection, var count_value = try evaluator.popPair();
+fn dropPrimitive(fiber: *Fiber) MachineError!void {
+    var collection, var count_value = try fiber.popPair();
     defer count_value.deinit();
     defer collection.deinit();
     if (collection.borrow() != .list or count_value.borrow() != .int) {
-        return evaluator.typeError("a list and an integer count");
+        return fiber.typeError("a list and an integer count");
     }
     const count: usize = @intCast(collection.borrow().list.length());
     const magnitude: usize = @intCast(@min(unsignedMagnitude(count_value.borrow().int), count));
@@ -1728,16 +1728,16 @@ fn dropPrimitive(evaluator: *Fiber) MachineError!void {
     else
         .{ .start = 0, .end = count - magnitude };
     if (bounds.start == bounds.end)
-        return evaluator.pushOwned(try emptyLike(evaluator.allocator, collection.borrow()));
-    try ListCopyDriver.installOne(evaluator, &collection, bounds.start, bounds.end, false);
+        return fiber.pushOwned(try emptyLike(fiber.allocator, collection.borrow()));
+    try ListCopyDriver.installOne(fiber, &collection, bounds.start, bounds.end, false);
 }
 
-fn reversePrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn reversePrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
-    if (count == 0) return evaluator.pushOwned(try emptyLike(evaluator.allocator, collection.borrow()));
-    try ListCopyDriver.installOne(evaluator, &collection, 0, count, true);
+    if (count == 0) return fiber.pushOwned(try emptyLike(fiber.allocator, collection.borrow()));
+    try ListCopyDriver.installOne(fiber, &collection, 0, count, true);
 }
 
 const ListCopyDriver = struct {
@@ -1755,71 +1755,71 @@ const ListCopyDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
 
     fn installOne(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         collection: *heap.OwnedValue,
         start: usize,
         end: usize,
         reverse: bool,
     ) MachineError!void {
         if (try startTypedSlice(
-            evaluator,
+            fiber,
             collection,
             if (reverse) .{ .reversed = .{ .end = end } } else .{ .contiguous = .{ .start = start } },
             end - start,
         )) return;
-        const values = try evaluator.allocator.alloc(Value, end - start);
-        try evaluator.runDriver(ListCopyDriver{
+        const values = try fiber.allocator.alloc(Value, end - start);
+        try fiber.runDriver(ListCopyDriver{
             .left = .init(collection.take()),
             .start = start,
             .end = end,
             .reverse = reverse,
             .values = .init(values),
-            .materializer = .init(.init(evaluator.allocator, values)),
+            .materializer = .init(.init(fiber.allocator, values)),
         });
     }
 
-    fn installCons(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
+    fn installCons(fiber: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
         const count: usize = @intCast(collection.borrow().list.length());
-        const values = try evaluator.allocator.alloc(Value, count + 1);
-        try evaluator.runDriver(ListCopyDriver{
+        const values = try fiber.allocator.alloc(Value, count + 1);
+        try fiber.runDriver(ListCopyDriver{
             .left = .init(collection.take()),
             .head = .init(item.take()),
             .start = 0,
             .end = count + 1,
             .values = .init(values),
-            .materializer = .init(.init(evaluator.allocator, values)),
+            .materializer = .init(.init(fiber.allocator, values)),
         });
     }
 
     fn installCat(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         left: *heap.OwnedValue,
         right: *heap.OwnedValue,
         left_count: usize,
         right_count: usize,
     ) MachineError!void {
         if (try startTypedConcat(
-            evaluator,
+            fiber,
             left,
             right,
             left_count,
             left_count + right_count,
         )) return;
-        const values = try evaluator.allocator.alloc(Value, left_count + right_count);
-        try evaluator.runDriver(ListCopyDriver{
+        const values = try fiber.allocator.alloc(Value, left_count + right_count);
+        try fiber.runDriver(ListCopyDriver{
             .left = .init(left.take()),
             .right = .init(right.take()),
             .start = 0,
             .end = left_count + right_count,
             .left_count = left_count,
             .values = .init(values),
-            .materializer = .init(.init(evaluator.allocator, values)),
+            .materializer = .init(.init(fiber.allocator, values)),
         });
     }
 
-    pub fn advance(evaluator: *Fiber, self: *ListCopyDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *ListCopyDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         const values = self.values.borrow();
         while (self.index != values.len and work.spend()) {
             if (self.head) |*head| {
@@ -1853,16 +1853,16 @@ fn emptyLike(allocator: std.mem.Allocator, collection: Value) MachineError!Value
     };
 }
 
-fn rangePrimitive(evaluator: *Fiber) MachineError!void {
-    var count_value = try evaluator.popValue();
+fn rangePrimitive(fiber: *Fiber) MachineError!void {
+    var count_value = try fiber.popValue();
     defer count_value.deinit();
-    if (count_value.borrow() != .int) return evaluator.typeError("a non-negative integer");
-    if (count_value.borrow().int < 0) return evaluator.fail(.domain, "range requires a non-negative integer");
+    if (count_value.borrow() != .int) return fiber.typeError("a non-negative integer");
+    if (count_value.borrow().int < 0) return fiber.fail(.domain, "range requires a non-negative integer");
     const count = std.math.cast(usize, count_value.borrow().int) orelse
-        return evaluator.fail(.overflow, "range length exceeds addressable size");
+        return fiber.fail(.overflow, "range length exceeds addressable size");
     // A known-width producer selects its builder before filling: `range` is
     // exactly the shape that never needed a boxed intermediate.
-    try support.Kernel(RangeKernel).run(evaluator, .{}, {}, count);
+    try support.Kernel(RangeKernel).run(fiber, .{}, {}, count);
 }
 
 /// Fills the typed result buffer in place. There is no intermediate: the
@@ -1880,10 +1880,10 @@ const RangeKernel = struct {
     pub const finish = Output.finish;
 };
 
-fn lenPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn lenPrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
-    try evaluator.pushOwned(.{ .int = @intCast(collection.borrow().list.length()) });
+    try fiber.pushOwned(.{ .int = @intCast(collection.borrow().list.length()) });
 }
 
 const ShapeProgress = union(enum) { pending, complete: []usize, ragged, too_deep };
@@ -1964,11 +1964,11 @@ const ShapeCursor = struct {
     }
 };
 
-fn shapePrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn shapePrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
-    const cursor = try ShapeCursor.init(evaluator.allocator, collection.borrow());
-    try evaluator.runDriver(ShapeDriver{
+    const cursor = try ShapeCursor.init(fiber.allocator, collection.borrow());
+    try fiber.runDriver(ShapeDriver{
         .collection = .init(collection.take()),
         .cursor = .init(cursor),
     });
@@ -1980,17 +1980,17 @@ const ShapeDriver = struct {
     cursor: heap.Owned(ShapeCursor),
     dimensions: ?heap.Owned([]usize) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *ShapeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *ShapeDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => return .stepped,
-            .ragged => return evaluator.fail(.shape, "shape requires a rectangular list"),
-            .too_deep => return evaluator.fail(.shape, "shape nesting exceeds 256 levels"),
+            .ragged => return fiber.fail(.shape, "shape requires a rectangular list"),
+            .too_deep => return fiber.fail(.shape, "shape nesting exceeds 256 levels"),
             .complete => |dimensions| self.dimensions = .init(dimensions),
         };
         const dimensions = self.dimensions.?.borrow();
-        var writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, dimensions.len);
-        errdefer writer.retirePartial(evaluator.releases);
+        var writer = try heap.LeafWriter(.leaf_i64).init(fiber.allocator, dimensions.len);
+        errdefer writer.retirePartial(fiber.releases);
         var values: [support.max_depth]i64 = undefined;
         for (dimensions, values[0..dimensions.len]) |dimension, *destination| destination.* = @intCast(dimension);
         writer.writeRange(0, values[0..dimensions.len]);
@@ -1998,10 +1998,10 @@ const ShapeDriver = struct {
     }
 };
 
-fn flipPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popValue();
+fn flipPrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popValue();
     defer collection.deinit();
-    if (collection.borrow() != .list) return evaluator.typeError("a rectangular list");
+    if (collection.borrow() != .list) return fiber.typeError("a rectangular list");
     const source = collection.borrow();
     const validation: FlipDriver.Validation = if (source.list.length() == 0)
         .{ .flat = 0 }
@@ -2013,7 +2013,7 @@ fn flipPrimitive(evaluator: *Fiber) MachineError!void {
         FlipDriver.leafKind(list.atUnchecked(source, 0).list.kind())
     else
         null;
-    try evaluator.runDriver(FlipDriver{
+    try fiber.runDriver(FlipDriver{
         .collection = .init(collection.take()),
         .validation = validation,
         .leaf_kind = leaf_kind,
@@ -2045,28 +2045,28 @@ const FlipDriver = struct {
     inner: ?heap.Owned(list.ValueMaterializer) = null,
     outer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *FlipDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *FlipDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const rows: usize = @intCast(self.collection.borrow().list.length());
         const columns = switch (self.validation) {
             .flat => |*next| {
-                while (next.* != rows and evaluator.workBudget().spend()) : (next.* += 1) {
+                while (next.* != rows and fiber.workBudget().spend()) : (next.* += 1) {
                     if (list.atUnchecked(self.collection.borrow(), next.*) == .list)
-                        return evaluator.fail(.shape, "flip requires rows of the same length");
+                        return fiber.fail(.shape, "flip requires rows of the same length");
                 }
                 if (next.* != rows) return .stepped;
-                try evaluator.pushBorrowed(self.collection.borrow());
+                try fiber.pushBorrowed(self.collection.borrow());
                 return .completed;
             },
             .rows => |*validation| {
-                while (validation.next != rows and evaluator.workBudget().spend()) : (validation.next += 1) {
+                while (validation.next != rows and fiber.workBudget().spend()) : (validation.next += 1) {
                     const row = list.atUnchecked(self.collection.borrow(), validation.next);
                     if (row != .list or row.list.length() != validation.columns)
-                        return evaluator.fail(.shape, "flip requires rows of the same length");
+                        return fiber.fail(.shape, "flip requires rows of the same length");
                     if (self.leaf_kind != null and row.list.kind() != self.leaf_kind.?) self.leaf_kind = null;
                 }
                 if (validation.next != rows) return .stepped;
-                if (validation.columns == 0) return evaluator.fail(
+                if (validation.columns == 0) return fiber.fail(
                     .shape,
                     "flip cannot retain trailing axes after a transposed zero dimension",
                 );
@@ -2075,39 +2075,39 @@ const FlipDriver = struct {
             },
             .ready => |columns| columns,
         };
-        if (self.leaf_kind) |kind| return self.advanceTyped(evaluator, kind, rows, columns);
+        if (self.leaf_kind) |kind| return self.advanceTyped(fiber, kind, rows, columns);
         if (self.result_rows == null) {
-            self.result_rows = .init(try .init(evaluator.releases, columns));
-            self.cells = .init(try evaluator.allocator.alloc(Value, rows));
+            self.result_rows = .init(try .init(fiber.releases, columns));
+            self.cells = .init(try fiber.allocator.alloc(Value, rows));
             return .stepped;
         }
-        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
+        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
-        if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
+        if (self.inner) |*inner| switch (try inner.borrowMut().advance(fiber.workBudget())) {
             .pending => return .stepped,
             .complete => |row_value| {
-                inner.deinit(evaluator.releases, evaluator.allocator);
+                inner.deinit(fiber.releases, fiber.allocator);
                 self.inner = null;
                 self.result_rows.?.borrowMut().appendOwned(row_value);
                 self.column += 1;
                 self.row = 0;
                 if (self.column == columns) {
                     self.outer = .init(.init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         self.result_rows.?.borrow().values(),
                     ));
                 }
                 return .stepped;
             },
         };
-        while (self.row != rows and evaluator.workBudget().spend()) : (self.row += 1) {
+        while (self.row != rows and fiber.workBudget().spend()) : (self.row += 1) {
             const source_row = list.atUnchecked(self.collection.borrow(), self.row);
             self.cells.?.borrow()[self.row] = list.atUnchecked(source_row, self.column);
         }
         if (self.row == rows) self.inner = .init(.init(
-            evaluator.allocator,
+            fiber.allocator,
             self.cells.?.borrow(),
         ));
         return .stepped;
@@ -2125,18 +2125,18 @@ const FlipDriver = struct {
     /// split's current result row and position.
     fn advanceTyped(
         self: *FlipDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         kind: value.HeapKind,
         rows: usize,
         columns: usize,
     ) MachineError!machine.WorkProgress {
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         if (self.flat == null) {
             if (self.typed == null) {
                 const total = std.math.mul(usize, rows, columns) catch
-                    return evaluator.fail(.overflow, "flip result is too large");
-                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(evaluator.allocator, kind, total, total) });
-                self.result_rows = .init(try .init(evaluator.releases, columns));
+                    return fiber.fail(.overflow, "flip result is too large");
+                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(fiber.allocator, kind, total, total) });
+                self.result_rows = .init(try .init(fiber.releases, columns));
                 return .stepped;
             }
             while (self.row != rows and !work.exhausted()) {
@@ -2157,7 +2157,7 @@ const FlipDriver = struct {
                         rows,
                         self.column,
                         @min(run, columns - self.column),
-                        evaluator.releases,
+                        fiber.releases,
                     ),
                 }
                 self.column += @min(run, columns - self.column);
@@ -2177,7 +2177,7 @@ const FlipDriver = struct {
         while (!work.exhausted()) {
             if (self.typed == null) {
                 if (spine.len() == columns) return .{ .output = spine.takeList() };
-                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(evaluator.allocator, kind, rows, rows) });
+                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(fiber.allocator, kind, rows, rows) });
                 self.row = 0;
             }
             const run = work.take(rows - self.row);
@@ -2188,7 +2188,7 @@ const FlipDriver = struct {
                     builder.items()[self.row..][0..run],
                     self.flat.?.borrow().list,
                     spine.len() * rows + self.row,
-                    evaluator.releases,
+                    fiber.releases,
                 ),
             }
             self.row += run;
@@ -2239,58 +2239,58 @@ const FlipDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn reshapePrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var shape_value = try evaluator.popValue();
+fn reshapePrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var shape_value = try fiber.popValue();
     defer shape_value.deinit();
-    var collection = try evaluator.popValue();
+    var collection = try fiber.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list or shape_value.borrow() != .list) {
-        return evaluator.typeError("a list and a non-empty integer shape");
+        return fiber.typeError("a list and a non-empty integer shape");
     }
     const rank: usize = @intCast(shape_value.borrow().list.length());
-    if (rank == 0) return evaluator.fail(.shape, "reshape requires a non-empty shape");
-    if (rank > support.max_depth) return evaluator.fail(.shape, "reshape rank exceeds 256");
+    if (rank == 0) return fiber.fail(.shape, "reshape requires a non-empty shape");
+    if (rank > support.max_depth) return fiber.fail(.shape, "reshape rank exceeds 256");
     // A flat source reshaped to rank one is exactly a typed cyclic copy. The
     // higher-rank builder still owns nested spine construction, and a
     // zero-length result stays there so its historical empty representation
     // does not change merely because the source happened to be a leaf.
     if (collection.borrow().list.kind() != .generic_spine) {
         const dimension = list.atUnchecked(shape_value.borrow(), 0);
-        if (dimension != .int) return evaluator.typeError("an integer shape");
-        if (dimension.int < 0) return evaluator.failAtIndex(
+        if (dimension != .int) return fiber.typeError("an integer shape");
+        if (dimension.int < 0) return fiber.failAtIndex(
             .shape,
             "reshape dimensions must be non-negative",
             0,
         );
         const count = std.math.cast(usize, dimension.int) orelse
-            return evaluator.failAtIndex(.overflow, "reshape dimension exceeds addressable size", 0);
+            return fiber.failAtIndex(.overflow, "reshape dimension exceeds addressable size", 0);
         const source_count: usize = @intCast(collection.borrow().list.length());
         if (rank == 1 and count != 0) {
-            if (source_count == 0) return evaluator.fail(
+            if (source_count == 0) return fiber.fail(
                 .domain,
                 "reshape cannot fill a non-empty shape from empty data",
             );
             if (try startTypedSlice(
-                evaluator,
+                fiber,
                 &collection,
                 .{ .cyclic = .{ .start = 0 } },
                 count,
             )) return;
         }
         if (rank == 2 and source_count != 0 and try startTypedMatrix(
-            evaluator,
+            fiber,
             &collection,
             count,
             list.atUnchecked(shape_value.borrow(), 1),
         )) return;
     }
-    const dimensions = try evaluator.allocator.alloc(usize, rank);
+    const dimensions = try fiber.allocator.alloc(usize, rank);
     var dimensions_owner: ?[]usize = dimensions;
-    errdefer if (dimensions_owner) |owned| evaluator.allocator.free(owned);
-    const ravel = try RavelCursor.init(evaluator.allocator, collection.borrow(), null);
+    errdefer if (dimensions_owner) |owned| fiber.allocator.free(owned);
+    const ravel = try RavelCursor.init(fiber.allocator, collection.borrow(), null);
     dimensions_owner = null;
-    try evaluator.runDriver(ReshapeDriver{
+    try fiber.runDriver(ReshapeDriver{
         .collection = .init(collection.take()),
         .shape_value = .init(shape_value.take()),
         .dimensions = .init(dimensions),
@@ -2304,7 +2304,7 @@ fn reshapePrimitive(evaluator: *Fiber) MachineError!void {
 /// anything when the column dimension is not a positive integer or the volume
 /// is zero, leaving validation and its errors to the generic driver.
 fn startTypedMatrix(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     source: *heap.OwnedValue,
     rows: usize,
     columns_value: Value,
@@ -2315,7 +2315,7 @@ fn startTypedMatrix(
     const source_kind = source.borrow().list.kind();
     inline for (leaf_kinds) |candidate| {
         if (candidate == source_kind) {
-            try support.Kernel(MatrixKernel(candidate)).run(evaluator, .{source}, .{ .rows = rows, .columns = columns }, volume);
+            try support.Kernel(MatrixKernel(candidate)).run(fiber, .{source}, .{ .rows = rows, .columns = columns }, volume);
             return true;
         }
     }
@@ -2338,16 +2338,16 @@ fn MatrixKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Fiber, _: [1]Value, shape: Params, _: usize) error{OutOfMemory}!Output {
-            return .{ .spine = try heap.OwnedValueBuffer.init(evaluator.releases, shape.rows) };
+        pub fn prepare(fiber: *Fiber, _: [1]Value, shape: Params, _: usize) error{OutOfMemory}!Output {
+            return .{ .spine = try heap.OwnedValueBuffer.init(fiber.releases, shape.rows) };
         }
 
-        pub fn chunk(shape: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
+        pub fn chunk(shape: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
             const source = heap.leafElements(kind, operands[0].list);
             var position = range.start;
             while (position != range.end) {
                 const column = position % shape.columns;
-                if (output.row == null) output.row = try heap.LeafWriter(kind).init(evaluator.allocator, shape.columns);
+                if (output.row == null) output.row = try heap.LeafWriter(kind).init(fiber.allocator, shape.columns);
                 const out = output.row.?.unpublishedRange(column, @min(shape.columns - column, range.end - position));
                 var from = position % source.len;
                 var written: usize = 0;
@@ -2558,62 +2558,62 @@ const ReshapeDriver = struct {
     ravel_filling: bool = false,
     builder: ?heap.Owned(ReshapeBuildCursor) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *ReshapeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *ReshapeDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.dimension_index != self.dimensions.borrow().len) {
-            while (self.dimension_index != self.dimensions.borrow().len and evaluator.workBudget().spend()) : (self.dimension_index += 1) {
+            while (self.dimension_index != self.dimensions.borrow().len and fiber.workBudget().spend()) : (self.dimension_index += 1) {
                 const dimension = list.atUnchecked(self.shape_value.borrow(), self.dimension_index);
-                if (dimension != .int) return evaluator.typeError("an integer shape");
-                if (dimension.int < 0) return evaluator.failAtIndex(
+                if (dimension != .int) return fiber.typeError("an integer shape");
+                if (dimension.int < 0) return fiber.failAtIndex(
                     .shape,
                     "reshape dimensions must be non-negative",
                     self.dimension_index,
                 );
                 self.dimensions.borrow()[self.dimension_index] = std.math.cast(usize, dimension.int) orelse
-                    return evaluator.failAtIndex(
+                    return fiber.failAtIndex(
                         .overflow,
                         "reshape dimension exceeds addressable size",
                         self.dimension_index,
                     );
                 if (self.dimensions.borrow()[self.dimension_index] == 0 and
                     self.dimension_index + 1 < self.dimensions.borrow().len)
-                    return evaluator.failAtIndex(
+                    return fiber.failAtIndex(
                         .shape,
                         "reshape cannot retain axes after a zero dimension",
                         self.dimension_index,
                     );
                 self.volume = std.math.mul(usize, self.volume, self.dimensions.borrow()[self.dimension_index]) catch
-                    return evaluator.fail(.overflow, "reshape volume overflows addressable size");
+                    return fiber.fail(.overflow, "reshape volume overflows addressable size");
             }
             return .stepped;
         }
-        if (self.builder) |*builder| return switch (try builder.borrowMut().advance(evaluator.workBudget())) {
+        if (self.builder) |*builder| return switch (try builder.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
-        switch (try self.ravel.borrowMut().advance(evaluator.workBudget())) {
+        switch (try self.ravel.borrowMut().advance(fiber.workBudget())) {
             .pending => return .stepped,
-            .too_deep => return evaluator.fail(.shape, "reshape data nesting exceeds 256 levels"),
+            .too_deep => return fiber.fail(.shape, "reshape data nesting exceeds 256 levels"),
             .complete => |count| if (!self.ravel_filling) {
-                self.flat = .init(try evaluator.allocator.alloc(Value, count));
+                self.flat = .init(try fiber.allocator.alloc(Value, count));
                 const next = try RavelCursor.init(
-                    evaluator.allocator,
+                    fiber.allocator,
                     self.collection.borrow(),
                     self.flat.?.borrow(),
                 );
-                self.ravel.deinit(evaluator.releases, evaluator.allocator);
+                self.ravel.deinit(fiber.releases, fiber.allocator);
                 self.ravel = .init(next);
                 self.ravel_filling = true;
                 return .stepped;
             } else {
                 std.debug.assert(count == self.flat.?.borrow().len);
-                if (self.volume > 0 and count == 0) return evaluator.fail(
+                if (self.volume > 0 and count == 0) return fiber.fail(
                     .domain,
                     "reshape cannot fill a non-empty shape from empty data",
                 );
                 self.builder = .init(try .init(
-                    evaluator.releases,
-                    evaluator.allocator,
+                    fiber.releases,
+                    fiber.allocator,
                     self.dimensions.borrow(),
                     self.flat.?.borrow(),
                 ));
@@ -2625,15 +2625,15 @@ const ReshapeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn cutPrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var starts = try evaluator.popValue();
+fn cutPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var starts = try fiber.popValue();
     defer starts.deinit();
-    var collection = try evaluator.popValue();
+    var collection = try fiber.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list or starts.borrow() != .list)
-        return evaluator.typeError("a list and a list of integer start indices");
-    try evaluator.runDriver(CutDriver{
+        return fiber.typeError("a list and a list of integer start indices");
+    try fiber.runDriver(CutDriver{
         .collection = .init(collection.take()),
         .starts = .init(starts.take()),
     });
@@ -2668,21 +2668,21 @@ const CutDriver = struct {
             self.start(index + 1);
     }
 
-    pub fn advance(evaluator: *Fiber, self: *CutDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *CutDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         const count: usize = @intCast(self.starts.borrow().list.length());
         const length: usize = @intCast(self.collection.borrow().list.length());
         if (self.validated != count) {
-            while (self.validated != count and evaluator.workBudget().spend()) : (self.validated += 1) {
+            while (self.validated != count and fiber.workBudget().spend()) : (self.validated += 1) {
                 const item = list.atUnchecked(self.starts.borrow(), self.validated);
-                if (item != .int) return evaluator.typeError("a list of integer start indices");
-                if (item.int < 0 or item.int > length) return evaluator.failAtIndex(
+                if (item != .int) return fiber.typeError("a list of integer start indices");
+                if (item.int < 0 or item.int > length) return fiber.failAtIndex(
                     .domain,
                     "cut starts must lie within the list",
                     self.validated,
                 );
                 const position: usize = @intCast(item.int);
-                if (self.validated != 0 and position < self.previous) return evaluator.failAtIndex(
+                if (self.validated != 0 and position < self.previous) return fiber.failAtIndex(
                     .domain,
                     "cut starts must be nondecreasing",
                     self.validated,
@@ -2693,33 +2693,33 @@ const CutDriver = struct {
         }
         const header = self.collection.borrow().list;
         if (self.pieces == null) {
-            self.pieces = .init(try .init(evaluator.releases, count));
-            if (count == 0) self.outer = .init(.init(evaluator.allocator, self.pieces.?.borrow().values()));
+            self.pieces = .init(try .init(fiber.releases, count));
+            if (count == 0) self.outer = .init(.init(fiber.allocator, self.pieces.?.borrow().values()));
             return .stepped;
         }
-        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
+        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
         // Pieces follow one another within the turn until its budget is
         // spent: a copy charges its elements, an empty piece one unit.
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (self.outer == null) {
             if (self.typed) |*typed| switch (try typed.borrowMut().advance(work)) {
                 .pending => return .stepped,
                 .complete => |piece_value| {
-                    typed.deinit(evaluator.releases, evaluator.allocator);
+                    typed.deinit(fiber.releases, fiber.allocator);
                     self.typed = null;
-                    self.finishPiece(evaluator, piece_value);
+                    self.finishPiece(fiber, piece_value);
                     continue;
                 },
             };
             if (self.inner) |*inner| switch (try inner.borrowMut().advance(work)) {
                 .pending => return .stepped,
                 .complete => |piece_value| {
-                    inner.deinit(evaluator.releases, evaluator.allocator);
+                    inner.deinit(fiber.releases, fiber.allocator);
                     self.inner = null;
-                    self.finishPiece(evaluator, piece_value);
+                    self.finishPiece(fiber, piece_value);
                     continue;
                 },
             };
@@ -2729,27 +2729,27 @@ const CutDriver = struct {
             if (size == 0) {
                 // Every empty piece is the one empty list.
                 _ = work.spend();
-                if (self.empty == null) self.empty = .init(try emptyLike(evaluator.allocator, self.collection.borrow()));
+                if (self.empty == null) self.empty = .init(try emptyLike(fiber.allocator, self.collection.borrow()));
                 heap.retainValue(self.empty.?.borrow());
-                self.finishPiece(evaluator, self.empty.?.borrow());
+                self.finishPiece(fiber, self.empty.?.borrow());
                 continue;
             }
-            if (list.LeafRangeMaterializer.init(evaluator.allocator, header, first, first + size)) |copy| {
+            if (list.LeafRangeMaterializer.init(fiber.allocator, header, first, first + size)) |copy| {
                 self.typed = .init(copy);
                 continue;
             }
             // A generic piece is profiled from the source's own cells, which
             // the driver holds.
-            self.inner = .init(.init(evaluator.allocator, heap.valuesConst(header)[first..][0..size]));
+            self.inner = .init(.init(fiber.allocator, heap.valuesConst(header)[first..][0..size]));
         }
         return .stepped;
     }
 
-    fn finishPiece(self: *CutDriver, evaluator: *Fiber, piece_value: Value) void {
+    fn finishPiece(self: *CutDriver, fiber: *Fiber, piece_value: Value) void {
         self.pieces.?.borrowMut().appendOwned(piece_value);
         self.piece += 1;
         if (self.piece == @as(usize, @intCast(self.starts.borrow().list.length())))
-            self.outer = .init(.init(evaluator.allocator, self.pieces.?.borrow().values()));
+            self.outer = .init(.init(fiber.allocator, self.pieces.?.borrow().values()));
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
@@ -2850,8 +2850,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             pub fn mayOverwrite(shape: CopyShape, _: usize) bool {
                 return shape == .contiguous;
             }
-            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
-                return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), null, null, output.range(range.start, range.len()), range);
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
+                return copyRange(fiber, shape, heap.leafElements(kind, operands[0].list), null, null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2864,8 +2864,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// list with room for the right becomes the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
-                return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.range(range.start, range.len()), range);
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
+                return copyRange(fiber, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2878,8 +2878,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// so the index list may become the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{1} };
 
-            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
-                return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.range(range.start, range.len()), range);
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
+                return copyRange(fiber, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2894,9 +2894,9 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{} };
 
-            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
                 const source: []const Element = if (range.end > 1) heap.leafElements(kind, operands[0].list) else &.{};
-                return copyRange(evaluator, shape, source, null, null, output.range(range.start, range.len()), range);
+                return copyRange(fiber, shape, source, null, null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2914,7 +2914,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
         /// own buffer for the shapes `Single` and `Concat` allow; each shape
         /// writes its range in place, with no staging block.
         fn copyRange(
-            evaluator: *Fiber,
+            fiber: *Fiber,
             shape: CopyShape,
             source: []const Element,
             other: ?[]const Other,
@@ -2947,8 +2947,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
                 .gather => {
                     const indices = gather_indices.?[range.start..range.end];
                     if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault.kind) {
-                        .negative => evaluator.fail(.domain, "at index is negative"),
-                        .out_of_bounds => evaluator.fail(.domain, "at index is out of bounds"),
+                        .negative => fiber.fail(.domain, "at index is negative"),
+                        .out_of_bounds => fiber.fail(.domain, "at index is out of bounds"),
                     };
                     for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
                 },
@@ -2973,14 +2973,14 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
 /// mixed-representation move to the generic path. The caller knows
 /// its copy's shape, so each shape has its own start and names exactly its
 /// operands.
-fn startTypedSlice(evaluator: *Fiber, source_owner: *heap.OwnedValue, shape: CopyShape, length: usize) MachineError!bool {
+fn startTypedSlice(fiber: *Fiber, source_owner: *heap.OwnedValue, shape: CopyShape, length: usize) MachineError!bool {
     if (length == 0) return false;
     const source = source_owner.borrow();
     if (source != .list) return false;
     const source_kind = source.list.kind();
     inline for (leaf_kinds) |candidate| {
         if (candidate == source_kind) {
-            try support.Kernel(CopyKernels(candidate, candidate, .leaf_i64).Single).run(evaluator, .{source_owner}, shape, length);
+            try support.Kernel(CopyKernels(candidate, candidate, .leaf_i64).Single).run(fiber, .{source_owner}, shape, length);
             return true;
         }
     }
@@ -2988,7 +2988,7 @@ fn startTypedSlice(evaluator: *Fiber, source_owner: *heap.OwnedValue, shape: Cop
 }
 
 fn startTypedConcat(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     left_owner: *heap.OwnedValue,
     right_owner: *heap.OwnedValue,
     left_count: usize,
@@ -3003,7 +3003,7 @@ fn startTypedConcat(
     inline for (leaf_kinds) |candidate_left| if (candidate_left == left_kind) inline for (leaf_kinds) |candidate_right| if (candidate_right == right_kind) {
         if (comptime list.ListProfile.joinKinds(candidate_left, candidate_right) == .generic_spine) return false else {
             try support.Kernel(CopyKernels(candidate_left, candidate_right, .leaf_i64).Concat).run(
-                evaluator,
+                fiber,
                 .{ left_owner, right_owner },
                 .{ .concat = .{ .left_count = left_count } },
                 length,
@@ -3018,14 +3018,14 @@ fn startTypedConcat(
 /// list's elements join into one leaf representation (see `CopyKernels`); onto
 /// an empty list, the leaf the atom alone makes. False otherwise, for the
 /// generic path.
-fn startTypedCons(evaluator: *Fiber, item: Value, collection: *heap.OwnedValue) MachineError!bool {
+fn startTypedCons(fiber: *Fiber, item: Value, collection: *heap.OwnedValue) MachineError!bool {
     const atom_kind = list.ListProfile.of(item).heapKind();
     const count: usize = @intCast(collection.borrow().list.length());
     const list_kind = if (count == 0) atom_kind else collection.borrow().list.kind();
     inline for (leaf_kinds) |candidate_list| if (candidate_list == list_kind) inline for (leaf_kinds) |candidate_atom| if (candidate_atom == atom_kind) {
         if (comptime list.ListProfile.joinKinds(candidate_list, candidate_atom) == .generic_spine) return false else {
             try support.Kernel(CopyKernels(candidate_list, candidate_atom, .leaf_i64).Cons).run(
-                evaluator,
+                fiber,
                 .{collection},
                 .{ .cons = .{ .head = item } },
                 count + 1,
@@ -3040,19 +3040,19 @@ fn startTypedCons(evaluator: *Fiber, item: Value, collection: *heap.OwnedValue) 
 /// short spine built in place, and otherwise the boxed copy every mixed move
 /// takes, profiled into its result. The head enters as data (`popDatum`), so
 /// the built list pushes it whatever it is.
-fn consPrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var collection = try evaluator.popList();
+fn consPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var collection = try fiber.popList();
     defer collection.deinit();
-    var item = try evaluator.popDatum();
+    var item = try fiber.popDatum();
     defer item.deinit();
-    try consValues(evaluator, &item, &collection);
+    try consValues(fiber, &item, &collection);
 }
 
-fn consValues(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
-    if (try startTypedCons(evaluator, item.borrow(), collection)) return;
-    if (try consSmallSpine(evaluator, item, collection)) return;
-    try ListCopyDriver.installCons(evaluator, item, collection);
+fn consValues(fiber: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
+    if (try startTypedCons(fiber, item.borrow(), collection)) return;
+    if (try consSmallSpine(fiber, item, collection)) return;
+    try ListCopyDriver.installCons(fiber, item, collection);
 }
 
 /// The longest tail a spine `cons` copies where the word is invoked. Below
@@ -3065,12 +3065,12 @@ const small_spine_cons = 16;
 /// the representation by itself. One allocation: the head takes the first
 /// slot and each tail element is retained into the next. Quotations built by
 /// partial application, `x (q) cons`, are the common case.
-fn consSmallSpine(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) error{OutOfMemory}!bool {
+fn consSmallSpine(fiber: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) error{OutOfMemory}!bool {
     if (list.ListProfile.of(item.borrow()).kind != .mixed) return false;
     const tail = collection.borrow();
     const count: usize = @intCast(tail.list.length());
     if (count > small_spine_cons) return false;
-    var builder = try heap.ListBuilder(.generic_spine).initCode(evaluator.allocator, count + 1, count + 1, .none);
+    var builder = try heap.ListBuilder(.generic_spine).initCode(fiber.allocator, count + 1, count + 1, .none);
     const slots = builder.items()[0 .. count + 1];
     slots[0] = item.take();
     for (slots[1..], 0..) |*slot, index| {
@@ -3079,8 +3079,8 @@ fn consSmallSpine(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.O
         slot.* = element;
     }
     const header = builder.finish();
-    evaluator.pushOwned(.{ .list = header }) catch |err| {
-        evaluator.releases.releaseHeader(header);
+    fiber.pushOwned(.{ .list = header }) catch |err| {
+        fiber.releases.releaseHeader(header);
         return err;
     };
     return true;
@@ -3089,7 +3089,7 @@ fn consSmallSpine(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.O
 /// A nested typed index list over a typed source, gathered as one leaf kernel
 /// inside the index cursor, or null when either is not a typed leaf. The
 /// kernel checks each index in order, as the per-element walk would.
-fn startNestedGather(evaluator: *Fiber, source: Value, indices: Value) MachineError!?support.NestedOutcome {
+fn startNestedGather(fiber: *Fiber, source: Value, indices: Value) MachineError!?support.NestedOutcome {
     if (source != .list or indices != .list) return null;
     const length: usize = @intCast(indices.list.length());
     if (length == 0) return null;
@@ -3099,7 +3099,7 @@ fn startNestedGather(evaluator: *Fiber, source: Value, indices: Value) MachineEr
         inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
             if (candidate == source_kind and candidate_index == index_kind) {
                 return try support.Kernel(CopyKernels(candidate, candidate, candidate_index).Gather).nested(
-                    evaluator,
+                    fiber,
                     .{ source, indices },
                     null,
                     .gather,
@@ -3112,7 +3112,7 @@ fn startNestedGather(evaluator: *Fiber, source: Value, indices: Value) MachineEr
 }
 
 fn startTypedGather(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     source_owner: *heap.OwnedValue,
     indices_owner: *heap.OwnedValue,
     length: usize,
@@ -3128,7 +3128,7 @@ fn startTypedGather(
         inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
             if (candidate == source_kind and candidate_index == index_kind) {
                 try support.Kernel(CopyKernels(candidate, candidate, candidate_index).Gather).run(
-                    evaluator,
+                    fiber,
                     .{ source_owner, indices_owner },
                     .gather,
                     length,

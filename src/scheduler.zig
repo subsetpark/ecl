@@ -2258,10 +2258,10 @@ pub const WorkerScheduler = enum(usize) {
 
     pub fn installTasksDriver(
         self: *const WorkerScheduler,
-        evaluator: *machine.Fiber,
+        fiber: *machine.Fiber,
         scope: *TaskScope,
     ) error{OutOfMemory}!void {
-        try evaluator.startDriver(TasksDriver{ .scheduler = self, .scope = scope });
+        try fiber.startDriver(TasksDriver{ .scheduler = self, .scope = scope });
     }
 
     fn closeRootScope(self: *const WorkerScheduler, scope: *TaskScope) void {
@@ -3009,10 +3009,10 @@ const TasksDriver = struct {
     filled: usize = 0,
 
     pub fn advance(
-        evaluator: *machine.Fiber,
+        fiber: *machine.Fiber,
         self: *TasksDriver,
     ) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+        try fiber.pollKernel();
         const old_pass = if (self.pass) |*pass| pass.take() else null;
         self.pass = null;
         const scheduler_state = self.scheduler.privateState();
@@ -3035,7 +3035,7 @@ const TasksDriver = struct {
             .start => self.scope.first,
             .retained => |next| next,
         } else self.scope.first;
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         var visited: usize = 0;
         while (current != null and visited < task_snapshot_quantum and work.spend()) : (visited += 1) {
             const cell = current.?;

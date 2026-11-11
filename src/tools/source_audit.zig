@@ -49,7 +49,7 @@ const source_groups = [_]SourceGroup{
     embeddedGroup(true, &.{
         "machine.zig", "binder.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }),
-    // The evaluator's own subsystems. Each reaches the fiber through the
+    // The machine's own subsystems. Each reaches the fiber through the
     // public surface or a machine-minted view; none shares the machine's
     // file-level exemptions.
     embeddedGroup(true, &.{
@@ -1182,7 +1182,7 @@ fn auditErasedCasts(
     return failed;
 }
 
-/// Work drivers may produce owned values, but only the evaluator loop may
+/// Work drivers may produce owned values, but only the machine loop may
 /// commit those values to the operand stack. Checking the declared return
 /// type makes this boundary cover new drivers without maintaining a name list.
 fn auditWorkDriverOutputs(label: []const u8, source: [:0]const u8) bool {

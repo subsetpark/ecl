@@ -1230,17 +1230,17 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             terminal: completion.Completion = .{},
             first: bool = true,
 
-            pub fn advance(evaluator: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
-                return self.terminal.advance(evaluator, self);
+            pub fn advance(fiber: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
+                return self.terminal.advance(fiber, self);
             }
-            pub fn advanceOperation(self: *@This(), evaluator: *machine.Fiber) machine.MachineError!completion.Progress {
+            pub fn advanceOperation(self: *@This(), fiber: *machine.Fiber) machine.MachineError!completion.Progress {
                 if (self.first) {
                     self.first = false;
-                    _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 8);
+                    _ = fiber.workBudget().take(fiber.remainingKernelFuel() -| 8);
                     return .yielded;
                 }
-                if (evaluator.remainingKernelFuel() < machine.kernel_poll_quantum / 2)
-                    return evaluator.fail(.user, "host yield retained its worker turn");
+                if (fiber.remainingKernelFuel() < machine.kernel_poll_quantum / 2)
+                    return fiber.fail(.user, "host yield retained its worker turn");
                 return .{ .output = .{ .int = 11 } };
             }
             pub fn advanceCleanup(_: *@This(), _: *heap.ReleaseDomain, _: std.mem.Allocator) bool {
@@ -1270,84 +1270,84 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             mode: enum { output, empty, failure, chain, forever, exhausted_output, exhausted_empty, exhausted_chain },
             remaining: u8 = 2,
 
-            pub fn advance(evaluator: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
-                if (evaluator.workBudget().exhausted()) return evaluator.fail(.user, "driver ran on an exhausted turn");
-                try evaluator.pollKernel();
+            pub fn advance(fiber: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
+                if (fiber.workBudget().exhausted()) return fiber.fail(.user, "driver ran on an exhausted turn");
+                try fiber.pollKernel();
                 if (self.remaining != 0) {
                     self.remaining -= 1;
                     return .{ .yielded = .wait };
                 }
                 return switch (self.mode) {
                     .exhausted_output => blk: {
-                        _ = evaluator.workBudget().take(machine.kernel_poll_quantum);
+                        _ = fiber.workBudget().take(machine.kernel_poll_quantum);
                         break :blk .{ .output = .{ .int = 11 } };
                     },
                     .exhausted_empty => blk: {
-                        _ = evaluator.workBudget().take(machine.kernel_poll_quantum);
+                        _ = fiber.workBudget().take(machine.kernel_poll_quantum);
                         break :blk .completed;
                     },
                     .exhausted_chain => blk: {
-                        _ = evaluator.workBudget().take(machine.kernel_poll_quantum);
-                        evaluator.retireDriver(self);
-                        try evaluator.startDriver(Driver{ .mode = .output, .remaining = 0 });
+                        _ = fiber.workBudget().take(machine.kernel_poll_quantum);
+                        fiber.retireDriver(self);
+                        try fiber.startDriver(Driver{ .mode = .output, .remaining = 0 });
                         break :blk .detached;
                     },
                     .output => .{ .output = .{ .int = 11 } },
                     .empty => .completed,
-                    .failure => evaluator.fail(.user, "deferred failure"),
+                    .failure => fiber.fail(.user, "deferred failure"),
                     .forever => .{ .yielded = .wait },
                     .chain => blk: {
-                        evaluator.retireDriver(self);
-                        try evaluator.startDriver(Driver{ .mode = .output });
+                        fiber.retireDriver(self);
+                        try fiber.startDriver(Driver{ .mode = .output });
                         break :blk .detached;
                     },
                 };
             }
         };
-        fn immediate(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.pushOwned(.{ .int = 11 });
+        fn immediate(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.pushOwned(.{ .int = 11 });
         }
-        fn hostYield(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(YieldingDriver{});
+        fn hostYield(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(YieldingDriver{});
         }
         fn empty(_: *machine.Fiber) machine.MachineError!void {}
-        fn deferred(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .output });
+        fn deferred(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .output });
         }
-        fn wrong(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .empty });
+        fn wrong(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .empty });
         }
-        fn failure(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .failure });
+        fn failure(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .failure });
         }
-        fn chain(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .chain });
+        fn chain(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .chain });
         }
-        fn forever(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .forever });
+        fn forever(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .forever });
         }
-        fn exhaustedOutput(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .exhausted_output, .remaining = 0 });
+        fn exhaustedOutput(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .exhausted_output, .remaining = 0 });
         }
-        fn exhaustedEmpty(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .exhausted_empty, .remaining = 0 });
+        fn exhaustedEmpty(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .exhausted_empty, .remaining = 0 });
         }
-        fn exhaustedChain(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.startDriver(Driver{ .mode = .exhausted_chain, .remaining = 0 });
+        fn exhaustedChain(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.startDriver(Driver{ .mode = .exhausted_chain, .remaining = 0 });
         }
-        fn freshTurn(evaluator: *machine.Fiber) machine.MachineError!void {
-            if (evaluator.remainingKernelFuel() < 128) return evaluator.fail(.user, "successor ran without a fresh allowance");
-            try evaluator.pushOwned(.{ .int = 1 });
+        fn freshTurn(fiber: *machine.Fiber) machine.MachineError!void {
+            if (fiber.remainingKernelFuel() < 128) return fiber.fail(.user, "successor ran without a fresh allowance");
+            try fiber.pushOwned(.{ .int = 1 });
         }
-        fn shortTurn(evaluator: *machine.Fiber) machine.MachineError!void {
-            _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 100);
+        fn shortTurn(fiber: *machine.Fiber) machine.MachineError!void {
+            _ = fiber.workBudget().take(fiber.remainingKernelFuel() -| 100);
         }
-        fn nested(evaluator: *machine.Fiber) machine.MachineError!void {
-            var body = try evaluator.popQuotation();
-            try evaluator.callOwned(body.take().list);
+        fn nested(fiber: *machine.Fiber) machine.MachineError!void {
+            var body = try fiber.popQuotation();
+            try fiber.callOwned(body.take().list);
         }
-        fn reflect(evaluator: *machine.Fiber) machine.MachineError!void {
-            try evaluator.executeWord(.{ .name = try intern.intern("which") });
+        fn reflect(fiber: *machine.Fiber) machine.MachineError!void {
+            try fiber.executeWord(.{ .name = try intern.intern("which") });
         }
     };
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1454,9 +1454,9 @@ test "port writes share the remaining turn allowance with boxed byte encoding" {
                 unreachable;
             }
         };
-        pub fn write(self: *@This(), evaluator: *machine.Fiber, _: WritePermit, bytes: []const u8) machine.MachineError!@import("port_transfer.zig").WriteProgress {
-            if (bytes.len == 0 or bytes.len > evaluator.remainingKernelFuel())
-                return evaluator.fail(.user, "write exceeds remaining allowance");
+        pub fn write(self: *@This(), fiber: *machine.Fiber, _: WritePermit, bytes: []const u8) machine.MachineError!@import("port_transfer.zig").WriteProgress {
+            if (bytes.len == 0 or bytes.len > fiber.remainingKernelFuel())
+                return fiber.fail(.user, "write exceeds remaining allowance");
             self.counts.calls += 1;
             self.counts.written += bytes.len;
             return .{ .written = bytes.len };

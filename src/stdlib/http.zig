@@ -68,20 +68,20 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn get(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .text);
+fn get(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .{ .method = .GET, .follow_redirects = true }, .text);
 }
 
-fn getBytes(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .bytes);
+fn getBytes(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .{ .method = .GET, .follow_redirects = true }, .bytes);
 }
 
-fn post(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .{ .method = .POST }, .text);
+fn post(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .{ .method = .POST }, .text);
 }
 
-fn send(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .{}, .text);
+fn send(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .{}, .text);
 }
 
 const ResponseMode = enum { text, bytes };
@@ -99,38 +99,38 @@ const RequestFields = struct {
     params: ?Value = null,
 };
 
-fn begin(evaluator: *Fiber, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
-    const access = evaluator.inherited.runtime().http_access;
-    const deadline = evaluator.scheduler.?.deadlineAfter(access.limits().deadline_ms) catch
-        return evaluator.fail(.overflow, "HTTP deadline lies beyond the clock's range");
-    var request = try evaluator.popValue();
+fn begin(fiber: *Fiber, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
+    const access = fiber.inherited.runtime().http_access;
+    const deadline = fiber.scheduler.?.deadlineAfter(access.limits().deadline_ms) catch
+        return fiber.fail(.overflow, "HTTP deadline lies beyond the clock's range");
+    var request = try fiber.popValue();
     errdefer request.deinit();
-    const fields = try requestFields(evaluator, request.borrow());
+    const fields = try requestFields(fiber, request.borrow());
     if (fields.method) |requested_method| if (requested_method.list.length() > 7)
-        return evaluator.fail(.domain, "unsupported HTTP request method");
+        return fiber.fail(.domain, "unsupported HTTP request method");
     const method = defaults.method orelse required_method: {
         if (fields.method == null)
-            return evaluator.typeError("a request with a string `method");
+            return fiber.typeError("a request with a string `method");
         // The request driver parses and replaces this placeholder before it
         // opens the URL. Requiring the field here keeps a missing method from
         // silently acquiring a transport-level default.
         break :required_method .GET;
     };
-    _ = fields.target orelse return evaluator.typeError("a request with a string `target URL");
+    _ = fields.target orelse return fiber.typeError("a request with a string `target URL");
     const admitted = access.admit() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Overflow => {
-            const failure = evaluator.fail(.overflow, "HTTP request capacity exhausted");
-            evaluator.addErrorPath(fields.target.?);
+            const failure = fiber.fail(.overflow, "HTTP request capacity exhausted");
+            fiber.addErrorPath(fields.target.?);
             return failure;
         },
     };
     errdefer _ = admitted.retire();
-    try evaluator.startDriver(RequestDriver{
+    try fiber.startDriver(RequestDriver{
         .admitted = admitted,
         .limits = access.limits(),
         .deadline = deadline,
-        .allocator = evaluator.allocator,
+        .allocator = fiber.allocator,
         .method = method,
         .follow_redirects = defaults.follow_redirects,
         .response_mode = response_mode,
@@ -140,37 +140,37 @@ fn begin(evaluator: *Fiber, defaults: RequestDefaults, response_mode: ResponseMo
     });
 }
 
-fn requestFields(evaluator: *Fiber, request: Value) MachineError!RequestFields {
-    if (request != .dict) return evaluator.typeError("a request dict");
+fn requestFields(fiber: *Fiber, request: Value) MachineError!RequestFields {
+    if (request != .dict) return fiber.typeError("a request dict");
     if (request.dict.length() > 8)
-        return evaluator.typeError("a request dict with only recognized fields");
+        return fiber.typeError("a request dict with only recognized fields");
     var fields: RequestFields = .{};
     for (0..@as(usize, @intCast(request.dict.length()))) |index| {
         const key = dict.keyAt(request.dict, index);
-        if (key != .symbol) return evaluator.typeError("symbol request field names");
+        if (key != .symbol) return fiber.typeError("symbol request field names");
         const item = dict.valueAt(request.dict, index);
         const name = intern.get(key.symbol.name);
         if (std.mem.eql(u8, name, "method")) {
-            if (!item.isString()) return evaluator.typeError("a string request `method");
+            if (!item.isString()) return fiber.typeError("a string request `method");
             fields.method = item;
         } else if (std.mem.eql(u8, name, "target")) {
-            if (!item.isString()) return evaluator.typeError("a string request `target");
+            if (!item.isString()) return fiber.typeError("a string request `target");
             fields.target = item;
         } else if (std.mem.eql(u8, name, "path") or
             std.mem.eql(u8, name, "query") or
             std.mem.eql(u8, name, "peer"))
         {
-            if (!item.isString()) return evaluator.typeError("string request `path, `query, and `peer fields");
+            if (!item.isString()) return fiber.typeError("string request `path, `query, and `peer fields");
         } else if (std.mem.eql(u8, name, "headers")) {
-            if (item != .dict) return evaluator.typeError("a request `headers dict");
+            if (item != .dict) return fiber.typeError("a request `headers dict");
             fields.headers = item;
         } else if (std.mem.eql(u8, name, "body")) {
-            if (item != .list or item.isString()) return evaluator.typeError("a request `body byte list");
+            if (item != .list or item.isString()) return fiber.typeError("a request `body byte list");
             fields.body = item;
         } else if (std.mem.eql(u8, name, "params")) {
-            if (item != .dict) return evaluator.typeError("a request `params dict");
+            if (item != .dict) return fiber.typeError("a request `params dict");
             fields.params = item;
-        } else return evaluator.typeError("a request dict with only recognized fields");
+        } else return fiber.typeError("a request dict with only recognized fields");
     }
     return fields;
 }
@@ -284,12 +284,12 @@ const RequestDriver = struct {
         cleanup_destroy,
     };
 
-    pub fn advance(evaluator: *Fiber, self: *RequestDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.deadline.reachedBy(evaluator.scheduler.?.now())) {
+    pub fn advance(fiber: *Fiber, self: *RequestDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        if (self.deadline.reachedBy(fiber.scheduler.?.now())) {
             self.admitted.cancel();
-            const failure = evaluator.fail(.timeout, "HTTP request deadline expired");
-            evaluator.addErrorPath(self.fields.target.?);
+            const failure = fiber.fail(.timeout, "HTTP request deadline expired");
+            fiber.addErrorPath(self.fields.target.?);
             return failure;
         }
         switch (self.state) {
@@ -304,23 +304,23 @@ const RequestDriver = struct {
                 } else {
                     if (!dict.keyAt(params, index.*).isString() or
                         !dict.valueAt(params, index.*).isString())
-                        return evaluator.typeError("request `params string names and values");
+                        return fiber.typeError("request `params string names and values");
                     index.* += 1;
                 }
             },
-            .method => |*encoder| switch (try self.advanceEncoder(evaluator, encoder)) {
+            .method => |*encoder| switch (try self.advanceEncoder(fiber, encoder)) {
                 .pending => {},
                 .complete => |bytes| {
                     encoder.deinit();
                     defer self.allocator.free(bytes);
                     self.method = std.meta.stringToEnum(std.http.Method, bytes) orelse {
                         self.state = .cleanup_request_value;
-                        return evaluator.fail(.domain, "unsupported HTTP request method");
+                        return fiber.fail(.domain, "unsupported HTTP request method");
                     };
                     self.beginUrl();
                 },
             },
-            .url => |*encoder| switch (try self.advanceEncoder(evaluator, encoder)) {
+            .url => |*encoder| switch (try self.advanceEncoder(fiber, encoder)) {
                 .pending => {},
                 .complete => |bytes| {
                     encoder.deinit();
@@ -334,27 +334,27 @@ const RequestDriver = struct {
                     try headers.request.fields.ensureTotalCapacityPrecise(self.allocator, self.limits.header_fields);
                 const header_value = self.fields.headers orelse {
                     const request = headers.request;
-                    try self.beginBody(evaluator, request);
+                    try self.beginBody(fiber, request);
                     return .stepped;
                 };
                 const header_dict = header_value.dict;
                 const count: usize = @intCast(dict.keysOf(header_dict).list.length());
                 if (headers.index == count) {
                     const request = headers.request;
-                    try self.beginBody(evaluator, request);
+                    try self.beginBody(fiber, request);
                 } else {
                     const key = dict.keyAt(header_dict, headers.index);
                     if (!key.isString())
-                        return evaluator.typeError("request header names to be strings");
+                        return fiber.typeError("request header names to be strings");
                     const values = dict.valueAt(header_dict, headers.index);
                     if (values != .list)
-                        return evaluator.typeError("request header values to be lists of strings");
+                        return fiber.typeError("request header values to be lists of strings");
                     if (values.list.length() == 0) {
                         headers.index += 1;
                         return .stepped;
                     }
                     if (@as(usize, @intCast(values.list.length())) > self.limits.header_fields - headers.request.fields.items.len)
-                        return self.overflow(evaluator);
+                        return self.overflow(fiber);
                     const request = headers.request;
                     const index = headers.index;
                     self.state = .{ .request_header_name = .{
@@ -365,18 +365,18 @@ const RequestDriver = struct {
                     } };
                 }
             },
-            .request_header_name => |*header| switch (try self.advanceEncoder(evaluator, &header.encoder)) {
+            .request_header_name => |*header| switch (try self.advanceEncoder(fiber, &header.encoder)) {
                 .pending => {},
                 .complete => |name| {
                     for (name) |char| if (std.ascii.isUpper(char)) {
                         self.allocator.free(name);
-                        return evaluator.typeError("lowercased request header names");
+                        return fiber.typeError("lowercased request header names");
                     };
                     const values = dict.valueAt(self.fields.headers.?.dict, header.index).list;
                     const item = list.atUnchecked(.{ .list = values }, header.value_index);
                     if (!item.isString()) {
                         self.allocator.free(name);
-                        return evaluator.typeError("request header values to be lists of strings");
+                        return fiber.typeError("request header values to be lists of strings");
                     }
                     header.encoder.deinit();
                     const request = header.request;
@@ -391,7 +391,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .request_header_value => |*header| switch (try self.advanceEncoder(evaluator, &header.encoder)) {
+            .request_header_value => |*header| switch (try self.advanceEncoder(fiber, &header.encoder)) {
                 .pending => {},
                 .complete => |value_bytes| {
                     header.encoder.deinit();
@@ -410,7 +410,7 @@ const RequestDriver = struct {
             },
             .request_header_append => |*header| {
                 const count = header.name.len + header.value.len + 4;
-                if (count > self.limits.header_bytes - self.request_header_bytes) return self.overflow(evaluator);
+                if (count > self.limits.header_bytes - self.request_header_bytes) return self.overflow(fiber);
                 self.request_header_bytes += count;
                 header.request.fields.appendAssumeCapacity(.{
                     .name = header.name,
@@ -436,11 +436,11 @@ const RequestDriver = struct {
             },
             .request_body => |*body| {
                 const output = body.request.body.?;
-                const end = body.index + evaluator.workBudget().take(output.len - body.index);
+                const end = body.index + fiber.workBudget().take(output.len - body.index);
                 while (body.index < end) : (body.index += 1) {
                     const item = list.atUnchecked(self.fields.body.?, body.index);
                     if (item != .int or item.int < 0 or item.int > 255)
-                        return evaluator.typeError("request `body values to be integers from 0 through 255");
+                        return fiber.typeError("request `body values to be integers from 0 through 255");
                     output[body.index] = @intCast(item.int);
                 }
                 if (body.index == output.len) {
@@ -451,10 +451,10 @@ const RequestDriver = struct {
             .exchange => |*exchange_state| {
                 const input = exchange_state.request;
                 self.state = .running;
-                self.admitted.start(input, self.method, self.follow_redirects, evaluator.task_scope.?) catch |err| return switch (err) {
+                self.admitted.start(input, self.method, self.follow_redirects, fiber.task_scope.?) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
-                    error.ScopeClosing => evaluator.fail(.cancelled, "HTTP scope is closing"),
-                    else => self.failIo(evaluator, input.url, @errorName(err)),
+                    error.ScopeClosing => fiber.fail(.cancelled, "HTTP scope is closing"),
+                    else => self.failIo(fiber, input.url, @errorName(err)),
                 };
             },
             .running => {
@@ -466,14 +466,14 @@ const RequestDriver = struct {
                         chunk.len += count;
                         self.chunks.len += count;
                     },
-                    .failed => |failure| return self.failResult(evaluator, failure),
-                    .pending => try evaluator.park(.{ .external_until = .{
+                    .failed => |failure| return self.failResult(fiber, failure),
+                    .pending => try fiber.park(.{ .external_until = .{
                         .source = self.admitted.pipe().readSource(),
                         .deadline = self.deadline,
                     } }),
                     .eof => switch (self.admitted.result()) {
-                        .pending => try evaluator.park(.{ .external_until = .{ .source = self.admitted.source(), .deadline = self.deadline } }),
-                        .failed => |failure| return self.failResult(evaluator, failure),
+                        .pending => try fiber.park(.{ .external_until = .{ .source = self.admitted.source(), .deadline = self.deadline } }),
+                        .failed => |failure| return self.failResult(fiber, failure),
                         .complete => {
                             const response = self.admitted.take();
                             self.state = .{ .body_allocate = response };
@@ -520,7 +520,7 @@ const RequestDriver = struct {
                     } };
                 }
             },
-            .response_header_name => |*header| switch (try header.text.advance(evaluator.workBudget())) {
+            .response_header_name => |*header| switch (try header.text.advance(fiber.workBudget())) {
                 .pending => {},
                 .complete => |key| {
                     header.text.deinit();
@@ -532,7 +532,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .response_header_value => |*header| switch (try header.text.advance(evaluator.workBudget())) {
+            .response_header_value => |*header| switch (try header.text.advance(fiber.workBudget())) {
                 .pending => {},
                 .complete => |value_text| {
                     header.text.deinit();
@@ -563,7 +563,7 @@ const RequestDriver = struct {
                     .dictionary = dictionary,
                 } };
             },
-            .headers_dictionary => |*headers| switch (try headers.dictionary.advance(evaluator.workBudget())) {
+            .headers_dictionary => |*headers| switch (try headers.dictionary.advance(fiber.workBudget())) {
                 .pending => {},
                 .duplicate_key => unreachable,
                 .complete => |built| {
@@ -577,8 +577,8 @@ const RequestDriver = struct {
             },
             .release_header_pairs => |*release| {
                 if (release.build.pairs.pop()) |pair| {
-                    evaluator.releases.releaseValue(pair[0]);
-                    evaluator.releases.releaseValue(pair[1]);
+                    fiber.releases.releaseValue(pair[0]);
+                    fiber.releases.releaseValue(pair[1]);
                     return .stepped;
                 }
                 release.build.pairs.deinit(self.allocator);
@@ -597,7 +597,7 @@ const RequestDriver = struct {
                     } },
                 };
             },
-            .response_body_text => |*body| switch (try body.text.advance(evaluator.workBudget())) {
+            .response_body_text => |*body| switch (try body.text.advance(fiber.workBudget())) {
                 .pending => {},
                 .complete => |built| {
                     body.text.deinit();
@@ -610,7 +610,7 @@ const RequestDriver = struct {
                     } };
                 },
             },
-            .response_body_bytes => |*body| switch (try body.bytes.advance(evaluator.workBudget())) {
+            .response_body_bytes => |*body| switch (try body.bytes.advance(fiber.workBudget())) {
                 .pending => {},
                 .complete => |built| {
                     body.bytes.deinit();
@@ -639,16 +639,16 @@ const RequestDriver = struct {
                     .dictionary = dictionary,
                 } };
             },
-            .finish_dictionary => |*finish| switch (try finish.dictionary.advance(evaluator.workBudget())) {
+            .finish_dictionary => |*finish| switch (try finish.dictionary.advance(fiber.workBudget())) {
                 .pending => {},
-                .duplicate_key => return evaluator.fail(.domain, "http response keys collided"),
+                .duplicate_key => return fiber.fail(.domain, "http response keys collided"),
                 .complete => |built| {
                     finish.dictionary.deinit();
                     const results = finish.results;
                     self.state = .{ .output = results };
-                    if (self.deadline.reachedBy(evaluator.scheduler.?.now())) {
-                        evaluator.releases.releaseValue(built);
-                        return evaluator.fail(.timeout, "HTTP request deadline expired");
+                    if (self.deadline.reachedBy(fiber.scheduler.?.now())) {
+                        fiber.releases.releaseValue(built);
+                        return fiber.fail(.timeout, "HTTP request deadline expired");
                     }
                     return .{ .output = built };
                 },
@@ -664,7 +664,7 @@ const RequestDriver = struct {
             .cleanup_destroy,
             => unreachable,
         }
-        return evaluator.afterStep();
+        return fiber.afterStep();
     }
 
     fn beginMethod(self: *RequestDriver) void {
@@ -677,31 +677,31 @@ const RequestDriver = struct {
         self.state = .{ .url = .init(self.allocator, self.fields.target.?) };
     }
 
-    fn beginBody(self: *RequestDriver, evaluator: *Fiber, input: RequestData) MachineError!void {
+    fn beginBody(self: *RequestDriver, fiber: *Fiber, input: RequestData) MachineError!void {
         var request = input;
         if (self.fields.body) |body| {
             const count: usize = @intCast(body.list.length());
-            if (count > self.limits.outbound_bytes) return self.overflow(evaluator);
+            if (count > self.limits.outbound_bytes) return self.overflow(fiber);
             if (count != 0 and !self.method.requestHasBody())
-                return evaluator.fail(.domain, "HTTP request method does not admit a body");
+                return fiber.fail(.domain, "HTTP request method does not admit a body");
             request.body = try self.allocator.alloc(u8, count);
             self.state = .{ .request_body = .{ .request = request } };
         } else self.state = .{ .exchange = .{ .request = request } };
     }
 
-    fn overflow(self: *RequestDriver, evaluator: *Fiber) MachineError {
-        const failure = evaluator.fail(.overflow, "HTTP transfer limit exceeded");
-        evaluator.addErrorPath(self.fields.target.?);
+    fn overflow(self: *RequestDriver, fiber: *Fiber) MachineError {
+        const failure = fiber.fail(.overflow, "HTTP transfer limit exceeded");
+        fiber.addErrorPath(self.fields.target.?);
         return failure;
     }
 
-    fn failResult(self: *RequestDriver, evaluator: *Fiber, failure: service.Failure) MachineError {
+    fn failResult(self: *RequestDriver, fiber: *Fiber, failure: service.Failure) MachineError {
         return switch (failure) {
             .out_of_memory => error.OutOfMemory,
             .report => |report| blk: {
-                if (report.kind == .io) break :blk self.failIo(evaluator, self.admitted.target(), report.message[0..report.len]);
-                const result = evaluator.fail(report.kind, report.message[0..report.len]);
-                evaluator.addErrorPath(self.fields.target.?);
+                if (report.kind == .io) break :blk self.failIo(fiber, self.admitted.target(), report.message[0..report.len]);
+                const result = fiber.fail(report.kind, report.message[0..report.len]);
+                fiber.addErrorPath(self.fields.target.?);
                 break :blk result;
             },
         };
@@ -709,7 +709,7 @@ const RequestDriver = struct {
 
     fn advanceEncoder(
         self: *RequestDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         encoder: *kernel_storage.StringEncoder,
     ) MachineError!kernel_storage.StringEncodeResult {
         const limit = switch (self.state) {
@@ -717,10 +717,10 @@ const RequestDriver = struct {
             .url => self.limits.target_bytes,
             else => self.limits.header_bytes - self.request_header_bytes,
         };
-        return encoder.advanceLimited(evaluator.workBudget(), limit) catch |err| switch (err) {
-            error.Overflow => return self.overflow(evaluator),
+        return encoder.advanceLimited(fiber.workBudget(), limit) catch |err| switch (err) {
+            error.Overflow => return self.overflow(fiber),
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(
+            error.InvalidCodepoint => return fiber.fail(
                 .domain,
                 "a request string contains an invalid Unicode scalar",
             ),
@@ -729,16 +729,16 @@ const RequestDriver = struct {
 
     fn failIo(
         self: *RequestDriver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         url: []const u8,
         name: []const u8,
     ) MachineError {
-        const failure = evaluator.failFmt(
+        const failure = fiber.failFmt(
             .io,
             "cannot reach `{s}`: {s}",
             .{ url, name },
         );
-        evaluator.addErrorPath(self.fields.target.?);
+        fiber.addErrorPath(self.fields.target.?);
         return failure;
     }
 

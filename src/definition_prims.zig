@@ -21,8 +21,8 @@ const Mode = enum { def, defp, test_declaration };
 
 fn bind(comptime mode: Mode) env.PrimitiveImpl {
     return struct {
-        fn run(evaluator: *Fiber) MachineError!void {
-            return define(evaluator, mode);
+        fn run(fiber: *Fiber) MachineError!void {
+            return define(fiber, mode);
         }
     }.run;
 }
@@ -53,26 +53,26 @@ const Annotation = struct {
     }
 };
 
-fn define(evaluator: *Fiber, mode: Mode) MachineError!void {
-    try evaluator.require(2);
+fn define(fiber: *Fiber, mode: Mode) MachineError!void {
+    try fiber.require(2);
     const private = mode == .defp;
-    const scope = try evaluator.definitionScope();
+    const scope = try fiber.definitionScope();
     if (private and scope.storage != .module_root)
-        return evaluator.fail(.domain, "defp/setp are legal only in a module root");
-    const name = try evaluator.popSymbol();
-    var item = try evaluator.popValue();
+        return fiber.fail(.domain, "defp/setp are legal only in a module root");
+    const name = try fiber.popSymbol();
+    var item = try fiber.popValue();
     defer item.deinit();
     const separator = try intern.intern("--");
     const colon = try intern.intern(":");
     var annotation_candidate: ?heap.Owned(Value) = null;
-    if (item.borrow() == .list and evaluator.available() != 0) {
-        const candidate = evaluator.visibleOperandBorrowed(evaluator.available() - 1);
+    if (item.borrow() == .list and fiber.available() != 0) {
+        const candidate = fiber.visibleOperandBorrowed(fiber.available() - 1);
         if (candidate == .list) {
             heap.retainValue(candidate);
             annotation_candidate = .init(candidate);
         }
     }
-    try evaluator.startDriver(DefineDriver{
+    try fiber.startDriver(DefineDriver{
         .mode = mode,
         .scope = scope,
         .name = name,
@@ -189,53 +189,53 @@ const DefineDriver = struct {
     /// A word in the body does not resolve. A definition never
     /// forward-references: a miss fails at that word.
     fn bindingMiss(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         code: *value.ListHandle,
         index: u32,
         word: value.Symbol,
         miss: binder.Unbound,
     ) MachineError!machine.WorkProgress {
-        const failure = evaluator.failUnbound(word, miss);
-        evaluator.setFailureSite(code, index);
+        const failure = fiber.failUnbound(word, miss);
+        fiber.setFailureSite(code, index);
         return failure;
     }
 
-    fn malformed(evaluator: *Fiber) MachineError {
-        return evaluator.fail(.domain, "malformed definition annotation");
+    fn malformed(fiber: *Fiber) MachineError {
+        return fiber.fail(.domain, "malformed definition annotation");
     }
 
-    pub fn advance(evaluator: *Fiber, self: *DefineDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *DefineDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
             .scan_annotation => |*scan| {
                 const count: usize = @intCast(scan.candidate.borrow().list.length());
                 if (scan.index == count) {
                     if (scan.separator_at == null and scan.colon_at == null) {
                         scan.candidate.deinit(
-                            evaluator.releases,
-                            evaluator.allocator,
+                            fiber.releases,
+                            fiber.allocator,
                         );
                         self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                         continue;
                     }
                     if (scan.separator_at != null and scan.colon_at != null and
-                        scan.separator_at.? > scan.colon_at.?) return malformed(evaluator);
+                        scan.separator_at.? > scan.colon_at.?) return malformed(fiber);
                     const effect_end = scan.colon_at orelse count;
                     if (scan.separator_at == null and scan.colon_at.? != 0)
-                        return malformed(evaluator);
+                        return malformed(fiber);
                     const document = if (scan.colon_at) |doc_at| document: {
-                        if (count != doc_at + 2) return malformed(evaluator);
+                        if (count != doc_at + 2) return malformed(fiber);
                         const value_at = list.atUnchecked(scan.candidate.borrow(), doc_at + 1);
-                        if (!value_at.isString()) return malformed(evaluator);
+                        if (!value_at.isString()) return malformed(fiber);
                         break :document value_at;
                     } else null;
                     const grammar = if (scan.separator_at != null)
                         env.EffectGrammar.init(scan.candidate.borrow().list, effect_end) orelse
-                            return malformed(evaluator)
+                            return malformed(fiber)
                     else
                         null;
-                    evaluator.discard(1);
+                    fiber.discard(1);
                     heap.retainValue(scan.candidate.borrow());
                     self.annotation_value = .init(scan.candidate.borrow());
                     const source = scan.candidate.take();
@@ -252,10 +252,10 @@ const DefineDriver = struct {
                 }
                 const item = list.atUnchecked(scan.candidate.borrow(), scan.index);
                 if (item == .symbol and item.symbol.name == self.separator) {
-                    if (scan.separator_at != null) return malformed(evaluator);
+                    if (scan.separator_at != null) return malformed(fiber);
                     scan.separator_at = scan.index;
                 } else if (item == .symbol and item.symbol.name == self.colon) {
-                    if (scan.colon_at != null) return malformed(evaluator);
+                    if (scan.colon_at != null) return malformed(fiber);
                     scan.colon_at = scan.index;
                 }
                 scan.index += 1;
@@ -266,7 +266,7 @@ const DefineDriver = struct {
                     switch (grammar.advance()) {
                         .pending => _ = work.spend(),
                         .complete => |shape| {
-                            validation.context.shape = shape orelse return malformed(evaluator);
+                            validation.context.shape = shape orelse return malformed(fiber);
                             validation.grammar = null;
                         },
                     }
@@ -275,7 +275,7 @@ const DefineDriver = struct {
                 // The documentation is kept as written; `doc` normalizes it
                 // when asked, and `see` through the formatter.
                 if (validation.document) |document| {
-                    const doc_value = env.documentation(document.list) orelse return malformed(evaluator);
+                    const doc_value = env.documentation(document.list) orelse return malformed(fiber);
                     heap.retainValue(document);
                     self.annotation.borrowMut().doc_source = document;
                     self.annotation.borrowMut().doc_value = doc_value;
@@ -285,14 +285,14 @@ const DefineDriver = struct {
                     self.state.borrowMut().* = .{ .prepare_effect = context };
                 } else {
                     validation.context.source.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                 }
             },
             .prepare_effect => |*context| {
-                const items = try evaluator.allocator.alloc(Value, context.effect_end);
+                const items = try fiber.allocator.alloc(Value, context.effect_end);
                 const moved = context.*;
                 self.state.borrowMut().* = .{ .copy_effect = .{
                     .context = moved,
@@ -302,7 +302,7 @@ const DefineDriver = struct {
             .copy_effect => |*copy| {
                 if (copy.index == copy.context.effect_end) {
                     const materializer = list.ValueMaterializer.init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         copy.items.borrow(),
                     );
                     const context = copy.context;
@@ -330,13 +330,13 @@ const DefineDriver = struct {
                         materialization.context.shape.?,
                     );
                     materialization.materializer.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
-                    materialization.items.deinit(evaluator.releases, evaluator.allocator);
+                    materialization.items.deinit(fiber.releases, fiber.allocator);
                     materialization.context.source.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                     return .stepped;
@@ -349,7 +349,7 @@ const DefineDriver = struct {
                         continue;
                     },
                     .complete => |name| {
-                        const binding_name = name orelse return evaluator.fail(
+                        const binding_name = name orelse return fiber.fail(
                             .domain,
                             if (self.mode == .test_declaration)
                                 "test requires an unqualified, non-reserved name"
@@ -357,7 +357,7 @@ const DefineDriver = struct {
                                 "def/set requires an unqualified, non-reserved name",
                         );
                         if (self.item.borrow() != .list)
-                            return evaluator.fail(
+                            return fiber.fail(
                                 .type,
                                 if (self.mode == .test_declaration)
                                     "test expected a list body"
@@ -366,7 +366,7 @@ const DefineDriver = struct {
                             );
                         self.state.borrowMut().* = .{ .source = .{
                             .binding_name = binding_name,
-                            .cursor = evaluator.archive.sourceCursor(self.item.borrow().list),
+                            .cursor = fiber.archive.sourceCursor(self.item.borrow().list),
                         } };
                     },
                 }
@@ -385,16 +385,16 @@ const DefineDriver = struct {
             },
             .prepare_publish => |*publication| {
                 if (self.mode == .test_declaration) {
-                    const cursor = try evaluator.testDeclarationCursor(
+                    const cursor = try fiber.testDeclarationCursor(
                         publication.binding_name,
                         env.quotation(self.item.borrow().list) orelse
-                            return evaluator.fail(.domain, "test body has an invalid heap representation"),
+                            return fiber.fail(.domain, "test body has an invalid heap representation"),
                         self.annotation.borrow().effect,
                         self.annotation.borrow().doc_value,
                     );
                     if (publication.source) |*source| source.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
                     self.state.borrowMut().* = .{ .publishing_test = cursor };
                     continue;
@@ -402,7 +402,7 @@ const DefineDriver = struct {
                 const private = self.mode == .defp;
                 const visibility: env.Visibility = if (private) .private else .public;
                 const body = env.quotation(self.item.borrow().list) orelse
-                    return evaluator.fail(.domain, "definition body has an invalid heap representation");
+                    return fiber.fail(.domain, "definition body has an invalid heap representation");
                 var owned_source: ?reader_types.SourceSlice = if (publication.source) |*owned| owned.take() else null;
                 defer if (owned_source) |*owned| owned.deinit();
                 const source = owned_source;
@@ -410,7 +410,7 @@ const DefineDriver = struct {
                     // A module stages its definitions; the group binds when the
                     // module is sealed.
                     .module_root => {
-                        const image = evaluator.stagingImage(self.scope) orelse return evaluator.fail(
+                        const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
                             .domain,
                             "module definitions are legal only while the module is under construction",
                         );
@@ -427,7 +427,7 @@ const DefineDriver = struct {
                 }
                 const root: env.DefinitionRoot = if (self.scope.storage == .session) .session else .core;
                 const reservation = try env.Definition.reserve(
-                    evaluator.allocator,
+                    fiber.allocator,
                     if (root == .session) .counted else .static,
                     env.quotationHeader(body),
                     .{
@@ -437,16 +437,16 @@ const DefineDriver = struct {
                         .root = root,
                     },
                 );
-                var context = evaluator.resolutionContext(evaluator.inherited.registry.view());
+                var context = fiber.resolutionContext(fiber.inherited.registry.view());
                 context.self_reference = .{
-                    .root = if (root == .session) evaluator.environment.sessionScopeId() else evaluator.environment.coreScopeId(),
+                    .root = if (root == .session) fiber.environment.sessionScopeId() else fiber.environment.coreScopeId(),
                     .name = intern.bindingId(publication.binding_name),
                 };
                 self.state.borrowMut().* = .{ .validating = .{
                     .binding_name = publication.binding_name,
                     .reservation = reservation,
                     .context = .init(context),
-                    .cursor = .init(binder.ValidationCursor.init(evaluator.releases, env.quotationHeader(body))),
+                    .cursor = .init(binder.ValidationCursor.init(fiber.releases, env.quotationHeader(body))),
                 } };
             },
             .validating => |*validating| {
@@ -458,25 +458,25 @@ const DefineDriver = struct {
                     .valid => {
                         const reservation = validating.reservation;
                         const name = validating.binding_name;
-                        validating.cursor.deinit(evaluator.releases, evaluator.allocator);
-                        validating.context.deinit(evaluator.releases, evaluator.allocator);
+                        validating.cursor.deinit(fiber.releases, fiber.allocator);
+                        validating.context.deinit(fiber.releases, fiber.allocator);
                         const definition = reservation.seal();
                         switch (self.scope.storage) {
                             .session => {
                                 // The registry cursor takes the definition's
                                 // first reference.
                                 self.state.borrowMut().* = .{ .publishing_session = .init(
-                                    evaluator.inherited.registry.defineCursor(name, .{ .definition = definition }),
+                                    fiber.inherited.registry.defineCursor(name, .{ .definition = definition }),
                                 ) };
                             },
                             .core_build => |publisher| {
                                 self.state.borrowMut().* = .published;
                                 publisher.publish(name, definition) catch |err| {
-                                    definition.retireStatic(evaluator.releases);
+                                    definition.retireStatic(fiber.releases);
                                     return switch (err) {
                                         error.OutOfMemory => error.OutOfMemory,
-                                        error.Frozen => evaluator.fail(.domain, "core is sealed"),
-                                        error.Duplicate => evaluator.fail(.domain, "a core name is defined once"),
+                                        error.Frozen => fiber.fail(.domain, "core is sealed"),
+                                        error.Duplicate => fiber.fail(.domain, "a core name is defined once"),
                                     };
                                 };
                                 return .completed;
@@ -487,14 +487,14 @@ const DefineDriver = struct {
                     .failed => |failure| {
                         const code = validating.cursor.borrow().code;
                         const word = heap.valuesConst(code)[failure.index].symbol;
-                        return bindingMiss(evaluator, code, failure.index, word, failure.miss);
+                        return bindingMiss(fiber, code, failure.index, word, failure.miss);
                     },
                 }
             },
             .publishing_session => |*cursor| switch (try cursor.borrowMut().advance()) {
                 .pending => _ = work.spend(),
                 .complete => |outcome| {
-                    if (outcome == .introduced) evaluator.warnCoreShadowing(cursor.borrow().definedName(), null);
+                    if (outcome == .introduced) fiber.warnCoreShadowing(cursor.borrow().definedName(), null);
                     return .completed;
                 },
             },
@@ -502,8 +502,8 @@ const DefineDriver = struct {
             .publishing_test => |*cursor| {
                 switch (cursor.advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.DuplicateTest => return evaluator.fail(.domain, "duplicate test name in module"),
-                    error.Frozen => return evaluator.fail(
+                    error.DuplicateTest => return fiber.fail(.domain, "duplicate test name in module"),
+                    error.Frozen => return fiber.fail(
                         .domain,
                         "module test catalogs are immutable after registration",
                     ),
@@ -519,9 +519,9 @@ const DefineDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn doc(evaluator: *Fiber) MachineError!void {
-    const requested = try evaluator.popWord();
-    return installLookup(evaluator, requested);
+fn doc(fiber: *Fiber) MachineError!void {
+    const requested = try fiber.popWord();
+    return installLookup(fiber, requested);
 }
 
 const ReflectionResolution = union(enum) {
@@ -533,21 +533,21 @@ const ReflectionResolution = union(enum) {
 /// module, destroy the current driver and hand the symbol plus primitive call
 /// back to the machine's ordinary load/retry protocol.
 fn resolveForReflection(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     driver: anytype,
     requested: value.Symbol,
     outcome: binder.Outcome,
 ) MachineError!ReflectionResolution {
     return switch (outcome) {
-        .resolved => |definition| .{ .resolved = machine.Reflected.hold(evaluator, definition, requested.name) },
+        .resolved => |definition| .{ .resolved = machine.Reflected.hold(fiber, definition, requested.name) },
         .missed => |miss| switch (miss) {
             .unknown_module_prefix, .unregistered_module => {
-                evaluator.retireDriver(driver);
-                return .{ .retry = try evaluator.retryQualifiedOperandAfterLoad(requested, miss) };
+                fiber.retireDriver(driver);
+                return .{ .retry = try fiber.retryQualifiedOperandAfterLoad(requested, miss) };
             },
-            .unresolved => |chain| evaluator.undefinedNameIn(requested.name, chain),
-            .retired => evaluator.failUnbound(requested, .retired),
-            .alias_cycle => evaluator.failUnbound(requested, .alias_cycle),
+            .unresolved => |chain| fiber.undefinedNameIn(requested.name, chain),
+            .retired => fiber.failUnbound(requested, .retired),
+            .alias_cycle => fiber.failUnbound(requested, .alias_cycle),
         },
     };
 }
@@ -556,10 +556,10 @@ fn resolveForReflection(
 /// values. There is no counterpart for a binding's stored body: nothing lifts a
 /// published body out of the home it resolves against, which is what keeps a
 /// quotation's scope label impossible to re-site.
-fn installLookup(evaluator: *Fiber, requested: value.Symbol) MachineError!void {
-    try evaluator.startDriver(LookupDriver{
+fn installLookup(fiber: *Fiber, requested: value.Symbol) MachineError!void {
+    try fiber.startDriver(LookupDriver{
         .requested = requested,
-        .resolution = .init(machine.ExplicitLookup.init(evaluator, requested)),
+        .resolution = .init(machine.ExplicitLookup.init(fiber, requested)),
     });
 }
 /// A binding's documentation as written, retained while it is normalized:
@@ -568,9 +568,9 @@ pub const DocumentNormalization = struct {
     document: heap.Owned(Value),
     normalizer: heap.Owned(doc_text.NormalizeCursor),
 
-    pub fn init(evaluator: *Fiber, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
+    pub fn init(fiber: *Fiber, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
         const item: Value = .{ .list = env.documentationHeader(document) };
-        const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator, item);
+        const normalizer = try doc_text.NormalizeCursor.init(fiber.allocator, item);
         heap.retainValue(item);
         return .{ .document = .init(item), .normalizer = .init(normalizer) };
     }
@@ -594,9 +594,9 @@ const LookupDriver = struct {
     requested: value.Symbol,
     resolution: heap.Owned(machine.ExplicitLookup),
     normalization: heap.Owned(DocumentNormalization) = .none,
-    pub fn advance(evaluator: *Fiber, self: *LookupDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *LookupDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) {
             if (self.normalization.isPresent()) {
                 if (try self.normalization.borrowMut().advance(work)) |normalized|
@@ -605,7 +605,7 @@ const LookupDriver = struct {
                 .pending => {},
                 .complete => |outcome| {
                     var resolved = switch (try resolveForReflection(
-                        evaluator,
+                        fiber,
                         self,
                         self.requested,
                         outcome,
@@ -615,8 +615,8 @@ const LookupDriver = struct {
                     };
                     defer resolved.deinit();
                     const document = resolved.definition.doc orelse
-                        return evaluator.fail(.domain, "binding has no documentation");
-                    self.normalization = .init(try .init(evaluator, document));
+                        return fiber.fail(.domain, "binding has no documentation");
+                    self.normalization = .init(try .init(fiber, document));
                 },
             }
         }
@@ -624,11 +624,11 @@ const LookupDriver = struct {
     }
 };
 
-fn declaredEffect(evaluator: *Fiber) MachineError!void {
-    const requested = try evaluator.popWord();
-    try evaluator.startDriver(EffectDriver{
+fn declaredEffect(fiber: *Fiber) MachineError!void {
+    const requested = try fiber.popWord();
+    try fiber.startDriver(EffectDriver{
         .requested = requested,
-        .resolution = .init(machine.ExplicitLookup.init(evaluator, requested)),
+        .resolution = .init(machine.ExplicitLookup.init(fiber, requested)),
     });
 }
 
@@ -640,19 +640,19 @@ const EffectDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: value.Symbol,
     resolution: heap.Owned(machine.ExplicitLookup),
-    pub fn advance(evaluator: *Fiber, self: *EffectDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *EffectDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
             .complete => |outcome| {
-                var resolved = switch (try resolveForReflection(evaluator, self, self.requested, outcome)) {
+                var resolved = switch (try resolveForReflection(fiber, self, self.requested, outcome)) {
                     .retry => |progress| return progress,
                     .resolved => |resolution| resolution,
                 };
                 defer resolved.deinit();
                 const declared = resolved.definition.effect orelse
-                    return .{ .output = try list.fromValues(evaluator.allocator, &.{}) };
+                    return .{ .output = try list.fromValues(fiber.allocator, &.{}) };
                 declared.retain();
                 return .{ .output = .{ .list = declared.header() } };
             },
@@ -661,9 +661,9 @@ const EffectDriver = struct {
     }
 };
 
-fn which(evaluator: *Fiber) MachineError!void {
-    const requested = try evaluator.popWord();
-    try evaluator.startDriver(WhichDriver.init(evaluator, requested));
+fn which(fiber: *Fiber) MachineError!void {
+    const requested = try fiber.popWord();
+    try fiber.startDriver(WhichDriver.init(fiber, requested));
 }
 
 const WhichDriver = struct {
@@ -722,12 +722,12 @@ const WhichDriver = struct {
         }
     };
 
-    fn init(evaluator: *Fiber, requested: value.Symbol) WhichDriver {
+    fn init(fiber: *Fiber, requested: value.Symbol) WhichDriver {
         return .{
             .requested = requested,
-            .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
+            .actions = .init(reflection.ActionPlan.init(fiber.allocator)),
             .state = .init(.{ .resolve = .init(
-                machine.ExplicitLookup.init(evaluator, requested),
+                machine.ExplicitLookup.init(fiber, requested),
             ) }),
         };
     }
@@ -792,15 +792,15 @@ const WhichDriver = struct {
         }
         base.step += 1;
     }
-    pub fn advance(evaluator: *Fiber, self: *WhichDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *WhichDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
                     const resolved = switch (try resolveForReflection(
-                        evaluator,
+                        fiber,
                         self,
                         self.requested,
                         outcome,
@@ -808,8 +808,8 @@ const WhichDriver = struct {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
                     };
-                    cursor.deinit(evaluator.releases, evaluator.allocator);
-                    const shadows = resolved.shadows(evaluator.environment, self.requested.name);
+                    cursor.deinit(fiber.releases, fiber.allocator);
+                    const shadows = resolved.shadows(fiber.environment, self.requested.name);
                     self.state.borrowMut().* = .{ .base_actions = .{
                         .context = .{
                             .resolved = .init(resolved),
@@ -848,7 +848,7 @@ const WhichDriver = struct {
                 },
             },
             .write => |*write| {
-                evaluator.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                fiber.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(fiber);
                 return .completed;
             },
         };
@@ -856,9 +856,9 @@ const WhichDriver = struct {
     }
 };
 
-fn see(evaluator: *Fiber) MachineError!void {
-    const requested = try evaluator.popWord();
-    try evaluator.startDriver(SeeDriver.init(evaluator, requested));
+fn see(fiber: *Fiber) MachineError!void {
+    const requested = try fiber.popWord();
+    try fiber.startDriver(SeeDriver.init(fiber, requested));
 }
 
 const SeeDriver = struct {
@@ -919,12 +919,12 @@ const SeeDriver = struct {
         }
     };
 
-    fn init(evaluator: *Fiber, requested: value.Symbol) SeeDriver {
+    fn init(fiber: *Fiber, requested: value.Symbol) SeeDriver {
         return .{
             .requested = requested,
-            .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
+            .actions = .init(reflection.ActionPlan.init(fiber.allocator)),
             .state = .init(.{ .resolve = .init(
-                machine.ExplicitLookup.init(evaluator, requested),
+                machine.ExplicitLookup.init(fiber, requested),
             ) }),
         };
     }
@@ -1009,15 +1009,15 @@ const SeeDriver = struct {
         plan.step += 1;
     }
 
-    pub fn advance(evaluator: *Fiber, self: *SeeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *SeeDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
                     const resolved = switch (try resolveForReflection(
-                        evaluator,
+                        fiber,
                         self,
                         self.requested,
                         outcome,
@@ -1025,7 +1025,7 @@ const SeeDriver = struct {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
                     };
-                    cursor.deinit(evaluator.releases, evaluator.allocator);
+                    cursor.deinit(fiber.releases, fiber.allocator);
                     var context: Context = .{ .resolved = .init(resolved) };
                     const document = resolved.definition.doc orelse {
                         self.state.borrowMut().* = .{ .plan = .{
@@ -1036,15 +1036,15 @@ const SeeDriver = struct {
                         } };
                         continue;
                     };
-                    const normalization = DocumentNormalization.init(evaluator, document) catch |err| {
-                        context.deinit(evaluator.releases, evaluator.allocator);
+                    const normalization = DocumentNormalization.init(fiber, document) catch |err| {
+                        context.deinit(fiber.releases, fiber.allocator);
                         return err;
                     };
                     self.state.borrowMut().* = .{ .normalize = .{ .context = context, .normalization = normalization } };
                 },
             },
             .normalize => |*normalize| if (try normalize.normalization.advance(work)) |normalized| {
-                normalize.normalization.deinit(evaluator.releases, evaluator.allocator);
+                normalize.normalization.deinit(fiber.releases, fiber.allocator);
                 var context = normalize.context;
                 context.document = .init(normalized);
                 self.state.borrowMut().* = .{ .plan = .{
@@ -1067,7 +1067,7 @@ const SeeDriver = struct {
             },
             .format => |*format_state| {
                 const rendered = formatter.format(
-                    evaluator.allocator,
+                    fiber.allocator,
                     format_state.source.borrow(),
                 ) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -1078,14 +1078,14 @@ const SeeDriver = struct {
                     error.InvalidUtf8, error.InvalidSource => unreachable,
                 };
                 const context = format_state.context;
-                format_state.source.deinit(evaluator.releases, evaluator.allocator);
+                format_state.source.deinit(fiber.releases, fiber.allocator);
                 self.state.borrowMut().* = .{ .write = .{
                     .context = context,
                     .rendered = .init(rendered),
                 } };
             },
             .write => |*write| {
-                evaluator.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                fiber.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(fiber);
                 return .completed;
             },
         };
@@ -1093,6 +1093,6 @@ const SeeDriver = struct {
     }
 };
 
-fn writeFailure(evaluator: *Fiber) MachineError {
-    return evaluator.fail(.io, "standard output write failed");
+fn writeFailure(fiber: *Fiber) MachineError {
+    return fiber.fail(.io, "standard output write failed");
 }

@@ -86,16 +86,16 @@ pub const AfterLoad = struct {
 /// qualified operation. The requested spelling also identifies a misspelled
 /// export in the final undefined-word error.
 pub fn autoLoadModule(via: *Loading, name: intern.ModuleName, request: QualifiedLoadRequest) MachineError!void {
-    const evaluator = via.fiber();
+    const fiber = via.fiber();
     try via.startDriver(AutoLoadDriver{
         .request = .{ .module = .{ .name = name, .operation = request } },
-        .state = .init(.{ .begin = evaluator.inherited.registry.beginLoadingCursor(name, .of(evaluator)) }),
+        .state = .init(.{ .begin = fiber.inherited.registry.beginLoadingCursor(name, .of(fiber)) }),
     });
 }
 
 /// Loads one mapped source artifact without resuming any qualified operation.
 pub fn loadSource(via: *Loading, source: *const map_state.SourceScope) MachineError!void {
-    const evaluator = via.fiber();
+    const fiber = via.fiber();
     const location = source.location();
     try via.startDriver(AutoLoadDriver{
         .request = .source,
@@ -108,7 +108,7 @@ pub fn loadSource(via: *Loading, source: *const map_state.SourceScope) MachineEr
                 .artifact_id = location.artifact_id,
                 .kind = location.kind,
             },
-            .cursor = evaluator.inherited.registry.beginArtifactLoadingCursor(location.artifact_id, .of(evaluator)),
+            .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(location.artifact_id, .of(fiber)),
         } }),
     });
 }
@@ -154,18 +154,18 @@ pub fn loadFile(via: *Loading, path: []u8, path_value: Value, word: intern.Trace
 /// false when there was nothing to verify, which leaves no work installed.
 /// Consumes `after`.
 pub fn verifyAfterLoad(via: *Loading, after: AfterLoad) MachineError!bool {
-    const evaluator = via.fiber();
+    const fiber = via.fiber();
     var lease = after.loading;
     defer lease.deinit();
-    var path = heap.OwnedValue.init(evaluator.releases, after.path);
+    var path = heap.OwnedValue.init(fiber.releases, after.path);
     defer path.deinit();
     // The registration check bounds the retry and gives every transport the
     // same post-load handoff.
     const artifact = after.artifact.artifact();
     const first_name = if (artifact) |artifact_id| name: {
-        const names = evaluator.inherited.module_snapshot.?.artifactModules(artifact_id);
+        const names = fiber.inherited.module_snapshot.?.artifactModules(artifact_id);
         if (names.len == 0) {
-            evaluator.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
+            fiber.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
             lease.finish();
             return false;
         }
@@ -175,7 +175,7 @@ pub fn verifyAfterLoad(via: *Loading, after: AfterLoad) MachineError!bool {
     // load are checked before it releases.
     try via.startDriver(QualifiedRegistrationDriver{
         .path = .init(path.take()),
-        .acquisition = .init(evaluator.inherited.registry.acquireCursor(first_name)),
+        .acquisition = .init(fiber.inherited.registry.acquireCursor(first_name)),
         .request = after.request,
         .loading = .init(lease.move()),
         .artifact = artifact,
@@ -343,7 +343,7 @@ const AutoLoadDriver = struct {
         kind: FileKind,
         target: FilenameTarget,
     ) error{OutOfMemory}!FilenameState {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         const module_name = intern.get(intern.moduleId(self.request.module.name));
         const extension = switch (kind) {
             .source => ".ecl",
@@ -351,7 +351,7 @@ const AutoLoadDriver = struct {
         };
         const length = std.math.add(usize, module_name.len, extension.len) catch
             return error.OutOfMemory;
-        const filename = try evaluator.allocator.alloc(u8, length);
+        const filename = try fiber.allocator.alloc(u8, length);
         return .{
             .loading = .init(loading.take()),
             .filename = .init(filename),
@@ -366,11 +366,11 @@ const AutoLoadDriver = struct {
         kind: FileKind,
         origin: CandidateOrigin,
     ) error{OutOfMemory}!CandidateState {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         const directory = switch (origin) {
             .mapped => |mapped| mapped.root,
             .search_path => |legacy| legacy_directory: {
-                const search = evaluator.inherited.ecl_path.?;
+                const search = fiber.inherited.ecl_path.?;
                 break :legacy_directory search[legacy.component_start..legacy.component_end];
             },
         };
@@ -379,7 +379,7 @@ const AutoLoadDriver = struct {
             return error.OutOfMemory;
         if (separator) length = std.math.add(usize, length, 1) catch
             return error.OutOfMemory;
-        const candidate = try evaluator.allocator.alloc(u8, length);
+        const candidate = try fiber.allocator.alloc(u8, length);
         return .{
             .loading = .init(loading.take()),
             .filename = .init(filename.take()),
@@ -398,14 +398,14 @@ const AutoLoadDriver = struct {
         loading: *heap.Owned(modules.LoadingLease),
         entry: stdlib.Entry,
     ) error{OutOfMemory}!void {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         const provenance = switch (entry) {
             .source => |source| source.name,
             .native, .builtin => intern.get(intern.moduleId(self.request.module.name)),
         };
-        var candidate = heap.Owned([]u8).init(try evaluator.allocator.dupe(u8, provenance));
+        var candidate = heap.Owned([]u8).init(try fiber.allocator.dupe(u8, provenance));
         const materializer = kernel_storage.Utf8Materializer.init(
-            evaluator.allocator,
+            fiber.allocator,
             candidate.borrow(),
         );
         self.state.borrowMut().* = .{ .path_value = .{
@@ -425,8 +425,8 @@ const AutoLoadDriver = struct {
         return continueSourceRequest(via, self, self.request);
     }
     fn notFound(self: *AutoLoadDriver, via: *Loading) MachineError {
-        const evaluator = via.fiber();
-        return evaluator.undefinedWordIn(self.request.module.operation.qualified, .qualified);
+        const fiber = via.fiber();
+        return fiber.undefinedWordIn(self.request.module.operation.qualified, .qualified);
     }
     fn sourceCompletion(
         self: *AutoLoadDriver,
@@ -443,14 +443,14 @@ const AutoLoadDriver = struct {
         } };
     }
     pub fn advance(via: *Loading, self: *AutoLoadDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        const fiber = via.fiber();
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         work: while (work.spend()) switch (self.state.borrowMut().*) {
             .begin => |*cursor| switch (try cursor.advance()) {
                 .pending => {},
                 .complete => |outcome| switch (outcome) {
-                    .cycle => return evaluator.failFmt(
+                    .cycle => return fiber.failFmt(
                         .domain,
                         "recursive auto-load of module `{s}`",
                         .{intern.get(intern.moduleId(self.request.module.name))},
@@ -460,20 +460,20 @@ const AutoLoadDriver = struct {
                     // below is what makes the winner's work count.
                     .contended => {
                         cursor.deinit();
-                        self.state.borrowMut().* = .{ .begin = evaluator.inherited.registry.beginLoadingCursor(
+                        self.state.borrowMut().* = .{ .begin = fiber.inherited.registry.beginLoadingCursor(
                             self.request.module.name,
-                            .of(evaluator),
+                            .of(fiber),
                         ) };
                         return .{ .yielded = .wait };
                     },
                     .granted => |lease| {
                         cursor.deinit();
-                        if (evaluator.inherited.module_snapshot != null and
+                        if (fiber.inherited.module_snapshot != null and
                             via.embeddedLibrary(self.request.module.name) == null)
                         {
                             self.state.borrowMut().* = .{ .map_lookup = .{
                                 .loading = .init(lease),
-                                .cursor = .init(evaluator.inherited.module_snapshot.?.lookupCursor(
+                                .cursor = .init(fiber.inherited.module_snapshot.?.lookupCursor(
                                     self.request.module.operation.context.scopeId(),
                                     intern.get(intern.moduleId(self.request.module.name)),
                                 )),
@@ -481,7 +481,7 @@ const AutoLoadDriver = struct {
                         } else {
                             self.state.borrowMut().* = .{ .registered = .{
                                 .loading = .init(lease),
-                                .cursor = .init(evaluator.inherited.registry.acquireCursor(self.request.module.name)),
+                                .cursor = .init(fiber.inherited.registry.acquireCursor(self.request.module.name)),
                             } };
                         }
                     },
@@ -493,10 +493,10 @@ const AutoLoadDriver = struct {
                 .pending => {},
                 .complete => |maybe_generation| {
                     var loading = heap.Owned(modules.LoadingLease).init(registered.loading.take());
-                    defer loading.deinit(evaluator.releases, evaluator.allocator);
+                    defer loading.deinit(fiber.releases, fiber.allocator);
                     registered.cursor.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
                     if (maybe_generation) |generation| {
                         var lease = generation;
@@ -510,7 +510,7 @@ const AutoLoadDriver = struct {
                         try self.beginEmbedded(via, &loading, entry);
                         continue;
                     }
-                    if (evaluator.inherited.module_snapshot) |module_snapshot| {
+                    if (fiber.inherited.module_snapshot) |module_snapshot| {
                         self.state.borrowMut().* = .{ .map_lookup = .{
                             .loading = .init(loading.take()),
                             .cursor = .init(module_snapshot.lookupCursor(
@@ -520,7 +520,7 @@ const AutoLoadDriver = struct {
                         } };
                         continue;
                     }
-                    if (evaluator.inherited.ecl_path == null)
+                    if (fiber.inherited.ecl_path == null)
                         return self.notFound(via);
                     const filename = try self.makeFilename(
                         via,
@@ -535,21 +535,21 @@ const AutoLoadDriver = struct {
                 .pending => {},
                 .complete => |outcome| {
                     var loading = heap.Owned(modules.LoadingLease).init(lookup.loading.take());
-                    defer loading.deinit(evaluator.releases, evaluator.allocator);
+                    defer loading.deinit(fiber.releases, fiber.allocator);
                     lookup.cursor.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
                     switch (outcome) {
                         .unmatched => {
-                            return evaluator.failFmt(
+                            return fiber.failFmt(
                                 .undefined_word,
                                 "module `{s}` is not exported by the active module map",
                                 .{intern.get(intern.moduleId(self.request.module.name))},
                             );
                         },
                         .hidden => |hidden| {
-                            return evaluator.failFmt(
+                            return fiber.failFmt(
                                 .undefined_word,
                                 "module `{s}` is exported by scope `{s}`, but is not visible to `{s}`",
                                 .{
@@ -571,7 +571,7 @@ const AutoLoadDriver = struct {
                             };
                             self.state.borrowMut().* = .{ .artifact_begin = .{
                                 .target = target,
-                                .cursor = evaluator.inherited.registry.beginArtifactLoadingCursor(match.artifact_id, .of(evaluator)),
+                                .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(match.artifact_id, .of(fiber)),
                             } };
                         },
                     }
@@ -580,7 +580,7 @@ const AutoLoadDriver = struct {
             .artifact_begin => |*begin| switch (try begin.cursor.advance()) {
                 .pending => {},
                 .complete => |outcome| switch (outcome) {
-                    .cycle => return evaluator.failFmt(
+                    .cycle => return fiber.failFmt(
                         .domain,
                         "recursive auto-load of mapped artifact `{s}`",
                         .{begin.target.relative_path},
@@ -590,9 +590,9 @@ const AutoLoadDriver = struct {
                         begin.cursor.deinit();
                         self.state.borrowMut().* = .{ .artifact_begin = .{
                             .target = target,
-                            .cursor = evaluator.inherited.registry.beginArtifactLoadingCursor(
+                            .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(
                                 target.artifact_id,
-                                .of(evaluator),
+                                .of(fiber),
                             ),
                         } };
                         return .{ .yielded = .wait };
@@ -601,11 +601,11 @@ const AutoLoadDriver = struct {
                         const target = begin.target;
                         begin.cursor.deinit();
                         self.state.borrowMut().* = .{ .mapped_root = .{ .target = target, .loading = .init(lease) } };
-                        if (evaluator.inherited.module_snapshot.?.artifactCommitted(target.artifact_id)) {
+                        if (fiber.inherited.module_snapshot.?.artifactCommitted(target.artifact_id)) {
                             self.state.borrowMut().mapped_root.loading.borrowMut().finish();
                             if (self.request == .source) return .completed;
-                            self.state.borrowMut().mapped_root.loading.deinit(evaluator.releases, evaluator.allocator);
-                            self.state.borrowMut().* = .{ .committed = .init(evaluator.inherited.registry.acquireCursor(self.request.module.name)) };
+                            self.state.borrowMut().mapped_root.loading.deinit(fiber.releases, fiber.allocator);
+                            self.state.borrowMut().* = .{ .committed = .init(fiber.inherited.registry.acquireCursor(self.request.module.name)) };
                         }
                     },
                 },
@@ -613,8 +613,8 @@ const AutoLoadDriver = struct {
             .committed => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |maybe_generation| {
-                    cursor.deinit(evaluator.releases, evaluator.allocator);
-                    const generation = maybe_generation orelse return evaluator.failFmt(
+                    cursor.deinit(fiber.releases, fiber.allocator);
+                    const generation = maybe_generation orelse return fiber.failFmt(
                         .io,
                         "a committed mapped artifact is missing module `{s}`",
                         .{intern.get(intern.moduleId(self.request.module.name))},
@@ -626,14 +626,14 @@ const AutoLoadDriver = struct {
             },
             .mapped_root => |*mapped| {
                 var loading = heap.Owned(modules.LoadingLease).init(mapped.loading.take());
-                defer loading.deinit(evaluator.releases, evaluator.allocator);
+                defer loading.deinit(fiber.releases, fiber.allocator);
                 const origin: CandidateOrigin = .{ .mapped = .{
                     .scope_name = mapped.target.scope_name,
                     .root = mapped.target.root,
                     .scope_id = mapped.target.scope_id,
                     .artifact_id = mapped.target.artifact_id,
                 } };
-                const filename_bytes = try evaluator.allocator.dupe(u8, mapped.target.relative_path);
+                const filename_bytes = try fiber.allocator.dupe(u8, mapped.target.relative_path);
                 const filename = FilenameState{
                     .loading = .init(loading.take()),
                     .filename = .init(filename_bytes),
@@ -678,7 +678,7 @@ const AutoLoadDriver = struct {
                 }
             },
             .component_start => |*component| {
-                const search = evaluator.inherited.ecl_path.?;
+                const search = fiber.inherited.ecl_path.?;
                 if (component.search_index == search.len) return self.notFound(via);
                 if (search[component.search_index] == std.fs.path.delimiter) {
                     component.search_index += 1;
@@ -694,7 +694,7 @@ const AutoLoadDriver = struct {
                 }
             },
             .component_end => |*component| {
-                const search = evaluator.inherited.ecl_path.?;
+                const search = fiber.inherited.ecl_path.?;
                 if (component.search_index == search.len or
                     search[component.search_index] == std.fs.path.delimiter)
                 {
@@ -720,7 +720,7 @@ const AutoLoadDriver = struct {
                 const directory = switch (candidate.origin) {
                     .mapped => |mapped| mapped.root,
                     .search_path => |legacy| legacy_directory: {
-                        const search = evaluator.inherited.ecl_path.?;
+                        const search = fiber.inherited.ecl_path.?;
                         break :legacy_directory search[legacy.component_start..legacy.component_end];
                     },
                 };
@@ -750,7 +750,7 @@ const AutoLoadDriver = struct {
                     .source => .{ .source = switch (access.origin) {
                         .search_path => .{ .provenance = .ordinary, .artifact = null },
                         .mapped => |mapped| .{
-                            .provenance = .{ .source = evaluator.inherited.module_snapshot.?.sourceScope(mapped.artifact_id) },
+                            .provenance = .{ .source = fiber.inherited.module_snapshot.?.sourceScope(mapped.artifact_id) },
                             .artifact = mapped.artifact_id,
                         },
                     } },
@@ -760,14 +760,14 @@ const AutoLoadDriver = struct {
                     } },
                 };
                 std.Io.Dir.cwd().access(
-                    evaluator.inherited.runtime().host_io,
+                    fiber.inherited.runtime().host_io,
                     access.candidate.borrow(),
                     .{ .read = true },
                 ) catch |err| switch (err) {
                     error.FileNotFound => {
                         const origin = access.origin;
                         switch (origin) {
-                            .mapped => |mapped| return evaluator.failFmt(
+                            .mapped => |mapped| return fiber.failFmt(
                                 .undefined_word,
                                 "mapped source `{s}` is absent from scope `{s}`",
                                 .{ access.candidate.borrow(), mapped.scope_name },
@@ -784,8 +784,8 @@ const AutoLoadDriver = struct {
                                     kind,
                                     target,
                                 );
-                                access.candidate.deinit(evaluator.releases, evaluator.allocator);
-                                access.filename.deinit(evaluator.releases, evaluator.allocator);
+                                access.candidate.deinit(fiber.releases, fiber.allocator);
+                                access.filename.deinit(fiber.releases, fiber.allocator);
                                 self.state.borrowMut().* = .{ .filename = filename };
                                 continue :work;
                             },
@@ -794,10 +794,10 @@ const AutoLoadDriver = struct {
                     else => disposition = .{ .fail = @errorName(err) },
                 };
                 const materializer = kernel_storage.Utf8Materializer.init(
-                    evaluator.allocator,
+                    fiber.allocator,
                     access.candidate.borrow(),
                 );
-                access.filename.deinit(evaluator.releases, evaluator.allocator);
+                access.filename.deinit(fiber.releases, fiber.allocator);
                 const next = @FieldType(State, "path_value"){
                     .loading = .init(access.loading.take()),
                     .candidate = .init(access.candidate.take()),
@@ -808,13 +808,13 @@ const AutoLoadDriver = struct {
             },
             .path_value => |*path| switch (path.materializer.borrowMut().advance(work) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidUtf8 => return evaluator.fail(.io, "module path is not valid UTF-8"),
+                error.InvalidUtf8 => return fiber.fail(.io, "module path is not valid UTF-8"),
             }) {
                 .pending => {},
                 .complete => |path_value| {
                     path.materializer.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
                     const next = @FieldType(State, "transfer"){
                         .loading = .init(path.loading.take()),
@@ -827,12 +827,12 @@ const AutoLoadDriver = struct {
             },
             .transfer => |*transfer| switch (transfer.disposition) {
                 .fail => |name| {
-                    const failure = evaluator.failFmt(
+                    const failure = fiber.failFmt(
                         .io,
                         "cannot access module file `{s}`: {s}",
                         .{ transfer.candidate.borrow(), name },
                     );
-                    evaluator.addErrorPath(transfer.path.borrow());
+                    fiber.addErrorPath(transfer.path.borrow());
                     return failure;
                 },
                 .embedded => |entry| return self.transferEmbedded(via, transfer, entry),
@@ -844,7 +844,7 @@ const AutoLoadDriver = struct {
                         source.provenance,
                         source.artifact,
                     );
-                    evaluator.retireDriver(self);
+                    fiber.retireDriver(self);
                     try fileSourceOwned(via, candidate, null, completion);
                     return .detached;
                 },
@@ -863,15 +863,15 @@ const AutoLoadDriver = struct {
         transfer: *@FieldType(State, "transfer"),
         entry: stdlib.Entry,
     ) MachineError!WorkProgress {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         const text = switch (entry) {
-            .source => |source| try evaluator.allocator.dupe(u8, source.text),
+            .source => |source| try fiber.allocator.dupe(u8, source.text),
             .native => |descriptor| return self.transferStatic(via, transfer, descriptor),
             .builtin => |module| return self.transferBuiltin(via, transfer, module),
         };
         const source_name = transfer.candidate.take();
         const completion = self.sourceCompletion(transfer, .standard_library, null);
-        evaluator.retireDriver(self);
+        fiber.retireDriver(self);
         try sourceOwned(via, source_name, text, completion);
         return .detached;
     }
@@ -881,11 +881,11 @@ const AutoLoadDriver = struct {
         transfer: *@FieldType(State, "transfer"),
         module: env.BuiltinModule,
     ) MachineError!WorkProgress {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         // The candidate is created before ownership moves: struct-literal
         // fields evaluate in order, so a failure here would otherwise
         // strand the lease and path this driver had already taken.
-        const publication = try modules.Registry.BuiltinCandidateCursor.init(evaluator.inherited.registry, self.request.module.name, .standard_library, module);
+        const publication = try modules.Registry.BuiltinCandidateCursor.init(fiber.inherited.registry, self.request.module.name, .standard_library, module);
         // No errdefer: from here nothing fails until `startDriver`, which
         // disposes the whole uninstalled driver's owned fields itself.
         const next = BuiltinLoadDriver{
@@ -895,7 +895,7 @@ const AutoLoadDriver = struct {
             .path = .init(transfer.path.take()),
             .publication = .init(publication),
         };
-        evaluator.retireDriver(self);
+        fiber.retireDriver(self);
         try via.startDriver(next);
         return .detached;
     }
@@ -905,12 +905,12 @@ const AutoLoadDriver = struct {
         transfer: *@FieldType(State, "transfer"),
         descriptor: *const native_abi.Descriptor,
     ) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        const loader_authority = evaluator.inherited.runtime().native_loader;
+        const fiber = via.fiber();
+        const loader_authority = fiber.inherited.runtime().native_loader;
         const loader = switch (loader_authority.startStatic(self.request.module.name, descriptor)) {
             .failure => |failure| {
-                const failed = evaluator.fail(.io, failure.text());
-                evaluator.addErrorPath(transfer.path.borrow());
+                const failed = fiber.fail(.io, failure.text());
+                fiber.addErrorPath(transfer.path.borrow());
                 return failed;
             },
             .loading => |loading| loading,
@@ -923,7 +923,7 @@ const AutoLoadDriver = struct {
             .path = .init(transfer.path.take()),
             .state = .init(.{ .validate = .init(loader) }),
         };
-        evaluator.retireDriver(self);
+        fiber.retireDriver(self);
         try via.startDriver(next);
         return .detached;
     }
@@ -932,16 +932,16 @@ const AutoLoadDriver = struct {
         via: *Loading,
         transfer: *@FieldType(State, "transfer"),
     ) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        const loader_authority = evaluator.inherited.runtime().native_loader;
+        const fiber = via.fiber();
+        const loader_authority = fiber.inherited.runtime().native_loader;
         const start = try loader_authority.startDynamic(
             self.request.module.name,
             transfer.candidate.borrow(),
         );
         const loader = switch (start) {
             .failure => |failure| {
-                const failed = evaluator.fail(.io, failure.text());
-                evaluator.addErrorPath(transfer.path.borrow());
+                const failed = fiber.fail(.io, failure.text());
+                fiber.addErrorPath(transfer.path.borrow());
                 return failed;
             },
             .loading => |loading| loading,
@@ -949,12 +949,12 @@ const AutoLoadDriver = struct {
         const next = NativeLoadDriver{
             .name = self.request.module.name,
             .request = self.request.module.operation,
-            .provenance = if (transfer.disposition.native) |id| .{ .source = evaluator.inherited.module_snapshot.?.sourceScope(id) } else .ordinary,
+            .provenance = if (transfer.disposition.native) |id| .{ .source = fiber.inherited.module_snapshot.?.sourceScope(id) } else .ordinary,
             .loading = .init(transfer.loading.take()),
             .path = .init(transfer.path.take()),
             .state = .init(.{ .validate = .init(loader) }),
         };
-        evaluator.retireDriver(self);
+        fiber.retireDriver(self);
         try via.startDriver(next);
         return .detached;
     }
@@ -971,12 +971,12 @@ const BuiltinLoadDriver = struct {
     commit: ?heap.Owned(modules.Registry.RegistrationCursor) = null,
 
     pub fn advance(via: *Loading, self: *BuiltinLoadDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
+        const fiber = via.fiber();
+        try fiber.pollKernel();
         if (self.commit == null) {
             switch (self.publication.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidName => return evaluator.fail(
+                error.InvalidName => return fiber.fail(
                     .contract,
                     "builtin module declares an invalid word name",
                 ),
@@ -987,19 +987,19 @@ const BuiltinLoadDriver = struct {
                     defer built.deinit();
                     const sealed = built.sealLiteralGroup() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.Duplicate, error.UnboundWord => return evaluator.fail(
+                        error.Duplicate, error.UnboundWord => return fiber.fail(
                             .contract,
                             "builtin module declares an invalid word",
                         ),
                     };
-                    self.commit = .init(evaluator.inherited.registry.registrationCursor(sealed));
+                    self.commit = .init(fiber.inherited.registry.registrationCursor(sealed));
                     return .stepped;
                 },
             }
         }
         switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return evaluator.failFmt(
+            else => return fiber.failFmt(
                 .io,
                 "cannot publish builtin module `{s}`: {s}",
                 .{ intern.get(intern.moduleId(self.name)), @errorName(err) },
@@ -1008,7 +1008,7 @@ const BuiltinLoadDriver = struct {
             .pending => return .stepped,
             .complete => {},
         }
-        self.commit.?.deinit(evaluator.releases, evaluator.allocator);
+        self.commit.?.deinit(fiber.releases, fiber.allocator);
         self.commit = null;
         return verifyPublishedModule(
             via,
@@ -1067,28 +1067,28 @@ const NativeLoadDriver = struct {
     };
 
     fn failLoad(self: *NativeLoadDriver, via: *Loading, message: []const u8) MachineError {
-        const evaluator = via.fiber();
-        const failure = evaluator.fail(.io, message);
-        evaluator.addErrorPath(self.path.borrow());
+        const fiber = via.fiber();
+        const failure = fiber.fail(.io, message);
+        fiber.addErrorPath(self.path.borrow());
         return failure;
     }
 
     pub fn advance(via: *Loading, self: *NativeLoadDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
+        const fiber = via.fiber();
+        try fiber.pollKernel();
         switch (self.state.borrowMut().*) {
-            .validate => |*loader| switch (try loader.borrowMut().advance(evaluator.workBudget())) {
+            .validate => |*loader| switch (try loader.borrowMut().advance(fiber.workBudget())) {
                 .pending => return .stepped,
                 .failure => |failure| return self.failLoad(via, failure.text()),
                 .loaded => |instance| {
-                    loader.deinit(evaluator.releases, evaluator.allocator);
+                    loader.deinit(fiber.releases, fiber.allocator);
                     self.state.borrowMut().* = .{ .loaded = .init(instance) };
                     return .stepped;
                 },
             },
             .loaded => |*instance| {
                 const publication = try modules.Registry.NativeCandidateCursor.init(
-                    evaluator.inherited.registry,
+                    fiber.inherited.registry,
                     self.name,
                     self.provenance,
                     instance.borrow(),
@@ -1115,16 +1115,16 @@ const NativeLoadDriver = struct {
                         var names = sealed.entries();
                         while (true) switch (names.advance()) {
                             .pending => {},
-                            .item => |entry| evaluator.warnCoreShadowing(entry.key, sealed.moduleName()),
+                            .item => |entry| fiber.warnCoreShadowing(entry.key, sealed.moduleName()),
                             .complete => break,
                         };
                     }
                     const instance = definitions.instance.take();
                     definitions.publication.deinit(
-                        evaluator.releases,
-                        evaluator.allocator,
+                        fiber.releases,
+                        fiber.allocator,
                     );
-                    const cursor = evaluator.inherited.registry.registrationCursor(sealed);
+                    const cursor = fiber.inherited.registry.registrationCursor(sealed);
                     self.state.borrowMut().* = .{ .commit = .{
                         .instance = .init(instance),
                         .cursor = .init(cursor),
@@ -1134,7 +1134,7 @@ const NativeLoadDriver = struct {
             },
             .commit => |*commit| switch (commit.cursor.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return evaluator.failFmt(
+                else => return fiber.failFmt(
                     .io,
                     "cannot publish native module `{s}`: {s}",
                     .{ intern.get(intern.moduleId(self.name)), @errorName(err) },
@@ -1147,8 +1147,8 @@ const NativeLoadDriver = struct {
                     } };
                     var cursor = commit.cursor;
                     self.state.borrowMut().* = next;
-                    cursor.deinit(evaluator.releases, evaluator.allocator);
-                    if (self.provenance == .source) evaluator.inherited.module_snapshot.?.commitArtifact(self.loading.borrowMut().artifactCommit());
+                    cursor.deinit(fiber.releases, fiber.allocator);
+                    if (self.provenance == .source) fiber.inherited.module_snapshot.?.commitArtifact(self.loading.borrowMut().artifactCommit());
                     return verifyPublishedModule(
                         via,
                         self,
@@ -1249,32 +1249,32 @@ const SourceDriver = struct {
     state: State = .start,
 
     fn beginIngest(self: *SourceDriver, via: *Loading) error{OutOfMemory}!void {
-        const evaluator = via.fiber();
-        const ingestion = try evaluator.archive.sourceIngestCursor(
+        const fiber = via.fiber();
+        const ingestion = try fiber.archive.sourceIngestCursor(
             self.text.borrow().sourceName(),
             self.text.borrow().source(),
             &self.diag,
-            try evaluator.rootLinker(evaluator.lexicalScope()),
+            try fiber.rootLinker(fiber.lexicalScope()),
         );
         self.state = .{ .ingesting = ingestion };
     }
 
     pub fn advance(via: *Loading, self: *SourceDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         // Preserve the established pre-cancelled-fiber behavior for a
         // source that fits in its first bounded slice: activate it first,
         // so evaluation can attach cancellation to the responsible word.
         // A source that needs another slice observes cancellation before
         // doing any more ingestion work.
-        if (self.state != .start) try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        if (self.state != .start) try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.state) {
             .start => {
                 if ((self.completion.borrow() == .call or self.completion.borrow() == .session or
                     self.completion.borrow() == .load) and
-                    evaluator.inherited.module_snapshot != null)
+                    fiber.inherited.module_snapshot != null)
                 {
-                    const cursor = try evaluator.inherited.module_snapshot.?.sourcePathCursor(self.text.borrow().sourceName());
+                    const cursor = try fiber.inherited.module_snapshot.?.sourcePathCursor(self.text.borrow().sourceName());
                     self.state = .{ .locating = cursor };
                 } else try self.beginIngest(via);
             },
@@ -1321,7 +1321,7 @@ const SourceDriver = struct {
             },
             .activating => |root_header| {
                 switch (self.completion.borrowMut().*) {
-                    .push => try evaluator.pushBorrowed(.{ .list = root_header }),
+                    .push => try fiber.pushBorrowed(.{ .list = root_header }),
                     .load => |load| {
                         const provenance: modules.RegistrationProvenance = if (load.source) |context|
                             .{ .source = context }
@@ -1332,11 +1332,11 @@ const SourceDriver = struct {
                     },
                     .call, .session => |source| {
                         heap.incRef(root_header);
-                        try evaluator.callProgramOwned(root_header, .owned);
+                        try fiber.callProgramOwned(root_header, .owned);
                         if (source) |context| {
-                            evaluator.current.?.site.registration_provenance = .{ .source = context };
+                            fiber.current.?.site.registration_provenance = .{ .source = context };
                         } else if (self.completion.borrow() == .call) {
-                            evaluator.current.?.site.registration_provenance = .ordinary;
+                            fiber.current.?.site.registration_provenance = .ordinary;
                         }
                     },
                     .register => |*register| {
@@ -1513,24 +1513,24 @@ const FileSourceDriver = struct {
         return context.transfer.borrow().diagnosticPath();
     }
     fn failIo(context: *Context, via: *Loading, message: []const u8) MachineError {
-        const evaluator = via.fiber();
-        const failure = evaluator.fail(.io, message);
-        if (diagnosticPath(context)) |item| evaluator.addErrorPath(item);
+        const fiber = via.fiber();
+        const failure = fiber.fail(.io, message);
+        if (diagnosticPath(context)) |item| fiber.addErrorPath(item);
         return failure;
     }
     pub fn advance(via: *Loading, self: *FileSourceDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
-        const io = evaluator.inherited.runtime().host_io;
+        const fiber = via.fiber();
+        try fiber.pollKernel();
+        const io = fiber.inherited.runtime().host_io;
         switch (self.state.borrowMut().*) {
             .open => |*context| {
                 const file = std.Io.Dir.cwd().openFile(io, context.path.borrow(), .{}) catch |err| {
-                    const failure = evaluator.failFmt(
+                    const failure = fiber.failFmt(
                         .io,
                         "cannot read `{s}`: {s}",
                         .{ context.path.borrow(), @errorName(err) },
                     );
-                    if (diagnosticPath(context)) |item| evaluator.addErrorPath(item);
+                    if (diagnosticPath(context)) |item| fiber.addErrorPath(item);
                     return failure;
                 };
                 self.state.borrowMut().* = .{ .size = .{
@@ -1542,16 +1542,16 @@ const FileSourceDriver = struct {
             .size => |*size| {
                 const opened = size.file.borrow();
                 const stat = opened.file.stat(opened.io) catch |err| {
-                    const failure = evaluator.failFmt(
+                    const failure = fiber.failFmt(
                         .io,
                         "cannot read `{s}`: {s}",
                         .{ size.context.path.borrow(), @errorName(err) },
                     );
-                    if (diagnosticPath(&size.context)) |item| evaluator.addErrorPath(item);
+                    if (diagnosticPath(&size.context)) |item| fiber.addErrorPath(item);
                     return failure;
                 };
                 if (stat.size > std.math.maxInt(usize))
-                    return failIo(&size.context, evaluator, "source file is too large");
+                    return failIo(&size.context, fiber, "source file is too large");
                 const source = try self.allocator.alloc(u8, @intCast(stat.size));
                 const file_reader = opened.file.reader(opened.io, &.{});
                 self.state.borrowMut().* = .{ .read = .{
@@ -1565,17 +1565,17 @@ const FileSourceDriver = struct {
             },
             .read => |*read| {
                 if (read.offset != read.source.borrow().len) {
-                    const end = read.offset + evaluator.workBudget().take(read.source.borrow().len - read.offset);
+                    const end = read.offset + fiber.workBudget().take(read.source.borrow().len - read.offset);
                     const amount = read.reader.interface.readSliceShort(
                         read.source.borrow()[read.offset..end],
                     ) catch {
                         const name = if (read.reader.err) |err| @errorName(err) else "ReadFailed";
-                        const failure = evaluator.failFmt(
+                        const failure = fiber.failFmt(
                             .io,
                             "cannot read `{s}`: {s}",
                             .{ read.context.path.borrow(), name },
                         );
-                        if (diagnosticPath(&read.context)) |item| evaluator.addErrorPath(item);
+                        if (diagnosticPath(&read.context)) |item| fiber.addErrorPath(item);
                         return failure;
                     };
                     if (amount == 0) return failIo(
@@ -1588,7 +1588,7 @@ const FileSourceDriver = struct {
                 }
                 const context = read.context.move();
                 const source = read.source.take();
-                read.file.deinit(evaluator.releases, evaluator.allocator);
+                read.file.deinit(fiber.releases, fiber.allocator);
                 self.state.borrowMut().* = .{ .transfer = .{
                     .context = context,
                     .source = .init(source),
@@ -1599,7 +1599,7 @@ const FileSourceDriver = struct {
                 const path = transfer.context.path.take();
                 const source = transfer.source.take();
                 const completion = transfer.context.transfer.take().source;
-                evaluator.retireDriver(self);
+                fiber.retireDriver(self);
                 try sourceOwned(via, path, source, completion);
                 return .detached;
             },
@@ -1640,15 +1640,15 @@ const QualifiedLoadPreparationDriver = struct {
         via: *Loading,
         self: *QualifiedLoadPreparationDriver,
     ) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        const fiber = via.fiber();
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (try self.cursor.advance()) {
             .pending => {},
             .complete => |maybe_name| {
                 const name = maybe_name orelse return switch (self.restore) {
-                    .none => evaluator.undefinedWordIn(self.request.qualified, .qualified),
-                    .operand => evaluator.undefinedNameIn(self.request.qualified, .qualified),
+                    .none => fiber.undefinedWordIn(self.request.qualified, .qualified),
+                    .operand => fiber.undefinedNameIn(self.request.qualified, .qualified),
                 };
                 const request = self.request;
                 const restore = self.restore;
@@ -1658,7 +1658,7 @@ const QualifiedLoadPreparationDriver = struct {
                         try via.replayOperand(requested);
                     },
                 }
-                evaluator.retireDriver(self);
+                fiber.retireDriver(self);
                 try autoLoadModule(via, name, request);
                 return .detached;
             },
@@ -1683,11 +1683,11 @@ fn continueQualifiedRequest(
     driver: anytype,
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
-    const evaluator = via.fiber();
+    const fiber = via.fiber();
     return switch (request.continuation) {
         .replay, .load_only => .completed,
         .dispatch => |dispatch_request| continuation: {
-            evaluator.retireDriver(driver);
+            fiber.retireDriver(driver);
             try via.dispatchAfterLoad(
                 dispatch_request.word,
                 dispatch_request.site,
@@ -1707,15 +1707,15 @@ fn verifyPublishedModule(
     path: *heap.Owned(Value),
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
-    const evaluator = via.fiber();
+    const fiber = via.fiber();
     loading.borrowMut().finish();
-    const registry = evaluator.inherited.registry;
+    const registry = fiber.inherited.registry;
     const next = QualifiedRegistrationDriver{
         .path = .init(path.take()),
         .acquisition = .init(registry.acquireCursor(name)),
         .request = .{ .module = .{ .name = name, .operation = request } },
     };
-    evaluator.retireDriver(driver);
+    fiber.retireDriver(driver);
     try via.startDriver(next);
     return .detached;
 }
@@ -1742,8 +1742,8 @@ const QualifiedRegistrationDriver = struct {
     } = .declared,
 
     pub fn advance(via: *Loading, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
+        const fiber = via.fiber();
+        try fiber.pollKernel();
         switch (self.phase) {
             .declared => {},
             .deferred => |index| return self.acquireDeferred(via, index),
@@ -1753,7 +1753,7 @@ const QualifiedRegistrationDriver = struct {
                     .pending => return .stepped,
                     .complete => |maybe_entry| {
                         const public = if (maybe_entry) |entry| modules.entryIsPublic(entry) else false;
-                        cursor.deinit(evaluator.releases, evaluator.allocator);
+                        cursor.deinit(fiber.releases, fiber.allocator);
                         self.resolving_cursor = null;
                         if (!public) return self.failDeferred(via, index);
                         return self.nextDeferred(via, index + 1);
@@ -1765,47 +1765,47 @@ const QualifiedRegistrationDriver = struct {
             .pending => return .stepped,
             .complete => |maybe_generation| {
                 const checked_name = if (self.artifact) |artifact|
-                    evaluator.inherited.module_snapshot.?.artifactModules(artifact)[self.module_index]
+                    fiber.inherited.module_snapshot.?.artifactModules(artifact)[self.module_index]
                 else
                     self.request.module.name;
                 const generation = maybe_generation orelse {
                     const failure = if (self.artifact != null)
-                        evaluator.failFmt(
+                        fiber.failFmt(
                             .io,
                             "loading mapped artifact registered nothing under declared module `{s}`",
                             .{intern.get(intern.moduleId(checked_name))},
                         )
                     else
-                        evaluator.failFmt(
+                        fiber.failFmt(
                             .io,
                             "loading module `{s}` registered nothing under that name",
                             .{intern.get(intern.moduleId(checked_name))},
                         );
-                    evaluator.addErrorPath(self.path.borrow());
+                    fiber.addErrorPath(self.path.borrow());
                     return failure;
                 };
                 var lease = generation;
                 defer lease.deinit();
                 if (self.artifact) |artifact| {
-                    const expected_source = evaluator.inherited.module_snapshot.?.sourceScope(artifact);
+                    const expected_source = fiber.inherited.module_snapshot.?.sourceScope(artifact);
                     const valid_origin = switch (lease.provenance()) {
                         .source => |source| source == expected_source,
                         .ordinary, .root_scope, .standard_library => false,
                     };
                     if (!valid_origin) {
-                        const failure = evaluator.failFmt(
+                        const failure = fiber.failFmt(
                             .domain,
                             "mapped artifact declared module `{s}` with foreign publication provenance",
                             .{intern.get(intern.moduleId(checked_name))},
                         );
-                        evaluator.addErrorPath(self.path.borrow());
+                        fiber.addErrorPath(self.path.borrow());
                         return failure;
                     }
-                    const modules_in_artifact = evaluator.inherited.module_snapshot.?.artifactModules(artifact);
+                    const modules_in_artifact = fiber.inherited.module_snapshot.?.artifactModules(artifact);
                     self.module_index += 1;
                     if (self.module_index != modules_in_artifact.len) {
-                        self.acquisition.deinit(evaluator.releases, evaluator.allocator);
-                        self.acquisition = .init(evaluator.inherited.registry.acquireCursor(
+                        self.acquisition.deinit(fiber.releases, fiber.allocator);
+                        self.acquisition = .init(fiber.inherited.registry.acquireCursor(
                             modules_in_artifact[self.module_index],
                         ));
                         return .stepped;
@@ -1825,11 +1825,11 @@ const QualifiedRegistrationDriver = struct {
     /// read from the main registry directly: the importer's own lookup would
     /// not see an artifact that has yet to commit.
     fn nextDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError!WorkProgress {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         const deferred = self.deferredImports();
         if (index == deferred.len) return self.complete(via);
-        self.acquisition.deinit(evaluator.releases, evaluator.allocator);
-        self.acquisition = .init(evaluator.inherited.registry.acquireCursor(deferred[index].module));
+        self.acquisition.deinit(fiber.releases, fiber.allocator);
+        self.acquisition = .init(fiber.inherited.registry.acquireCursor(deferred[index].module));
         self.phase = .{ .deferred = index };
         return .stepped;
     }
@@ -1849,20 +1849,20 @@ const QualifiedRegistrationDriver = struct {
     }
 
     fn failDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         const deferred = self.deferredImports()[index];
-        const failure = evaluator.undefinedNameIn(deferred.qualified, .qualified);
+        const failure = fiber.undefinedNameIn(deferred.qualified, .qualified);
         via.addErrorImporter(deferred.importer);
-        evaluator.addErrorPath(self.path.borrow());
+        fiber.addErrorPath(self.path.borrow());
         return failure;
     }
 
     fn complete(self: *QualifiedRegistrationDriver, via: *Loading) MachineError!WorkProgress {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         if (self.loading) |*owned| {
             const lease = owned.borrowMut();
             if (self.artifact != null)
-                evaluator.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
+                fiber.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
             lease.finish();
         }
         return continueSourceRequest(via, self, self.request);

@@ -44,9 +44,9 @@ pub const words = [_]env.BuiltinWord{
 const Domain = enum { unix, monotonic };
 
 /// Build `{'<domain> milliseconds}`.
-fn tagged(evaluator: *Fiber, domain: Domain, milliseconds: i64) error{OutOfMemory}!Value {
+fn tagged(fiber: *Fiber, domain: Domain, milliseconds: i64) error{OutOfMemory}!Value {
     const key = try intern.intern(@tagName(domain));
-    return dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{
+    return dict.fromUniquePairs(fiber.allocator, fiber.releases, &.{
         .{ .{ .symbol = .{ .name = key } }, .{ .int = milliseconds } },
     });
 }
@@ -64,45 +64,45 @@ fn untag(domain: Domain, item: Value) error{OutOfMemory}!?i64 {
     return payload.int;
 }
 
-fn now(evaluator: *Fiber) MachineError!void {
-    const instant = evaluator.scheduler.?.monotonicMilliseconds();
-    try evaluator.pushOwned(try tagged(evaluator, .monotonic, instant));
+fn now(fiber: *Fiber) MachineError!void {
+    const instant = fiber.scheduler.?.monotonicMilliseconds();
+    try fiber.pushOwned(try tagged(fiber, .monotonic, instant));
 }
 
-fn elapsed(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn elapsed(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
     const start = (try untag(.monotonic, item.borrow())) orelse
-        return evaluator.typeError("a {monotonic milliseconds} instant from clock.now");
-    const current = evaluator.scheduler.?.monotonicMilliseconds();
+        return fiber.typeError("a {monotonic milliseconds} instant from clock.now");
+    const current = fiber.scheduler.?.monotonicMilliseconds();
     const delta = std.math.sub(i64, current, start) catch
-        return evaluator.fail(.overflow, "clock.elapsed left the millisecond range");
-    try evaluator.pushOwned(.{ .int = delta });
+        return fiber.fail(.overflow, "clock.elapsed left the millisecond range");
+    try fiber.pushOwned(.{ .int = delta });
 }
 
-fn unix(evaluator: *Fiber) MachineError!void {
-    const milliseconds: i64 = switch (evaluator.inherited.runtime().wall_clock) {
+fn unix(fiber: *Fiber) MachineError!void {
+    const milliseconds: i64 = switch (fiber.inherited.runtime().wall_clock) {
         .host => |io| std.math.cast(i64, @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)) orelse
-            return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
+            return fiber.fail(.overflow, "clock.unix left the millisecond range"),
         .fixed => |timestamp| timestamp,
-        .anchored => |base| std.math.add(i64, base, evaluator.scheduler.?.monotonicMilliseconds()) catch
-            return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
+        .anchored => |base| std.math.add(i64, base, fiber.scheduler.?.monotonicMilliseconds()) catch
+            return fiber.fail(.overflow, "clock.unix left the millisecond range"),
     };
-    try evaluator.pushOwned(try tagged(evaluator, .unix, milliseconds));
+    try fiber.pushOwned(try tagged(fiber, .unix, milliseconds));
 }
 
-fn sleep(evaluator: *Fiber) MachineError!void {
-    var item = try evaluator.popValue();
+fn sleep(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
     defer item.deinit();
-    if (item.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
-    if (item.borrow().int < 0) return evaluator.fail(.domain, "clock.sleep duration must be nonnegative");
+    if (item.borrow() != .int) return fiber.typeError("an integer millisecond duration");
+    if (item.borrow().int < 0) return fiber.fail(.domain, "clock.sleep duration must be nonnegative");
     const duration: u63 = @intCast(item.borrow().int);
     // The clock only moves forward, so a deadline the clock cannot reach now
     // cannot be reached at registration either; refuse it before parking.
-    evaluator.scheduler.?.checkDeadline(duration) catch
-        return evaluator.fail(.overflow, "clock.sleep deadline lies beyond the clock's range");
+    fiber.scheduler.?.checkDeadline(duration) catch
+        return fiber.fail(.overflow, "clock.sleep deadline lies beyond the clock's range");
     // The deadline itself is captured by the scheduler at registration, after
     // this primitive returns, and a zero duration is already expired there:
     // the fiber parks and is woken on the next scheduler turn without a timer.
-    try evaluator.park(.{ .sleep = duration });
+    try fiber.park(.{ .sleep = duration });
 }

@@ -195,27 +195,27 @@ const Operation = enum {
     }
 };
 
-fn reserve(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .reserve);
+fn reserve(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .reserve);
 }
-fn openWriter(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .open_writer);
+fn openWriter(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .open_writer);
 }
-fn openReader(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .open_reader);
+fn openReader(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .open_reader);
 }
 
-fn openList(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .open_list);
+fn openList(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .open_list);
 }
-fn nextEntry(evaluator: *Fiber) MachineError!void {
-    var cursor = try evaluator.popValue();
+fn nextEntry(fiber: *Fiber) MachineError!void {
+    var cursor = try fiber.popValue();
     errdefer cursor.deinit();
-    if (!directory.isEnumeration(cursor.borrow())) return evaluator.typeError("a directory enumeration resource");
-    const driver = try evaluator.allocator.create(NextEntry);
+    if (!directory.isEnumeration(cursor.borrow())) return fiber.typeError("a directory enumeration resource");
+    const driver = try fiber.allocator.create(NextEntry);
     // SAFETY: reading initializes entry before the name phase uses it.
     driver.* = .{ .cursor = cursor.take(), .entry = undefined };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 const NextEntry = struct {
     pub const address_stable_driver = {};
@@ -227,31 +227,31 @@ const NextEntry = struct {
         if (self.state == .name) self.state.name.retire(releases);
         releases.releaseValue(self.cursor);
     }
-    pub fn advance(evaluator: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.state == .reading) switch (directory.next(self.cursor)) {
             .pending => return .stepped,
-            .closed => return evaluator.fail(.io, "directory enumeration is closed"),
-            .failed => |reason| return evaluator.fail(errorKindFor(reason), reason.message()),
+            .closed => return fiber.fail(.io, "directory enumeration is closed"),
+            .failed => |reason| return fiber.fail(errorKindFor(reason), reason.message()),
             .end => {
                 self.state = .complete;
-                return .{ .output = try dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{}) };
+                return .{ .output = try dict.fromUniquePairs(fiber.allocator, fiber.releases, &.{}) };
             },
             .entry => |entry| {
                 self.entry = entry;
-                self.state = .{ .name = .init(evaluator.allocator, self.entry.name[0..self.entry.length]) };
+                self.state = .{ .name = .init(fiber.allocator, self.entry.name[0..self.entry.length]) };
             },
         };
-        return switch (self.state.name.advance(evaluator.workBudget()) catch |err| switch (err) {
+        return switch (self.state.name.advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return evaluator.fail(.io, "directory entry is not UTF-8"),
+            error.InvalidUtf8 => return fiber.fail(.io, "directory entry is not UTF-8"),
         }) {
             .pending => .stepped,
             .complete => |name| result: {
                 self.state.name.deinit();
                 self.state = .complete;
-                defer evaluator.releases.releaseValue(name);
-                break :result .{ .output = try dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{
+                defer fiber.releases.releaseValue(name);
+                break :result .{ .output = try dict.fromUniquePairs(fiber.allocator, fiber.releases, &.{
                     .{ .{ .symbol = .{ .name = try intern.intern("name") } }, name },
                     .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern(self.entry.kind.symbol()) } } },
                 }) };
@@ -260,24 +260,24 @@ const NextEntry = struct {
     }
 };
 
-fn stageDirectory(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .stage_dir);
+fn stageDirectory(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .stage_dir);
 }
-fn commitDirectory(evaluator: *Fiber) MachineError!void {
-    var stage = try evaluator.popValue();
+fn commitDirectory(fiber: *Fiber) MachineError!void {
+    var stage = try fiber.popValue();
     errdefer stage.deinit();
-    if (!directory.isStage(stage.borrow())) return evaluator.typeError("a directory staging resource");
-    const driver = try evaluator.allocator.create(CommitDirectory);
+    if (!directory.isStage(stage.borrow())) return fiber.typeError("a directory staging resource");
+    const driver = try fiber.allocator.create(CommitDirectory);
     driver.* = .{ .stage = stage.take() };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
-fn commitFile(evaluator: *Fiber) MachineError!void {
-    var writer = try evaluator.popValue();
+fn commitFile(fiber: *Fiber) MachineError!void {
+    var writer = try fiber.popValue();
     errdefer writer.deinit();
-    if (!directory.isStream(writer.borrow())) return evaluator.typeError("a filesystem writer resource");
-    const driver = try evaluator.allocator.create(CommitDirectory);
+    if (!directory.isStream(writer.borrow())) return fiber.typeError("a filesystem writer resource");
+    const driver = try fiber.allocator.create(CommitDirectory);
     driver.* = .{ .stage = writer.take(), .kind = .file };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 const CommitDirectory = struct {
     pub const address_stable_driver = {};
@@ -288,33 +288,33 @@ const CommitDirectory = struct {
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         releases.releaseValue(self.stage);
     }
-    pub fn advance(evaluator: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.state == .sealing) switch (if (self.kind == .directory) directory.commit(self.stage) else directory.commitFile(self.stage)) {
-            .closed => return failResource(evaluator, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", .io),
-            .failed => |reason| return failResource(evaluator, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", reason),
+            .closed => return failResource(fiber, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", .io),
+            .failed => |reason| return failResource(fiber, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", reason),
             .pending => |source| {
-                try evaluator.park(.{ .external = source });
+                try fiber.park(.{ .external = source });
                 return .{ .yielded = .park };
             },
             .committed => self.state = .joining,
         };
         const port = @import("../port_resource.zig").Resource.fromValue(self.stage).?;
         if (!port.joined()) {
-            try evaluator.park(.{ .external = port.source() });
+            try fiber.park(.{ .external = port.source() });
             return .{ .yielded = .park };
         }
         return .completed;
     }
 };
 
-fn failResource(evaluator: *Fiber, item: Value, operation: []const u8, reason: fsport.Reason) MachineError {
+fn failResource(fiber: *Fiber, item: Value, operation: []const u8, reason: fsport.Reason) MachineError {
     const operation_symbol = try intern.intern(operation);
     const reason_symbol = try reasonSymbol(reason);
-    const path = try list.fromCodepoints(evaluator.allocator, &.{'.'});
-    defer evaluator.releases.releaseValue(path);
-    const failure = evaluator.fail(errorKindFor(reason), reason.message());
-    evaluator.addErrorFilesystem(.{
+    const path = try list.fromCodepoints(fiber.allocator, &.{'.'});
+    defer fiber.releases.releaseValue(path);
+    const failure = fiber.fail(errorKindFor(reason), reason.message());
+    fiber.addErrorFilesystem(.{
         .operation = .{ .symbol = .{ .name = operation_symbol } },
         .reason = .{ .symbol = .{ .name = reason_symbol } },
         .target = .{ .single = .{ .root = item, .path = path } },
@@ -322,17 +322,17 @@ fn failResource(evaluator: *Fiber, item: Value, operation: []const u8, reason: f
     return failure;
 }
 
-fn writeChunk(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var payload = try evaluator.popValue();
+fn writeChunk(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var payload = try fiber.popValue();
     errdefer payload.deinit();
-    if (payload.borrow() != .list) return evaluator.typeError("a byte list to write");
-    var writer = try evaluator.popValue();
+    if (payload.borrow() != .list) return fiber.typeError("a byte list to write");
+    var writer = try fiber.popValue();
     errdefer writer.deinit();
-    if (!directory.isStream(writer.borrow())) return evaluator.typeError("a filesystem writer resource");
-    const driver = try evaluator.allocator.create(WriteChunk);
+    if (!directory.isStream(writer.borrow())) return fiber.typeError("a filesystem writer resource");
+    const driver = try fiber.allocator.create(WriteChunk);
     driver.* = .{ .writer = writer.take(), .payload = payload.take() };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 const WriteChunk = struct {
     pub const address_stable_driver = {};
@@ -351,27 +351,27 @@ const WriteChunk = struct {
         releases.releaseValue(self.writer);
         releases.releaseValue(self.payload);
     }
-    pub fn advance(evaluator: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         switch (self.state) {
             .validating => |*index| {
                 const count = self.payload.list.length();
                 if (self.payload.list.kind() != .leaf_u8) {
-                    const end = index.* + evaluator.workBudget().take(count - index.*);
+                    const end = index.* + fiber.workBudget().take(count - index.*);
                     while (index.* < end) : (index.* += 1) {
                         const item = list.atUnchecked(self.payload, index.*);
                         if (item != .int or item.int < 0 or item.int > 255)
-                            return evaluator.failAtIndex(.type, "byte list members must be integers from 0 through 255", index.*);
+                            return fiber.failAtIndex(.type, "byte list members must be integers from 0 through 255", index.*);
                     }
                     if (index.* != count) return .stepped;
                 }
                 self.state = .waiting;
             },
             .waiting => switch (try directory.acquireWrite(self.writer)) {
-                .closed => return failResource(evaluator, self.writer, "write-chunk", .io),
-                .failed => |reason| return failResource(evaluator, self.writer, "write-chunk", reason),
+                .closed => return failResource(fiber, self.writer, "write-chunk", .io),
+                .failed => |reason| return failResource(fiber, self.writer, "write-chunk", reason),
                 .pending => |source| {
-                    try evaluator.park(.{ .external = source });
+                    try fiber.park(.{ .external = source });
                     return .{ .yielded = .park };
                 },
                 .claimed => |claim| {
@@ -382,18 +382,18 @@ const WriteChunk = struct {
             .admitted => {
                 const claim = self.claim.?;
                 if (!claim.ready()) {
-                    try evaluator.park(.{ .external = claim.source() });
+                    try fiber.park(.{ .external = claim.source() });
                     return .{ .yielded = .park };
                 }
                 if (self.payload.list.length() > @min(fsport.transfer_quantum, claim.remaining())) {
                     claim.fail(.limit);
-                    return failResource(evaluator, self.writer, "write-chunk", .limit);
+                    return failResource(fiber, self.writer, "write-chunk", .limit);
                 }
-                self.state = .{ .encoding = .init(evaluator.allocator, self.payload) };
+                self.state = .{ .encoding = .init(fiber.allocator, self.payload) };
             },
-            .encoding => |*encoder| switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
+            .encoding => |*encoder| switch (encoder.advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidByte => return evaluator.failAtIndex(.type, "byte list members must be integers from 0 through 255", encoder.invalid_index.?),
+                error.InvalidByte => return fiber.failAtIndex(.type, "byte list members must be integers from 0 through 255", encoder.invalid_index.?),
             }) {
                 .pending => {},
                 .complete => |bytes| {
@@ -404,88 +404,88 @@ const WriteChunk = struct {
             .writing => |*bytes| {
                 switch (self.claim.?.append(bytes.bytes())) {
                     .written => {
-                        evaluator.pollKernel() catch |err| {
+                        fiber.pollKernel() catch |err| {
                             self.claim.?.fail(.io);
                             @import("../port_resource.zig").Resource.fromValue(self.writer).?.close();
                             return err;
                         };
                         return .completed;
                     },
-                    .failed => |reason| return failResource(evaluator, self.writer, "write-chunk", reason),
-                    .pending => try evaluator.park(.{ .external = self.claim.?.source() }),
+                    .failed => |reason| return failResource(fiber, self.writer, "write-chunk", reason),
+                    .pending => try fiber.park(.{ .external = self.claim.?.source() }),
                 }
             },
         }
-        return evaluator.afterStep();
+        return fiber.afterStep();
     }
 };
 
-fn makeDirectories(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .mkdirs);
+fn makeDirectories(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .mkdirs);
 }
-fn removeTree(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .remove_tree);
+fn removeTree(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .remove_tree);
 }
-fn advisoryLock(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .lock);
+fn advisoryLock(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .lock);
 }
-fn openDirectory(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .open_dir);
+fn openDirectory(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .open_dir);
 }
-fn childDirectory(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .child_dir);
+fn childDirectory(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .child_dir);
 }
 
-fn readBytes(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .read_bytes);
+fn readBytes(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .read_bytes);
 }
-fn readText(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .read_text);
+fn readText(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .read_text);
 }
-fn createBytes(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .create_bytes);
+fn createBytes(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .create_bytes);
 }
-fn createText(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .create_text);
+fn createText(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .create_text);
 }
-fn replaceBytes(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .replace_bytes);
+fn replaceBytes(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .replace_bytes);
 }
-fn replaceText(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .replace_text);
+fn replaceText(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .replace_text);
 }
-fn publishBytes(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .publish_bytes);
+fn publishBytes(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .publish_bytes);
 }
-fn publishText(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .publish_text);
+fn publishText(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .publish_text);
 }
-fn stat(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .stat);
+fn stat(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .stat);
 }
-fn lstat(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .lstat);
+fn lstat(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .lstat);
 }
-fn exists(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .exists);
+fn exists(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .exists);
 }
-fn listDirectory(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .list);
+fn listDirectory(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .list);
 }
-fn mkdir(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .mkdir);
+fn mkdir(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .mkdir);
 }
-fn copy(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .copy);
+fn copy(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .copy);
 }
-fn rename(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .rename);
+fn rename(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .rename);
 }
-fn removeFile(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .remove_file);
+fn removeFile(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .remove_file);
 }
-fn removeDir(evaluator: *Fiber) MachineError!void {
-    return begin(evaluator, .remove_dir);
+fn removeDir(fiber: *Fiber) MachineError!void {
+    return begin(fiber, .remove_dir);
 }
 
 /// The owned argument values, retained for error provenance until retirement.
@@ -530,67 +530,67 @@ const Payload = union(enum) {
     }
 };
 
-fn begin(evaluator: *Fiber, operation: Operation) MachineError!void {
+fn begin(fiber: *Fiber, operation: Operation) MachineError!void {
     const count: usize = switch (operation.shape()) {
         .host, .root => 1,
         .unary => 2,
         .payload, .rename => 3,
         .copy => 4,
     };
-    try evaluator.require(count);
+    try fiber.require(count);
     // SAFETY: every arm of the switch below assigns the whole value before
     // it is read, and an arm that fails returns before reaching a read.
     var inputs: Inputs = undefined;
     switch (operation.shape()) {
         .root => {
-            var root = try evaluator.popValue();
+            var root = try fiber.popValue();
             errdefer root.deinit();
-            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
-            const path = try list.fromCodepoints(evaluator.allocator, &.{'.'});
+            if (!validRoot(root.borrow())) return fiber.typeError("a root symbol or directory resource");
+            const path = try list.fromCodepoints(fiber.allocator, &.{'.'});
             inputs = .{ .root = root.take(), .path = path };
         },
         .host => {
-            var path = try evaluator.popValue();
+            var path = try fiber.popValue();
             errdefer path.deinit();
-            if (!path.borrow().isString()) return evaluator.typeError("an absolute host directory path");
+            if (!path.borrow().isString()) return fiber.typeError("an absolute host directory path");
             inputs = .{ .root = .{ .symbol = .{ .name = try intern.intern("host") } }, .path = path.take() };
         },
         .unary => {
-            var path = try evaluator.popValue();
+            var path = try fiber.popValue();
             errdefer path.deinit();
-            if (!path.borrow().isString()) return evaluator.typeError("a string path");
-            var root = try evaluator.popValue();
+            if (!path.borrow().isString()) return fiber.typeError("a string path");
+            var root = try fiber.popValue();
             errdefer root.deinit();
-            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
+            if (!validRoot(root.borrow())) return fiber.typeError("a root symbol or directory resource");
             inputs = .{ .root = root.take(), .path = path.take() };
         },
         .payload => {
-            var payload = try evaluator.popValue();
+            var payload = try fiber.popValue();
             errdefer payload.deinit();
             if (operation.textPayload()) {
-                if (!payload.borrow().isString()) return evaluator.typeError("a string to write");
-            } else if (payload.borrow() != .list) return evaluator.typeError("a byte list to write");
-            var path = try evaluator.popValue();
+                if (!payload.borrow().isString()) return fiber.typeError("a string to write");
+            } else if (payload.borrow() != .list) return fiber.typeError("a byte list to write");
+            var path = try fiber.popValue();
             errdefer path.deinit();
-            if (!path.borrow().isString()) return evaluator.typeError("a string path");
-            var root = try evaluator.popValue();
+            if (!path.borrow().isString()) return fiber.typeError("a string path");
+            var root = try fiber.popValue();
             errdefer root.deinit();
-            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
+            if (!validRoot(root.borrow())) return fiber.typeError("a root symbol or directory resource");
             inputs = .{ .root = root.take(), .path = path.take(), .payload = payload.take() };
         },
         .copy => {
-            var destination_path = try evaluator.popValue();
+            var destination_path = try fiber.popValue();
             errdefer destination_path.deinit();
-            if (!destination_path.borrow().isString()) return evaluator.typeError("a string destination path");
-            var destination_root = try evaluator.popValue();
+            if (!destination_path.borrow().isString()) return fiber.typeError("a string destination path");
+            var destination_root = try fiber.popValue();
             errdefer destination_root.deinit();
-            if (!validRoot(destination_root.borrow())) return evaluator.typeError("a destination root symbol or directory resource");
-            var source_path = try evaluator.popValue();
+            if (!validRoot(destination_root.borrow())) return fiber.typeError("a destination root symbol or directory resource");
+            var source_path = try fiber.popValue();
             errdefer source_path.deinit();
-            if (!source_path.borrow().isString()) return evaluator.typeError("a string source path");
-            var source_root = try evaluator.popValue();
+            if (!source_path.borrow().isString()) return fiber.typeError("a string source path");
+            var source_root = try fiber.popValue();
             errdefer source_root.deinit();
-            if (!validRoot(source_root.borrow())) return evaluator.typeError("a source root symbol or directory resource");
+            if (!validRoot(source_root.borrow())) return fiber.typeError("a source root symbol or directory resource");
             inputs = .{
                 .root = source_root.take(),
                 .path = source_path.take(),
@@ -599,15 +599,15 @@ fn begin(evaluator: *Fiber, operation: Operation) MachineError!void {
             };
         },
         .rename => {
-            var destination_path = try evaluator.popValue();
+            var destination_path = try fiber.popValue();
             errdefer destination_path.deinit();
-            if (!destination_path.borrow().isString()) return evaluator.typeError("a string destination path");
-            var source_path = try evaluator.popValue();
+            if (!destination_path.borrow().isString()) return fiber.typeError("a string destination path");
+            var source_path = try fiber.popValue();
             errdefer source_path.deinit();
-            if (!source_path.borrow().isString()) return evaluator.typeError("a string source path");
-            var root = try evaluator.popValue();
+            if (!source_path.borrow().isString()) return fiber.typeError("a string source path");
+            var root = try fiber.popValue();
             errdefer root.deinit();
-            if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
+            if (!validRoot(root.borrow())) return fiber.typeError("a root symbol or directory resource");
             heap.retainValue(root.borrow());
             inputs = .{
                 .root = root.borrow(),
@@ -617,14 +617,14 @@ fn begin(evaluator: *Fiber, operation: Operation) MachineError!void {
             };
         },
     }
-    errdefer inputs.deinit(evaluator.releases);
+    errdefer inputs.deinit(fiber.releases);
     const symbols = try Symbols.init(operation);
-    const access = evaluator.inherited.runtime().filesystem_access;
-    const driver = try evaluator.allocator.create(Driver);
-    errdefer evaluator.allocator.destroy(driver);
-    const path_cursor = kernel_storage.StringEncoder.init(evaluator.allocator, inputs.path);
+    const access = fiber.inherited.runtime().filesystem_access;
+    const driver = try fiber.allocator.create(Driver);
+    errdefer fiber.allocator.destroy(driver);
+    const path_cursor = kernel_storage.StringEncoder.init(fiber.allocator, inputs.path);
     driver.* = .{
-        .allocator = evaluator.allocator,
+        .allocator = fiber.allocator,
         .io = fsport.hostIo(access),
         .access = access,
         .limits = fsport.limitsOf(access),
@@ -633,7 +633,7 @@ fn begin(evaluator: *Fiber, operation: Operation) MachineError!void {
         .inputs = inputs,
         .state = .{ .encode_path = path_cursor },
     };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 
 /// Interned spellings a failure or result needs, resolved before the driver
@@ -684,7 +684,7 @@ fn errorKindFor(reason: fsport.Reason) machine.ErrorKind {
 }
 
 fn failInputs(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     kind: machine.ErrorKind,
     reason: fsport.Reason,
     operation: Operation,
@@ -692,8 +692,8 @@ fn failInputs(
     inputs: *const Inputs,
 ) MachineError {
     const reason_symbol = try reasonSymbol(reason);
-    const failure = evaluator.fail(kind, reason.message());
-    evaluator.addErrorFilesystem(.{
+    const failure = fiber.fail(kind, reason.message());
+    fiber.addErrorFilesystem(.{
         .operation = .{ .symbol = .{ .name = symbols.operation } },
         .reason = .{ .symbol = .{ .name = reason_symbol } },
         .target = if (operation == .copy) .{ .transfer = .{
@@ -827,48 +827,48 @@ const Driver = struct {
         cleanup_done,
     };
 
-    pub fn advance(evaluator: *Fiber, self: *Driver) MachineError!machine.WorkProgress {
-        return self.completion.advance(evaluator, self);
+    pub fn advance(fiber: *Fiber, self: *Driver) MachineError!machine.WorkProgress {
+        return self.completion.advance(fiber, self);
     }
 
-    pub fn advanceOperation(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
-        try evaluator.pollKernel();
+    pub fn advanceOperation(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
+        try fiber.pollKernel();
         return switch (self.state) {
-            .encode_path => |*cursor| self.encodePath(evaluator, cursor, .primary),
-            .encode_second_path => |*cursor| self.encodePath(evaluator, cursor, .second),
-            .encode_text => |*encoder| self.encodeText(evaluator, encoder),
-            .encode_bytes => |*encoder| self.encodeBytes(evaluator, encoder),
-            .authorize => self.authorize(evaluator),
-            .resolve => |*resolver| self.resolve(evaluator, resolver, .primary),
-            .resolve_second => |*resolver| self.resolve(evaluator, resolver, .second),
-            .act => self.act(evaluator),
-            .waiting_lock => |file| self.waitForLock(evaluator, file),
-            .removing_tree => |*tree| self.removeTreeStep(evaluator, tree),
-            .read => |*read| self.readStep(evaluator, read),
-            .bytes_value => |*building| self.materializeBytes(evaluator, building),
-            .text_value => |*building| self.materializeText(evaluator, building),
-            .list_collect => |*collect| self.collectEntries(evaluator, collect),
-            .list_order => |*ordering| self.orderEntries(evaluator, ordering),
-            .list_build => |*build| self.buildEntries(evaluator, build),
-            .list_result => |*result| self.materializeEntries(evaluator, result),
-            .list_release => |*release| self.releaseEntries(evaluator, release),
-            .write => |*write| self.writeStep(evaluator, write),
-            .commit => |*staged| self.commitStep(evaluator, staged),
-            .copy => |*copying| self.copyStep(evaluator, copying),
+            .encode_path => |*cursor| self.encodePath(fiber, cursor, .primary),
+            .encode_second_path => |*cursor| self.encodePath(fiber, cursor, .second),
+            .encode_text => |*encoder| self.encodeText(fiber, encoder),
+            .encode_bytes => |*encoder| self.encodeBytes(fiber, encoder),
+            .authorize => self.authorize(fiber),
+            .resolve => |*resolver| self.resolve(fiber, resolver, .primary),
+            .resolve_second => |*resolver| self.resolve(fiber, resolver, .second),
+            .act => self.act(fiber),
+            .waiting_lock => |file| self.waitForLock(fiber, file),
+            .removing_tree => |*tree| self.removeTreeStep(fiber, tree),
+            .read => |*read| self.readStep(fiber, read),
+            .bytes_value => |*building| self.materializeBytes(fiber, building),
+            .text_value => |*building| self.materializeText(fiber, building),
+            .list_collect => |*collect| self.collectEntries(fiber, collect),
+            .list_order => |*ordering| self.orderEntries(fiber, ordering),
+            .list_build => |*build| self.buildEntries(fiber, build),
+            .list_result => |*result| self.materializeEntries(fiber, result),
+            .list_release => |*release| self.releaseEntries(fiber, release),
+            .write => |*write| self.writeStep(fiber, write),
+            .commit => |*staged| self.commitStep(fiber, staged),
+            .copy => |*copying| self.copyStep(fiber, copying),
             .complete, .cleanup_entries, .cleanup_values, .cleanup_done => unreachable,
         };
     }
 
     const Which = enum { primary, second };
 
-    fn fail(self: *Driver, evaluator: *Fiber, reason: fsport.Reason) MachineError {
-        return failInputs(evaluator, errorKindFor(reason), reason, self.operation, self.symbols, &self.inputs);
+    fn fail(self: *Driver, fiber: *Fiber, reason: fsport.Reason) MachineError {
+        return failInputs(fiber, errorKindFor(reason), reason, self.operation, self.symbols, &self.inputs);
     }
 
-    fn failMessage(self: *Driver, evaluator: *Fiber, kind: machine.ErrorKind, reason: fsport.Reason, message: []const u8) MachineError {
+    fn failMessage(self: *Driver, fiber: *Fiber, kind: machine.ErrorKind, reason: fsport.Reason, message: []const u8) MachineError {
         const reason_symbol = try reasonSymbol(reason);
-        const failure = evaluator.fail(kind, message);
-        evaluator.addErrorFilesystem(.{
+        const failure = fiber.fail(kind, message);
+        fiber.addErrorFilesystem(.{
             .operation = .{ .symbol = .{ .name = self.symbols.operation } },
             .reason = .{ .symbol = .{ .name = reason_symbol } },
             .target = if (self.operation == .copy) .{ .transfer = .{
@@ -883,13 +883,13 @@ const Driver = struct {
 
     fn encodePath(
         self: *Driver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         cursor: *kernel_storage.StringEncoder,
         which: Which,
     ) MachineError!driver_completion.Progress {
-        switch (cursor.advance(evaluator.workBudget()) catch |err| switch (err) {
+        switch (cursor.advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failMessage(evaluator, .domain, .invalid_path, "path contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return self.failMessage(fiber, .domain, .invalid_path, "path contains an invalid Unicode scalar"),
         }) {
             .pending => return .stepped,
             .complete => |bytes| {
@@ -918,12 +918,12 @@ const Driver = struct {
 
     fn encodeText(
         self: *Driver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         encoder: *kernel_storage.StringEncoder,
     ) MachineError!driver_completion.Progress {
-        switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
+        switch (encoder.advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failMessage(evaluator, .domain, .invalid_utf8, "string contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return self.failMessage(fiber, .domain, .invalid_utf8, "string contains an invalid Unicode scalar"),
         }) {
             .pending => return .stepped,
             .complete => |text| {
@@ -937,12 +937,12 @@ const Driver = struct {
 
     fn encodeBytes(
         self: *Driver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         encoder: *kernel_storage.ByteVectorEncoder,
     ) MachineError!driver_completion.Progress {
-        switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
+        switch (encoder.advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidByte => return evaluator.failAtIndex(
+            error.InvalidByte => return fiber.failAtIndex(
                 .type,
                 "byte list members must be integers from 0 through 255",
                 encoder.invalid_index.?,
@@ -960,33 +960,33 @@ const Driver = struct {
 
     /// Grammar, root lookup, and quota checks happen before any
     /// host object is opened.
-    fn authorize(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn authorize(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         if (self.operation == .open_dir) {
             const dir = switch (fsport.openHostDirectory(self.access, self.path.?)) {
                 .directory => |dir| dir,
-                .failed => |reason| return self.fail(evaluator, reason),
+                .failed => |reason| return self.fail(fiber, reason),
             };
-            return self.publishDirectory(evaluator, dir);
+            return self.publishDirectory(fiber, dir);
         }
-        const class = fsport.classifyPath(self.path.?) catch return self.fail(evaluator, .invalid_path);
+        const class = fsport.classifyPath(self.path.?) catch return self.fail(fiber, .invalid_path);
         if (class == .root and self.operation.requiresEntry() and self.operation != .rename)
-            return self.fail(evaluator, .invalid_path);
+            return self.fail(fiber, .invalid_path);
         if (self.second_path) |second| {
-            const second_class = fsport.classifyPath(second) catch return self.fail(evaluator, .invalid_path);
-            if (second_class == .root) return self.fail(evaluator, .invalid_path);
-            if (self.operation == .rename and class == .root) return self.fail(evaluator, .invalid_path);
+            const second_class = fsport.classifyPath(second) catch return self.fail(fiber, .invalid_path);
+            if (second_class == .root) return self.fail(fiber, .invalid_path);
+            if (self.operation == .rename and class == .root) return self.fail(fiber, .invalid_path);
         }
-        const root = try self.acquireRoot(evaluator, self.inputs.root);
+        const root = try self.acquireRoot(fiber, self.inputs.root);
         self.root = root;
-        if (self.operation == .reserve) return self.publishReservation(evaluator);
+        if (self.operation == .reserve) return self.publishReservation(fiber);
         if (self.inputs.second_root) |second_root_value| {
-            const second_root = try self.acquireRoot(evaluator, second_root_value);
+            const second_root = try self.acquireRoot(fiber, second_root_value);
             self.second_root = second_root;
         }
         if (self.payload) |*payload| {
-            if (payload.slice().len > self.limits.max_transfer_bytes) return self.fail(evaluator, .limit);
+            if (payload.slice().len > self.limits.max_transfer_bytes) return self.fail(fiber, .limit);
         }
-        self.slot = fsport.reservePair(self.access, root, self.second_root) orelse return self.fail(evaluator, .limit);
+        self.slot = fsport.reservePair(self.access, root, self.second_root) orelse return self.fail(fiber, .limit);
         if (class == .root) {
             self.resolved = .{ .directory = .{ .dir = root.dir(), .owned = false } };
             self.state = .act;
@@ -1004,7 +1004,7 @@ const Driver = struct {
             self.operation.resolveMode(),
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.PathTooLong => return self.fail(evaluator, .limit),
+            error.PathTooLong => return self.fail(fiber, .limit),
         };
         if (self.operation == .mkdirs) resolver.createParents();
         self.state = .{ .resolve = resolver };
@@ -1013,13 +1013,13 @@ const Driver = struct {
 
     fn resolve(
         self: *Driver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         resolver: *fsport.Resolver,
         which: Which,
     ) MachineError!driver_completion.Progress {
         switch (try resolver.step()) {
             .pending => return .yielded,
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .complete => |completed| {
                 // Every allocation happens before the finished resolver is
                 // retired, so an allocation failure leaves the state owning
@@ -1039,19 +1039,19 @@ const Driver = struct {
                                 resolved.deinit(self.allocator, self.io);
                                 return switch (err) {
                                     error.OutOfMemory => error.OutOfMemory,
-                                    error.PathTooLong => self.fail(evaluator, .limit),
+                                    error.PathTooLong => self.fail(fiber, .limit),
                                 };
                             };
-                            resolver.retire(evaluator.releases);
+                            resolver.retire(fiber.releases);
                             self.resolved = resolved;
                             self.state = .{ .resolve_second = next };
                             return .yielded;
                         }
-                        resolver.retire(evaluator.releases);
+                        resolver.retire(fiber.releases);
                         self.resolved = resolved;
                     },
                     .second => {
-                        resolver.retire(evaluator.releases);
+                        resolver.retire(fiber.releases);
                         self.second = resolved;
                     },
                 }
@@ -1061,19 +1061,19 @@ const Driver = struct {
         }
     }
 
-    fn acquireRoot(self: *Driver, evaluator: *Fiber, item: Value) MachineError!RootSelection {
+    fn acquireRoot(self: *Driver, fiber: *Fiber, item: Value) MachineError!RootSelection {
         return fsport.selectRoot(self.access, item) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.UnknownRoot => return self.fail(evaluator, .unknown_root),
-            error.Closed => return self.failMessage(evaluator, .io, .io, "directory resource is closed"),
-            error.Io => return self.fail(evaluator, .changed),
+            error.UnknownRoot => return self.fail(fiber, .unknown_root),
+            error.Closed => return self.failMessage(fiber, .io, .io, "directory resource is closed"),
+            error.Io => return self.fail(fiber, .changed),
         };
     }
 
-    fn publishDirectory(self: *Driver, evaluator: *Fiber, dir: std.Io.Dir) MachineError!driver_completion.Progress {
-        const scope = evaluator.task_scope orelse {
+    fn publishDirectory(self: *Driver, fiber: *Fiber, dir: std.Io.Dir) MachineError!driver_completion.Progress {
+        const scope = fiber.task_scope orelse {
             dir.close(self.io);
-            return evaluator.fail(.cancelled, "directory scope is closing");
+            return fiber.fail(.cancelled, "directory scope is closing");
         };
         const adoption = if (self.operation == .open_list)
             directory.adoptEnumeration(self.access, scope, dir, self.inputs.root, if (self.root) |root| root.reservation() else null)
@@ -1081,104 +1081,104 @@ const Driver = struct {
             directory.adoptChild(self.access, scope, dir, self.inputs.root, if (self.root) |root| root.reservation() else null);
         const result = adoption catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+            error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),
         };
         self.state = .complete;
         return .{ .output = result };
     }
 
-    fn acquireDirectory(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn acquireDirectory(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const dir = switch (self.resolved.?) {
             .directory => |d| d.dir.openDir(self.io, ".", .{ .iterate = true }),
             .entry => |entry| entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }),
-        } catch |err| return self.fail(evaluator, fsport.reasonForError(err));
-        return self.publishDirectory(evaluator, dir);
+        } catch |err| return self.fail(fiber, fsport.reasonForError(err));
+        return self.publishDirectory(fiber, dir);
     }
 
-    fn act(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn act(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         return switch (self.operation) {
             .reserve => unreachable,
-            .open_writer => self.beginStage(evaluator, .create),
-            .stage_dir => self.stageDirectory(evaluator),
-            .mkdirs => self.makeDirectories(evaluator),
-            .remove_tree => self.beginRemoveTree(evaluator),
-            .lock => self.beginLock(evaluator),
+            .open_writer => self.beginStage(fiber, .create),
+            .stage_dir => self.stageDirectory(fiber),
+            .mkdirs => self.makeDirectories(fiber),
+            .remove_tree => self.beginRemoveTree(fiber),
+            .lock => self.beginLock(fiber),
             .open_dir => unreachable,
-            .child_dir, .open_list => self.acquireDirectory(evaluator),
-            .read_bytes, .read_text => self.beginRead(evaluator),
-            .open_reader => self.openReaderEndpoint(evaluator),
-            .stat => self.inspect(evaluator, true),
-            .lstat => self.inspect(evaluator, false),
-            .exists => self.testExistence(evaluator),
-            .list => self.beginList(evaluator),
-            .mkdir => self.makeDirectory(evaluator),
-            .remove_file => self.removeEntry(evaluator, .file),
-            .remove_dir => self.removeEntry(evaluator, .directory),
-            .rename => self.renameEntry(evaluator),
-            .create_bytes, .create_text => self.beginStage(evaluator, .create),
-            .replace_bytes, .replace_text => self.beginStage(evaluator, .replace),
-            .publish_bytes, .publish_text => self.beginStage(evaluator, .publish),
-            .copy => self.beginCopy(evaluator),
+            .child_dir, .open_list => self.acquireDirectory(fiber),
+            .read_bytes, .read_text => self.beginRead(fiber),
+            .open_reader => self.openReaderEndpoint(fiber),
+            .stat => self.inspect(fiber, true),
+            .lstat => self.inspect(fiber, false),
+            .exists => self.testExistence(fiber),
+            .list => self.beginList(fiber),
+            .mkdir => self.makeDirectory(fiber),
+            .remove_file => self.removeEntry(fiber, .file),
+            .remove_dir => self.removeEntry(fiber, .directory),
+            .rename => self.renameEntry(fiber),
+            .create_bytes, .create_text => self.beginStage(fiber, .create),
+            .replace_bytes, .replace_text => self.beginStage(fiber, .replace),
+            .publish_bytes, .publish_text => self.beginStage(fiber, .publish),
+            .copy => self.beginCopy(fiber),
         };
     }
 
-    fn publishReservation(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn publishReservation(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const root = self.root.?;
         const ticket = if (root.reservation()) |existing| existing: {
             existing.retain();
             break :existing existing;
         } else fsport.Reservation.create(self.access) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.Limit => return self.fail(evaluator, .limit),
+            error.Limit => return self.fail(fiber, .limit),
         };
         defer ticket.release();
-        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing");
-        const dir = root.dir().openDir(self.io, ".", .{ .iterate = true }) catch |err| return self.fail(evaluator, fsport.reasonForError(err));
+        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "directory scope is closing");
+        const dir = root.dir().openDir(self.io, ".", .{ .iterate = true }) catch |err| return self.fail(fiber, fsport.reasonForError(err));
         const result = directory.adoptChild(self.access, scope, dir, self.inputs.root, ticket) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+            error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),
         };
         self.state = .complete;
         return .{ .output = result };
     }
 
-    fn stageDirectory(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
-        const entry = try self.requireEntry(evaluator, self.resolved.?);
-        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing");
+    fn stageDirectory(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
+        const entry = try self.requireEntry(fiber, self.resolved.?);
+        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "directory scope is closing");
         const stage = @import("../directory_stage.zig").Stage.create(self.access, entry.parent.dir, entry.name) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            return self.fail(evaluator, fsport.reasonForError(err));
+            return self.fail(fiber, fsport.reasonForError(err));
         };
         const result = directory.adoptStage(self.access, scope, stage, self.inputs.root, self.root.?.reservation()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+            error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),
         };
         self.state = .complete;
         return .{ .output = result };
     }
 
-    fn beginLock(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
-        const entry = try self.requireEntry(evaluator, self.resolved.?);
+    fn beginLock(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
+        const entry = try self.requireEntry(fiber, self.resolved.?);
         const file = switch (fsport.openLockFile(self.io, entry.parent.dir, entry.name)) {
             .file => |file| file,
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
         };
         self.state = .{ .waiting_lock = file };
         return .yielded;
     }
 
-    fn waitForLock(self: *Driver, evaluator: *Fiber, file: std.Io.File) MachineError!driver_completion.Progress {
-        if (!(file.tryLock(self.io, .exclusive) catch |err| return self.fail(evaluator, fsport.reasonForError(err)))) {
-            try evaluator.park(.{ .sleep = 10 });
+    fn waitForLock(self: *Driver, fiber: *Fiber, file: std.Io.File) MachineError!driver_completion.Progress {
+        if (!(file.tryLock(self.io, .exclusive) catch |err| return self.fail(fiber, fsport.reasonForError(err)))) {
+            try fiber.park(.{ .sleep = 10 });
             return .yielded;
         }
-        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "lock scope is closing");
+        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "lock scope is closing");
         // Adoption consumes the descriptor even on failure. Retirement cannot
         // close it again once the resource factory owns it.
         self.state = .complete;
         const result = fsport.adoptLock(self.access, scope, file) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return evaluator.fail(.cancelled, "lock scope is closing"),
+            error.ScopeClosing => return fiber.fail(.cancelled, "lock scope is closing"),
         };
         return .{ .output = result };
     }
@@ -1188,48 +1188,48 @@ const Driver = struct {
     /// `open-reader`: the file is opened as `read-bytes` opens it, but is
     /// adopted by the calling scope as a resource whose endpoint is the
     /// result. There is no size limit: the stream is read a chunk at a time.
-    fn openReaderEndpoint(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn openReaderEndpoint(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const entry = switch (self.resolved.?) {
-            .directory => return self.fail(evaluator, .is_directory),
+            .directory => return self.fail(fiber, .is_directory),
             .entry => |entry| entry,
         };
         const file = switch (fsport.openRegularForRead(self.io, entry.parent.dir, entry.name)) {
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .file => |file| file,
         };
         switch (fsport.regularFileInfo(self.io, file, std.math.maxInt(u64))) {
             .failed => |reason| {
                 file.close(self.io);
-                return self.fail(evaluator, reason);
+                return self.fail(fiber, reason);
             },
             .regular => {},
         }
-        const scope = evaluator.task_scope orelse {
+        const scope = fiber.task_scope orelse {
             file.close(self.io);
-            return evaluator.fail(.cancelled, "reader scope is closing");
+            return fiber.fail(.cancelled, "reader scope is closing");
         };
         // Adoption consumes the descriptor on either outcome.
         self.state = .complete;
         const result = directory.adoptReader(self.access, scope, file) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return evaluator.fail(.cancelled, "reader scope is closing"),
+            error.ScopeClosing => return fiber.fail(.cancelled, "reader scope is closing"),
         };
         return .{ .output = result };
     }
 
-    fn beginRead(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn beginRead(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const entry = switch (self.resolved.?) {
-            .directory => return self.fail(evaluator, .is_directory),
+            .directory => return self.fail(fiber, .is_directory),
             .entry => |entry| entry,
         };
         const file = switch (fsport.openRegularForRead(self.io, entry.parent.dir, entry.name)) {
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .file => |file| file,
         };
         const size = switch (fsport.regularFileInfo(self.io, file, self.limits.max_transfer_bytes)) {
             .failed => |reason| {
                 file.close(self.io);
-                return self.fail(evaluator, reason);
+                return self.fail(fiber, reason);
             },
             .regular => |info| info.size,
         };
@@ -1241,10 +1241,10 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn readStep(self: *Driver, evaluator: *Fiber, read: *Read) MachineError!driver_completion.Progress {
+    fn readStep(self: *Driver, fiber: *Fiber, read: *Read) MachineError!driver_completion.Progress {
         switch (fsport.readQuantum(self.io, read.file, read.buffer, &read.offset)) {
             .pending => return .yielded,
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .complete => {},
         }
         read.file.close(self.io);
@@ -1258,10 +1258,10 @@ const Driver = struct {
 
     fn materializeBytes(
         self: *Driver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         building: *@FieldType(State, "bytes_value"),
     ) MachineError!driver_completion.Progress {
-        return switch (try building.materializer.advance(evaluator.workBudget())) {
+        return switch (try building.materializer.advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| complete: {
                 building.materializer.deinit();
@@ -1274,12 +1274,12 @@ const Driver = struct {
 
     fn materializeText(
         self: *Driver,
-        evaluator: *Fiber,
+        fiber: *Fiber,
         building: *@FieldType(State, "text_value"),
     ) MachineError!driver_completion.Progress {
-        return switch (building.materializer.advance(evaluator.workBudget()) catch |err| switch (err) {
+        return switch (building.materializer.advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return self.failMessage(evaluator, .io, .invalid_utf8, "file is not valid UTF-8"),
+            error.InvalidUtf8 => return self.failMessage(fiber, .io, .invalid_utf8, "file is not valid UTF-8"),
         }) {
             .pending => .stepped,
             .complete => |result| complete: {
@@ -1293,34 +1293,34 @@ const Driver = struct {
 
     // -- metadata -----------------------------------------------------------
 
-    fn inspect(self: *Driver, evaluator: *Fiber, followed: bool) MachineError!driver_completion.Progress {
+    fn inspect(self: *Driver, fiber: *Fiber, followed: bool) MachineError!driver_completion.Progress {
         const info: std.Io.File.Stat = switch (self.resolved.?) {
-            .directory => |handle| handle.dir.stat(self.io) catch |err| return self.fail(evaluator, fsport.reasonForError(err)),
+            .directory => |handle| handle.dir.stat(self.io) catch |err| return self.fail(fiber, fsport.reasonForError(err)),
             .entry => |entry| entry.parent.dir.statFile(self.io, entry.name, .{ .follow_symlinks = false }) catch |err|
-                return self.fail(evaluator, fsport.reasonForError(err)),
+                return self.fail(fiber, fsport.reasonForError(err)),
         };
         const kind = fsport.EntryKind.fromHost(info.kind);
-        if (followed and kind == .symlink) return self.fail(evaluator, .changed);
+        if (followed and kind == .symlink) return self.fail(fiber, .changed);
         const result = if (kind == .file)
-            try dict.fromUniquePairs(self.allocator, evaluator.releases, &.{
+            try dict.fromUniquePairs(self.allocator, fiber.releases, &.{
                 .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.file } } },
                 .{ .{ .symbol = .{ .name = self.symbols.size } }, .{ .int = std.math.cast(i64, info.size) orelse std.math.maxInt(i64) } },
             })
         else
-            try dict.fromUniquePairs(self.allocator, evaluator.releases, &.{
+            try dict.fromUniquePairs(self.allocator, fiber.releases, &.{
                 .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.entryKind(kind) } } },
             });
         self.state = .complete;
         return .{ .output = result };
     }
 
-    fn testExistence(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn testExistence(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const present: i64 = switch (self.resolved.?) {
             .directory => 1,
             .entry => |entry| present: {
                 _ = entry.parent.dir.statFile(self.io, entry.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
                     error.FileNotFound => break :present 0,
-                    else => return self.fail(evaluator, fsport.reasonForError(err)),
+                    else => return self.fail(fiber, fsport.reasonForError(err)),
                 };
                 break :present 1;
             },
@@ -1331,16 +1331,16 @@ const Driver = struct {
 
     // -- listing ------------------------------------------------------------
 
-    fn beginList(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn beginList(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const dir = switch (self.resolved.?) {
             .directory => |handle| handle.dir.openDir(self.io, ".", .{ .iterate = true }) catch |err|
-                return self.fail(evaluator, fsport.reasonForError(err)),
+                return self.fail(fiber, fsport.reasonForError(err)),
             .entry => |entry| entry.parent.dir.openDir(self.io, entry.name, .{
                 .iterate = true,
                 .follow_symlinks = false,
             }) catch |err| switch (err) {
-                error.SymLinkLoop => return self.fail(evaluator, .changed),
-                else => return self.fail(evaluator, fsport.reasonForError(err)),
+                error.SymLinkLoop => return self.fail(fiber, .changed),
+                else => return self.fail(fiber, fsport.reasonForError(err)),
             },
         };
         self.state = .{ .list_collect = .{
@@ -1351,12 +1351,12 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn collectEntries(self: *Driver, evaluator: *Fiber, collect: *Collect) MachineError!driver_completion.Progress {
+    fn collectEntries(self: *Driver, fiber: *Fiber, collect: *Collect) MachineError!driver_completion.Progress {
         var observed: usize = 0;
         var observed_bytes: usize = 0;
         while (observed < fsport.listing_batch_entries and observed_bytes < fsport.listing_batch_bytes) {
             const entry = collect.iterator.next(self.io) catch |err|
-                return self.fail(evaluator, fsport.reasonForError(err));
+                return self.fail(fiber, fsport.reasonForError(err));
             const item = entry orelse {
                 const orderer = try Orderer.init(self.allocator, &collect.entries);
                 collect.dir.close(self.io);
@@ -1365,14 +1365,14 @@ const Driver = struct {
                 return .yielded;
             };
             if (std.mem.eql(u8, item.name, ".") or std.mem.eql(u8, item.name, "..")) continue;
-            if (!std.unicode.utf8ValidateSlice(item.name)) return self.fail(evaluator, .invalid_utf8);
-            if (collect.entries.count == self.limits.max_directory_entries) return self.fail(evaluator, .limit);
+            if (!std.unicode.utf8ValidateSlice(item.name)) return self.fail(fiber, .invalid_utf8);
+            if (collect.entries.count == self.limits.max_directory_entries) return self.fail(fiber, .limit);
             collect.name_bytes = std.math.add(usize, collect.name_bytes, item.name.len) catch
-                return self.fail(evaluator, .limit);
-            if (collect.name_bytes > self.limits.max_directory_name_bytes) return self.fail(evaluator, .limit);
+                return self.fail(fiber, .limit);
+            if (collect.name_bytes > self.limits.max_directory_name_bytes) return self.fail(fiber, .limit);
             const kind = if (item.kind == .unknown) classify: {
                 const info = collect.dir.statFile(self.io, item.name, .{ .follow_symlinks = false }) catch |err|
-                    return self.fail(evaluator, fsport.reasonForError(err));
+                    return self.fail(fiber, fsport.reasonForError(err));
                 break :classify fsport.EntryKind.fromHost(info.kind);
             } else fsport.EntryKind.fromHost(item.kind);
             const name = try self.allocator.dupe(u8, item.name);
@@ -1388,8 +1388,8 @@ const Driver = struct {
 
     /// Ordering draws on the fiber's budget; only the completed cursor yields
     /// the sorted pointers.
-    fn orderEntries(self: *Driver, evaluator: *Fiber, ordering: *Ordering) MachineError!driver_completion.Progress {
-        if (ordering.orderer.advance(evaluator.workBudget()) == .pending) return .stepped;
+    fn orderEntries(self: *Driver, fiber: *Fiber, ordering: *Ordering) MachineError!driver_completion.Progress {
+        if (ordering.orderer.advance(fiber.workBudget()) == .pending) return .stepped;
         const values = try self.allocator.alloc(Value, ordering.entries.count);
         const entries = ordering.entries;
         const sorted = ordering.orderer.take();
@@ -1397,8 +1397,8 @@ const Driver = struct {
         return .stepped;
     }
 
-    fn buildEntries(self: *Driver, evaluator: *Fiber, build: *Build) MachineError!driver_completion.Progress {
-        const work = evaluator.workBudget();
+    fn buildEntries(self: *Driver, fiber: *Fiber, build: *Build) MachineError!driver_completion.Progress {
+        const work = fiber.workBudget();
         while (!work.exhausted()) {
             if (build.built == build.sorted.len) {
                 const entries = build.entries;
@@ -1418,17 +1418,17 @@ const Driver = struct {
                 _ = work.spend();
                 build.name = .init(self.allocator, entry.name);
             }
-            const name_value = switch (build.name.?.advance(evaluator.workBudget()) catch |err| switch (err) {
+            const name_value = switch (build.name.?.advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidUtf8 => return self.fail(evaluator, .invalid_utf8),
+                error.InvalidUtf8 => return self.fail(fiber, .invalid_utf8),
             }) {
                 .pending => return .stepped,
                 .complete => |name_value| name_value,
             };
             build.name.?.deinit();
             build.name = null;
-            defer evaluator.releases.releaseValue(name_value);
-            build.values[build.built] = try dict.fromUniquePairs(self.allocator, evaluator.releases, &.{
+            defer fiber.releases.releaseValue(name_value);
+            build.values[build.built] = try dict.fromUniquePairs(self.allocator, fiber.releases, &.{
                 .{ .{ .symbol = .{ .name = self.symbols.name } }, name_value },
                 .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.entryKind(entry.kind) } } },
             });
@@ -1437,8 +1437,8 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn materializeEntries(self: *Driver, evaluator: *Fiber, result: *Result) MachineError!driver_completion.Progress {
-        return switch (try result.materializer.advance(evaluator.workBudget())) {
+    fn materializeEntries(self: *Driver, fiber: *Fiber, result: *Result) MachineError!driver_completion.Progress {
+        return switch (try result.materializer.advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |listing| complete: {
                 result.materializer.deinit();
@@ -1459,10 +1459,10 @@ const Driver = struct {
 
     /// The listing retains its element dictionaries, so the construction
     /// inputs release one per step before the result is published.
-    fn releaseEntries(self: *Driver, evaluator: *Fiber, release: *Release) MachineError!driver_completion.Progress {
-        const work = evaluator.workBudget();
+    fn releaseEntries(self: *Driver, fiber: *Fiber, release: *Release) MachineError!driver_completion.Progress {
+        const work = fiber.workBudget();
         while (release.index != release.built and work.spend()) {
-            evaluator.releases.releaseValue(release.values[release.index]);
+            fiber.releases.releaseValue(release.values[release.index]);
             release.index += 1;
         }
         if (release.index != release.built) return .yielded;
@@ -1478,55 +1478,55 @@ const Driver = struct {
 
     // -- single-entry mutation ----------------------------------------------
 
-    fn requireEntry(self: *Driver, evaluator: *Fiber, resolved: fsport.Resolved) MachineError!@FieldType(fsport.Resolved, "entry") {
+    fn requireEntry(self: *Driver, fiber: *Fiber, resolved: fsport.Resolved) MachineError!@FieldType(fsport.Resolved, "entry") {
         return switch (resolved) {
-            .directory => self.fail(evaluator, .invalid_path),
+            .directory => self.fail(fiber, .invalid_path),
             .entry => |entry| entry,
         };
     }
 
-    fn makeDirectory(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
-        const entry = try self.requireEntry(evaluator, self.resolved.?);
+    fn makeDirectory(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
+        const entry = try self.requireEntry(fiber, self.resolved.?);
         entry.parent.dir.createDir(self.io, entry.name, .default_dir) catch |err|
-            return self.fail(evaluator, fsport.reasonForError(err));
+            return self.fail(fiber, fsport.reasonForError(err));
         self.state = .complete;
         return .completed;
     }
 
-    fn makeDirectories(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn makeDirectories(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         switch (self.resolved.?) {
             .directory => {},
             .entry => |entry| entry.parent.dir.createDir(self.io, entry.name, .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {
-                    const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .follow_symlinks = false }) catch |open_err| return self.fail(evaluator, fsport.reasonForError(open_err));
+                    const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .follow_symlinks = false }) catch |open_err| return self.fail(fiber, fsport.reasonForError(open_err));
                     dir.close(self.io);
                 },
-                else => return self.fail(evaluator, fsport.reasonForError(err)),
+                else => return self.fail(fiber, fsport.reasonForError(err)),
             },
         }
         self.state = .complete;
         return .completed;
     }
 
-    fn beginRemoveTree(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
-        const entry = try self.requireEntry(evaluator, self.resolved.?);
-        const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return self.fail(evaluator, fsport.reasonForError(err));
+    fn beginRemoveTree(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
+        const entry = try self.requireEntry(fiber, self.resolved.?);
+        const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return self.fail(fiber, fsport.reasonForError(err));
         self.state = .{ .removing_tree = .init(self.io, dir) };
         return .yielded;
     }
 
-    fn removeTreeStep(self: *Driver, evaluator: *Fiber, tree: *fsport.TreeRemoval) MachineError!driver_completion.Progress {
+    fn removeTreeStep(self: *Driver, fiber: *Fiber, tree: *fsport.TreeRemoval) MachineError!driver_completion.Progress {
         switch (tree.step()) {
             .pending => return .yielded,
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .complete => {
-                const entry = try self.requireEntry(evaluator, self.resolved.?);
+                const entry = try self.requireEntry(fiber, self.resolved.?);
                 entry.parent.dir.deleteDir(self.io, entry.name) catch |err| switch (err) {
                     error.DirNotEmpty => {
                         tree.restart();
                         return .yielded;
                     },
-                    else => return self.fail(evaluator, fsport.reasonForError(err)),
+                    else => return self.fail(fiber, fsport.reasonForError(err)),
                 };
                 tree.deinit();
                 self.state = .complete;
@@ -1537,31 +1537,31 @@ const Driver = struct {
 
     const RemoveKind = enum { file, directory };
 
-    fn removeEntry(self: *Driver, evaluator: *Fiber, kind: RemoveKind) MachineError!driver_completion.Progress {
-        const entry = try self.requireEntry(evaluator, self.resolved.?);
+    fn removeEntry(self: *Driver, fiber: *Fiber, kind: RemoveKind) MachineError!driver_completion.Progress {
+        const entry = try self.requireEntry(fiber, self.resolved.?);
         const info = entry.parent.dir.statFile(self.io, entry.name, .{ .follow_symlinks = false }) catch |err|
-            return self.fail(evaluator, fsport.reasonForError(err));
+            return self.fail(fiber, fsport.reasonForError(err));
         switch (kind) {
             .file => {
-                if (info.kind == .directory) return self.fail(evaluator, .is_directory);
+                if (info.kind == .directory) return self.fail(fiber, .is_directory);
                 entry.parent.dir.deleteFile(self.io, entry.name) catch |err|
-                    return self.fail(evaluator, fsport.reasonForError(err));
+                    return self.fail(fiber, fsport.reasonForError(err));
             },
             .directory => {
-                if (info.kind != .directory) return self.fail(evaluator, .not_directory);
+                if (info.kind != .directory) return self.fail(fiber, .not_directory);
                 entry.parent.dir.deleteDir(self.io, entry.name) catch |err|
-                    return self.fail(evaluator, fsport.reasonForError(err));
+                    return self.fail(fiber, fsport.reasonForError(err));
             },
         }
         self.state = .complete;
         return .completed;
     }
 
-    fn renameEntry(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
-        const source = try self.requireEntry(evaluator, self.resolved.?);
-        const destination = try self.requireEntry(evaluator, self.second.?);
+    fn renameEntry(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
+        const source = try self.requireEntry(fiber, self.resolved.?);
+        const destination = try self.requireEntry(fiber, self.second.?);
         fsport.renameNoReplace(self.io, source.parent.dir, source.name, destination.parent.dir, destination.name) catch |err|
-            return self.fail(evaluator, fsport.reasonForError(err));
+            return self.fail(fiber, fsport.reasonForError(err));
         self.state = .complete;
         return .completed;
     }
@@ -1570,27 +1570,27 @@ const Driver = struct {
 
     const StageMode = enum { create, replace, publish };
 
-    fn beginStage(self: *Driver, evaluator: *Fiber, mode: StageMode) MachineError!driver_completion.Progress {
-        const entry = try self.requireEntry(evaluator, self.resolved.?);
+    fn beginStage(self: *Driver, fiber: *Fiber, mode: StageMode) MachineError!driver_completion.Progress {
+        const entry = try self.requireEntry(fiber, self.resolved.?);
         const existing = entry.parent.dir.statFile(self.io, entry.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => null,
-            else => return self.fail(evaluator, fsport.reasonForError(err)),
+            else => return self.fail(fiber, fsport.reasonForError(err)),
         };
         // A replaced file keeps its permissions through the exchange; a
         // created one gets the host default.
         const permissions: std.Io.File.Permissions = switch (mode) {
-            .create => if (existing != null) return self.fail(evaluator, .already_exists) else .default_file,
+            .create => if (existing != null) return self.fail(fiber, .already_exists) else .default_file,
             .replace, .publish => permissions: {
                 const info = existing orelse {
-                    if (mode == .replace) return self.fail(evaluator, .not_found);
+                    if (mode == .replace) return self.fail(fiber, .not_found);
                     break :permissions .default_file;
                 };
-                if (info.kind != .file) return self.fail(evaluator, .not_regular);
+                if (info.kind != .file) return self.fail(fiber, .not_regular);
                 break :permissions info.permissions;
             },
         };
         const staged = switch (fsport.StagedFile.create(self.io, entry.parent.dir, permissions)) {
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .staged => |staged| staged,
         };
         if (self.operation == .open_writer) {
@@ -1601,13 +1601,13 @@ const Driver = struct {
             const target = self.resolved.?;
             self.resolved = null;
             const stream = try @import("../filesystem_stream.zig").Stream.create(self.access, root, slot, target, staged);
-            const scope = evaluator.task_scope orelse {
+            const scope = fiber.task_scope orelse {
                 stream.retire();
-                return evaluator.fail(.cancelled, "directory scope is closing");
+                return fiber.fail(.cancelled, "directory scope is closing");
             };
             const result = directory.adoptStream(self.access, scope, stream, self.inputs.root) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),
+                error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),
             };
             self.state = .complete;
             return .{ .output = result };
@@ -1616,10 +1616,10 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn writeStep(self: *Driver, evaluator: *Fiber, write: *Write) MachineError!driver_completion.Progress {
+    fn writeStep(self: *Driver, fiber: *Fiber, write: *Write) MachineError!driver_completion.Progress {
         switch (fsport.writeQuantum(self.io, write.staged.file.?, self.payload.?.slice(), &write.offset)) {
             .pending => return .yielded,
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .complete => {},
         }
         const staged = write.staged;
@@ -1629,7 +1629,7 @@ const Driver = struct {
 
     /// Publication is its own step so cancellation is observed after the
     /// last write and before the one commit syscall.
-    fn commitStep(self: *Driver, evaluator: *Fiber, staged: *fsport.StagedFile) MachineError!driver_completion.Progress {
+    fn commitStep(self: *Driver, fiber: *Fiber, staged: *fsport.StagedFile) MachineError!driver_completion.Progress {
         // A copy publishes into its destination entry; every other staged
         // word publishes into the primary one.
         const entry = if (self.operation == .copy) self.second.?.entry else self.resolved.?.entry;
@@ -1638,7 +1638,7 @@ const Driver = struct {
             .publish_bytes, .publish_text => staged.commitReplace(entry.name),
             else => staged.commitNoReplace(entry.name),
         };
-        if (failed) |reason| return self.fail(evaluator, reason);
+        if (failed) |reason| return self.fail(fiber, reason);
         // After an exchange the displaced original sits under the staging
         // name; the mutation has committed either way, so disposal failure is
         // not reported as operation failure.
@@ -1649,25 +1649,25 @@ const Driver = struct {
 
     // -- copy ---------------------------------------------------------------
 
-    fn beginCopy(self: *Driver, evaluator: *Fiber) MachineError!driver_completion.Progress {
+    fn beginCopy(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const source = switch (self.resolved.?) {
-            .directory => return self.fail(evaluator, .not_regular),
+            .directory => return self.fail(fiber, .not_regular),
             .entry => |entry| entry,
         };
-        const destination = try self.requireEntry(evaluator, self.second.?);
+        const destination = try self.requireEntry(fiber, self.second.?);
         const existing = destination.parent.dir.statFile(self.io, destination.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => null,
-            else => return self.fail(evaluator, fsport.reasonForError(err)),
+            else => return self.fail(fiber, fsport.reasonForError(err)),
         };
-        if (existing != null) return self.fail(evaluator, .already_exists);
+        if (existing != null) return self.fail(fiber, .already_exists);
         const file = switch (fsport.openRegularForRead(self.io, source.parent.dir, source.name)) {
-            .failed => |reason| return self.fail(evaluator, reason),
+            .failed => |reason| return self.fail(fiber, reason),
             .file => |file| file,
         };
         const source_info = switch (fsport.regularFileInfo(self.io, file, self.limits.max_transfer_bytes)) {
             .failed => |reason| {
                 file.close(self.io);
-                return self.fail(evaluator, reason);
+                return self.fail(fiber, reason);
             },
             .regular => |info| info,
         };
@@ -1680,7 +1680,7 @@ const Driver = struct {
             .failed => |reason| {
                 file.close(self.io);
                 self.allocator.free(buffer);
-                return self.fail(evaluator, reason);
+                return self.fail(fiber, reason);
             },
             .staged => |staged| staged,
         };
@@ -1693,12 +1693,12 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn copyStep(self: *Driver, evaluator: *Fiber, copying: *Copy) MachineError!driver_completion.Progress {
+    fn copyStep(self: *Driver, fiber: *Fiber, copying: *Copy) MachineError!driver_completion.Progress {
         if (copying.offset == copying.size) {
             var probe: [1]u8 = undefined;
             const extra = copying.file.readPositionalAll(self.io, &probe, copying.size) catch |err|
-                return self.fail(evaluator, fsport.reasonForError(err));
-            if (extra != 0) return self.fail(evaluator, .changed);
+                return self.fail(fiber, fsport.reasonForError(err));
+            if (extra != 0) return self.fail(fiber, .changed);
             copying.file.close(self.io);
             self.allocator.free(copying.buffer);
             const staged = copying.staged;
@@ -1706,14 +1706,14 @@ const Driver = struct {
             return .yielded;
         }
         // One transfer chunk per step, charged a unit per byte.
-        const end = copying.offset + evaluator.workBudget().take(@min(fsport.transfer_quantum, copying.size - copying.offset));
+        const end = copying.offset + fiber.workBudget().take(@min(fsport.transfer_quantum, copying.size - copying.offset));
         if (end == copying.offset) return .yielded;
         const chunk = copying.buffer[0 .. end - copying.offset];
         const amount = copying.file.readPositionalAll(self.io, chunk, copying.offset) catch |err|
-            return self.fail(evaluator, fsport.reasonForError(err));
-        if (amount != chunk.len) return self.fail(evaluator, .changed);
+            return self.fail(fiber, fsport.reasonForError(err));
+        if (amount != chunk.len) return self.fail(fiber, .changed);
         copying.staged.file.?.writePositionalAll(self.io, chunk, copying.offset) catch |err|
-            return self.fail(evaluator, fsport.reasonForError(err));
+            return self.fail(fiber, fsport.reasonForError(err));
         copying.offset = end;
         return .yielded;
     }

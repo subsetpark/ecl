@@ -163,16 +163,16 @@ const DiscoveryDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *DiscoveryDriver,
     ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .discover => switch (self.cursor.?.advance()) {
                 .pending => _ = work.spend(),
                 .item => |found| {
-                    try self.items.ensureUnusedCapacity(evaluator.allocator, 1);
+                    try self.items.ensureUnusedCapacity(fiber.allocator, 1);
                     const item = Collected{ .module = found.module, .source = found.source, .metadata = found.metadata };
                     item.retain();
                     self.items.appendAssumeCapacity(item);
@@ -186,14 +186,14 @@ const DiscoveryDriver = struct {
             },
             .sort => {
                 if (self.sorter == null)
-                    self.sorter = try .init(evaluator.allocator, self.items.items, {});
+                    self.sorter = try .init(fiber.allocator, self.items.items, {});
                 switch (self.sorter.?.advance(work) catch |err| switch (err) {}) {
                     .pending => _ = work.spend(),
                     .complete => {
                         self.sorter.?.deinit();
                         self.sorter = null;
                         self.values = try heap.OwnedValueBuffer.init(
-                            evaluator.releases,
+                            fiber.releases,
                             self.items.items.len,
                         );
                         self.phase = .descriptors;
@@ -206,8 +206,8 @@ const DiscoveryDriver = struct {
                     continue;
                 }
                 self.values.?.appendOwned(try descriptorValue(
-                    evaluator.allocator,
-                    evaluator.releases,
+                    fiber.allocator,
+                    fiber.releases,
                     self.keys,
                     self.items.items[self.descriptor_index],
                 ));
@@ -224,16 +224,16 @@ const DiscoveryDriver = struct {
     }
 };
 
-fn discover(evaluator: *Fiber) MachineError!void {
-    const access = evaluator.inherited.test_observation orelse
-        return evaluator.fail(.domain, "tests is available only in a test Session");
+fn discover(fiber: *Fiber) MachineError!void {
+    const access = fiber.inherited.test_observation orelse
+        return fiber.fail(.domain, "tests is available only in a test Session");
     const keys = try DescriptorKeys.init();
-    const driver = try evaluator.allocator.create(DiscoveryDriver);
+    const driver = try fiber.allocator.create(DiscoveryDriver);
     driver.* = .{
         .cursor = access.discoveryCursor(),
         .keys = keys,
     };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }
 
 const InvocationDriver = struct {
@@ -261,37 +261,37 @@ const InvocationDriver = struct {
         self.descriptor.deinit(releases, allocator);
     }
 
-    fn invalid(evaluator: *Fiber) MachineError {
-        return evaluator.fail(
+    fn invalid(fiber: *Fiber) MachineError {
+        return fiber.fail(
             .domain,
             "@test requires a descriptor produced by tests",
         );
     }
 
-    fn missingOutcome(evaluator: *Fiber) error{OutOfMemory}!Value {
+    fn missingOutcome(fiber: *Fiber) error{OutOfMemory}!Value {
         var failure = machine.EclErr.init(.domain, "test descriptor names no current test");
-        defer failure.retire(evaluator.releases);
+        defer failure.retire(fiber.releases);
         const payload = try machine.errorValue(
-            evaluator.allocator,
-            evaluator.releases,
+            fiber.allocator,
+            fiber.releases,
             &failure,
             .{},
             null,
         );
         return machine.outcomeDict(
-            evaluator.allocator,
-            evaluator.releases,
+            fiber.allocator,
+            fiber.releases,
             "err",
             payload,
         );
     }
 
     pub fn advance(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         self: *InvocationDriver,
     ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) {
             if (self.lookup) |*lookup| switch (lookup.advance()) {
                 .pending => {
@@ -300,31 +300,31 @@ const InvocationDriver = struct {
                 },
                 .complete => |maybe_invocation| {
                     if (maybe_invocation == null)
-                        return .{ .output = try missingOutcome(evaluator) };
+                        return .{ .output = try missingOutcome(fiber) };
                     var invocation = maybe_invocation.?;
                     defer invocation.deinit();
-                    var target = invocation.enter(evaluator.module_access);
+                    var target = invocation.enter(fiber.module_access);
                     defer target.deinit();
-                    const home = target.home(evaluator.module_access);
-                    const task = evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
-                        .parent_fiber = evaluator,
+                    const home = target.home(fiber.module_access);
+                    const task = fiber.scheduler.?.spawn(fiber.task_scope.?, .{
+                        .parent_fiber = fiber,
                         .site = .{ .module = home },
                         .quotation = target.quotation(),
                     }) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.Io => return evaluator.fail(
+                        error.Io => return fiber.fail(
                             .io,
                             "could not start scheduler workers for @test",
                         ),
                         // @test requests no resource transfer.
                         error.Transfer => unreachable,
                     };
-                    const allocator = evaluator.allocator;
-                    const releases = evaluator.releases;
-                    evaluator.detachWorkDriver(self);
+                    const allocator = fiber.allocator;
+                    const releases = fiber.releases;
+                    fiber.detachWorkDriver(self);
                     self.deinit(releases, allocator);
                     allocator.destroy(self);
-                    try evaluator.park(.{ .task = task });
+                    try fiber.park(.{ .task = task });
                     return .detached;
                 },
             };
@@ -336,7 +336,7 @@ const InvocationDriver = struct {
                 },
                 .complete => |maybe_name| {
                     self.module_validation = null;
-                    self.module_name = maybe_name orelse return invalid(evaluator);
+                    self.module_name = maybe_name orelse return invalid(fiber);
                     self.name_validation = .init(self.name_id.?);
                     continue;
                 },
@@ -348,13 +348,13 @@ const InvocationDriver = struct {
                 },
                 .complete => |maybe_name| {
                     self.name_validation = null;
-                    self.test_name = maybe_name orelse return invalid(evaluator);
-                    self.lookup = evaluator.inherited.test_execution.?.lookupCursor(
+                    self.test_name = maybe_name orelse return invalid(fiber);
+                    self.lookup = fiber.inherited.test_execution.?.lookupCursor(
                         self.module_name.?,
                         self.test_name.?,
                         self.source_id,
                     );
-                    if (self.lookup == null) return .{ .output = try missingOutcome(evaluator) };
+                    if (self.lookup == null) return .{ .output = try missingOutcome(fiber) };
                     continue;
                 },
             };
@@ -365,41 +365,41 @@ const InvocationDriver = struct {
                 const key = dict.keyAt(descriptor.dict, self.scan_index);
                 const payload = dict.valueAt(descriptor.dict, self.scan_index);
                 self.scan_index += 1;
-                if (key != .symbol) return invalid(evaluator);
+                if (key != .symbol) return invalid(fiber);
                 if (key.symbol.name == self.keys.module) {
-                    if (self.module_id != null or payload != .symbol) return invalid(evaluator);
+                    if (self.module_id != null or payload != .symbol) return invalid(fiber);
                     self.module_id = payload.symbol.name;
                 } else if (key.symbol.name == self.keys.name) {
-                    if (self.name_id != null or payload != .symbol) return invalid(evaluator);
+                    if (self.name_id != null or payload != .symbol) return invalid(fiber);
                     self.name_id = payload.symbol.name;
                 } else if (key.symbol.name == self.keys.source) {
-                    if (self.source_id != null or payload != .int or payload.int < 0 or payload.int > std.math.maxInt(u32)) return invalid(evaluator);
+                    if (self.source_id != null or payload != .int or payload.int < 0 or payload.int > std.math.maxInt(u32)) return invalid(fiber);
                     self.source_id = @fromBackingInt(@intCast(@as(u32, @intCast(payload.int))));
                 } else if (key.symbol.name != self.keys.effect and key.symbol.name != self.keys.doc) {
-                    return invalid(evaluator);
+                    return invalid(fiber);
                 }
                 _ = work.spend();
                 continue;
             }
-            if (self.module_id == null or self.name_id == null) return invalid(evaluator);
+            if (self.module_id == null or self.name_id == null) return invalid(fiber);
             self.module_validation = .init(self.module_id.?);
         }
         return .stepped;
     }
 };
 
-fn invoke(evaluator: *Fiber) MachineError!void {
-    if (evaluator.inherited.test_execution == null)
-        return evaluator.fail(.domain, "@test is available only in a test Session");
-    var descriptor = try evaluator.popValue();
+fn invoke(fiber: *Fiber) MachineError!void {
+    if (fiber.inherited.test_execution == null)
+        return fiber.fail(.domain, "@test is available only in a test Session");
+    var descriptor = try fiber.popValue();
     defer descriptor.deinit();
     if (descriptor.borrow() != .dict)
-        return evaluator.fail(.domain, "@test requires a descriptor produced by tests");
+        return fiber.fail(.domain, "@test requires a descriptor produced by tests");
     const keys = try DescriptorKeys.init();
-    const driver = try evaluator.allocator.create(InvocationDriver);
+    const driver = try fiber.allocator.create(InvocationDriver);
     driver.* = .{
         .descriptor = .init(descriptor.take()),
         .keys = keys,
     };
-    evaluator.adoptDriver(driver);
+    fiber.adoptDriver(driver);
 }

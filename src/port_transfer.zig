@@ -220,12 +220,12 @@ pub fn ReadDriver(comptime Backend: type) type {
             releases.releaseValue(self.port);
         }
 
-        pub fn advance(evaluator: *machine.Fiber, self: *Self) machine.MachineError!machine.WorkProgress {
-            try evaluator.pollKernel();
+        pub fn advance(fiber: *machine.Fiber, self: *Self) machine.MachineError!machine.WorkProgress {
+            try fiber.pollKernel();
             if (self.state == .reading) {
-                const count = switch (try self.backend.read(evaluator, self.buffer)) {
+                const count = switch (try self.backend.read(fiber, self.buffer)) {
                     .pending => {
-                        try evaluator.park(.{ .external = self.backend.readSource() });
+                        try fiber.park(.{ .external = self.backend.readSource() });
                         return .{ .yielded = .park };
                     },
                     .eof => @as(usize, 0),
@@ -233,7 +233,7 @@ pub fn ReadDriver(comptime Backend: type) type {
                 };
                 self.state = .{ .materializing = .init(self.allocator, self.buffer[0..count]) };
             }
-            return switch (try self.state.materializing.advance(evaluator.workBudget())) {
+            return switch (try self.state.materializing.advance(fiber.workBudget())) {
                 .pending => .stepped,
                 .complete => |item| complete: {
                     self.state.materializing.deinit();
@@ -290,12 +290,12 @@ pub fn WriteDriver(comptime Backend: type) type {
             releases.releaseValue(self.port);
         }
 
-        pub fn advance(evaluator: *machine.Fiber, self: *Self) machine.MachineError!machine.WorkProgress {
-            try evaluator.pollKernel();
+        pub fn advance(fiber: *machine.Fiber, self: *Self) machine.MachineError!machine.WorkProgress {
+            try fiber.pollKernel();
             if (self.state == .encoding) {
-                const progress = self.state.encoding.encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
+                const progress = self.state.encoding.encoder.advance(fiber.workBudget()) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidByte => return evaluator.fail(.domain, Backend.invalid_byte_message),
+                    error.InvalidByte => return fiber.fail(.domain, Backend.invalid_byte_message),
                 };
                 switch (progress) {
                     .pending => return .stepped,
@@ -316,17 +316,17 @@ pub fn WriteDriver(comptime Backend: type) type {
             }
             // Encoding and I/O share this turn's allowance. Do not offer the
             // backend bytes the remaining budget cannot pay for.
-            const limit = @min(source.len - state.offset, evaluator.workBudget().remaining);
+            const limit = @min(source.len - state.offset, fiber.workBudget().remaining);
             if (limit == 0) return .stepped;
-            return switch (try self.backend.write(evaluator, state.permit, source[state.offset..][0..limit])) {
+            return switch (try self.backend.write(fiber, state.permit, source[state.offset..][0..limit])) {
                 .written => |count| progressed: {
                     state.offset += count;
                     // A write is charged a unit per byte it moved.
-                    _ = evaluator.workBudget().take(count);
+                    _ = fiber.workBudget().take(count);
                     break :progressed .stepped;
                 },
                 .pending => parked: {
-                    try evaluator.park(.{ .external = state.permit.source() });
+                    try fiber.park(.{ .external = state.permit.source() });
                     break :parked .{ .yielded = .park };
                 },
             };

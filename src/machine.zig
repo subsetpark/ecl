@@ -813,13 +813,13 @@ const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 fn ApplicationAdapters(comptime Driver: type) type {
     return struct {
         fn run(
-            evaluator: *Fiber,
+            fiber: *Fiber,
             raw: *anyopaque,
             window: StackWindow,
             site: *ApplicationContractSite,
         ) MachineError!?ApplicationStep {
             const driver: *Driver = @ptrCast(@alignCast(raw));
-            return Driver.resumeApplication(evaluator, driver, window, site);
+            return Driver.resumeApplication(fiber, driver, window, site);
         }
 
         fn deinit(
@@ -1028,11 +1028,11 @@ const TaskWaitResume = park_api.TaskWaitResume;
 pub const ParkResume = park_api.ParkResume;
 
 /// A driver transfers an owned result through this completion state. The
-/// evaluator destroys the driver before committing that value to the stack,
+/// fiber destroys the driver before committing that value to the stack,
 /// so stack-growth failure always has exactly one resumable owner.
 ///
 /// `stepped` and `yielded` separate progress from surrender, and a yield names
-/// why the driver ends its turn; `turn_core` decides what the evaluator does
+/// why the driver ends its turn; `turn_core` decides what the fiber does
 /// with either.
 pub const WorkProgress = union(enum) {
     completed,
@@ -1075,7 +1075,7 @@ pub const StackReservation = struct {
         return self.remaining == 0;
     }
 
-    /// Moves one already-reserved output through the evaluator's driver
+    /// Moves one already-reserved output through the fiber's driver
     /// completion boundary. No allocation can follow a consuming result claim.
     pub fn output(self: StackReservation, item: Value) WorkProgress {
         std.debug.assert(self.remaining == 1);
@@ -1111,8 +1111,8 @@ const WorkDriver = struct {
     site: ?ErrorSite,
     trace_parent: ?intern.TraceWord = null,
 
-    fn advance(self: WorkDriver, evaluator: *Fiber) MachineError!WorkProgress {
-        return self.resume_fn(evaluator, self.context);
+    fn advance(self: WorkDriver, fiber: *Fiber) MachineError!WorkProgress {
+        return self.resume_fn(fiber, self.context);
     }
 
     fn deinit(self: WorkDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
@@ -1122,7 +1122,7 @@ const WorkDriver = struct {
 
 /// The scheduler-visible native continuation owned by a fiber. A work driver
 /// carries its wait request or delivered result in the same variant, so the
-/// evaluator cannot represent an unrelated driver and park at once.
+/// fiber cannot represent an unrelated driver and park at once.
 const NativeContinuation = union(enum) {
     idle,
     work: WorkDriver,
@@ -1149,13 +1149,13 @@ fn requireDriverAuthority(comptime Driver: type, comptime Held: type) void {
 
 fn WorkDriverAdapters(comptime Driver: type) type {
     return struct {
-        fn advance(evaluator: *Fiber, raw: *anyopaque) MachineError!WorkProgress {
+        fn advance(fiber: *Fiber, raw: *anyopaque) MachineError!WorkProgress {
             const driver: *Driver = @ptrCast(@alignCast(raw));
             return Driver.advance(switch (DriverAuthority(Driver)) {
-                *Fiber => evaluator,
-                *Loading => Loading.of(evaluator),
-                *Unwinding => Unwinding.of(evaluator),
-                *Construction => Construction.of(evaluator),
+                *Fiber => fiber,
+                *Loading => Loading.of(fiber),
+                *Unwinding => Unwinding.of(fiber),
+                *Construction => Construction.of(fiber),
                 else => @compileError(@typeName(Driver) ++ " asks for an authority the machine does not mint"),
             }, driver);
         }
@@ -1250,11 +1250,11 @@ pub fn PathActionDriver(
         encoder: heap.Owned(kernel_storage.StringEncoder),
         path: ?heap.Owned([]u8) = null,
 
-        fn advance(evaluator: *Fiber, self: *Self) MachineError!WorkProgress {
-            try evaluator.pollKernel();
-            if (self.path == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+        fn advance(fiber: *Fiber, self: *Self) MachineError!WorkProgress {
+            try fiber.pollKernel();
+            if (self.path == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
+                error.InvalidCodepoint => return fiber.fail(.domain, "path contains an invalid Unicode scalar"),
             }) {
                 .pending => return .stepped,
                 .complete => |path| self.path = .init(path),
@@ -1262,21 +1262,21 @@ pub fn PathActionDriver(
             const path = self.path.?.take();
             const path_value = self.path_value.take();
             self.path = null;
-            evaluator.retireDriver(self);
-            try action(evaluator, path, path_value);
+            fiber.retireDriver(self);
+            try action(fiber, path, path_value);
             return .detached;
         }
     };
 }
 
-/// The evaluator as its module loader sees it: the fiber, plus the handful of
+/// The fiber as its module loader sees it, plus the handful of
 /// continuation operations a load needs and a primitive must not have. It is
 /// the fiber's own address under an opaque type, so holding one is the
 /// authority; only the machine mints it, handing it to the loader's entry
 /// points and to the drivers that ask for it in `advance`.
 pub const Loading = opaque {
-    fn of(evaluator: *Fiber) *Loading {
-        return @ptrCast(evaluator);
+    fn of(target: *Fiber) *Loading {
+        return @ptrCast(target);
     }
 
     pub fn fiber(self: *Loading) *Fiber {
@@ -1315,29 +1315,7 @@ pub const Loading = opaque {
         provenance: modules.RegistrationProvenance,
         after: load.AfterLoad,
     ) error{OutOfMemory}!void {
-        const evaluator = self.fiber();
-        var continuation = OwnedFrame.init(.{ .qualified_after_load = after });
-        defer continuation.deinit(evaluator.releases, evaluator.allocator);
-        var site = evaluator.current.?.site.applied();
-        site.registration_provenance = provenance;
-        _ = (if (after.request.preservesCaller())
-            evaluator.suspendCurrentForQualifiedLoad()
-        else
-            evaluator.suspendCurrent()) catch {
-            evaluator.releases.releaseHeader(body);
-            return error.OutOfMemory;
-        };
-        evaluator.appendFrame(&continuation) catch {
-            evaluator.releases.releaseHeader(body);
-            return error.OutOfMemory;
-        };
-        evaluator.current = .{
-            .code = body,
-            .program = .owned,
-            .position = .{ .source = 0 },
-            .site = site,
-            .traced_word = no_word,
-        };
+        return self.fiber().enterRegistration(body, provenance, after);
     }
 
     /// Dispatches the word a completed load was started for, by explicit
@@ -1349,26 +1327,13 @@ pub const Loading = opaque {
         trace_parent: ?intern.TraceWord,
         provenance: modules.RegistrationProvenance,
     ) error{OutOfMemory}!void {
-        const evaluator = self.fiber();
-        evaluator.active_word = .plain(word.name);
-        var context = evaluator.resolutionContext(evaluator.inherited.registry.view());
-        context.provenance = provenance;
-        try evaluator.startDriver(LookupDispatchDriver{
-            .word = word,
-            .site = site,
-            .context = .init(context),
-            .resolver = .none,
-        });
-        if (site) |at| evaluator.setWorkDriverSite(at.code, at.index);
-        if (trace_parent) |parent| evaluator.setWorkDriverTraceParent(parent);
+        return self.fiber().dispatchAfterLoad(word, site, trace_parent, provenance);
     }
 
     /// Puts back the symbol operand a primitive consumed before its module
     /// turned out to be unloaded, and rewinds so the primitive runs again.
     pub fn replayOperand(self: *Loading, requested: value.Symbol) error{OutOfMemory}!void {
-        const evaluator = self.fiber();
-        try evaluator.pushBorrowed(.{ .symbol = requested });
-        evaluator.current.?.rewind(evaluator.active_index);
+        return self.fiber().replayOperand(requested);
     }
 
     /// The embedded or registered standard library named `name`, if any.
@@ -1812,7 +1777,7 @@ pub const Fiber = struct {
         return self.native == .work or self.native == .work_park_request or
             self.native == .work_park_resume;
     }
-    /// Scheduler-owned teardown of all user-sized evaluator cargo. Each fiber
+    /// Scheduler-owned teardown of all user-sized fiber cargo. Each fiber
     /// of budget retires at most one continuation, operand, native owner, or
     /// generation pin. Array storage is released by `deinit` after this cursor
     /// reports complete.
@@ -2348,7 +2313,7 @@ pub const Fiber = struct {
                 return .detached;
             },
             .unregistered_module => |name| {
-                try Loading.of(self).replayOperand(requested);
+                try self.replayOperand(requested);
                 try self.autoLoadModule(name, .{
                     .qualified = requested.name,
                     .context = self.current.?.site.registration_provenance,
@@ -3722,6 +3687,83 @@ pub const Fiber = struct {
         _ = owned.take();
         self.max_frames = @max(self.max_frames, self.frames.items.len);
     }
+    fn enterRegistration(self: *Fiber, body: *Header, provenance: modules.RegistrationProvenance, after: load.AfterLoad) error{OutOfMemory}!void {
+        var continuation = OwnedFrame.init(.{ .qualified_after_load = after });
+        defer continuation.deinit(self.releases, self.allocator);
+        var site = self.current.?.site.applied();
+        site.registration_provenance = provenance;
+        _ = (if (after.request.preservesCaller())
+            self.suspendCurrentForQualifiedLoad()
+        else
+            self.suspendCurrent()) catch {
+            self.releases.releaseHeader(body);
+            return error.OutOfMemory;
+        };
+        self.appendFrame(&continuation) catch {
+            self.releases.releaseHeader(body);
+            return error.OutOfMemory;
+        };
+        self.current = .{
+            .code = body,
+            .program = .owned,
+            .position = .{ .source = 0 },
+            .site = site,
+            .traced_word = no_word,
+        };
+    }
+    fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite, trace_parent: ?intern.TraceWord, provenance: modules.RegistrationProvenance) error{OutOfMemory}!void {
+        self.active_word = .plain(word.name);
+        var context = self.resolutionContext(self.inherited.registry.view());
+        context.provenance = provenance;
+        try self.startDriver(LookupDispatchDriver{
+            .word = word,
+            .site = site,
+            .context = .init(context),
+            .resolver = .none,
+        });
+        if (site) |at| self.setWorkDriverSite(at.code, at.index);
+        if (trace_parent) |parent| self.setWorkDriverTraceParent(parent);
+    }
+    fn replayOperand(self: *Fiber, requested: value.Symbol) error{OutOfMemory}!void {
+        try self.pushBorrowed(.{ .symbol = requested });
+        self.current.?.rewind(self.active_index);
+    }
+    fn beginModuleSeal(self: *Fiber) MachineError!*modules.OwnedImage {
+        const frame = &self.frames.items[self.frames.items.len - 1].boundary;
+        const observed = self.stack.items.len - frame.stack_base;
+        if (observed != 0) {
+            const boundary = self.popFrame(.boundary);
+            self.boundary_index = boundary.previous_boundary;
+            self.setFloor(boundary.previous_base, boundary.previous_paging);
+            self.active_word = boundary.word;
+            boundary.deinit();
+            return self.failFmt(
+                .domain,
+                "@defm body left {d} value{s} on its stack; a module body defines words and keeps no state",
+                .{ observed, if (observed == 1) "" else "s" },
+            );
+        }
+        self.active_word = frame.word;
+        const built = &frame.mode.module.image;
+        const home = built.executionHome(self.module_access);
+        const placeholder = try list.fromValuesGeneric(self.allocator, &.{});
+        self.current = .{
+            .code = placeholder.list,
+            .program = .owned,
+            .position = .{ .source = 0 },
+            .site = .image(home, self.module_access, false),
+            .traced_word = no_word,
+        };
+        return built;
+    }
+    fn closeModuleBoundary(self: *Fiber) modules.OwnedImage {
+        releaseCurrent(self);
+        const boundary = self.popFrame(.boundary);
+        self.boundary_index = boundary.previous_boundary;
+        self.setFloor(boundary.previous_base, boundary.previous_paging);
+        self.active_word = boundary.word;
+        return boundary.mode.module.image;
+    }
     /// Establishes completion before invoking foreign implementation code.
     /// The saved caller owns the source lifetime for the check's diagnostic
     /// site; the invocation activation supplies execution context but cannot
@@ -3852,7 +3894,7 @@ pub fn runSlice(fiber: *Fiber) MachineError!RunStatus {
     return status;
 }
 
-/// Makes the next evaluator entry observe cancellation before executing a
+/// Makes the next fiber entry observe cancellation before executing a
 /// ready fiber's first form.
 pub fn armCancellationBeforeDispatch(fiber: *Fiber) void {
     fiber.fuel = 0;
@@ -4208,9 +4250,9 @@ const LookupDispatchDriver = struct {
     pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
 
-    fn advance(evaluator: *Fiber, self: *LookupDispatchDriver) MachineError!WorkProgress {
+    fn advance(fiber: *Fiber, self: *LookupDispatchDriver) MachineError!WorkProgress {
         if (!self.resolver.isPresent()) self.resolver = .init(binder.Resolver.init(self.context.borrowMut(), self.word));
-        const work = evaluator.workBudget();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.resolver.borrowMut().advance(self.context.borrowMut())) {
             .pending => {},
             .complete => |outcome| {
@@ -4221,21 +4263,21 @@ const LookupDispatchDriver = struct {
                         // across the invocation, which retains what it keeps.
                         const counted = definition.lifetime == .counted;
                         if (counted) definition.retain();
-                        defer if (counted) definition.release(evaluator.releases);
-                        try evaluator.rememberResolution(
+                        defer if (counted) definition.release(fiber.releases);
+                        try fiber.rememberResolution(
                             word,
                             self.context.borrow().view.publication,
                             self.context.borrow().provenance,
                             definition,
                         );
-                        evaluator.retireDriver(self);
-                        try invokeDefinition(evaluator, definition, word.name);
+                        fiber.retireDriver(self);
+                        try invokeDefinition(fiber, definition, word.name);
                         return .detached;
                     },
                     .missed => |miss| {
                         const site = self.site;
-                        evaluator.retireDriver(self);
-                        try evaluator.missOrLoad(word, miss, .{ .dispatch = .{ .word = word, .site = site, .trace_parent = null } });
+                        fiber.retireDriver(self);
+                        try fiber.missOrLoad(word, miss, .{ .dispatch = .{ .word = word, .site = site, .trace_parent = null } });
                         return .detached;
                     },
                 }
@@ -4251,8 +4293,8 @@ pub const ExplicitLookup = struct {
     context: binder.Context,
     resolver: binder.Resolver,
 
-    pub fn init(evaluator: *Fiber, word: value.Symbol) ExplicitLookup {
-        const context = evaluator.resolutionContext(evaluator.inherited.registry.view());
+    pub fn init(fiber: *Fiber, word: value.Symbol) ExplicitLookup {
+        const context = fiber.resolutionContext(fiber.inherited.registry.view());
         return .{ .context = context, .resolver = binder.Resolver.init(&context, word) };
     }
 
@@ -4275,14 +4317,14 @@ pub const Reflected = struct {
     releases: *heap.ReleaseDomain,
 
     /// Holds a definition the lookup's view kept alive.
-    pub fn hold(evaluator: *Fiber, definition: *env.Definition, name: u32) Reflected {
+    pub fn hold(fiber: *Fiber, definition: *env.Definition, name: u32) Reflected {
         if (definition.lifetime == .counted) definition.retain();
         const home = modules.definitionHome(definition);
         return .{
             .definition = definition,
             .trace_word = definitionTraceWord(definition, home, name),
             .home = home,
-            .releases = evaluator.releases,
+            .releases = fiber.releases,
         };
     }
 
@@ -4643,7 +4685,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
             }
         },
     };
-    // Even if this was the last frame, the evaluator must poll cancellation
+    // Even if this was the last frame, the fiber must poll cancellation
     // and yield before reporting completion.
     return true;
 }
@@ -4715,9 +4757,9 @@ const AttemptResultDriver = struct {
             .materializer = .init(.init(allocator, values)),
         };
     }
-    fn advance(evaluator: *Fiber, self: *AttemptResultDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    fn advance(fiber: *Fiber, self: *AttemptResultDriver) MachineError!WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .materialize => switch (try self.materializer.borrowMut().advance(work)) {
                 .pending => return .stepped,
@@ -4728,17 +4770,17 @@ const AttemptResultDriver = struct {
                 },
             },
             .release => {
-                if (evaluator.stack.items.len == self.base) {
+                if (fiber.stack.items.len == self.base) {
                     self.phase = .outcome;
                     continue;
                 }
-                evaluator.releases.releaseValue(evaluator.stack.pop().?);
+                fiber.releases.releaseValue(fiber.stack.pop().?);
                 _ = work.spend();
             },
             .outcome => {
                 const results = self.results.?.take();
                 self.results = null;
-                const outcome = try outcomeDict(self.allocator, evaluator.releases, "ok", results);
+                const outcome = try outcomeDict(self.allocator, fiber.releases, "ok", results);
                 return .{ .output = outcome };
             },
         };
@@ -4764,12 +4806,12 @@ fn startFailure(self: *Fiber) error{OutOfMemory}!void {
     return failure_driver.start(.of(self));
 }
 
-/// The evaluator as module construction sees it: the fiber, plus the
+/// The fiber as module construction sees it, plus the
 /// construction boundary that holds the image being built. Minted only by the
 /// machine, like `Loading`.
 pub const Construction = opaque {
-    fn of(evaluator: *Fiber) *Construction {
-        return @ptrCast(evaluator);
+    fn of(target: *Fiber) *Construction {
+        return @ptrCast(target);
     }
 
     pub fn fiber(self: *Construction) *Fiber {
@@ -4805,55 +4847,23 @@ pub const Construction = opaque {
     /// evaluation at the image's site becomes the caller that a module load
     /// during the seal suspends and returns to.
     pub fn beginSeal(self: *Construction) MachineError!*modules.OwnedImage {
-        const evaluator = self.fiber();
-        const frame = &evaluator.frames.items[evaluator.frames.items.len - 1].boundary;
-        const observed = evaluator.stack.items.len - frame.stack_base;
-        if (observed != 0) {
-            const boundary = evaluator.popFrame(.boundary);
-            evaluator.boundary_index = boundary.previous_boundary;
-            evaluator.setFloor(boundary.previous_base, boundary.previous_paging);
-            evaluator.active_word = boundary.word;
-            boundary.deinit();
-            return evaluator.failFmt(
-                .domain,
-                "@defm body left {d} value{s} on its stack; a module body defines words and keeps no state",
-                .{ observed, if (observed == 1) "" else "s" },
-            );
-        }
-        evaluator.active_word = frame.word;
-        const built = &frame.mode.module.image;
-        const home = built.executionHome(evaluator.module_access);
-        const placeholder = try list.fromValuesGeneric(evaluator.allocator, &.{});
-        evaluator.current = .{
-            .code = placeholder.list,
-            .program = .owned,
-            .position = .{ .source = 0 },
-            .site = .image(home, evaluator.module_access, false),
-            .traced_word = no_word,
-        };
-        return built;
+        return self.fiber().beginModuleSeal();
     }
 
     /// Closes the construction boundary once its group is bound, and returns
     /// the image it held.
     pub fn closeBoundary(self: *Construction) modules.OwnedImage {
-        const evaluator = self.fiber();
-        releaseCurrent(evaluator);
-        const boundary = evaluator.popFrame(.boundary);
-        evaluator.boundary_index = boundary.previous_boundary;
-        evaluator.setFloor(boundary.previous_base, boundary.previous_paging);
-        evaluator.active_word = boundary.word;
-        return boundary.mode.module.image;
+        return self.fiber().closeModuleBoundary();
     }
 };
 
-/// The evaluator as its failure driver sees it: the fiber, plus what building
+/// The fiber as its failure driver sees it, plus what building
 /// and delivering an error value needs of the continuation — the activation
 /// trace, the pending failure, and the unwind itself. Minted only by the
 /// machine, like `Loading`.
 pub const Unwinding = opaque {
-    fn of(evaluator: *Fiber) *Unwinding {
-        return @ptrCast(evaluator);
+    fn of(target: *Fiber) *Unwinding {
+        return @ptrCast(target);
     }
 
     pub fn fiber(self: *Unwinding) *Fiber {
@@ -4988,17 +4998,17 @@ pub const Unwind = struct {
     /// One step: one boundary examined, or one frame, local, or operand
     /// released.
     pub fn advance(self: *Unwind, via: *Unwinding) Progress {
-        const evaluator = via.fiber();
+        const fiber = via.fiber();
         switch (self.phase) {
             .nearest => |*nearest| {
                 const boundary_index = nearest.* orelse {
                     self.phase = .{ .current = .{ .uncaught = .{
-                        .stack_base = evaluator.entry_base,
+                        .stack_base = fiber.entry_base,
                     } } };
                     return .pending;
                 };
-                const boundary = evaluator.frames.items[@backingInt(boundary_index)].boundary;
-                if (boundary.mode == .attempt and !evaluator.cancelled.load(.acquire)) {
+                const boundary = fiber.frames.items[@backingInt(boundary_index)].boundary;
+                if (boundary.mode == .attempt and !fiber.cancelled.load(.acquire)) {
                     self.phase = .{ .current = .{ .caught = .{
                         .boundary_index = boundary_index,
                         .stack_base = boundary.stack_base,
@@ -5010,32 +5020,32 @@ pub const Unwind = struct {
                 } else nearest.* = boundary.previous_boundary;
             },
             .current => |target| {
-                releaseCurrent(evaluator);
+                releaseCurrent(fiber);
                 self.phase = .{ .frames = target };
             },
             .frames => |target| {
-                if (evaluator.frames.items.len != target.frameTarget()) {
-                    evaluator.deinitPoppedFrame(evaluator.frames.pop().?);
+                if (fiber.frames.items.len != target.frameTarget()) {
+                    fiber.deinitPoppedFrame(fiber.frames.pop().?);
                 } else self.phase = .{ .boundary = target };
             },
             .boundary => |target| {
-                if (target == .caught) evaluator.deinitPoppedFrame(evaluator.frames.pop().?);
+                if (target == .caught) fiber.deinitPoppedFrame(fiber.frames.pop().?);
                 self.phase = .{ .locals = target };
             },
             .locals => |target| {
-                const depth = @min(target.localsTarget(), evaluator.locals.items.len);
-                if (evaluator.locals.items.len != depth) {
-                    evaluator.releases.releaseValue(evaluator.locals.pop().?);
+                const depth = @min(target.localsTarget(), fiber.locals.items.len);
+                if (fiber.locals.items.len != depth) {
+                    fiber.releases.releaseValue(fiber.locals.pop().?);
                 } else self.phase = .{ .stack = target };
             },
             .stack => |target| {
-                const depth = @min(target.stackTarget(), evaluator.stack.items.len);
-                if (evaluator.stack.items.len != depth) {
-                    evaluator.releases.releaseValue(evaluator.stack.pop().?);
+                const depth = @min(target.stackTarget(), fiber.stack.items.len);
+                if (fiber.stack.items.len != depth) {
+                    fiber.releases.releaseValue(fiber.stack.pop().?);
                     return .pending;
                 }
-                evaluator.setFloor(target.previousBase(), target.previousPaging());
-                evaluator.boundary_index = target.previousBoundary();
+                fiber.setFloor(target.previousBase(), target.previousPaging());
+                fiber.boundary_index = target.previousBoundary();
                 return switch (target) {
                     .uncaught => .uncaught,
                     .caught => .caught,

@@ -25,12 +25,12 @@ pub fn begin(
     body_header: *Header,
     doc: ?*env.DocumentationString,
 ) MachineError!void {
-    const evaluator = via.fiber();
+    const fiber = via.fiber();
     var body = heap.Owned(*Header).init(body_header);
-    defer body.deinit(evaluator.releases, evaluator.allocator);
-    const registry = evaluator.inherited.registry;
-    const word = evaluator.active_word;
-    var candidate = try registry.createImage(name, evaluator.current.?.site.registration_provenance);
+    defer body.deinit(fiber.releases, fiber.allocator);
+    const registry = fiber.inherited.registry;
+    const word = fiber.active_word;
+    var candidate = try registry.createImage(name, fiber.current.?.site.registration_provenance);
     errdefer candidate.deinit();
     if (doc) |document| candidate.document(document);
     // Every word in the body names the image. A specialized leaf holds no
@@ -41,15 +41,15 @@ pub fn begin(
     // boundary can open.
     if (body.borrow().kind() != .generic_spine)
         return via.openImageBoundary(&candidate, word, body.take());
-    const home = candidate.executionHome(evaluator.module_access);
-    const image_cell = try evaluator.environment.scopeCell(
-        home.scope(evaluator.module_access),
-        modules.anchorHandle(home, evaluator.module_access),
+    const home = candidate.executionHome(fiber.module_access);
+    const image_cell = try fiber.environment.scopeCell(
+        home.scope(fiber.module_access),
+        modules.anchorHandle(home, fiber.module_access),
     );
     var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-        try evaluator.archive.rescopeCursor(body.take(), evaluator.environment.linker(image_cell.id)),
+        try fiber.archive.rescopeCursor(body.take(), fiber.environment.linker(image_cell.id)),
     );
-    defer cursor.deinit(evaluator.releases, evaluator.allocator);
+    defer cursor.deinit(fiber.releases, fiber.allocator);
     try via.startDriver(ConstructionDriver{
         .state = .init(.{ .rescope = .{
             .image = .init(candidate.move()),
@@ -61,13 +61,13 @@ pub fn begin(
 
 /// Drives one registry publication, mapping its refusals to language errors.
 fn advanceRegistration(
-    evaluator: *Fiber,
+    fiber: *Fiber,
     cursor: *modules.Registry.RegistrationCursor,
 ) MachineError!WorkProgress {
     return switch (cursor.advance() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
-        error.ReservedName => return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier"),
+        error.NameConflict => return fiber.fail(.domain, "module name collides with an alias"),
+        error.ReservedName => return fiber.fail(.domain, "module name `core` is reserved for the core qualifier"),
     }) {
         .pending => .stepped,
         .complete => .completed,
@@ -116,26 +116,26 @@ const ConstructionDriver = struct {
     word: intern.TraceWord,
 
     pub fn advance(via: *Construction, self: *ConstructionDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
+        const fiber = via.fiber();
+        try fiber.pollKernel();
         switch (self.state.borrowMut().*) {
             .rescope => |*rescope| {
-                const progress = try rescope.cursor.borrowMut().advance(evaluator.workBudget());
+                const progress = try rescope.cursor.borrowMut().advance(fiber.workBudget());
                 const copy = switch (progress) {
                     .pending => return .stepped,
                     .complete => |header| header,
                 };
-                rescope.cursor.deinit(evaluator.releases, evaluator.allocator);
+                rescope.cursor.deinit(fiber.releases, fiber.allocator);
                 // The open consumes the copy on success and failure alike, and
                 // the image only once the boundary owns it; on failure the
                 // image stays here for the state's own release.
                 try via.openImageBoundary(rescope.image.borrowMut(), self.word, copy);
-                rescope.image.deinit(evaluator.releases, evaluator.allocator);
+                rescope.image.deinit(fiber.releases, fiber.allocator);
                 self.state.borrowMut().* = .opened;
                 return .stepped;
             },
             .opened => {
-                try evaluator.pollCancellableCompletion();
+                try fiber.pollCancellableCompletion();
                 return .completed;
             },
         }
@@ -150,11 +150,11 @@ const ConstructionDriver = struct {
 /// holds the loaded module. A placeholder evaluation at the image's site is the
 /// caller such a load suspends and returns to.
 pub fn startSeal(via: *Construction) MachineError!void {
-    const evaluator = via.fiber();
+    const fiber = via.fiber();
     const image = try via.beginSeal();
-    var context = evaluator.resolutionContext(evaluator.inherited.registry.view());
+    var context = fiber.resolutionContext(fiber.inherited.registry.view());
     context.group = .{
-        .image_scope = image.executionHome(evaluator.module_access).scope(evaluator.module_access).cellId(),
+        .image_scope = image.executionHome(fiber.module_access).scope(fiber.module_access).cellId(),
         .module = image.moduleName(),
         .directory = null,
     };
@@ -193,13 +193,13 @@ const ModuleSealDriver = struct {
     };
 
     pub fn advance(via: *Construction, self: *ModuleSealDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+        const fiber = via.fiber();
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.phase.borrowMut().*) {
             .group => |*cursor| switch (cursor.advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.Duplicate => return evaluator.failFmt(
+                error.Duplicate => return fiber.failFmt(
                     .domain,
                     "the name `{s}` is introduced more than once in this module",
                     .{intern.get(intern.bindingId(cursor.duplicate.?))},
@@ -228,9 +228,9 @@ const ModuleSealDriver = struct {
                         .failed => |failure| {
                             const code = reservation.quotation();
                             const word = heap.valuesConst(code)[failure.index].symbol;
-                            evaluator.retireDriver(self);
-                            const unbound = evaluator.failUnbound(word, failure.miss);
-                            evaluator.setFailureSite(code, failure.index);
+                            fiber.retireDriver(self);
+                            const unbound = fiber.failUnbound(word, failure.miss);
+                            fiber.setFailureSite(code, failure.index);
                             return unbound;
                         },
                     }
@@ -242,11 +242,11 @@ const ModuleSealDriver = struct {
                         const owned = via.image();
                         // Shadowing in a shipped module is deliberate.
                         if (owned.provenance() != .standard_library)
-                            evaluator.warnCoreShadowing(entry.key, owned.moduleName());
+                            fiber.warnCoreShadowing(entry.key, owned.moduleName());
                         switch (entry.value) {
                             .reserved => |reservation| validate.current = .{
                                 .reservation = reservation,
-                                .cursor = binder.ValidationCursor.init(evaluator.releases, reservation.quotation()),
+                                .cursor = binder.ValidationCursor.init(fiber.releases, reservation.quotation()),
                             },
                             .definition, .alias => {},
                         }
@@ -265,14 +265,14 @@ const ModuleSealDriver = struct {
                     const owned = via.image();
                     const provenance = owned.provenance();
                     const name = owned.moduleName();
-                    evaluator.retireDriver(self);
+                    fiber.retireDriver(self);
                     var built = via.closeBoundary();
                     var sealed = heap.Owned(modules.SealedImage).init(built.seal());
-                    errdefer sealed.deinit(evaluator.releases, evaluator.allocator);
-                    const driver = try evaluator.allocator.create(ModuleCompletionDriver);
+                    errdefer sealed.deinit(fiber.releases, fiber.allocator);
+                    const driver = try fiber.allocator.create(ModuleCompletionDriver);
                     // The cursor owns the sealed image from here; nothing can fail after.
                     driver.* = .{
-                        .cursor = .init(evaluator.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
+                        .cursor = .init(fiber.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
                     };
                     via.adoptDriver(driver);
                     return .detached;
@@ -289,8 +289,8 @@ const ModuleCompletionDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     cursor: heap.Owned(modules.Registry.RegistrationCursor),
 
-    pub fn advance(evaluator: *Fiber, self: *ModuleCompletionDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        return advanceRegistration(evaluator, self.cursor.borrowMut());
+    pub fn advance(fiber: *Fiber, self: *ModuleCompletionDriver) MachineError!WorkProgress {
+        try fiber.pollKernel();
+        return advanceRegistration(fiber, self.cursor.borrowMut());
     }
 };

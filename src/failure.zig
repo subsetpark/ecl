@@ -19,20 +19,20 @@ const ErrorValueCursor = error_values.ErrorValueCursor;
 /// Starts the failure driver over the fiber's pending failure. The failure
 /// stays pending when this fails.
 pub fn start(via: *Unwinding) error{OutOfMemory}!void {
-    const evaluator = via.fiber();
-    const capacity = std.math.add(usize, evaluator.frames.items.len, 3) catch
+    const fiber = via.fiber();
+    const capacity = std.math.add(usize, fiber.frames.items.len, 3) catch
         return error.OutOfMemory;
-    const trace = try evaluator.allocator.alloc(intern.TraceWord, capacity);
-    errdefer evaluator.allocator.free(trace);
-    const resolved = try evaluator.allocator.alloc(u32, capacity);
-    errdefer evaluator.allocator.free(resolved);
-    const driver = try evaluator.allocator.create(FailureDriver);
+    const trace = try fiber.allocator.alloc(intern.TraceWord, capacity);
+    errdefer fiber.allocator.free(trace);
+    const resolved = try fiber.allocator.alloc(u32, capacity);
+    errdefer fiber.allocator.free(resolved);
+    const driver = try fiber.allocator.create(FailureDriver);
     driver.* = .{
-        .allocator = evaluator.allocator,
+        .allocator = fiber.allocator,
         .failure = via.takeFailure(),
         .trace = trace,
         .resolved = resolved,
-        .state = .{ .trace = evaluator.frames.items.len },
+        .state = .{ .trace = fiber.frames.items.len },
     };
     driver.appendInitial(via);
     via.adoptDriver(driver);
@@ -131,8 +131,8 @@ const FailureDriver = struct {
     /// spent: a stepped driver's charge can observe cancellation, and an
     /// unwind already in progress must not start another failure.
     pub fn advance(via: *Unwinding, self: *FailureDriver) MachineError!WorkProgress {
-        const evaluator = via.fiber();
-        const work = evaluator.workBudget();
+        const fiber = via.fiber();
+        const work = fiber.workBudget();
         while (switch (self.state) {
             .value, .outcome => !work.exhausted(),
             else => work.spend(),
@@ -177,7 +177,7 @@ const FailureDriver = struct {
             .value => |*cursor| switch (try cursor.advance(work)) {
                 .pending => return .{ .yielded = .settle },
                 .complete => |item| {
-                    cursor.retire(evaluator.releases);
+                    cursor.retire(fiber.releases);
                     self.state = .{ .unwinding = .{
                         .error_value = item,
                         .cursor = via.beginUnwind(),

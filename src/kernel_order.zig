@@ -37,58 +37,58 @@ fn definition(comptime operation: Op) env.BuiltinWord {
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Fiber) MachineError!void {
+        fn run(fiber: *Fiber) MachineError!void {
             return switch (operation) {
-                .cmp => cmpPrimitive(evaluator),
-                .grade => gradePrimitive(evaluator),
-                .sort => sortPrimitive(evaluator),
-                .distinct => distinctPrimitive(evaluator),
-                .group => groupPrimitive(evaluator),
-                .group_columns => groupColumnsPrimitive(evaluator),
+                .cmp => cmpPrimitive(fiber),
+                .grade => gradePrimitive(fiber),
+                .sort => sortPrimitive(fiber),
+                .distinct => distinctPrimitive(fiber),
+                .group => groupPrimitive(fiber),
+                .group_columns => groupColumnsPrimitive(fiber),
             };
         }
     }.run);
 }
 
-fn cmpPrimitive(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    var right = try evaluator.popValue();
+fn cmpPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var right = try fiber.popValue();
     defer right.deinit();
-    var left = try evaluator.popValue();
+    var left = try fiber.popValue();
     defer left.deinit();
     const left_item = left.borrow();
     const right_item = right.borrow();
     // Two typed number or char lists, strings among them, have no nesting to
     // descend, so the flat kernel searches their shared prefix.
     if (lexCompareCandidate(left_item, right_item))
-        return startLexCompare(evaluator, &left, &right);
+        return startLexCompare(fiber, &left, &right);
     // Only two lists have anything to walk. Every other pair is one call to
     // `compareScalars` -- the cursor's own answer for them -- which a driver and
     // a scheduler turn were being allocated to reach.
     if (left_item != .list or right_item != .list) {
         const ordering = equal.compareScalars(left_item, right_item) catch
-            return evaluator.typeError(incomparable_pair);
-        return evaluator.pushOwned(.{ .int = switch (ordering) {
+            return fiber.typeError(incomparable_pair);
+        return fiber.pushOwned(.{ .int = switch (ordering) {
             .lt => -1,
             .eq => 0,
             .gt => 1,
         } });
     }
-    try evaluator.startDriver(CompareDriver{
+    try fiber.startDriver(CompareDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
-        .cursor = .init(.init(evaluator.allocator, left_item, right_item)),
+        .cursor = .init(.init(fiber.allocator, left_item, right_item)),
     });
 }
 
 const incomparable_pair = "two comparable numbers, chars, or lists";
 /// `grade` and `sort` share the walk, so the message names whichever ran.
-fn failIncomparable(evaluator: *Fiber, index: usize) MachineError {
+fn failIncomparable(fiber: *Fiber, index: usize) MachineError {
     var buffer: [128]u8 = undefined;
     const message = std.fmt.bufPrint(&buffer, "{s} expected mutually comparable numbers, chars, or lists", .{
-        evaluator.activeWordName(),
+        fiber.activeWordName(),
     }) catch "expected mutually comparable numbers, chars, or lists";
-    return evaluator.failAtIndex(.type, message, index);
+    return fiber.failAtIndex(.type, message, index);
 }
 
 /// The kinds `cmp` orders within. Values of two classes never order, and a
@@ -148,14 +148,14 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
             return .{ .ordering = std.math.order(operands[0].list.length(), operands[1].list.length()) };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
-            if (comptime !comparable) return incomparable(evaluator);
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {
+            if (comptime !comparable) return incomparable(fiber);
             const left = heap.leafElements(left_kind, operands[0].list);
             const right = heap.leafElements(right_kind, operands[1].list);
             for (range.start..range.end) |index| {
                 const ordering = if (comptime floating)
                     equal.compareScalars(scalar(left_kind, left[index]), scalar(right_kind, right[index])) catch
-                        return incomparable(evaluator)
+                        return incomparable(fiber)
                 else
                     std.math.order(widen(left[index]), widen(right[index]));
                 if (ordering != .eq) {
@@ -166,8 +166,8 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
             }
         }
 
-        fn incomparable(evaluator: *Fiber) MachineError {
-            return evaluator.typeError(incomparable_pair);
+        fn incomparable(fiber: *Fiber) MachineError {
+            return fiber.typeError(incomparable_pair);
         }
 
         fn widen(element: anytype) if (lexClass(left_kind) == .char) u32 else i64 {
@@ -206,19 +206,19 @@ fn lexKind(kind: value.HeapKind) bool {
 
 /// `( left right -- ordering )`: `cmp`, which is `(cmp) lex-cmp-with`, over
 /// two lists that `lexCompareCandidate` admits.
-pub fn lexCompare(evaluator: *Fiber) MachineError!void {
-    var right = try evaluator.popValue();
+pub fn lexCompare(fiber: *Fiber) MachineError!void {
+    var right = try fiber.popValue();
     defer right.deinit();
-    var left = try evaluator.popValue();
+    var left = try fiber.popValue();
     defer left.deinit();
-    return startLexCompare(evaluator, &left, &right);
+    return startLexCompare(fiber, &left, &right);
 }
 
-fn startLexCompare(evaluator: *Fiber, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!void {
+fn startLexCompare(fiber: *Fiber, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!void {
     const left_list = left.borrow().list;
     const right_list = right.borrow().list;
     const shared: usize = @intCast(@min(left_list.length(), right_list.length()));
-    if (shared == 0) return evaluator.pushOwned(.{ .int = switch (std.math.order(left_list.length(), right_list.length())) {
+    if (shared == 0) return fiber.pushOwned(.{ .int = switch (std.math.order(left_list.length(), right_list.length())) {
         .lt => -1,
         .eq => 0,
         .gt => 1,
@@ -226,24 +226,24 @@ fn startLexCompare(evaluator: *Fiber, left: *heap.OwnedValue, right: *heap.Owned
     inline for (lex_leaf_kinds) |candidate_left| {
         if (left_list.kind() == candidate_left) inline for (lex_leaf_kinds) |candidate_right| {
             if (right_list.kind() == candidate_right)
-                return support.Kernel(LexCompareKernel(candidate_left, candidate_right)).run(evaluator, .{ left, right }, {}, shared);
+                return support.Kernel(LexCompareKernel(candidate_left, candidate_right)).run(fiber, .{ left, right }, {}, shared);
         };
     }
     unreachable;
 }
 
-fn gradePrimitive(evaluator: *Fiber) MachineError!void {
-    return startGrade(evaluator, false);
+fn gradePrimitive(fiber: *Fiber) MachineError!void {
+    return startGrade(fiber, false);
 }
 
-fn startGrade(evaluator: *Fiber, sorted_values: bool) MachineError!void {
-    var collection = try evaluator.popValue();
+fn startGrade(fiber: *Fiber, sorted_values: bool) MachineError!void {
+    var collection = try fiber.popValue();
     defer collection.deinit();
-    if (collection.borrow() != .list) return evaluator.typeError("a comparable list");
-    if (try startTypedGrade(evaluator, &collection, sorted_values)) return;
+    if (collection.borrow() != .list) return fiber.typeError("a comparable list");
+    if (try startTypedGrade(fiber, &collection, sorted_values)) return;
     const count: usize = @intCast(collection.borrow().list.length());
-    const indices = try evaluator.allocator.alloc(usize, count);
-    try evaluator.startDriver(GradeDriver{
+    const indices = try fiber.allocator.alloc(usize, count);
+    try fiber.startDriver(GradeDriver{
         .collection = .init(collection.take()),
         .sorted_values = sorted_values,
         .indices = .init(indices),
@@ -298,14 +298,14 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Fiber, _: [1]Value, sorted_values: bool, length: usize) error{OutOfMemory}!Output {
-            const pairs = try evaluator.allocator.alloc(Pair, length);
-            errdefer evaluator.allocator.free(pairs);
+        pub fn prepare(fiber: *Fiber, _: [1]Value, sorted_values: bool, length: usize) error{OutOfMemory}!Output {
+            const pairs = try fiber.allocator.alloc(Pair, length);
+            errdefer fiber.allocator.free(pairs);
             return .{
-                .allocator = evaluator.allocator,
+                .allocator = fiber.allocator,
                 .sorted_values = sorted_values,
                 .pairs = pairs,
-                .scratch = try evaluator.allocator.alloc(Pair, length),
+                .scratch = try fiber.allocator.alloc(Pair, length),
             };
         }
 
@@ -336,7 +336,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             }
         }
 
-        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
+        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
             const count = output.pairs.len;
             switch (output.phase) {
                 .initialize => {
@@ -359,9 +359,9 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
                 return count;
             }
             if (output.sorted_values) {
-                output.value_writer = try .init(evaluator.allocator, count);
+                output.value_writer = try .init(fiber.allocator, count);
             } else {
-                output.index_writer = try .init(evaluator.allocator, count);
+                output.index_writer = try .init(fiber.allocator, count);
             }
             output.phase = .output;
             return count;
@@ -437,21 +437,21 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
     };
 }
 
-fn startTypedGrade(evaluator: *Fiber, collection: *heap.OwnedValue, sorted_values: bool) MachineError!bool {
+fn startTypedGrade(fiber: *Fiber, collection: *heap.OwnedValue, sorted_values: bool) MachineError!bool {
     const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0 or collection.borrow().list.kind() == .generic_spine) return false;
     const kind = collection.borrow().list.kind();
     inline for (order_leaf_kinds) |candidate| {
         if (kind == candidate) {
-            try support.Kernel(GradeKernel(candidate)).run(evaluator, .{collection}, sorted_values, count);
+            try support.Kernel(GradeKernel(candidate)).run(fiber, .{collection}, sorted_values, count);
             return true;
         }
     }
     unreachable;
 }
 
-fn sortPrimitive(evaluator: *Fiber) MachineError!void {
-    return startGrade(evaluator, true);
+fn sortPrimitive(fiber: *Fiber) MachineError!void {
+    return startGrade(fiber, true);
 }
 
 const CompareProgress = union(enum) { pending, complete: std.math.Order, not_comparable };
@@ -575,11 +575,11 @@ const CompareDriver = struct {
     left: heap.Owned(Value),
     right: heap.Owned(Value),
     cursor: heap.Owned(CompareCursor),
-    pub fn advance(evaluator: *Fiber, self: *CompareDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *CompareDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
-            .not_comparable => evaluator.typeError(incomparable_pair),
+            .not_comparable => fiber.typeError(incomparable_pair),
             .complete => |ordering| .{ .output = .{ .int = switch (ordering) {
                 .lt => -1,
                 .eq => 0,
@@ -635,9 +635,9 @@ const GradeDriver = struct {
         }
     };
 
-    pub fn advance(evaluator: *Fiber, self: *GradeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *GradeDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
             .validate => |*index| {
                 const collection = self.collection.borrow();
@@ -647,7 +647,7 @@ const GradeDriver = struct {
                     const end = index.* + work.take(count - index.*);
                     while (index.* != end) : (index.* += 1) {
                         if (class == null or orderClass(list.atUnchecked(collection, index.*)) != class)
-                            return failIncomparable(evaluator, index.*);
+                            return failIncomparable(fiber, index.*);
                     }
                 }
                 if (index.* == count) self.state.borrowMut().* = .{ .initialize = 0 };
@@ -658,27 +658,27 @@ const GradeDriver = struct {
                 while (index.* != end) : (index.* += 1) indices[index.*] = index.*;
                 if (index.* == indices.len) {
                     const sort = try GradeSortCursor.init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         indices,
-                        .{ .collection = self.collection.borrow(), .allocator = evaluator.allocator },
+                        .{ .collection = self.collection.borrow(), .allocator = fiber.allocator },
                     );
                     self.state.borrowMut().* = .{ .sort = .init(sort) };
                 }
             },
             .sort => |*sort| switch (sort.borrowMut().advance(work) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.NotComparable => return failIncomparable(evaluator, sort.borrowMut().comparing().?.position),
+                error.NotComparable => return failIncomparable(fiber, sort.borrowMut().comparing().?.position),
             }) {
                 .pending => return .stepped,
                 .complete => {
-                    sort.deinit(evaluator.releases, evaluator.allocator);
+                    sort.deinit(fiber.releases, fiber.allocator);
                     self.state.borrowMut().* = .prepare;
                     continue;
                 },
             },
             .prepare => {
                 if (self.sorted_values) {
-                    const values = try evaluator.allocator.alloc(
+                    const values = try fiber.allocator.alloc(
                         Value,
                         self.indices.borrow().len,
                     );
@@ -688,7 +688,7 @@ const GradeDriver = struct {
                     } };
                 } else {
                     const writer = try heap.LeafWriter(.leaf_i64).init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         self.indices.borrow().len,
                     );
                     self.state.borrowMut().* = .{ .prepare_indices = .{
@@ -705,7 +705,7 @@ const GradeDriver = struct {
                     values[prepare.index] = list.atUnchecked(self.collection.borrow(), indices[prepare.index]);
                 if (prepare.index == indices.len) {
                     const materializer = list.ValueMaterializer.init(
-                        evaluator.allocator,
+                        fiber.allocator,
                         values,
                     );
                     self.state.borrowMut().* = .{ .materialize_values = .{
@@ -738,8 +738,8 @@ const GradeDriver = struct {
                     .pending => .stepped,
                     .complete => |result| completed: {
                         materialize.materializer.deinit(
-                            evaluator.releases,
-                            evaluator.allocator,
+                            fiber.releases,
+                            fiber.allocator,
                         );
                         self.state.borrowMut().* = .{ .complete_values = .init(
                             materialize.values.take(),
@@ -754,18 +754,18 @@ const GradeDriver = struct {
     }
 };
 
-fn distinctPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn distinctPrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
     if (count != 0) {
         const kind = collection.borrow().list.kind();
         inline for (order_leaf_kinds) |candidate| {
-            if (kind == candidate) return support.Kernel(DistinctKernel(candidate)).run(evaluator, .{&collection}, {}, count);
+            if (kind == candidate) return support.Kernel(DistinctKernel(candidate)).run(fiber, .{&collection}, {}, count);
         }
     }
-    const results = try evaluator.allocator.alloc(Value, count);
-    try evaluator.startDriver(DistinctDriver{
+    const results = try fiber.allocator.alloc(Value, count);
+    try fiber.startDriver(DistinctDriver{
         .collection = .init(collection.take()),
         .results = .init(results),
     });
@@ -807,8 +807,8 @@ fn DistinctKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Fiber, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
-            const allocator = evaluator.allocator;
+        pub fn prepare(fiber: *Fiber, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
+            const allocator = fiber.allocator;
             const capacity = std.math.ceilPowerOfTwo(usize, @max(8, length * 2)) catch return error.OutOfMemory;
             const slots = try allocator.alloc(usize, capacity);
             errdefer allocator.free(slots);
@@ -821,9 +821,9 @@ fn DistinctKernel(comptime kind: value.HeapKind) type {
             for (heap.leafElements(kind, operands[0].list)[range.start..range.end]) |item| output.keep(item);
         }
 
-        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
+        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
             if (output.writer != null) return null;
-            output.writer = try .init(evaluator.allocator, output.kept_count);
+            output.writer = try .init(fiber.allocator, output.kept_count);
             return output.kept_count;
         }
 
@@ -855,15 +855,15 @@ const DistinctDriver = struct {
     matcher: ?heap.Owned(equal.MatchCursor) = null,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *DistinctDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *DistinctDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) {
             if (self.materializer) |*materializer| {
                 return switch (try materializer.borrowMut().advance(work)) {
                     .pending => .stepped,
                     .complete => |result| completed: {
-                        materializer.deinit(evaluator.releases, evaluator.allocator);
+                        materializer.deinit(fiber.releases, fiber.allocator);
                         self.materializer = null;
                         break :completed .{ .output = result };
                     },
@@ -871,7 +871,7 @@ const DistinctDriver = struct {
             }
             if (self.item_index == self.results.borrow().len) {
                 self.materializer = .init(list.ValueMaterializer.init(
-                    evaluator.allocator,
+                    fiber.allocator,
                     self.results.borrow()[0..self.result_count],
                 ));
                 continue;
@@ -888,14 +888,14 @@ const DistinctDriver = struct {
                 continue;
             }
             if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(
-                evaluator.allocator,
+                fiber.allocator,
                 self.results.borrow()[self.candidate],
                 list.atUnchecked(self.collection.borrow(), self.item_index),
             ));
             switch (try self.matcher.?.borrowMut().advance(work)) {
                 .pending => _ = work.spend(),
                 .complete => |matches| {
-                    self.matcher.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.matcher.?.deinit(fiber.releases, fiber.allocator);
                     self.matcher = null;
                     if (matches) {
                         self.item_index += 1;
@@ -909,16 +909,16 @@ const DistinctDriver = struct {
     }
 };
 
-fn groupPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn groupPrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
-    try evaluator.startDriver(GroupDriver{ .collection = .init(collection.take()) });
+    try fiber.startDriver(GroupDriver{ .collection = .init(collection.take()) });
 }
 
-fn groupColumnsPrimitive(evaluator: *Fiber) MachineError!void {
-    var collection = try evaluator.popList();
+fn groupColumnsPrimitive(fiber: *Fiber) MachineError!void {
+    var collection = try fiber.popList();
     defer collection.deinit();
-    try evaluator.startDriver(GroupDriver{ .collection = .init(collection.take()), .columns = true });
+    try fiber.startDriver(GroupDriver{ .collection = .init(collection.take()), .columns = true });
 }
 
 const GroupDriver = struct {
@@ -954,21 +954,21 @@ const GroupDriver = struct {
     dict_materializer: ?heap.Owned(dict.Materializer) = null,
     group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
-    fn allocate(self: *GroupDriver, evaluator: *Fiber) error{OutOfMemory}!void {
-        const allocator = evaluator.allocator;
+    fn allocate(self: *GroupDriver, fiber: *Fiber) error{OutOfMemory}!void {
+        const allocator = fiber.allocator;
         const count = self.row_count;
         self.key_rows = .init(try allocator.alloc(usize, count));
         const capacity = std.math.ceilPowerOfTwo(usize, std.math.add(usize, std.math.mul(usize, count, 2) catch return error.OutOfMemory, 1) catch return error.OutOfMemory) catch return error.OutOfMemory;
         self.slots = .init(try allocator.alloc(usize, capacity));
         self.hashes = .init(try allocator.alloc(u64, count));
-        if (self.columns) self.key_values = .init(try .init(evaluator.releases, count));
+        if (self.columns) self.key_values = .init(try .init(fiber.releases, count));
         self.keys = .init(try allocator.alloc(Value, count));
         self.assignments = .init(try allocator.alloc(usize, count));
         self.frequencies = .init(try allocator.alloc(usize, count));
         self.offsets = .init(try allocator.alloc(usize, count + 1));
         self.cursors = .init(try allocator.alloc(usize, count));
         self.indices = .init(try allocator.alloc(i64, count));
-        self.group_values = .init(try .init(evaluator.releases, count));
+        self.group_values = .init(try .init(fiber.releases, count));
         self.offsets.?.borrow()[0] = 0;
         self.phase = .initialize;
     }
@@ -1031,9 +1031,9 @@ const GroupDriver = struct {
         self.phase = .hash;
     }
 
-    pub fn advance(evaluator: *Fiber, self: *GroupDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *GroupDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .validate => {
                 const source = self.collection.borrow();
@@ -1043,20 +1043,20 @@ const GroupDriver = struct {
                     self.phase = .allocate;
                     continue;
                 }
-                if (source.list.length() == 0) return evaluator.fail(.shape, "group-columns requires at least one column");
+                if (source.list.length() == 0) return fiber.fail(.shape, "group-columns requires at least one column");
                 if (self.index == source.list.length()) {
                     self.index = 0;
                     self.phase = .allocate;
                     continue;
                 }
                 const column = list.atUnchecked(source, self.index);
-                if (column != .list) return evaluator.typeError("a list of columns");
+                if (column != .list) return fiber.typeError("a list of columns");
                 if (self.index == 0) self.row_count = @intCast(column.list.length());
-                if (column.list.length() != self.row_count) return evaluator.fail(.shape, "group-columns requires equal-length columns");
+                if (column.list.length() != self.row_count) return fiber.fail(.shape, "group-columns requires equal-length columns");
                 self.index += 1;
                 _ = work.spend();
             },
-            .allocate => try self.allocate(evaluator),
+            .allocate => try self.allocate(fiber),
             .initialize => {
                 const slots = self.slots.?.borrow();
                 if (self.index == slots.len) {
@@ -1076,7 +1076,7 @@ const GroupDriver = struct {
                 }
                 const rows = work.take(self.row_count - self.item_index);
                 switch (self.collection.borrow().list.kind()) {
-                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| self.assignTyped(kind, rows, evaluator.releases),
+                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| self.assignTyped(kind, rows, fiber.releases),
                     .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
                 }
             },
@@ -1097,12 +1097,12 @@ const GroupDriver = struct {
                     _ = work.spend();
                     break :scalar h;
                 } else blk: {
-                    if (self.hasher == null) self.hasher = .init(try equal.HashCursor.init(evaluator.allocator, item));
+                    if (self.hasher == null) self.hasher = .init(try equal.HashCursor.init(fiber.allocator, item));
                     const progress = try self.hasher.?.borrowMut().advance(work);
                     switch (progress) {
                         .pending => continue,
                         .complete => |h| {
-                            self.hasher.?.deinit(evaluator.releases, evaluator.allocator);
+                            self.hasher.?.deinit(fiber.releases, fiber.allocator);
                             self.hasher = null;
                             break :blk h;
                         },
@@ -1139,12 +1139,12 @@ const GroupDriver = struct {
                     _ = work.spend();
                     continue;
                 }
-                if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(evaluator.allocator, left, right));
+                if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(fiber.allocator, left, right));
                 const progress = try self.matcher.?.borrowMut().advance(work);
                 switch (progress) {
                     .pending => {},
                     .complete => |matches| {
-                        self.matcher.?.deinit(evaluator.releases, evaluator.allocator);
+                        self.matcher.?.deinit(fiber.releases, fiber.allocator);
                         self.matcher = null;
                         if (matches) self.cell += 1 else {
                             self.cell = 0;
@@ -1155,7 +1155,7 @@ const GroupDriver = struct {
             },
             .key => {
                 if (self.columns) {
-                    if (self.key_builder == null) self.key_builder = .init(try .init(evaluator.releases, self.cellCount()));
+                    if (self.key_builder == null) self.key_builder = .init(try .init(fiber.releases, self.cellCount()));
                     if (self.cell != self.cellCount()) {
                         self.key_builder.?.borrowMut().appendBorrowed(self.cellValue(self.item_index, self.cell));
                         self.cell += 1;
@@ -1219,7 +1219,7 @@ const GroupDriver = struct {
             .groups => {
                 if (self.index == self.key_count) {
                     self.dict_materializer = .init(try dict.Materializer.initBorrowedSlices(
-                        evaluator.allocator,
+                        fiber.allocator,
                         self.keys.?.borrow()[0..self.key_count],
                         self.group_values.?.borrow().values(),
                         false,
@@ -1230,7 +1230,7 @@ const GroupDriver = struct {
                 const start = self.offsets.?.borrow()[self.index];
                 const end = self.offsets.?.borrow()[self.index + 1];
                 if (self.group_writer == null) self.group_writer = .init(try heap.LeafWriter(.leaf_i64).init(
-                    evaluator.allocator,
+                    fiber.allocator,
                     end - start,
                 ));
                 const copied = work.take(end - start - self.group_fill);
@@ -1251,9 +1251,9 @@ const GroupDriver = struct {
                 .pending => return .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| {
-                    self.dict_materializer.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.dict_materializer.?.deinit(fiber.releases, fiber.allocator);
                     self.dict_materializer = null;
-                    self.group_values.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.group_values.?.deinit(fiber.releases, fiber.allocator);
                     self.group_values = null;
                     return .{ .output = result };
                 },

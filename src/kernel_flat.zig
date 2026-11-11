@@ -129,14 +129,14 @@ pub const FlatCursor = struct {
     /// so cancellation surfaces here as an error rather than as a missed check.
     /// Element accounting is deliberately conservative: a copied or gathered
     /// element is charged like a computed one.
-    pub fn nextRange(self: *FlatCursor, evaluator: *Fiber) MachineError!?Chunk {
+    pub fn nextRange(self: *FlatCursor, fiber: *Fiber) MachineError!?Chunk {
         const plan = planRange(
             self.index,
             self.length,
-            evaluator.remainingKernelFuel(),
+            fiber.remainingKernelFuel(),
             support.poll_quantum,
         ) orelse return null;
-        try evaluator.advanceKernel(plan.len());
+        try fiber.advanceKernel(plan.len());
         self.index = plan.end;
         return plan;
     }

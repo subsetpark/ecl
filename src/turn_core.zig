@@ -2,7 +2,7 @@
 //!
 //! A fiber has one budget per turn. This module knows nothing about drivers,
 //! frames, or cancellation flags: it accepts the budget, one charge or one
-//! driver outcome, and returns what the evaluator must do next. The machine
+//! driver outcome, and returns what the fiber must do next. The machine
 //! loop carries the decision out; the tests below enumerate every case.
 
 const std = @import("std");
@@ -59,7 +59,7 @@ pub fn charge(budget: *poll.WorkBudget, amount: usize) bool {
     return false;
 }
 
-/// What the evaluator does after a driver reports it has not finished. A
+/// What the fiber does after a driver reports it has not finished. A
 /// stepped driver is charged one unit for the step itself, so a driver that
 /// drew nothing cannot keep the turn indefinitely.
 pub fn afterDriver(

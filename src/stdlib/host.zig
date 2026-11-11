@@ -17,17 +17,17 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Query = enum { cwd, executable };
-fn cwd(evaluator: *machine.Fiber) machine.MachineError!void {
-    return begin(evaluator, .cwd);
+fn cwd(fiber: *machine.Fiber) machine.MachineError!void {
+    return begin(fiber, .cwd);
 }
-fn executable(evaluator: *machine.Fiber) machine.MachineError!void {
-    return begin(evaluator, .executable);
+fn executable(fiber: *machine.Fiber) machine.MachineError!void {
+    return begin(fiber, .executable);
 }
-fn begin(evaluator: *machine.Fiber, query: Query) machine.MachineError!void {
-    const owned = try evaluator.allocator.create(Metadata);
+fn begin(fiber: *machine.Fiber, query: Query) machine.MachineError!void {
+    const owned = try fiber.allocator.create(Metadata);
     // SAFETY: executablePath fills the buffer before its returned prefix is read.
     owned.* = .{ .query = query, .buffer = undefined };
-    evaluator.adoptDriver(owned);
+    fiber.adoptDriver(owned);
 }
 const Metadata = struct {
     pub const address_stable_driver = {};
@@ -39,23 +39,23 @@ const Metadata = struct {
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         if (self.state == .text) self.state.text.retire(releases);
     }
-    pub fn advance(evaluator: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
+    pub fn advance(fiber: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
         if (self.state == .query) {
-            const runtime = evaluator.inherited.runtime();
+            const runtime = fiber.inherited.runtime();
             const bytes = switch (self.query) {
                 .cwd => runtime.startup_cwd,
                 .executable => path: {
                     const length = std.process.executablePath(runtime.host_io, &self.buffer) catch
-                        return evaluator.fail(.io, "cannot determine current executable path");
+                        return fiber.fail(.io, "cannot determine current executable path");
                     break :path self.buffer[0..length];
                 },
             };
-            self.state = .{ .text = .init(evaluator.allocator, bytes) };
+            self.state = .{ .text = .init(fiber.allocator, bytes) };
         }
-        return switch (self.state.text.advance(evaluator.workBudget()) catch |err| switch (err) {
+        return switch (self.state.text.advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return evaluator.fail(.io, "host process path is not UTF-8"),
+            error.InvalidUtf8 => return fiber.fail(.io, "host process path is not UTF-8"),
         }) {
             .pending => .stepped,
             .complete => |result| done: {

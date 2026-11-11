@@ -40,32 +40,32 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// The one module constructor. The name is validated before the body runs, so
 /// a name that could never be published costs no evaluation and no effect.
 /// Only a registry change during construction can still refuse publication.
-fn defmWord(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    const name = try evaluator.popSymbol();
-    var body = try evaluator.popQuotation();
-    try startDefm(evaluator, name, body.take().list);
+fn defmWord(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    const name = try fiber.popSymbol();
+    var body = try fiber.popQuotation();
+    try startDefm(fiber, name, body.take().list);
 }
 
 /// The value beneath the operands documents the module only when it is exactly
 /// `(: "text")`. Anything else is the caller's data and stays where it is: a
 /// module declares no stack effect, so nothing else could be its annotation.
-fn startDefm(evaluator: *Fiber, name: u32, body_header: *Header) MachineError!void {
+fn startDefm(fiber: *Fiber, name: u32, body_header: *Header) MachineError!void {
     var body = heap.Owned(*Header).init(body_header);
-    errdefer body.deinit(evaluator.releases, evaluator.allocator);
+    errdefer body.deinit(fiber.releases, fiber.allocator);
     var doc: heap.Owned(Value) = .none;
-    errdefer doc.deinit(evaluator.releases, evaluator.allocator);
-    if (evaluator.available() != 0) {
-        if (try moduleDocumentation(evaluator.visibleOperandBorrowed(evaluator.available() - 1))) |document| {
+    errdefer doc.deinit(fiber.releases, fiber.allocator);
+    if (fiber.available() != 0) {
+        if (try moduleDocumentation(fiber.visibleOperandBorrowed(fiber.available() - 1))) |document| {
             heap.retainValue(document);
             doc = .init(document);
-            evaluator.discard(1);
+            fiber.discard(1);
         }
     }
     // From here the driver owns both; an uninstalled driver disposes them.
     const owned_doc = doc;
     doc = .none;
-    try evaluator.startDriver(DefmDriver{
+    try fiber.startDriver(DefmDriver{
         .body = .init(body.take()),
         .validation = .init(name),
         .doc = owned_doc,
@@ -89,25 +89,25 @@ const DefmDriver = struct {
     /// The module's documentation, consumed from beneath the operands.
     doc: heap.Owned(Value) = .none,
 
-    pub fn advance(evaluator: *Fiber, self: *DefmDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *DefmDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.validation.advance()) {
             .pending => {},
             .complete => |maybe_name| {
                 const name = maybe_name orelse
-                    return evaluator.fail(.domain, "@defm requires a valid module name");
+                    return fiber.fail(.domain, "@defm requires a valid module name");
                 // The registry refuses `core` too, but only at publication; a
                 // name that can never publish must fail before the body runs.
                 if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
-                    return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier");
-                try evaluator.refuseReservedModule(name, evaluator.current.?.site.registration_provenance);
+                    return fiber.fail(.domain, "module name `core` is reserved for the core qualifier");
+                try fiber.refuseReservedModule(name, fiber.current.?.site.registration_provenance);
                 const body = self.body.take();
                 var doc = self.doc;
                 self.doc = .none;
-                defer doc.deinit(evaluator.releases, evaluator.allocator);
-                evaluator.retireDriver(self);
-                try evaluator.moduleOwned(
+                defer doc.deinit(fiber.releases, fiber.allocator);
+                fiber.retireDriver(self);
+                try fiber.moduleOwned(
                     name,
                     body,
                     if (doc.isPresent()) env.documentation(doc.borrow().list).? else null,
@@ -122,24 +122,24 @@ const DefmDriver = struct {
 /// Returns the name of the active execution home's image. An alias resolves to
 /// the image before the call, so it reports the module's own name. A
 /// construction body reports the name it is being built under.
-fn moduleNameWord(evaluator: *Fiber) MachineError!void {
-    const home = evaluator.currentHome() orelse return evaluator.fail(
+fn moduleNameWord(fiber: *Fiber) MachineError!void {
+    const home = fiber.currentHome() orelse return fiber.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    try evaluator.pushOwned(.{ .symbol = .{ .name = intern.moduleId(home.name()) } });
+    try fiber.pushOwned(.{ .symbol = .{ .name = intern.moduleId(home.name()) } });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names
 /// are user-sized host input, so materialization remains scheduled and
 /// cancellable rather than hiding a traversal in the primitive callback.
-fn fileWord(evaluator: *Fiber) MachineError!void {
-    const source_name = evaluator.activeSourceName() orelse return evaluator.fail(
+fn fileWord(fiber: *Fiber) MachineError!void {
+    const source_name = fiber.activeSourceName() orelse return fiber.fail(
         .domain,
         "*file* is unavailable for code without source provenance",
     );
-    try evaluator.startDriver(FileDriver{
-        .text = .init(.init(evaluator.allocator, source_name)),
+    try fiber.startDriver(FileDriver{
+        .text = .init(.init(fiber.allocator, source_name)),
     });
 }
 
@@ -147,9 +147,9 @@ const FileDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     text: heap.Owned(kernel_storage.TextMaterializer),
 
-    pub fn advance(evaluator: *Fiber, self: *FileDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        return switch (try self.text.borrowMut().advance(evaluator.workBudget())) {
+    pub fn advance(fiber: *Fiber, self: *FileDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        return switch (try self.text.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
@@ -158,35 +158,35 @@ const FileDriver = struct {
 
 fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
     return struct {
-        fn run(evaluator: *Fiber) MachineError!void {
-            return importWord(evaluator, visibility);
+        fn run(fiber: *Fiber) MachineError!void {
+            return importWord(fiber, visibility);
         }
     }.run;
 }
 
-fn importWord(evaluator: *Fiber, visibility: env.Visibility) MachineError!void {
-    try evaluator.require(2);
-    const scope = try evaluator.definitionScope();
-    if (visibility == .private and (!scope.isModuleRoot() or evaluator.stagingImage(scope) == null))
-        return evaluator.fail(.domain, "importp is legal only in a module root under construction");
-    var requested = try evaluator.popList();
+fn importWord(fiber: *Fiber, visibility: env.Visibility) MachineError!void {
+    try fiber.require(2);
+    const scope = try fiber.definitionScope();
+    if (visibility == .private and (!scope.isModuleRoot() or fiber.stagingImage(scope) == null))
+        return fiber.fail(.domain, "importp is legal only in a module root under construction");
+    var requested = try fiber.popList();
     errdefer requested.deinit();
-    const module_id = try evaluator.popSymbol();
+    const module_id = try fiber.popSymbol();
     const requested_count: usize = @intCast(requested.borrow().list.length());
-    const prepared = try evaluator.allocator.alloc(ImportName, requested_count);
-    try evaluator.startDriver(ImportDriver.init(
-        evaluator,
+    const prepared = try fiber.allocator.alloc(ImportName, requested_count);
+    try fiber.startDriver(ImportDriver.init(
+        fiber,
         module_id,
         requested.take(),
         prepared,
         visibility,
     ));
 }
-fn aliasModule(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    const target = try evaluator.popSymbol();
-    const short = try evaluator.popSymbol();
-    try evaluator.startDriver(AliasDriver{
+fn aliasModule(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    const target = try fiber.popSymbol();
+    const short = try fiber.popSymbol();
+    try fiber.startDriver(AliasDriver{
         .short_validation = .init(short),
         .target_validation = .init(target),
     });
@@ -242,7 +242,7 @@ const ImportDriver = struct {
     publisher: ?heap.Owned(modules.Registry.DefineCursor) = null,
 
     fn init(
-        evaluator: *Fiber,
+        fiber: *Fiber,
         module_id: u32,
         requested: Value,
         prepared: []ImportName,
@@ -252,20 +252,20 @@ const ImportDriver = struct {
             .module_id = module_id,
             .requested = .init(requested),
             .prepared = .init(prepared),
-            .scope = evaluator.currentScope(),
+            .scope = fiber.currentScope(),
             .visibility = visibility,
             .module_validation = .init(module_id),
         };
     }
 
-    pub fn advance(evaluator: *Fiber, self: *ImportDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *ImportDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) {
             if (self.module_name == null) switch (self.module_validation.advance()) {
                 .pending => continue,
                 .complete => |maybe_name| {
-                    self.module_name = maybe_name orelse return evaluator.fail(
+                    self.module_name = maybe_name orelse return fiber.fail(
                         .domain,
                         "import requires a valid module name",
                     );
@@ -278,21 +278,21 @@ const ImportDriver = struct {
                 if (self.binding_validation == null and self.qualifier == null) {
                     const symbol = switch (item) {
                         .symbol => |name| name.name,
-                        else => return evaluator.typeError("a list of symbols"),
+                        else => return fiber.typeError("a list of symbols"),
                     };
                     self.binding_validation = .init(symbol);
                 }
                 if (self.qualifier == null) switch (self.binding_validation.?.advance()) {
                     .pending => continue,
                     .complete => |maybe_name| {
-                        const binding = maybe_name orelse return evaluator.fail(
+                        const binding = maybe_name orelse return fiber.fail(
                             .domain,
                             "import attributes must be unqualified and non-reserved symbols",
                         );
                         self.binding_validation = null;
                         self.prepared.borrowMut().*[self.prepare_index].binding = binding;
                         self.qualifier = .init(try .init(
-                            evaluator.allocator,
+                            fiber.allocator,
                             intern.qualifiedName(self.module_name.?, binding),
                         ));
                         continue;
@@ -302,7 +302,7 @@ const ImportDriver = struct {
                     .pending => continue,
                     .complete => |qualified| {
                         self.prepared.borrowMut().*[self.prepare_index].qualified = qualified;
-                        self.qualifier.?.deinit(evaluator.releases, evaluator.allocator);
+                        self.qualifier.?.deinit(fiber.releases, fiber.allocator);
                         self.qualifier = null;
                         self.binding_validation = null;
                         self.prepare_index += 1;
@@ -314,11 +314,11 @@ const ImportDriver = struct {
             if (self.generation == null) switch (self.deferral) {
                 .unprobed => {
                     if (self.acquisition == null)
-                        self.acquisition = .init(evaluator.moduleLookup(self.module_name.?));
+                        self.acquisition = .init(fiber.moduleLookup(self.module_name.?));
                     switch (self.acquisition.?.borrowMut().advance()) {
                         .pending => continue,
                         .complete => |maybe_generation| {
-                            self.acquisition.?.deinit(evaluator.releases, evaluator.allocator);
+                            self.acquisition.?.deinit(fiber.releases, fiber.allocator);
                             self.acquisition = null;
                             if (maybe_generation) |generation| {
                                 self.generation = .init(generation);
@@ -327,7 +327,7 @@ const ImportDriver = struct {
                             // Only a module body stages its imports for a
                             // later check; top-level source stays incremental.
                             self.deferral = if (self.scope.storage == .module_root)
-                                .{ .module = evaluator.inherited.registry.heldModuleLoadingCursor(self.module_name.?, .of(evaluator)) }
+                                .{ .module = fiber.inherited.registry.heldModuleLoadingCursor(self.module_name.?, .of(fiber)) }
                             else
                                 .load;
                             continue;
@@ -339,12 +339,12 @@ const ImportDriver = struct {
                     .pending => continue,
                     .complete => |maybe_claim| {
                         if (maybe_claim) |held_claim| {
-                            try self.claimLoad(evaluator, held_claim);
+                            try self.claimLoad(fiber, held_claim);
                             continue;
                         }
-                        self.deferral = if (evaluator.inherited.module_snapshot) |project|
+                        self.deferral = if (fiber.inherited.module_snapshot) |project|
                             .{ .catalog = project.lookupCursor(
-                                evaluator.current.?.site.registration_provenance.scopeId(),
+                                fiber.current.?.site.registration_provenance.scopeId(),
                                 intern.get(intern.moduleId(self.module_name.?)),
                             ) }
                         else
@@ -360,7 +360,7 @@ const ImportDriver = struct {
                     .complete => |outcome| {
                         lookup.deinit();
                         self.deferral = switch (outcome) {
-                            .matched => |match| .{ .artifact = evaluator.inherited.registry.heldArtifactLoadingCursor(match.artifact_id, .of(evaluator)) },
+                            .matched => |match| .{ .artifact = fiber.inherited.registry.heldArtifactLoadingCursor(match.artifact_id, .of(fiber)) },
                             .unmatched, .hidden => .load,
                         };
                         continue;
@@ -370,7 +370,7 @@ const ImportDriver = struct {
                     .pending => continue,
                     .complete => |maybe_claim| {
                         if (maybe_claim) |held_claim| {
-                            try self.claimLoad(evaluator, held_claim);
+                            try self.claimLoad(fiber, held_claim);
                             continue;
                         }
                         self.deferral = .load;
@@ -386,8 +386,8 @@ const ImportDriver = struct {
                     else
                         self.prepared.borrow()[0].qualified;
                     const requested = self.requested.take();
-                    evaluator.retireDriver(self);
-                    return evaluator.retryImportAfterLoad(
+                    fiber.retireDriver(self);
+                    return fiber.retryImportAfterLoad(
                         module_id,
                         requested,
                         module_name,
@@ -420,10 +420,10 @@ const ImportDriver = struct {
                     .pending => continue,
                     .complete => |maybe_entry| {
                         const entry = maybe_entry orelse
-                            return evaluator.undefinedNameIn(requested.qualified, .qualified);
+                            return fiber.undefinedNameIn(requested.qualified, .qualified);
                         if (!modules.entryIsPublic(entry))
-                            return evaluator.undefinedNameIn(requested.qualified, .qualified);
-                        self.resolution.?.deinit(evaluator.releases, evaluator.allocator);
+                            return fiber.undefinedNameIn(requested.qualified, .qualified);
+                        self.resolution.?.deinit(fiber.releases, fiber.allocator);
                         self.resolution = null;
                         self.validation_index += 1;
                         continue;
@@ -442,7 +442,7 @@ const ImportDriver = struct {
                 // A module stages its imports with its definitions; a name
                 // introduced twice fails construction.
                 .module_root => {
-                    const image = evaluator.stagingImage(self.scope) orelse return evaluator.fail(
+                    const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
                         .domain,
                         "module imports are legal only while the module is under construction",
                     );
@@ -450,16 +450,16 @@ const ImportDriver = struct {
                     self.publish_index += 1;
                     continue;
                 },
-                .core_build => return evaluator.fail(.domain, "core does not import"),
+                .core_build => return fiber.fail(.domain, "core does not import"),
                 .session => {},
             }
             if (self.publisher == null)
-                self.publisher = .init(evaluator.inherited.registry.defineCursor(requested.binding, .{ .alias = alias }));
+                self.publisher = .init(fiber.inherited.registry.defineCursor(requested.binding, .{ .alias = alias }));
             switch (try self.publisher.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
-                    if (outcome == .introduced) evaluator.warnCoreShadowing(requested.binding, null);
-                    self.publisher.?.deinit(evaluator.releases, evaluator.allocator);
+                    if (outcome == .introduced) fiber.warnCoreShadowing(requested.binding, null);
+                    self.publisher.?.deinit(fiber.releases, fiber.allocator);
                     self.publisher = null;
                     self.publish_index += 1;
                 },
@@ -470,8 +470,8 @@ const ImportDriver = struct {
 
     /// Capacity for every requested name is reserved up front, so recording
     /// them cannot fail partway through the request.
-    fn claimLoad(self: *ImportDriver, evaluator: *Fiber, held: modules.LoadingClaim) MachineError!void {
-        const image = evaluator.stagingImage(self.scope) orelse return evaluator.fail(
+    fn claimLoad(self: *ImportDriver, fiber: *Fiber, held: modules.LoadingClaim) MachineError!void {
+        const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
             .domain,
             "module imports are legal only while the module is under construction",
         );
@@ -487,14 +487,14 @@ const AliasDriver = struct {
     short: ?intern.BindingName = null,
     target: ?intern.ModuleName = null,
     cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
-    pub fn advance(evaluator: *Fiber, self: *AliasDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *AliasDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) {
             if (self.target == null) switch (self.target_validation.advance()) {
                 .pending => continue,
                 .complete => |name| {
-                    self.target = name orelse return evaluator.fail(
+                    self.target = name orelse return fiber.fail(
                         .domain,
                         "alias target requires a valid module name",
                     );
@@ -504,7 +504,7 @@ const AliasDriver = struct {
             if (self.short == null) switch (self.short_validation.advance()) {
                 .pending => continue,
                 .complete => |name| {
-                    self.short = name orelse return evaluator.fail(
+                    self.short = name orelse return fiber.fail(
                         .domain,
                         "alias name requires an unqualified, non-reserved name",
                     );
@@ -514,18 +514,18 @@ const AliasDriver = struct {
             if (self.cursor == null) {
                 // An alias of an embedded module could remove it, and an
                 // alias under an embedded name would claim one.
-                const provenance = evaluator.current.?.site.registration_provenance;
-                try evaluator.refuseReservedModule(self.target.?, provenance);
+                const provenance = fiber.current.?.site.registration_provenance;
+                try fiber.refuseReservedModule(self.target.?, provenance);
                 if (intern.moduleName(intern.bindingId(self.short.?)) catch null) |short|
-                    try evaluator.refuseReservedModule(short, provenance);
-                const registry = evaluator.publicationRegistry(self.target.?, evaluator.current.?.site.registration_provenance);
+                    try fiber.refuseReservedModule(short, provenance);
+                const registry = fiber.publicationRegistry(self.target.?, fiber.current.?.site.registration_provenance);
                 self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
             }
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.NameConflict => return evaluator.fail(.domain, "alias collides with a module name"),
-                error.ReservedName => return evaluator.fail(.domain, "alias name `core` is reserved for the core qualifier"),
-                error.MissingModule => return evaluator.undefinedModule(intern.moduleId(self.target.?)),
+                error.NameConflict => return fiber.fail(.domain, "alias collides with a module name"),
+                error.ReservedName => return fiber.fail(.domain, "alias name `core` is reserved for the core qualifier"),
+                error.MissingModule => return fiber.undefinedModule(intern.moduleId(self.target.?)),
             }) {
                 .pending => {},
                 .complete => return .completed,
@@ -535,11 +535,11 @@ const AliasDriver = struct {
     }
 };
 
-fn qualify(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
-    const binding = try evaluator.popSymbol();
-    const module_name = try evaluator.popSymbol();
-    try evaluator.startDriver(QualifyDriver{
+fn qualify(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    const binding = try fiber.popSymbol();
+    const module_name = try fiber.popSymbol();
+    try fiber.startDriver(QualifyDriver{
         .module_validation = .init(module_name),
         .binding_validation = .init(binding),
     });
@@ -553,14 +553,14 @@ const QualifyDriver = struct {
     binding_name: ?intern.BindingName = null,
     cursor: ?heap.Owned(intern.QualifiedCursor) = null,
 
-    pub fn advance(evaluator: *Fiber, self: *QualifyDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *QualifyDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) {
             if (self.module_name == null) switch (self.module_validation.advance()) {
                 .pending => continue,
                 .complete => |name| {
-                    self.module_name = name orelse return evaluator.fail(
+                    self.module_name = name orelse return fiber.fail(
                         .domain,
                         "qualify requires a valid module name",
                     );
@@ -570,7 +570,7 @@ const QualifyDriver = struct {
             if (self.binding_name == null) switch (self.binding_validation.advance()) {
                 .pending => continue,
                 .complete => |name| {
-                    self.binding_name = name orelse return evaluator.fail(
+                    self.binding_name = name orelse return fiber.fail(
                         .domain,
                         "qualify requires an unqualified, non-reserved binding name",
                     );
@@ -578,24 +578,24 @@ const QualifyDriver = struct {
                 },
             };
             if (self.cursor == null) self.cursor = .init(try .init(
-                evaluator.allocator,
+                fiber.allocator,
                 intern.qualifiedName(self.module_name.?, self.binding_name.?),
             ));
             switch (try self.cursor.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |word| return .{ .output = .{ .symbol = try evaluator.linkedWord(word) } },
+                .complete => |word| return .{ .output = .{ .symbol = try fiber.linkedWord(word) } },
             }
         }
         return .stepped;
     }
 };
-fn words(evaluator: *Fiber) MachineError!void {
-    try evaluator.startDriver(WordsDriver.init(evaluator));
+fn words(fiber: *Fiber) MachineError!void {
+    try fiber.startDriver(WordsDriver.init(fiber));
 }
 
-fn exportsWord(evaluator: *Fiber) MachineError!void {
-    const requested = try evaluator.popSymbol();
-    try evaluator.startDriver(ExportsDriver.init(evaluator, requested));
+fn exportsWord(fiber: *Fiber) MachineError!void {
+    const requested = try fiber.popSymbol();
+    try fiber.startDriver(ExportsDriver.init(fiber, requested));
 }
 
 /// Collect one module's public names, or core's, then sort them and build the
@@ -649,41 +649,41 @@ const ExportsDriver = struct {
         }
     };
 
-    fn init(evaluator: *Fiber, requested: u32) ExportsDriver {
+    fn init(fiber: *Fiber, requested: u32) ExportsDriver {
         const core_requested = intern.isReservedRegistryBytes(intern.get(requested));
         return .{
-            .allocator = evaluator.allocator,
+            .allocator = fiber.allocator,
             .requested = requested,
-            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator)),
+            .found = .init(poll_api.ChunkList(u32).init(fiber.allocator)),
             .state = .init(if (core_requested)
-                .{ .core_names = .init(reflection.VisibleNameCursor.init(.core, evaluator.environment)) }
+                .{ .core_names = .init(reflection.VisibleNameCursor.init(.core, fiber.environment)) }
             else
                 .{ .validate = .init(requested) }),
         };
     }
 
-    fn replace(self: *ExportsDriver, evaluator: *Fiber, next: State) void {
-        self.state.borrowMut().deinit(evaluator.releases, evaluator.allocator);
+    fn replace(self: *ExportsDriver, fiber: *Fiber, next: State) void {
+        self.state.borrowMut().deinit(fiber.releases, fiber.allocator);
         self.state.borrowMut().* = next;
     }
 
-    fn startSort(self: *ExportsDriver, evaluator: *Fiber) MachineError!void {
+    fn startSort(self: *ExportsDriver, fiber: *Fiber) MachineError!void {
         const cursor = try reflection.SortedUniqueNameCursor.init(self.allocator, self.found.borrowMut());
-        self.replace(evaluator, .{ .sort = .init(cursor) });
+        self.replace(fiber, .{ .sort = .init(cursor) });
     }
 
-    pub fn advance(evaluator: *Fiber, self: *ExportsDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *ExportsDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .validate => |*validation| switch (validation.advance()) {
                 .pending => {},
                 .complete => |name| {
                     const module_name = name orelse
-                        return evaluator.fail(.domain, "exports requires a valid module name");
-                    self.replace(evaluator, .{ .acquire = .{
+                        return fiber.fail(.domain, "exports requires a valid module name");
+                    self.replace(fiber, .{ .acquire = .{
                         .name = module_name,
-                        .cursor = .init(evaluator.moduleLookup(module_name)),
+                        .cursor = .init(fiber.moduleLookup(module_name)),
                     } });
                 },
             },
@@ -691,15 +691,15 @@ const ExportsDriver = struct {
                 .pending => {},
                 .complete => |maybe_generation| if (maybe_generation) |generation| {
                     const names = generation.publicNameCursor();
-                    self.replace(evaluator, .{ .module_names = .{
+                    self.replace(fiber, .{ .module_names = .{
                         .generation = .init(generation),
                         .cursor = .init(names),
                     } });
                 } else {
                     const requested = self.requested;
                     const module_name = acquire.name;
-                    evaluator.retireDriver(self);
-                    return evaluator.retryQualifiedOperandAfterLoad(
+                    fiber.retireDriver(self);
+                    return fiber.retryQualifiedOperandAfterLoad(
                         .{ .name = requested },
                         .{ .unregistered_module = module_name },
                     );
@@ -707,24 +707,24 @@ const ExportsDriver = struct {
             },
             .module_names => |*names| switch (names.cursor.borrowMut().advance()) {
                 .pending => {},
-                .complete => try self.startSort(evaluator),
+                .complete => try self.startSort(fiber),
                 .item => |name| try self.found.borrowMut().append(name),
             },
             .core_names => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
-                .complete => try self.startSort(evaluator),
+                .complete => try self.startSort(fiber),
                 .item => |name| try self.found.borrowMut().append(name),
             },
             .sort => |*cursor| switch (try cursor.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |names| {
                     var owned_names = heap.Owned(reflection.SortedUniqueNames).init(names);
-                    errdefer owned_names.deinit(evaluator.releases, evaluator.allocator);
+                    errdefer owned_names.deinit(fiber.releases, fiber.allocator);
                     const values = try heap.OwnedValueBuffer.init(
-                        evaluator.releases,
+                        fiber.releases,
                         owned_names.borrow().items().len,
                     );
-                    self.replace(evaluator, .{ .fill = .{
+                    self.replace(fiber, .{ .fill = .{
                         .names = .init(owned_names.take()),
                         .values = .init(values),
                     } });
@@ -738,7 +738,7 @@ const ExportsDriver = struct {
                     continue;
                 }
                 const materializer = list.ValueMaterializer.initOwned(self.allocator, fill.values.take());
-                self.replace(evaluator, .{ .build = .init(materializer) });
+                self.replace(fiber, .{ .build = .init(materializer) });
             },
             .build => |*materializer| switch (try materializer.borrowMut().advance(work)) {
                 .pending => {},
@@ -749,9 +749,9 @@ const ExportsDriver = struct {
     }
 };
 
-fn moduleDocWord(evaluator: *Fiber) MachineError!void {
-    const requested = try evaluator.popSymbol();
-    try evaluator.startDriver(ModuleDocDriver{ .requested = requested, .validation = .init(requested) });
+fn moduleDocWord(fiber: *Fiber) MachineError!void {
+    const requested = try fiber.popSymbol();
+    try fiber.startDriver(ModuleDocDriver{ .requested = requested, .validation = .init(requested) });
 }
 
 /// Read one module generation's documentation and normalize it as `doc`
@@ -765,9 +765,9 @@ const ModuleDocDriver = struct {
     name: ?intern.ModuleName = null,
     normalization: heap.Owned(definition_prims.DocumentNormalization) = .none,
 
-    pub fn advance(evaluator: *Fiber, self: *ModuleDocDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *ModuleDocDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) {
             if (self.normalization.isPresent()) {
                 if (try self.normalization.borrowMut().advance(work)) |normalized|
@@ -778,27 +778,27 @@ const ModuleDocDriver = struct {
                     var generation = heap.Owned(modules.GenerationLease).init(maybe_generation orelse {
                         const requested = self.requested;
                         const module_name = self.name.?;
-                        evaluator.retireDriver(self);
-                        return evaluator.retryQualifiedOperandAfterLoad(
+                        fiber.retireDriver(self);
+                        return fiber.retryQualifiedOperandAfterLoad(
                             .{ .name = requested },
                             .{ .unregistered_module = module_name },
                         );
                     });
-                    defer generation.deinit(evaluator.releases, evaluator.allocator);
+                    defer generation.deinit(fiber.releases, fiber.allocator);
                     const document = generation.borrow().documentation() orelse
-                        return evaluator.fail(.domain, "module has no documentation");
-                    self.acquire.deinit(evaluator.releases, evaluator.allocator);
-                    self.normalization = .init(try .init(evaluator, document));
+                        return fiber.fail(.domain, "module has no documentation");
+                    self.acquire.deinit(fiber.releases, fiber.allocator);
+                    self.normalization = .init(try .init(fiber, document));
                 },
             } else switch (self.validation.advance()) {
                 .pending => {},
                 .complete => |maybe_name| {
                     const name = maybe_name orelse
-                        return evaluator.fail(.domain, "module-doc requires a valid module name");
+                        return fiber.fail(.domain, "module-doc requires a valid module name");
                     if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
-                        return evaluator.fail(.domain, "`core` is a qualifier, not a documented module");
+                        return fiber.fail(.domain, "`core` is a qualifier, not a documented module");
                     self.name = name;
-                    self.acquire = .init(evaluator.moduleLookup(name));
+                    self.acquire = .init(fiber.moduleLookup(name));
                 },
             }
         }
@@ -806,11 +806,11 @@ const ModuleDocDriver = struct {
     }
 };
 
-fn stdlibWord(evaluator: *Fiber) MachineError!void {
+fn stdlibWord(fiber: *Fiber) MachineError!void {
     const names = comptime stdlib.sortedNames();
     var values: [names.len]Value = undefined;
     for (names, &values) |name, *slot| slot.* = value.datum(.{ .symbol = .{ .name = try intern.intern(name) } });
-    return evaluator.pushOwned(try list.fromValues(evaluator.allocator, &values));
+    return fiber.pushOwned(try list.fromValues(fiber.allocator, &values));
 }
 
 const WordsDriver = struct {
@@ -851,23 +851,23 @@ const WordsDriver = struct {
         }
     };
 
-    fn init(evaluator: *Fiber) WordsDriver {
+    fn init(fiber: *Fiber) WordsDriver {
         return .{
-            .allocator = evaluator.allocator,
-            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator)),
-            .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
+            .allocator = fiber.allocator,
+            .found = .init(poll_api.ChunkList(u32).init(fiber.allocator)),
+            .actions = .init(reflection.ActionPlan.init(fiber.allocator)),
             .state = .init(.{ .visible = .init(reflection.VisibleNameCursor.init(
-                evaluator.visibleNameRoot(),
-                evaluator.environment,
+                fiber.visibleNameRoot(),
+                fiber.environment,
             )) }),
         };
     }
     fn append(self: *WordsDriver, name: u32) error{OutOfMemory}!void {
         try self.found.borrowMut().append(name);
     }
-    pub fn advance(evaluator: *Fiber, self: *WordsDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
+    pub fn advance(fiber: *Fiber, self: *WordsDriver) MachineError!machine.WorkProgress {
+        try fiber.pollKernel();
+        const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .visible => |*visible| switch (visible.borrowMut().advance()) {
                 .pending => {},
@@ -876,7 +876,7 @@ const WordsDriver = struct {
                         self.allocator,
                         self.found.borrowMut(),
                     );
-                    visible.deinit(evaluator.releases, evaluator.allocator);
+                    visible.deinit(fiber.releases, fiber.allocator);
                     self.state.borrowMut().* = .{ .postprocess = .init(cursor) };
                 },
                 .item => |name| try self.append(name),
@@ -884,7 +884,7 @@ const WordsDriver = struct {
             .postprocess => |*cursor| switch (try cursor.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |names| {
-                    cursor.deinit(evaluator.releases, evaluator.allocator);
+                    cursor.deinit(fiber.releases, fiber.allocator);
                     self.state.borrowMut().* = .{ .actions = .{
                         .names = .init(names),
                         .index = 0,
@@ -916,22 +916,22 @@ const WordsDriver = struct {
                 },
             },
             .write => |*write| {
-                evaluator.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                fiber.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(fiber);
                 return .completed;
             },
         };
         return .stepped;
     }
 };
-fn writeFailure(evaluator: *Fiber) MachineError {
-    return evaluator.fail(.io, "standard output write failed");
+fn writeFailure(fiber: *Fiber) MachineError {
+    return fiber.fail(.io, "standard output write failed");
 }
-fn load(evaluator: *Fiber) MachineError!void {
-    var path_value = try evaluator.popValue();
+fn load(fiber: *Fiber) MachineError!void {
+    var path_value = try fiber.popValue();
     defer path_value.deinit();
-    if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
-    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, path_value.borrow());
-    try evaluator.startDriver(LoadDriver{
+    if (!path_value.borrow().isString()) return fiber.typeError("a string path");
+    const encoder = kernel_storage.StringEncoder.init(fiber.allocator, path_value.borrow());
+    try fiber.startDriver(LoadDriver{
         .path_value = .init(path_value.take()),
         .encoder = .init(encoder),
     });
