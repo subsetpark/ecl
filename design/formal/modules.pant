@@ -54,7 +54,7 @@ some call: Call,
 where
 
 > The model has one kind of module object: an immutable image, published
-> under exactly one module name as one generation. Reload publishes a new
+> under one module name as one generation. Reload publishes a new
 > image under the same name and retires the previous one. No action removes a
 > registration. A name is live while it maps to a
 > published, non-retired image, which is that name's current generation. A
@@ -139,28 +139,23 @@ all registry-name: RegistryName, alias? registry-name |
   module? (image-name (image-of registry-name)) and
   image-of (image-name (image-of registry-name)) = image-of registry-name.
 
-all image: Image, image-published? image |
-  constructed? image.
+image-published? image -> constructed? image.
 
 > An image exists only as a published generation: no program can hold one
 > any other way.
-all image: Image, constructed? image |
-  image-published? image.
+constructed? image -> image-published? image.
 
-all image: Image, image-retired? image |
-  image-published? image.
+image-retired? image -> image-published? image.
 
 > A published image that is not retired is current under its own name.
-all image: Image,
-    image-published? image,
-    ~image-retired? image |
+image-published? image and
+~image-retired? image ->
   module? (image-name image) and
   image-of (image-name image) = image.
 
-all call: Call, call-active? call |
-  call-created? call.
+call-active? call -> call-created? call.
 
-all call: Call, call-active? call |
+call-active? call ->
   constructed? (call-image call) and
   definition-image (call-definition call) = call-image call.
 

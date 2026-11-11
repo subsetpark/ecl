@@ -883,7 +883,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### which
-`( name -- )` — Print where a name resolves (module home, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition.
+`( name -- )` — Print where a name resolves (module, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition.
 
 ### while
 `( cond body -- ... )` — At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. Definitions, IO, and other non-stack effects from the condition survive; definition permission follows the invoking unit. Tail-call optimized.

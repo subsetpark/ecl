@@ -34,14 +34,13 @@ value-type data-field = symbol-type and
 symbol-spelling data-field = "data".
 
 > A trace is a list containing only symbols. The empty list is a valid trace.
-all value: Value |
-  symbol-list-value? value <->
-    (value-type value = list-type and
-     (all index: Nat, index <= list-length value |
-       value-type (list-element value index) = symbol-type)).
+symbol-list-value? value <->
+  (value-type value = list-type and
+   (all index: Nat, index <= list-length value |
+     value-type (list-element value index) = symbol-type)).
 
 > Non-dictionaries cannot satisfy any error-schema field predicate.
-all value: Value, value-type value != dict-type |
+value-type value != dict-type ->
   ~kind-field-valid? value and
   ~message-field-valid? value and
   ~word-field-valid? value and
@@ -49,75 +48,54 @@ all value: Value, value-type value != dict-type |
   ~data-field-valid? value.
 
 > The `'kind` field is required and its value is a symbol.
-all value: Value,
-    value-type value = dict-type,
-    ~dict-has-key? value kind-field |
-  ~kind-field-valid? value.
+~dict-has-key? value kind-field -> ~kind-field-valid? value.
 
-all value: Value,
-    value-type value = dict-type,
-    dict-has-key? value kind-field |
-  kind-field-valid? value <->
-    value-type (dict-value-for-key value kind-field) = symbol-type.
+value-type value = dict-type and
+dict-has-key? value kind-field ->
+  (kind-field-valid? value <->
+     value-type (dict-value-for-key value kind-field) = symbol-type).
 
 > The `'msg` field is optional and, when present, is a string.
-all value: Value,
-    value-type value = dict-type,
-    ~dict-has-key? value message-field |
-  message-field-valid? value.
+~dict-has-key? value message-field -> message-field-valid? value.
 
-all value: Value,
-    value-type value = dict-type,
-    dict-has-key? value message-field |
-  message-field-valid? value <->
-    string-value? (dict-value-for-key value message-field).
+value-type value = dict-type and
+dict-has-key? value message-field ->
+  (message-field-valid? value <->
+     string-value? (dict-value-for-key value message-field)).
 
 > The `'word` field is optional and, when present, is a symbol.
-all value: Value,
-    value-type value = dict-type,
-    ~dict-has-key? value word-field |
-  word-field-valid? value.
+~dict-has-key? value word-field -> word-field-valid? value.
 
-all value: Value,
-    value-type value = dict-type,
-    dict-has-key? value word-field |
-  word-field-valid? value <->
-    value-type (dict-value-for-key value word-field) = symbol-type.
+value-type value = dict-type and
+dict-has-key? value word-field ->
+  (word-field-valid? value <->
+     value-type (dict-value-for-key value word-field) = symbol-type).
 
 > The `'trace` field is optional and, when present, is a list of symbols.
-all value: Value,
-    value-type value = dict-type,
-    ~dict-has-key? value trace-field |
-  trace-field-valid? value.
+~dict-has-key? value trace-field -> trace-field-valid? value.
 
-all value: Value,
-    value-type value = dict-type,
-    dict-has-key? value trace-field |
-  trace-field-valid? value <->
-    symbol-list-value? (dict-value-for-key value trace-field).
+value-type value = dict-type and
+dict-has-key? value trace-field ->
+  (trace-field-valid? value <->
+     symbol-list-value? (dict-value-for-key value trace-field)).
 
 > The `'data` field is optional and, when present, is a dictionary.
-all value: Value,
-    value-type value = dict-type,
-    ~dict-has-key? value data-field |
-  data-field-valid? value.
+~dict-has-key? value data-field -> data-field-valid? value.
 
-all value: Value,
-    value-type value = dict-type,
-    dict-has-key? value data-field |
-  data-field-valid? value <->
-    value-type (dict-value-for-key value data-field) = dict-type.
+value-type value = dict-type and
+dict-has-key? value data-field ->
+  (data-field-valid? value <->
+     value-type (dict-value-for-key value data-field) = dict-type).
 
 > A value is an error exactly when it is a dictionary satisfying every field
 > rule above. Fields outside this schema do not affect validity.
-all value: Value |
-  error-value? value <->
-    (value-type value = dict-type and
-     kind-field-valid? value and
-     message-field-valid? value and
-     word-field-valid? value and
-     trace-field-valid? value and
-     data-field-valid? value).
+error-value? value <->
+  (value-type value = dict-type and
+   kind-field-valid? value and
+   message-field-valid? value and
+   word-field-valid? value and
+   trace-field-valid? value and
+   data-field-valid? value).
 
 where
 
@@ -169,21 +147,20 @@ value-type user-error-kind = symbol-type and
 symbol-spelling user-error-kind = "user".
 
 > No other value is a core error kind.
-all value: Value |
-  core-error-kind? value <->
-    (value = underflow-error-kind or
-     value = undefined-word-error-kind or
-     value = type-error-kind or
-     value = shape-error-kind or
-     value = conform-error-kind or
-     value = overflow-error-kind or
-     value = domain-error-kind or
-     value = contract-error-kind or
-     value = parse-error-kind or
-     value = io-error-kind or
-     value = cancelled-error-kind or
-     value = timeout-error-kind or
-     value = user-error-kind).
+core-error-kind? value <->
+  (value = underflow-error-kind or
+   value = undefined-word-error-kind or
+   value = type-error-kind or
+   value = shape-error-kind or
+   value = conform-error-kind or
+   value = overflow-error-kind or
+   value = domain-error-kind or
+   value = contract-error-kind or
+   value = parse-error-kind or
+   value = io-error-kind or
+   value = cancelled-error-kind or
+   value = timeout-error-kind or
+   value = user-error-kind).
 
 where
 
@@ -207,38 +184,46 @@ symbol-spelling err-field = "err".
 
 > A successful result is exactly a one-entry dictionary tagged `'ok` whose
 > payload is a list of successful stack values.
-all value: Value |
-  successful-result-value? value <->
-    (value-type value = dict-type and
-     dict-length value = 1 and
-     dict-has-key? value ok-field and
-     value-type (dict-value-for-key value ok-field) = list-type).
+successful-result-value? value -> value-type value = dict-type.
+
+value-type value = dict-type and
+successful-result-value? value ->
+  dict-has-key? value ok-field.
+
+value-type value = dict-type and
+dict-has-key? value ok-field ->
+  (successful-result-value? value <->
+     ((all key: Value, dict-has-key? value key | matches? key ok-field) and
+      value-type (dict-value-for-key value ok-field) = list-type)).
 
 > A failed result is exactly a one-entry dictionary tagged `'err` whose
 > payload satisfies the error schema.
-all value: Value |
-  failed-result-value? value <->
-    (value-type value = dict-type and
-     dict-length value = 1 and
-     dict-has-key? value err-field and
-     error-value? (dict-value-for-key value err-field)).
+failed-result-value? value -> value-type value = dict-type.
+
+value-type value = dict-type and
+failed-result-value? value ->
+  dict-has-key? value err-field.
+
+value-type value = dict-type and
+dict-has-key? value err-field ->
+  (failed-result-value? value <->
+     ((all key: Value, dict-has-key? value key | matches? key err-field) and
+      error-value? (dict-value-for-key value err-field))).
 
 > The payload accessors expose the successful values list or failed error after
 > the corresponding result form has been established.
-all value: Value, successful-result-value? value |
+successful-result-value? value ->
   successful-result-values value = dict-value-for-key value ok-field.
 
-all value: Value, failed-result-value? value |
+failed-result-value? value ->
   failed-result-error value = dict-value-for-key value err-field.
 
 > Results are exactly the successful and failed forms.
-all value: Value |
-  result-value? value <->
-    (successful-result-value? value or failed-result-value? value).
+result-value? value <->
+  (successful-result-value? value or failed-result-value? value).
 
 > The two result forms are disjoint.
-all value: Value, successful-result-value? value |
-  ~failed-result-value? value.
+successful-result-value? value -> ~failed-result-value? value.
 
 where
 
@@ -252,24 +237,25 @@ timeout-error? value: Value => Bool.
 cancelled-result? value: Value => Bool.
 timeout-result? value: Value => Bool.
 ---
-> Cancellation and timeout errors have the corresponding core kind.
-all value: Value |
-  cancelled-error? value <->
-    (error-value? value and
+> Cancellation and timeout errors are exactly the errors of the corresponding
+> core kind.
+cancelled-error? value -> error-value? value.
+
+error-value? value ->
+  (cancelled-error? value <->
      dict-value-for-key value kind-field = cancelled-error-kind).
 
-all value: Value |
-  timeout-error? value <->
-    (error-value? value and
+timeout-error? value -> error-value? value.
+
+error-value? value ->
+  (timeout-error? value <->
      dict-value-for-key value kind-field = timeout-error-kind).
 
 > Cancellation and timeout results contain errors of the corresponding kind.
-all value: Value |
-  cancelled-result? value <->
-    (failed-result-value? value and
-     cancelled-error? (failed-result-error value)).
+cancelled-result? value <->
+  (failed-result-value? value and
+   cancelled-error? (failed-result-error value)).
 
-all value: Value |
-  timeout-result? value <->
-    (failed-result-value? value and
-     timeout-error? (failed-result-error value)).
+timeout-result? value <->
+  (failed-result-value? value and
+   timeout-error? (failed-result-error value)).
