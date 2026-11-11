@@ -81,7 +81,7 @@ permissions:
 jobs:
   test:
     name: Linux x86_64 / ${{ inputs.optimize }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 300
     env:
       OPTIMIZE: ${{ inputs.optimize }}
@@ -179,7 +179,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
             --volume "$ZIG_LOCAL_CACHE_HOST:/build/.zig-cache" \
-            ubuntu:24.04 bash -euxo pipefail -c '
+            ubuntu:26.04 bash -euxo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
               apt-get install -y --no-install-recommends \
