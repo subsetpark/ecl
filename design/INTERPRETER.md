@@ -59,7 +59,7 @@ The main components are these:
 | Reader and source archive | Turn source into executable values while retaining optional diagnostic spans | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
 | Names and modules | Resolution at dispatch, validated and immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
-| Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
+| Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, load and construct modules, and construct errors | `machine.zig`, `load.zig`, `module_construction.zig`, `failure.zig`, `error_value.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green fibers, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
@@ -928,6 +928,17 @@ The closest standard description is a defunctionalized CEK machine: control is
 the current quotation, the environment is the `ExecutionSite`, and the
 continuation is a tagged `Frame`. ecl adds its visible operand stack and the
 application, scheduler, module, and error boundaries required by the language.
+
+Only the machine edits the continuation. Its own subsystems — module loading,
+module construction, and failure delivery — live outside `machine.zig` and
+need more of the continuation than a primitive may have: opening a load or
+construction boundary, running a registering source in place of its caller,
+taking the pending failure and unwinding. Each reaches those operations
+through an opaque view of the Fiber (`Loading`, `Construction`, `Unwinding`)
+that only the machine mints. A work driver names the view it needs as the
+first parameter of its `advance`; the public start paths hold only the Fiber
+and refuse such a driver at compile time, so a view is obtained only from the
+machine or from a driver already holding it.
 
 ### Explicit frames carry continuation
 

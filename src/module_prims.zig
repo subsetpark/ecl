@@ -314,7 +314,7 @@ const ImportDriver = struct {
             if (self.generation == null) switch (self.deferral) {
                 .unprobed => {
                     if (self.acquisition == null)
-                        self.acquisition = .init(machine.ModuleLookupCursor.atCurrent(evaluator, self.module_name.?));
+                        self.acquisition = .init(evaluator.moduleLookup(self.module_name.?));
                     switch (self.acquisition.?.borrowMut().advance()) {
                         .pending => continue,
                         .complete => |maybe_generation| {
@@ -683,7 +683,7 @@ const ExportsDriver = struct {
                         return evaluator.fail(.domain, "exports requires a valid module name");
                     self.replace(evaluator, .{ .acquire = .{
                         .name = module_name,
-                        .cursor = .init(machine.ModuleLookupCursor.atCurrent(evaluator, module_name)),
+                        .cursor = .init(evaluator.moduleLookup(module_name)),
                     } });
                 },
             },
@@ -798,7 +798,7 @@ const ModuleDocDriver = struct {
                     if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                         return evaluator.fail(.domain, "`core` is a qualifier, not a documented module");
                     self.name = name;
-                    self.acquire = .init(machine.ModuleLookupCursor.atCurrent(evaluator, name));
+                    self.acquire = .init(evaluator.moduleLookup(name));
                 },
             }
         }
