@@ -268,7 +268,7 @@ reason before selecting the matrix.
 
   ```sh
   timeout 50m docker run --rm --init --platform linux/amd64 \
-    -v "$PWD":/work:ro ubuntu:24.04 bash -euxo pipefail -c '
+    -v "$PWD":/work:ro ubuntu:26.04 bash -euxo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
       apt-get install -y --no-install-recommends ca-certificates curl libc6-dev python3 xz-utils

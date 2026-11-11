@@ -166,6 +166,18 @@ const FailureSite = union(enum) {
         self.* = undefined;
     }
 };
+/// Where a fiber's root activation runs.
+pub const RootEntry = union(enum) {
+    /// The fiber's own root scope.
+    own,
+    /// A root the fiber does not own: a task in its spawner's, or a Session's
+    /// root fiber in the Session's. The scope's owner outlives the fiber, or
+    /// the fiber pins it.
+    scope: *env.Scope,
+    /// One registered module generation's own code, under that image's
+    /// provenance. The fiber pins the generation before entering it.
+    image: *modules.ModuleHome,
+};
 /// A fiber runs in one of two roles, and everything that differs between them
 /// follows from which. A root fiber runs a submission, the prelude, or host-driven loading and may
 /// define. A task fiber runs in its spawner's scope without being a root of
@@ -1174,10 +1186,9 @@ const Eval = struct {
         redispatch: u32,
     },
 
-    /// Where this body's definitions land, where its references resolve, and
-    /// whose privacy it runs under. One value rather than
-    /// three fields, so a construction site cannot set two of them and leave
-    /// the third describing different code.
+    /// The root this body runs in, the provenance it registers under, and
+    /// whether it may define. One value, so a construction site cannot set
+    /// one part and leave another describing different code.
     site: ExecutionSite,
     traced_word: intern.TraceWord,
     /// The word whose body this is, set only when dispatch entered that body.
@@ -1270,14 +1281,9 @@ const Eval = struct {
         };
     }
 
-    /// Where this body's own definitions land, and the chain it hands to any
-    /// quotation it invokes on a caller's behalf.
+    /// The root this body runs in: where its own definitions land.
     pub fn scope(self: Eval) *env.Scope {
         return self.site.scope;
-    }
-    /// Whose privacy this body runs under.
-    pub fn home(self: Eval) ?*modules.ModuleHome {
-        return self.site.home;
     }
 };
 /// A module construction boundary. The body builds the image `@defm` named
@@ -1554,13 +1560,12 @@ fn encodeApplicationProvenanceTarget(
 }
 
 pub const ExecutionSite = struct {
-    /// Where this body's own definitions land, and the chain it hands to any
-    /// quotation it invokes on a caller's behalf.
+    /// The current root: where this body's own definitions land, and, when it
+    /// is a module image's root scope, the module whose code is running. A
+    /// module word runs in its image's scope; every other word, and every
+    /// quotation applied as a value, runs in its caller's. Where a word
+    /// resolves is carried by the word itself.
     scope: *env.Scope,
-    /// Whose privacy this body runs under. Correlated with the scope but not
-    /// derivable from it: a homeless word called from module code inherits the
-    /// caller's home. Where a word resolves is carried by the word itself.
-    home: ?*modules.ModuleHome,
     /// Authority carried only while evaluating an embedded source module.
     /// A named module constructed by that source moves it into the immutable
     /// registration; ordinary source always carries ordinary provenance.
@@ -1574,59 +1579,45 @@ pub const ExecutionSite = struct {
 
     /// The base case: a fiber's root activation, built from nothing.
     pub fn root(fiber: *Fiber) ExecutionSite {
-        if (fiber.root_execution_home) |home| return image(home, fiber.module_access, fiber.role == .root);
-        const scope = fiber.lexicalScope();
-        return .{
-            .scope = scope,
-            .home = null,
-            .defining = fiber.role == .root,
-            .registration_provenance = if (fiber.inherited.module_snapshot) |module_snapshot|
-                .{ .root_scope = module_snapshot.localScope() }
-            else
-                .ordinary,
+        const defining = fiber.role == .root;
+        return switch (fiber.root_entry) {
+            .image => |home| image(home, fiber.module_access, defining),
+            .own, .scope => .{
+                .scope = fiber.lexicalScope(),
+                .defining = defining,
+                .registration_provenance = if (fiber.inherited.module_snapshot) |module_snapshot|
+                    .{ .root_scope = module_snapshot.localScope() }
+                else
+                    .ordinary,
+            },
         };
     }
 
     /// Code running as one module image: the image's own definitions, then
-    /// core.
+    /// core, under the image's provenance.
     pub fn image(
         home: *modules.ModuleHome,
         access: *const modules.ExecutionAccess,
         defining: bool,
     ) ExecutionSite {
-        const scope = home.scope(access);
         return .{
-            .scope = scope,
-            .home = home,
+            .scope = home.scope(access),
             .defining = defining,
             .registration_provenance = home.registrationProvenance(),
         };
     }
 
-    /// A nested activation continuing the same logical execution in `scope`:
-    /// a dynamic `call`, an `@attempt` body, or a resumed qualified load.
-    /// A quotation resolves where its invoker runs, so both scopes are the one
-    /// it was handed. An applied quotation may have come from any caller, so
-    /// it does not inherit embedded registration trust; a resumed load sets
-    /// the provenance it registers under itself.
-    pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        return resumed(scope, invoker.home(), invoker.site.registration_provenance.applied(), invoker.site.defining);
-    }
-
-    /// An application resuming in `scope` under its launch home. The only
-    /// construction where the home does not come from a running activation,
-    /// because an application's scope is decided when it launches.
-    pub fn resumed(
-        scope: *env.Scope,
-        home: ?*modules.ModuleHome,
-        registration_provenance: modules.RegistrationProvenance,
-        defining: bool,
-    ) ExecutionSite {
+    /// The site of a quotation this activation applies as a value: a dynamic
+    /// `call`, a combinator's quotation, an `@attempt` body, or a resumed
+    /// qualified load. It runs in the same root with the same right to
+    /// define. The value may have come from any caller, so it does not
+    /// inherit embedded registration trust; a resumed load sets the
+    /// provenance it registers under itself.
+    pub fn applied(self: ExecutionSite) ExecutionSite {
         return .{
-            .scope = scope,
-            .home = home,
-            .registration_provenance = registration_provenance,
-            .defining = defining,
+            .scope = self.scope,
+            .registration_provenance = self.registration_provenance.applied(),
+            .defining = self.defining,
         };
     }
 };
@@ -1635,19 +1626,12 @@ pub const ApplicationProvenance = union(enum) {
     boundary,
     selected_target: *const ApplicationProvenanceTarget,
 };
-pub const ApplicationSite = struct {
-    parent_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
-    registration_provenance: modules.RegistrationProvenance,
-    /// The launching activation's `defining`, which the body inherits.
-    defining: bool,
-};
 pub const IsolatedApplication = struct {
     quotation: *Header,
     context: *anyopaque,
     resume_fn: *const fn (*Fiber, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
-    site: ApplicationSite,
+    site: ExecutionSite,
     seeded: u32,
     provenance: ApplicationProvenance,
     /// Where a finite iteration keeps what its call has decided for its
@@ -1801,7 +1785,7 @@ fn ApplicationAdapters(comptime Driver: type) type {
 pub fn typedApplication(
     driver: anytype,
     quotation: *Header,
-    site: ApplicationSite,
+    site: ExecutionSite,
     seeded: u32,
 ) IsolatedApplication {
     const Context = @TypeOf(driver);
@@ -1836,7 +1820,7 @@ const ApplicationFrame = struct {
     context: *anyopaque,
     resume_fn: *const fn (*Fiber, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
-    site: ApplicationSite,
+    site: ExecutionSite,
     mode: ApplicationMode,
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
@@ -2582,10 +2566,7 @@ pub const Fiber = struct {
     scheduler: ?*const scheduler_api.WorkerScheduler = null,
     task_scope: ?*scheduler_api.TaskScope = null,
     role: FiberRole = .root,
-    execution_scope: ?*env.Scope = null,
-    /// Protected invocation may start this child at one selected registered
-    /// module generation. The Fiber lifetime pins the home before installation.
-    root_execution_home: ?*modules.ModuleHome = null,
+    root_entry: RootEntry = .own,
     native: NativeContinuation = .idle,
     current: ?Eval = null,
     active_index: u32 = 0,
@@ -2654,11 +2635,6 @@ pub const Fiber = struct {
         self.lifetime.replaceRoot(root);
     }
 
-    pub fn executeRootAtModule(self: *Fiber, home: *modules.ModuleHome) void {
-        self.root_execution_home = home;
-        self.execution_scope = home.scope(self.module_access);
-    }
-
     fn rootScope(self: *Fiber) *env.Scope {
         return self.lifetime.rootScope();
     }
@@ -2668,7 +2644,11 @@ pub const Fiber = struct {
     /// session-level redefinition still reaches prelude bodies while a module
     /// body executing further down the stack does not.
     pub fn lexicalScope(self: *Fiber) *env.Scope {
-        return self.execution_scope orelse self.rootScope();
+        return switch (self.root_entry) {
+            .own => self.rootScope(),
+            .scope => |scope| scope,
+            .image => |home| home.scope(self.module_access),
+        };
     }
 
     /// Replaces a stopped root fiber's operands from a stable borrowed
@@ -3140,8 +3120,9 @@ pub const Fiber = struct {
             return null;
         return located.source_name;
     }
+    /// The module whose code is running, if the current root is an image.
     pub fn currentHome(self: *const Fiber) ?*modules.ModuleHome {
-        return self.current.?.home();
+        return modules.homeForModuleRootScope(self.currentScope());
     }
     /// Begin publishing one first-class test into the candidate owned by the
     /// immediately enclosing module-construction boundary. Requiring that
@@ -3166,22 +3147,15 @@ pub const Fiber = struct {
         if (self.current.?.code != frame.boundary.mode.module.root_code)
             return self.fail(.domain, "test is legal only at a direct module construction root");
         const home = candidate.executionHome(self.module_access);
-        if (self.currentHome() != home or self.currentScope() != home.scope(self.module_access))
+        if (self.currentScope() != home.scope(self.module_access))
             return self.fail(.domain, "test is legal only at a direct module construction root");
         if (self.inherited.test_execution == null)
             return .discard();
         return candidate.testDeclarationCursor(name, body, effect, doc);
     }
-    pub fn applicationSite(self: *const Fiber) ApplicationSite {
-        const current = self.current.?;
-        return .{
-            .parent_scope = current.scope(),
-            .home = current.home(),
-            // A combinator applies a quotation value, which may have come from
-            // any caller, so embedded trust stays with the embedded code.
-            .registration_provenance = current.site.registration_provenance.applied(),
-            .defining = current.site.defining,
-        };
+    /// The site a combinator's quotation runs at, captured when it launches.
+    pub fn applicationSite(self: *const Fiber) ExecutionSite {
+        return self.current.?.site.applied();
     }
     fn installDriver(self: *Fiber, context: anytype) void {
         const Context = @TypeOf(context);
@@ -4633,10 +4607,7 @@ pub const Fiber = struct {
                             }
                         },
                         .register => |*register| {
-                            var site = ExecutionSite.inheriting(
-                                evaluator.current.?,
-                                evaluator.current.?.scope(),
-                            );
+                            var site = evaluator.current.?.site.applied();
                             site.registration_provenance = register.provenance;
                             heap.incRef(root_header);
                             const preserves_caller = register.request.preservesCaller();
@@ -5657,7 +5628,7 @@ pub const Fiber = struct {
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(quotation);
         }
-        const site = ExecutionSite.inheriting(self.current.?, self.current.?.scope());
+        const site = self.current.?.site.applied();
         const inherited_trace = self.suspendCurrent() catch {
             self.releases.releaseHeader(quotation);
             return error.OutOfMemory;
@@ -5861,12 +5832,7 @@ pub const Fiber = struct {
             .code = application.quotation,
             .program = .borrowed,
             .position = .{ .source = 0 },
-            .site = .resumed(
-                application.site.parent_scope,
-                application.site.home,
-                application.site.registration_provenance,
-                application.site.defining,
-            ),
+            .site = application.site,
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
             .application_selection = if (select_initial) provenance_target else null,
@@ -6169,7 +6135,7 @@ pub const Fiber = struct {
         // The body runs in its invoker's scope with its invoker's right to
         // define. A failure restores the stack, not the environment: like IO,
         // a definition the body made survives it.
-        const site = ExecutionSite.inheriting(invoker, invoker.scope());
+        const site = invoker.site.applied();
         try self.openBoundary(
             .attempt,
             @intCast(self.stack.items.len),
@@ -6203,7 +6169,7 @@ pub const Fiber = struct {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         }
-        var site = ExecutionSite.inheriting(invoker, invoker.scope());
+        var site = invoker.site.applied();
         site.registration_provenance = provenance;
         try self.openBoundary(.load, @intCast(self.stack.items.len), word, body);
         self.current = .{
@@ -7139,7 +7105,10 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
     const trace_word = definitionTraceWord(definition, home, name);
     self.active_word = trace_word;
     const origin = definitionOrigin(definition, home);
-    const cross_home = home != null and home != self.current.?.home();
+    const cross_home = if (home) |target|
+        target.scope(self.module_access) != self.current.?.scope()
+    else
+        false;
     const checked = cross_home and origin != .standard_library;
     const cross_home_effect = if (checked) definition.effect else null;
     switch (definition.code()) {
@@ -7481,24 +7450,15 @@ fn scheduleWord(
     resolved_home: ?*modules.ModuleHome,
     effect: ?env.Effect,
 ) MachineError!void {
-    const scope = if (resolved_home) |home|
-        home.scope(self.module_access)
+    // A module word runs as its image; any other word runs at its caller's
+    // site. Either way it defines where its caller could, and no further.
+    const caller = self.current.?.site;
+    const site: ExecutionSite = if (resolved_home) |home|
+        .image(home, self.module_access, caller.defining)
     else
-        self.current.?.scope();
-    const home = resolved_home orelse self.current.?.home();
-    const registration_provenance = if (resolved_home == null)
-        self.current.?.site.registration_provenance
-    else
-        resolved_home.?.registrationProvenance();
-    // A body defines where its caller could, and no further.
-    const defining = self.current.?.site.defining;
+        caller;
     const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
-    return enterBody(self, executable, word, .{
-        .scope = scope,
-        .home = home,
-        .defining = defining,
-        .registration_provenance = registration_provenance,
-    }, check);
+    return enterBody(self, executable, word, site, check);
 }
 /// Suspends the caller and makes `executable` the running evaluation at
 /// `site`, under its effect check if it has one. The callee's owner is secured

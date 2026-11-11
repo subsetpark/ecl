@@ -676,7 +676,7 @@ pub const Session = enum(usize) {
         );
         fiber.scheduler = core.scheduler.worker();
         fiber.task_scope = &core.root_tasks;
-        fiber.execution_scope = core.root_scope.?;
+        fiber.root_entry = .{ .scope = core.root_scope.? };
         return fiber;
     }
 

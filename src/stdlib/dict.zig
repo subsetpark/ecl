@@ -466,7 +466,7 @@ const MergeWithState = struct {
     index: usize = 0,
     collision_index: ?usize = null,
     phase: MergeWithPhase = .copy_left,
-    site: machine.ApplicationSite,
+    site: machine.ExecutionSite,
     word: intern.TraceWord,
 };
 
