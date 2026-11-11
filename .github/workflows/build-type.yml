@@ -174,7 +174,11 @@ jobs:
           set +e
           # OPTIMIZE is passed into the container.
           # shellcheck disable=SC2016
+          # TSan re-execs itself with ASLR disabled when the runner's mmap
+          # entropy is too high; Docker's default seccomp profile blocks
+          # personality(ADDR_NO_RANDOMIZE), so the re-exec fails (exit 66).
           timeout 35m docker run --rm --platform linux/amd64 \
+            --security-opt seccomp=unconfined \
             --env OPTIMIZE="$OPTIMIZE" \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
