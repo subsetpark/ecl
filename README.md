@@ -74,8 +74,8 @@ symbols, and strings. Lists are formed with `()` or `[]`. An invocation like
 `[1 2 3] 10 *` will apply the multiplication operation to 10 and each element
 in the list `[1 2 3]`. Strings are formed with double-quotes.
 
-Ordinarily, symbols (like `*` and `where`) are evaluated as soon as they're
-pushed onto the stack. To push a symbol without evaluating, quote it with `` ` ``.
+Evaluating an unquoted symbol (like `*` or `where`) invokes its word.
+To push a symbol without invoking its word, quote it with `` ` ``.
 A quotation is a list of values, including other quotations. To define new
 words, call `def` with a quotation and a quoted symbol.
 
@@ -86,7 +86,7 @@ ecl> 10 range mean
 4.5
 ```
 
-Once the word is defined, pushing it to the stack will execute its quotation.
+Once the word is defined, evaluating `mean` executes its quotation.
 
 Here, `(sum)` and `(len)` are also both quotations. `bi` is a **combinator**: a
 word which expects quotations on the stack and applies them in useful patterns.

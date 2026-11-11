@@ -32,9 +32,9 @@ context Nesting.
 >
 > `Begin unit` starts a unit with no parent.
 > Submissions and unit constructors differ in how they expose the eventual
-> outcome; those policies do not change unit execution semantics. Units that
-> running code opens inside another, such as `@attempt`, `@load`, and module
-> construction, begin through `Begin nested unit`.
+> outcome; those policies do not change unit execution semantics. A unit that
+> running code opens inside another unit, such as `@attempt`, `@load`, and module
+> construction, begins through `Begin nested unit`.
 Units ~> Begin unit.
 ---
 > Beginning a unit selects one identity that has never begun and makes it

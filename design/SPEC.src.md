@@ -128,8 +128,10 @@ in single quotes.
 
 **Strings** constructed with double quotes, and may span newlines. Raw
 newlines, indentation, and blank lines inside the quotes are literal; there is
-no triple-quoted, dedented, or margin-stripped form. Special characters can be
-escaped with `\`. 
+no triple-quoted, dedented, or margin-stripped form. The escapes are `\\`
+for backslash, `\"` for double quote, `\n` for newline, `\t` for tab, and
+`\u{...}` for a Unicode scalar value given by one to six hex digits. Any other
+escape, or a malformed Unicode escape, is a parse error.
 
 ### Forms
 
@@ -156,7 +158,8 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
   evaluated. An odd form count or a duplicate key is a parse error.
 - Locals create temporary, quotation-internal bindings. Any word bound in the
   locals declaration can be used any number of times within the quotation.
-  Locals consume elements from the stack in the order that they're written.
+  The first name receives the deepest consumed stack value and the last name
+  the top value, so `1 2 (|x y| x y -) call` is `-1`.
   Locals do **not** exhibit lexical scoping: a local is not visible inside a
   nested quotation within the declaring body. 
 
@@ -175,9 +178,9 @@ symbols are the same kind.
 
 A quotation, vector, or matrix row are all represented with a list. While the
 interpreter may specialize implementation and operations over homogeneous typed
-lists, the only language-visible reflection of list "type" is that lists
-entirely of one number kind are printed back with `[]`, and all other lists are
-printed back with `()`. Lists don't have any rank or axis metadata.
+lists, printing uses canonical value shape rather than storage specialization
+(see Readable representations and display). Lists don't have any rank or axis
+metadata.
 
 A task is an opaque capability bound to its session and prints as `<task:N>`. A
 port is an opaque capability for a host endpoint and prints as `<port:N>`. Task
@@ -262,7 +265,8 @@ word again whenever it runs.
 A definition written to the session is published as `def` runs. Every word of
 its body outside a nested quotation must already resolve, so the body cannot
 refer forward to a later definition, and a misspelled word fails the
-definition. The definition's own name, written in the root it is published
+definition. A qualified word whose module is not registered yet is the other
+exception: its lookup is deferred until the word is reached. The definition's own name, written in the root it is published
 into, is the exception: it calls the definition itself.
 
 A definition written to a module image is staged by the module's construction
@@ -504,7 +508,9 @@ definition, a core primitive, or a prelude word, runs in its caller's root.
 Outside any module word the current root is the session, or the image under
 construction in a module's construction body. The current root decides where
 definition words write, what `*module*` reports, and the root a symbol built at
-run time links to.
+run time links to. A core word such as `*module*` written in an escaped
+quotation runs in its caller's root, so it reports the caller's module, or is
+`` `domain `` at the session root.
 
 ### Binding model
 
@@ -876,9 +882,7 @@ that name.
   carry the same optional annotations as top-level ones, so a module word may
   be unannotated, documentation-only, effect-only, or both; `set`/`setp`
   publish the bare literal capture. Privacy is subtractive: private definitions
-  are omitted entirely from the module's public face. A definition attempted
-  inside a combinator application, an `@attempt`, or a task is `` `domain ``,
-  as it is everywhere.
+  are omitted entirely from the module's public face.
 - **Tests are a distinct module-owned namespace.**
   ``annotation? (body) `name test`` accepts the same optional effect and
   documentation forms as `def`, but only while the exact direct construction
@@ -923,7 +927,8 @@ that name.
   result, continues after ordinary failures, and exits 1 when any test failed.
 - Module code always runs under the name of the image that defined it:
   dispatch through a registered name, a construction body, an escaped
-  quotation, and a private call all report the same `*module*` and spell
+  quotation, and a private call all run module-authored words under the same
+  module, so those words report the same `*module*` and spell
   their trace words `name.word`. An application through escaped
   module-authored code still crosses a module boundary for effect checking. An
   exported word's body resolves against its module's internal environment and
