@@ -137,7 +137,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
             --volume "$ZIG_LOCAL_CACHE_HOST:/build/.zig-cache" \
-            ubuntu:24.04 tail -f /dev/null
+            ubuntu:26.04 tail -f /dev/null
           # PANT_VERSION is intentionally expanded inside the container.
           # shellcheck disable=SC2016
           timeout 20m docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
