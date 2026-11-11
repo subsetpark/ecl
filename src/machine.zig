@@ -1068,10 +1068,27 @@ fn requireDriverAuthority(comptime Driver: type, comptime Held: type) void {
         @compileError(@typeName(Driver) ++ " asks for " ++ @typeName(Asked) ++ ", which its starter does not hold");
 }
 
+/// Who observes cancellation between a driver's steps. The machine polls
+/// before every step of an ordinary driver, so no driver body restates the
+/// rule and a new driver is cancellable without asking. A driver declares
+/// `cancellation = .own` when a step must run despite cancellation, or must
+/// do something before observing it; it then polls where its own protocol
+/// allows, or not at all.
+pub const DriverCancellation = enum { each_step, own };
+
+/// Observes cancellation ahead of one step of `Driver`, unless the driver
+/// owns that. Both places a step begins, the installed driver's resumption
+/// and `runDriverAt`'s first step, come through here.
+inline fn pollBeforeStep(comptime Driver: type, fiber: *Fiber) MachineError!void {
+    const policy: DriverCancellation = if (@hasDecl(Driver, "cancellation")) Driver.cancellation else .each_step;
+    if (policy == .each_step) try fiber.pollKernel();
+}
+
 fn WorkDriverAdapters(comptime Driver: type) type {
     return struct {
         fn advance(fiber: *Fiber, raw: *anyopaque) MachineError!WorkProgress {
             const driver: *Driver = @ptrCast(@alignCast(raw));
+            try pollBeforeStep(Driver, fiber);
             return Driver.advance(switch (DriverAuthority(Driver)) {
                 *Fiber => fiber,
                 *Loading => Loading.of(fiber),
@@ -1178,7 +1195,6 @@ pub fn PathActionDriver(
         path: ?heap.Owned([]u8) = null,
 
         fn advance(fiber: *Fiber, self: *Self) MachineError!WorkProgress {
-            try fiber.pollKernel();
             if (self.path == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCodepoint => return fiber.fail(.domain, "path contains an invalid Unicode scalar"),
@@ -2115,7 +2131,10 @@ pub const Fiber = struct {
     pub fn runDriverAt(self: *Fiber, pending: anytype) MachineError!void {
         const Driver = @typeInfo(@TypeOf(pending)).pointer.child;
         if (!turn_core.mayDispatch(self.kernel_budget)) return self.startDriver(pending.*);
-        const progress = Driver.advance(self, pending) catch |err| {
+        const progress = first: {
+            pollBeforeStep(Driver, self) catch |err| break :first err;
+            break :first Driver.advance(self, pending);
+        } catch |err| {
             heap.deinitDriverFields(self.releases, self.allocator, pending);
             return err;
         };
@@ -2812,8 +2831,14 @@ pub const Fiber = struct {
     pub fn pollKernel(self: *Fiber) MachineError!void {
         self.polls += 1;
         if (self.cancelled.load(.acquire)) {
-            return self.fail(.cancelled, "unit cancelled");
+            @branchHint(.cold);
+            return self.failCancelled();
         }
+    }
+    /// Out of line: the poll is inlined wherever a driver step begins, and
+    /// installing the failure is the path almost no poll takes.
+    noinline fn failCancelled(self: *Fiber) MachineError {
+        return self.fail(.cancelled, "unit cancelled");
     }
     /// Charges logical kernel work against the fiber's one budget for the turn.
     /// Keeping the remainder on Fiber means ragged recursion and consecutive
@@ -3597,7 +3622,7 @@ pub fn initializeSource(
 
 pub fn runSlice(fiber: *Fiber) MachineError!RunStatus {
     // Each turn begins with one full kernel quantum. The charge that exhausted
-    // the previous one already polled cancellation, and every driver polls
+    // the previous one already polled cancellation, and a driver's step polls
     // before it draws.
     fiber.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
     const status = loop(fiber) catch |err| switch (err) {
@@ -3965,6 +3990,9 @@ const LookupDispatchDriver = struct {
     /// Started once per explicitly looked-up word, so it uses the inline slot.
     pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
+
+    /// Resolves and invokes one word without a cancellation point of its own.
+    pub const cancellation: DriverCancellation = .own;
 
     fn advance(fiber: *Fiber, self: *LookupDispatchDriver) MachineError!WorkProgress {
         if (!self.resolver.isPresent()) self.resolver = .init(binder.Resolver.init(self.context.borrowMut(), self.word));
@@ -4469,7 +4497,6 @@ const AttemptResultDriver = struct {
         };
     }
     fn advance(fiber: *Fiber, self: *AttemptResultDriver) MachineError!WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .materialize => switch (try self.materializer.borrowMut().advance(work)) {

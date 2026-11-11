@@ -127,6 +127,9 @@ const FailureDriver = struct {
             ),
         };
     }
+    /// An unwind in progress must not start another failure.
+    pub const cancellation: machine.DriverCancellation = .own;
+
     /// Draws on the fiber's budget, but yields rather than stepping when it is
     /// spent: a stepped driver's charge can observe cancellation, and an
     /// unwind already in progress must not start another failure.

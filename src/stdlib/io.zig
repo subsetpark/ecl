@@ -96,7 +96,6 @@ const EprintDriver = struct {
     encoder: heap.Owned(kernel_storage.StringEncoder),
 
     pub fn advance(fiber: *Fiber, self: *EprintDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return fiber.fail(

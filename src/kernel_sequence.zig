@@ -159,7 +159,6 @@ const IndexDriver = struct {
     index: heap.Owned(Value),
     cursor: heap.Owned(IndexCursor),
     pub fn advance(fiber: *Fiber, self: *IndexDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber, fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
@@ -178,7 +177,6 @@ const FlatGatherDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *FlatGatherDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (try self.cursor.nextRange(fiber)) |range| {
             const source = self.source.borrow();
             for (range.start..range.end) |index| {
@@ -394,7 +392,6 @@ const DictAtDriver = struct {
     key: heap.Owned(Value),
     cursor: heap.Owned(dict.FindCursor),
     pub fn advance(fiber: *Fiber, self: *DictAtDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |maybe_result| result: {
@@ -937,7 +934,6 @@ const FindDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *FindDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const input = self.collection.borrow();
         const needle = self.needle.borrow();
         const count: usize = @intCast(input.list.length());
@@ -1231,7 +1227,6 @@ const MembershipDriver = struct {
     collection: heap.Owned(Value),
     cursor: heap.Owned(MembershipCursor),
     pub fn advance(fiber: *Fiber, self: *MembershipDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber, fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
@@ -1489,7 +1484,6 @@ const RazeDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *RazeDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const count: usize = @intCast(self.collection.borrow().list.length());
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -1694,7 +1688,6 @@ const TakeDriver = struct {
         fiber: *Fiber,
         self: *TakeDriver,
     ) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         const values = self.values.borrow();
         while (!self.materializing and !work.exhausted() and self.result_index < values.len) {
@@ -1818,7 +1811,6 @@ const ListCopyDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *ListCopyDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         const values = self.values.borrow();
         while (self.index != values.len and work.spend()) {
@@ -1981,7 +1973,6 @@ const ShapeDriver = struct {
     dimensions: ?heap.Owned([]usize) = null,
 
     pub fn advance(fiber: *Fiber, self: *ShapeDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => return .stepped,
             .ragged => return fiber.fail(.shape, "shape requires a rectangular list"),
@@ -2046,7 +2037,6 @@ const FlipDriver = struct {
     outer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *FlipDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const rows: usize = @intCast(self.collection.borrow().list.length());
         const columns = switch (self.validation) {
             .flat => |*next| {
@@ -2559,7 +2549,6 @@ const ReshapeDriver = struct {
     builder: ?heap.Owned(ReshapeBuildCursor) = null,
 
     pub fn advance(fiber: *Fiber, self: *ReshapeDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.dimension_index != self.dimensions.borrow().len) {
             while (self.dimension_index != self.dimensions.borrow().len and fiber.workBudget().spend()) : (self.dimension_index += 1) {
                 const dimension = list.atUnchecked(self.shape_value.borrow(), self.dimension_index);
@@ -2669,7 +2658,6 @@ const CutDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *CutDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const count: usize = @intCast(self.starts.borrow().list.length());
         const length: usize = @intCast(self.collection.borrow().list.length());
         if (self.validated != count) {

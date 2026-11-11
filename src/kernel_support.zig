@@ -650,6 +650,9 @@ pub fn Kernel(comptime Spec: type) type {
             output: heap.Owned(Spec.Output),
             cursor: flat.FlatCursor,
 
+            /// Observes cancellation where its range charge crosses the turn's budget.
+            pub const cancellation: machine.DriverCancellation = .own;
+
             pub fn advance(fiber: *Fiber, self: *Driver) MachineError!machine.WorkProgress {
                 if (try self.cursor.nextRange(fiber)) |range|
                     try Spec.chunk(self.params, self.operands.borrow().values, self.output.borrowMut(), range, fiber);

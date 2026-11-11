@@ -120,7 +120,6 @@ const LineReadDriver = struct {
     }
 
     pub fn advance(fiber: *machine.Fiber, self: *LineReadDriver) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (self.state == .reading) {
             const waiting = self.backend.reader.buffered();
@@ -261,7 +260,6 @@ const SendDriver = struct {
         releases.releaseValue(self.endpoint);
     }
     pub fn advance(fiber: *machine.Fiber, self: *SendDriver) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.state == .validating) {
             const input = self.state.validating;
             const progress = input.advance(fiber.workBudget()) catch |err| return switch (err) {
@@ -322,7 +320,6 @@ const ReceiveDriver = struct {
         }
     };
     pub fn advance(fiber: *machine.Fiber, self: *ReceiveDriver) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const scope = try callingScope(fiber);
         const output = try fiber.reserveStack(1);
         var preparation: Preparation = .{ .fiber = fiber };
@@ -408,7 +405,6 @@ const Request = struct {
     }
 
     pub fn advance(fiber: *machine.Fiber, self: *Request) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.state == .validating) {
             const progress = self.message.advance(fiber.workBudget()) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -542,7 +538,6 @@ const CloseEndpoint = struct {
     requested: bool = false,
 
     pub fn advance(fiber: *machine.Fiber, self: *CloseEndpoint) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (!self.requested) {
             self.endpoint.close();
             self.requested = true;
@@ -583,7 +578,6 @@ const Observe = struct {
     mode: Mode,
 
     pub fn advance(fiber: *machine.Fiber, self: *Observe) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         switch (self.target) {
             .resource => |resource| {
                 if (self.mode == .shutdown) {

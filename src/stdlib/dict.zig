@@ -150,7 +150,6 @@ const GetDriver = struct {
     cursor: heap.Owned(dict_storage.FindCursor),
 
     pub fn advance(fiber: *Fiber, self: *GetDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |found| if (found) |item| present: {
@@ -195,7 +194,6 @@ const DictLookupDriver = struct {
     index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *DictLookupDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const count: usize = @intCast(self.keys.borrow().list.length());
         if (self.output == null) self.output = .init(try .init(fiber.releases, count));
         const work = fiber.workBudget();
@@ -248,7 +246,6 @@ const AssociateDriver = struct {
     materializer: heap.Owned(dict_storage.Materializer),
 
     pub fn advance(fiber: *Fiber, self: *AssociateDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.materializer.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .duplicate_key => unreachable,
@@ -280,7 +277,6 @@ const FromFlatDriver = struct {
     materializer: ?heap.Owned(dict_storage.Materializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *FromFlatDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.materializer == null) {
             const flat_pairs = self.pairs.borrow();
             const end = self.index + fiber.workBudget().take(flat_pairs.len - self.index);
@@ -343,7 +339,6 @@ const DictSelectDriver = struct {
     destination_index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *DictSelectDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .initialize => {
@@ -521,6 +516,9 @@ const MergeWithApplication = struct {
 const MergeWithWorkDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     state: heap.Owned(*MergeWithState),
+
+    /// Names its word before it polls, so a cancellation is attributed to it.
+    pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
         fiber.active_word = self.state.borrow().word;

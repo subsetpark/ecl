@@ -1075,7 +1075,6 @@ const PervadeEachDriver = struct {
     /// Elements run one after another within a step until the budget is spent,
     /// through one cursor armed in place for each.
     pub fn advance(fiber: *Fiber, self: *PervadeEachDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         const count = self.results.borrow().capacity();
         while (self.index != count) {
@@ -1148,7 +1147,6 @@ const LengthEachDriver = struct {
     index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *LengthEachDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const count: usize = @intCast(self.input.list.length());
         const end = self.index + fiber.workBudget().take(count - self.index);
         while (self.index < end) : (self.index += 1) {
@@ -1187,7 +1185,6 @@ const MatchEachDriver = struct {
     cursor: ?heap.Owned(equal.MatchCursor) = null,
 
     pub fn advance(fiber: *Fiber, self: *MatchEachDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const count: usize = @intCast(self.input.list.length());
         const work = fiber.workBudget();
         while (self.index != count and work.spend()) {

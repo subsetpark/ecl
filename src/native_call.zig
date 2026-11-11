@@ -557,7 +557,6 @@ const Transaction = struct {
     ) machine.MachineError!machine.WorkProgress {
         self.active_fiber = fiber;
         defer self.active_fiber = null;
-        try fiber.pollKernel();
         self.yield_requested = false;
         self.candidate_generation +%= 1;
         if (self.candidate_generation == 0) self.candidate_generation = 1;

@@ -1211,6 +1211,9 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             terminal: completion.Completion = .{},
             first: bool = true,
 
+            /// Polls while its operation runs; its cleanup must finish under cancellation.
+            pub const cancellation: machine.DriverCancellation = .own;
+
             pub fn advance(fiber: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
                 return self.terminal.advance(fiber, self);
             }
@@ -1253,7 +1256,6 @@ test "invocation effects: completion owns immediate deferred nested and failing 
 
             pub fn advance(fiber: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
                 if (fiber.workBudget().exhausted()) return fiber.fail(.user, "driver ran on an exhausted turn");
-                try fiber.pollKernel();
                 if (self.remaining != 0) {
                     self.remaining -= 1;
                     return .{ .yielded = .wait };

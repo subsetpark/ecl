@@ -444,7 +444,6 @@ const AutoLoadDriver = struct {
     }
     pub fn advance(via: *Loading, self: *AutoLoadDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         work: while (work.spend()) switch (self.state.borrowMut().*) {
             .begin => |*cursor| switch (try cursor.advance()) {
@@ -972,7 +971,6 @@ const BuiltinLoadDriver = struct {
 
     pub fn advance(via: *Loading, self: *BuiltinLoadDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         if (self.commit == null) {
             switch (self.publication.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1075,7 +1073,6 @@ const NativeLoadDriver = struct {
 
     pub fn advance(via: *Loading, self: *NativeLoadDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         switch (self.state.borrowMut().*) {
             .validate => |*loader| switch (try loader.borrowMut().advance(fiber.workBudget())) {
                 .pending => return .stepped,
@@ -1258,6 +1255,9 @@ const SourceDriver = struct {
         );
         self.state = .{ .ingesting = ingestion };
     }
+
+    /// Activates a source that fits its first slice before observing cancellation.
+    pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(via: *Loading, self: *SourceDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
@@ -1520,7 +1520,6 @@ const FileSourceDriver = struct {
     }
     pub fn advance(via: *Loading, self: *FileSourceDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         const io = fiber.inherited.runtime().host_io;
         switch (self.state.borrowMut().*) {
             .open => |*context| {
@@ -1641,7 +1640,6 @@ const QualifiedLoadPreparationDriver = struct {
         self: *QualifiedLoadPreparationDriver,
     ) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (try self.cursor.advance()) {
             .pending => {},
@@ -1743,7 +1741,6 @@ const QualifiedRegistrationDriver = struct {
 
     pub fn advance(via: *Loading, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         switch (self.phase) {
             .declared => {},
             .deferred => |index| return self.acquireDeferred(via, index),

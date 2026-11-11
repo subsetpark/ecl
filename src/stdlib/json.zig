@@ -94,7 +94,6 @@ const ParseDriver = struct {
     };
 
     pub fn advance(fiber: *Fiber, self: *ParseDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.bytes == null) {
             switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -370,7 +369,6 @@ const EmitDriver = struct {
     materializer: ?kernel_storage.TextMaterializer = null,
 
     pub fn advance(fiber: *Fiber, self: *EmitDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.materializer) |*materializer| {
             return switch (try materializer.advance(fiber.workBudget())) {
                 .pending => .stepped,

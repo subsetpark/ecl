@@ -3012,7 +3012,6 @@ const TasksDriver = struct {
         fiber: *machine.Fiber,
         self: *TasksDriver,
     ) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const old_pass = if (self.pass) |*pass| pass.take() else null;
         self.pass = null;
         const scheduler_state = self.scheduler.privateState();

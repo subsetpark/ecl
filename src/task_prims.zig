@@ -247,7 +247,6 @@ const GiveDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *GiveDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.cursor.phase == .validating) {
             if (self.cursor.advance(fiber.workBudget()) == .pending) return .stepped;
             if (self.cursor.refusal == .not_a_port)
@@ -375,7 +374,6 @@ const SendDriver = struct {
     checked: bool = false,
 
     pub fn advance(fiber: *Fiber, self: *SendDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (!self.checked) {
             const progress = self.check.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -429,7 +427,6 @@ const ReceiveDriver = struct {
     deadline: ?scheduler_api.Deadline,
 
     pub fn advance(fiber: *Fiber, self: *ReceiveDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const own = fiber.scheduling().scheduler.currentMailbox(fiber.scheduling().scope).?;
         if (own.dequeue()) |message| {
             if (self.deadline == null) return .{ .output = message.value };
@@ -509,7 +506,6 @@ const AwaitAnyDriver = struct {
         fiber: *Fiber,
         self: *AwaitAnyDriver,
     ) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const task_values = self.tasks.?.borrow();
         const count: usize = @intCast(task_values.list.length());
         const end = self.index + fiber.workBudget().take(count - self.index);

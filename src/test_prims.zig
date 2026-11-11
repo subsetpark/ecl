@@ -166,7 +166,6 @@ const DiscoveryDriver = struct {
         fiber: *Fiber,
         self: *DiscoveryDriver,
     ) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .discover => switch (self.cursor.?.advance()) {
@@ -290,7 +289,6 @@ const InvocationDriver = struct {
         fiber: *Fiber,
         self: *InvocationDriver,
     ) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) {
             if (self.lookup) |*lookup| switch (lookup.advance()) {

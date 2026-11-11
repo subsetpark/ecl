@@ -285,7 +285,6 @@ const RequestDriver = struct {
     };
 
     pub fn advance(fiber: *Fiber, self: *RequestDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.deadline.reachedBy(fiber.scheduling().scheduler.now())) {
             self.admitted.cancel();
             const failure = fiber.fail(.timeout, "HTTP request deadline expired");

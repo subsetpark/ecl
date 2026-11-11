@@ -205,7 +205,6 @@ const DefineDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *DefineDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
             .scan_annotation => |*scan| {
@@ -595,7 +594,6 @@ const LookupDriver = struct {
     resolution: heap.Owned(machine.ExplicitLookup),
     normalization: heap.Owned(DocumentNormalization) = .none,
     pub fn advance(fiber: *Fiber, self: *LookupDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) {
             if (self.normalization.isPresent()) {
@@ -641,7 +639,6 @@ const EffectDriver = struct {
     requested: value.Symbol,
     resolution: heap.Owned(machine.ExplicitLookup),
     pub fn advance(fiber: *Fiber, self: *EffectDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
@@ -793,7 +790,6 @@ const WhichDriver = struct {
         base.step += 1;
     }
     pub fn advance(fiber: *Fiber, self: *WhichDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
@@ -1010,7 +1006,6 @@ const SeeDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *SeeDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .resolve => |*cursor| switch (cursor.borrowMut().advance()) {

@@ -122,6 +122,9 @@ fn SuspendedWork(comptime State: type) type {
     return struct {
         state: *State,
 
+        /// Names its word before it polls, so a cancellation is attributed to it.
+        pub const cancellation: machine.DriverCancellation = .own;
+
         pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
             fiber.active_word = self.state.word;
             try fiber.pollKernel();
@@ -420,6 +423,9 @@ const DipControl = struct {
 const DipDriver = struct {
     control: heap.Owned(DipControl),
 
+    /// Names its word before it polls, so a cancellation is attributed to it.
+    pub const cancellation: machine.DriverCancellation = .own;
+
     pub fn advance(fiber: *Fiber, self: *DipDriver) MachineError!machine.WorkProgress {
         fiber.active_word = self.control.borrow().word;
         try fiber.pollKernel();
@@ -590,6 +596,9 @@ fn launchCleave(fiber: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!vo
 /// Finishes a cleave's validation when the turn ran out, then launches it.
 const CleaveDriver = struct {
     state: heap.Owned(*CleaveState),
+
+    /// Names its word before it polls, so a cancellation is attributed to it.
+    pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *CleaveDriver) MachineError!machine.WorkProgress {
         fiber.active_word = self.state.borrow().word;
@@ -872,7 +881,6 @@ const CondDriver = struct {
     index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *CondDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const clauses = self.clauses.borrow();
         const count: usize = @intCast(clauses.list.length());
         const end = self.index + fiber.workBudget().take(count - self.index);
@@ -1351,6 +1359,9 @@ const UpdateWorkDriver = struct {
         return position;
     }
 
+    /// Names its word before it polls, so a cancellation is attributed to it.
+    pub const cancellation: machine.DriverCancellation = .own;
+
     pub fn advance(fiber: *Fiber, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
         fiber.active_word = state.word;
@@ -1621,7 +1632,6 @@ const CollectedDriver = struct {
     result: ?heap.Owned(Value) = null,
 
     pub fn advance(fiber: *Fiber, self: *CollectedDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(fiber.workBudget())) {
                 .pending => return .stepped,
@@ -1702,6 +1712,9 @@ const StencilBootstrapDriver = struct {
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => return null,
         }
     }
+
+    /// Names its word before it polls, so a cancellation is attributed to it.
+    pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(
         fiber: *Fiber,
@@ -2014,7 +2027,6 @@ const UnfoldCollectDriver = struct {
         fiber: *Fiber,
         self: *UnfoldCollectDriver,
     ) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const end = self.copied + fiber.workBudget().take(self.count - self.copied);
         while (self.copied != end) : (self.copied += 1)
             self.result.borrowMut().appendBorrowed(self.iterator.next().?.*);
@@ -2092,7 +2104,6 @@ const InfraResultDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *InfraResultDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(fiber.workBudget())) {
                 .pending => return .stepped,
@@ -2122,7 +2133,6 @@ const InfraBootstrapDriver = struct {
     index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const iteration = self.iteration.borrow();
         const end = self.index + fiber.workBudget().take(iteration.count - self.index);
         while (self.index != end) : (self.index += 1) {

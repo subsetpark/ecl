@@ -40,7 +40,6 @@ const Metadata = struct {
         if (self.state == .text) self.state.text.retire(releases);
     }
     pub fn advance(fiber: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.state == .query) {
             const runtime = fiber.inherited.runtime();
             const bytes = switch (self.query) {

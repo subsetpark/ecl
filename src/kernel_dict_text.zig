@@ -90,7 +90,6 @@ const StrDriver = struct {
     work: heap.Owned(StrPhase),
 
     pub fn advance(fiber: *Fiber, self: *StrDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const phase = self.work.borrowMut();
         return switch (phase.*) {
             .rendering => |*renderer| switch (try renderer.advance(fiber.workBudget())) {
@@ -190,7 +189,6 @@ const HasDriver = struct {
     cursor: heap.Owned(dict.FindCursor),
 
     pub fn advance(fiber: *Fiber, self: *HasDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |found| .{ .output = .{ .int = @intFromBool(found != null) } },
@@ -303,7 +301,6 @@ const PervasivePutDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *PervasivePutDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         const output = self.values.borrow();
 
@@ -626,7 +623,6 @@ const ListPutDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *ListPutDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         if (self.materializer == null) {
             const values = self.values.borrow();
@@ -692,7 +688,6 @@ const DictPutDriver = struct {
     index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *DictPutDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(work)) {
             .pending => return .stepped,
@@ -770,7 +765,6 @@ const FromListsDriver = struct {
     materializer: ?heap.Owned(dict.Materializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *FromListsDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         if (self.materializer == null) {
             const pairs = self.pairs.borrow();
@@ -872,7 +866,6 @@ const PervasiveDelDriver = struct {
     destination_index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *PervasiveDelDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .initialize => {
@@ -1097,7 +1090,6 @@ const ListDelDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *ListDelDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         if (self.materializer == null) {
             const count: usize = @intCast(self.collection.borrow().list.length());
@@ -1141,7 +1133,6 @@ const DictDelDriver = struct {
     destination_index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *DictDelDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(work)) {
             .pending => return .stepped,
@@ -1220,7 +1211,6 @@ const MergeDriver = struct {
     work: heap.Owned(RebuildPhase) = .init(.between),
 
     pub fn advance(fiber: *Fiber, self: *MergeDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .copy_left => {
@@ -1662,7 +1652,6 @@ const JoinDriver = struct {
     source: ?heap.Owned(AnyCharReader) = null,
 
     pub fn advance(fiber: *Fiber, self: *JoinDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         var block: [kernel_flat.block_size]u32 = undefined;
         while (!work.exhausted()) switch (self.phase) {
@@ -1863,7 +1852,6 @@ const FormatDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *FormatDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
             .scan => |*scan| {

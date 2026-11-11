@@ -1432,7 +1432,10 @@ step, and a wait never spends the budget polling. A slice reports the two
 endings apart: an exhausted fiber is still runnable, so the root starts its next
 turn without offering its host thread, while a root that stopped to wait,
 settle, or relieve backpressure yields the thread. Root fairness comes from
-releasing and re-acquiring admission each turn, not from the host yield. Work
+releasing and re-acquiring admission each turn, not from the host yield. The
+machine observes cancellation before each driver step, so the rule is not a
+driver's to restate; a driver whose step must run regardless, or must act
+before observing it, declares that it owns the observation. Work
 that must finish regardless of cancellation, such as a failure unwind or a
 completion's cleanup or retirement and output delivery after state publication,
 draws on the budget but always ends the turn when it is spent rather than
