@@ -101,9 +101,12 @@ symbol-spelling left = symbol-spelling right -> left = right.
 
 > A list is a finite ordered sequence. Its length and positional elements
 > determine its value identity.
-list-length left = list-length right and
-(all index: Nat, index <= list-length left |
-  list-element left index = list-element right index) ->
+all left: Value, right: Value,
+    value-type left = list-type,
+    value-type right = list-type,
+    list-length left = list-length right,
+    (all index: Nat, index <= list-length left |
+      list-element left index = list-element right index) |
   left = right.
 
 > Booleans are exactly the int values 0 and 1.
