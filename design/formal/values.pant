@@ -94,10 +94,29 @@ char-codepoint value <= 1114111 and
 ~(char-codepoint value >= 55296 and char-codepoint value <= 57343).
 
 > Scalar payloads determine value identity within each scalar kind.
-int-payload left = int-payload right -> left = right.
-float-payload left = float-payload right -> left = right.
-char-codepoint left = char-codepoint right -> left = right.
-symbol-spelling left = symbol-spelling right -> left = right.
+all left: Value, right: Value,
+    value-type left = int-type,
+    value-type right = int-type,
+    int-payload left = int-payload right |
+  left = right.
+
+all left: Value, right: Value,
+    value-type left = float-type,
+    value-type right = float-type,
+    float-payload left = float-payload right |
+  left = right.
+
+all left: Value, right: Value,
+    value-type left = char-type,
+    value-type right = char-type,
+    char-codepoint left = char-codepoint right |
+  left = right.
+
+all left: Value, right: Value,
+    value-type left = symbol-type,
+    value-type right = symbol-type,
+    symbol-spelling left = symbol-spelling right |
+  left = right.
 
 > A list is a finite ordered sequence. Its length and positional elements
 > determine its value identity.
@@ -110,24 +129,27 @@ all left: Value, right: Value,
   left = right.
 
 > Booleans are exactly the int values 0 and 1.
-boolean-value? value -> value-type value = int-type.
-
-value-type value = int-type ->
-  (boolean-value? value <->
+all value: Value |
+  boolean-value? value <->
+    (value-type value = int-type and
      (int-payload value = 0 or int-payload value = 1)).
 
 > A string is exactly a list whose elements are all chars. The empty list is
 > therefore both a string and any other role compatible with empty list data.
-string-value? value <->
-  (value-type value = list-type and
-   (all index: Nat, index <= list-length value |
-     value-type (list-element value index) = char-type)).
+all value: Value |
+  string-value? value <->
+    (value-type value = list-type and
+     (all index: Nat, index <= list-length value |
+       value-type (list-element value index) = char-type)).
 
 > Whole-value matching is reflexive.
-matches? value value.
+all value: Value |
+  matches? value value.
 
 > Whole-value matching is symmetric.
-matches? left right -> matches? right left.
+all left: Value, right: Value,
+    matches? left right |
+  matches? right left.
 
 > Whole-value matching is transitive.
 all first: Value, second: Value, third: Value,
@@ -137,7 +159,8 @@ all first: Value, second: Value, third: Value,
 
 > Values match only as numbers across the two numeric kinds, or within the
 > same non-numeric kind.
-matches? left right ->
+all left: Value, right: Value,
+    matches? left right |
   (numeric-value? left and numeric-value? right) or
   (value-type left = char-type and value-type right = char-type) or
   (value-type left = symbol-type and value-type right = symbol-type) or
@@ -148,35 +171,40 @@ matches? left right ->
   (value-type left = address-type and value-type right = address-type).
 
 > Numeric matching is exact mathematical-value equality across int and float.
-numeric-value? left and
-numeric-value? right ->
-  (matches? left right <->
-     numeric-magnitude left = numeric-magnitude right).
+all left: Value, right: Value,
+    numeric-value? left,
+    numeric-value? right |
+  matches? left right <->
+    numeric-magnitude left = numeric-magnitude right.
 
 > Equal int magnitudes are exactly equal int payloads.
-value-type left = int-type and
-value-type right = int-type ->
-  (numeric-magnitude left = numeric-magnitude right <->
-     int-payload left = int-payload right).
+all left: Value, right: Value,
+    value-type left = int-type,
+    value-type right = int-type |
+  numeric-magnitude left = numeric-magnitude right <->
+    int-payload left = int-payload right.
 
 > Chars and symbols match exactly when their scalar contents match.
-value-type left = char-type and
-value-type right = char-type ->
-  (matches? left right <->
-     char-codepoint left = char-codepoint right).
+all left: Value, right: Value,
+    value-type left = char-type,
+    value-type right = char-type |
+  matches? left right <->
+    char-codepoint left = char-codepoint right.
 
-value-type left = symbol-type and
-value-type right = symbol-type ->
-  (matches? left right <->
-     symbol-spelling left = symbol-spelling right).
+all left: Value, right: Value,
+    value-type left = symbol-type,
+    value-type right = symbol-type |
+  matches? left right <->
+    symbol-spelling left = symbol-spelling right.
 
 > Lists match recursively and positionally.
-value-type left = list-type and
-value-type right = list-type ->
-  (matches? left right <->
-     (list-length left = list-length right and
-      (all index: Nat, index <= list-length left |
-        matches? (list-element left index) (list-element right index)))).
+all left: Value, right: Value,
+    value-type left = list-type,
+    value-type right = list-type |
+  matches? left right <->
+    (list-length left = list-length right and
+     (all index: Nat, index <= list-length left |
+       matches? (list-element left index) (list-element right index))).
 
 > Whole-value matching is dictionary-key identity.
 all dictionary: Value, key: Value, other: Value,
@@ -193,64 +221,73 @@ all dictionary: Value, key: Value, other: Value,
 
 > Dictionaries match exactly when they have the same keys and the values under
 > each key match.
-value-type left = dict-type and
-value-type right = dict-type ->
-  (matches? left right <->
-     ((all key: Value |
-        dict-has-key? left key <-> dict-has-key? right key) and
-      (all key: Value, dict-has-key? left key, dict-has-key? right key |
-        matches?
-          (dict-value-for-key left key)
-          (dict-value-for-key right key)))).
+all left: Value, right: Value,
+    value-type left = dict-type,
+    value-type right = dict-type |
+  matches? left right <->
+    ((all key: Value |
+       dict-has-key? left key <-> dict-has-key? right key) and
+     (all key: Value, dict-has-key? left key, dict-has-key? right key |
+       matches?
+         (dict-value-for-key left key)
+         (dict-value-for-key right key))).
 
 > A task value only matches itself.
-value-type left = task-type and
-value-type right = task-type ->
-  (matches? left right <-> left = right).
+all left: Value, right: Value,
+    value-type left = task-type,
+    value-type right = task-type |
+  matches? left right <-> left = right.
 
 > A port value only matches itself.
-value-type left = port-type and
-value-type right = port-type ->
-  (matches? left right <-> left = right).
+all left: Value, right: Value,
+    value-type left = port-type,
+    value-type right = port-type |
+  matches? left right <-> left = right.
 
 > An address names the mailbox of one task capability.
-value-type (address-mailbox value) = task-type.
+all value: Value, value-type value = address-type |
+  value-type (address-mailbox value) = task-type.
 
 > Address values match when they correspond to the same task.
-value-type left = address-type and
-value-type right = address-type ->
-  (matches? left right <->
-     address-mailbox left = address-mailbox right).
+all left: Value, right: Value,
+    value-type left = address-type,
+    value-type right = address-type |
+  matches? left right <->
+    address-mailbox left = address-mailbox right.
 
 > Scalar source kinds have readable representations.
-(value-type value = int-type or
- value-type value = float-type or
- value-type value = char-type or
- value-type value = symbol-type) ->
+all value: Value,
+    (value-type value = int-type or
+     value-type value = float-type or
+     value-type value = char-type or
+     value-type value = symbol-type) |
   readable? value.
 
 > Task, port, and address values have diagnostic displays but no readable
 > representations.
-(value-type value = task-type or
- value-type value = port-type or
- value-type value = address-type) ->
+all value: Value,
+    (value-type value = task-type or
+     value-type value = port-type or
+     value-type value = address-type) |
   ~readable? value.
 
 > A list is readable exactly when all its elements are readable.
-value-type value = list-type ->
-  (readable? value <->
-     (all index: Nat, index <= list-length value |
-       readable? (list-element value index))).
+all value: Value, value-type value = list-type |
+  readable? value <->
+    (all index: Nat, index <= list-length value |
+      readable? (list-element value index)).
 
 > A dictionary is readable exactly when all its keys and values are readable.
-value-type value = dict-type ->
-  (readable? value <->
-     (all key: Value, dict-has-key? value key |
-       readable? key and
-       readable? (dict-value-for-key value key))).
+all value: Value, value-type value = dict-type |
+  readable? value <->
+    (all key: Value, dict-has-key? value key |
+      readable? key and
+      readable? (dict-value-for-key value key)).
 
 > Hashing is congruent with whole-value matching.
-matches? left right -> value-hash left = value-hash right.
+all left: Value, right: Value,
+    matches? left right |
+  value-hash left = value-hash right.
 
 where
 

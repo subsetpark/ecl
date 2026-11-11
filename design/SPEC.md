@@ -269,13 +269,13 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > Scalar payloads determine value identity within each scalar kind.
 
-**int-payload** *left* = **int-payload** *right* → *left* = *right*.
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **int-type**, **value-type** *right* = **int-type**, **int-payload** *left* = **int-payload** *right* · *left* = *right*.
 
-**float-payload** *left* = **float-payload** *right* → *left* = *right*.
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **float-type**, **value-type** *right* = **float-type**, **float-payload** *left* = **float-payload** *right* · *left* = *right*.
 
-**char-codepoint** *left* = **char-codepoint** *right* → *left* = *right*.
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **char-type**, **value-type** *right* = **char-type**, **char-codepoint** *left* = **char-codepoint** *right* · *left* = *right*.
 
-**symbol-spelling** *left* = **symbol-spelling** *right* → *left* = *right*.
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **symbol-type**, **value-type** *right* = **symbol-type**, **symbol-spelling** *left* = **symbol-spelling** *right* · *left* = *right*.
 
 > A list is a finite ordered sequence. Its length and positional elements determine its value identity.
 
@@ -283,21 +283,19 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > Booleans are exactly the int values 0 and 1.
 
-**boolean-value?** *value* → **value-type** *value* = **int-type**.
-
-**value-type** *value* = **int-type** → (**boolean-value?** *value* ↔ **int-payload** *value* = 0 ∨ **int-payload** *value* = 1).
+∀ *value*: `Value` · **boolean-value?** *value* ↔ **value-type** *value* = **int-type** ∧ (**int-payload** *value* = 0 ∨ **int-payload** *value* = 1).
 
 > A string is exactly a list whose elements are all chars. The empty list is therefore both a string and any other role compatible with empty list data.
 
-**string-value?** *value* ↔ **value-type** *value* = **list-type** ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **value-type** (**list-element** *value* *index*) = **char-type**).
+∀ *value*: `Value` · **string-value?** *value* ↔ **value-type** *value* = **list-type** ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **value-type** (**list-element** *value* *index*) = **char-type**).
 
 > Whole-value matching is reflexive.
 
-**matches?** *value* *value*.
+∀ *value*: `Value` · **matches?** *value* *value*.
 
 > Whole-value matching is symmetric.
 
-**matches?** *left* *right* → **matches?** *right* *left*.
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **matches?** *right* *left*.
 
 > Whole-value matching is transitive.
 
@@ -305,25 +303,25 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > Values match only as numbers across the two numeric kinds, or within the same non-numeric kind.
 
-**matches?** *left* *right* → **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type** ∨ **value-type** *left* = **address-type** ∧ **value-type** *right* = **address-type**.
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type** ∨ **value-type** *left* = **address-type** ∧ **value-type** *right* = **address-type**.
 
 > Numeric matching is exact mathematical-value equality across int and float.
 
-**numeric-value?** *left* ∧ **numeric-value?** *right* → (**matches?** *left* *right* ↔ **numeric-magnitude** *left* = **numeric-magnitude** *right*).
+∀ *left*: `Value`, *right*: `Value`, **numeric-value?** *left*, **numeric-value?** *right* · **matches?** *left* *right* ↔ **numeric-magnitude** *left* = **numeric-magnitude** *right*.
 
 > Equal int magnitudes are exactly equal int payloads.
 
-**value-type** *left* = **int-type** ∧ **value-type** *right* = **int-type** → (**numeric-magnitude** *left* = **numeric-magnitude** *right* ↔ **int-payload** *left* = **int-payload** *right*).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **int-type**, **value-type** *right* = **int-type** · **numeric-magnitude** *left* = **numeric-magnitude** *right* ↔ **int-payload** *left* = **int-payload** *right*.
 
 > Chars and symbols match exactly when their scalar contents match.
 
-**value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** → (**matches?** *left* *right* ↔ **char-codepoint** *left* = **char-codepoint** *right*).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **char-type**, **value-type** *right* = **char-type** · **matches?** *left* *right* ↔ **char-codepoint** *left* = **char-codepoint** *right*.
 
-**value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** → (**matches?** *left* *right* ↔ **symbol-spelling** *left* = **symbol-spelling** *right*).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **symbol-type**, **value-type** *right* = **symbol-type** · **matches?** *left* *right* ↔ **symbol-spelling** *left* = **symbol-spelling** *right*.
 
 > Lists match recursively and positionally.
 
-**value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** → (**matches?** *left* *right* ↔ **list-length** *left* = **list-length** *right* ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **matches?** (**list-element** *left* *index*) (**list-element** *right* *index*))).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **list-type**, **value-type** *right* = **list-type** · **matches?** *left* *right* ↔ **list-length** *left* = **list-length** *right* ∧ (∀ *index*: `Nat`, *index* ≤ **list-length** *left* · **matches?** (**list-element** *left* *index*) (**list-element** *right* *index*)).
 
 > Whole-value matching is dictionary-key identity.
 
@@ -333,44 +331,44 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > Dictionaries match exactly when they have the same keys and the values under each key match.
 
-**value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** → (**matches?** *left* *right* ↔ (∀ *key*: `Value` · **dict-has-key?** *left* *key* ↔ **dict-has-key?** *right* *key*) ∧ (∀ *key*: `Value`, **dict-has-key?** *left* *key*, **dict-has-key?** *right* *key* · **matches?** (**dict-value-for-key** *left* *key*) (**dict-value-for-key** *right* *key*))).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **dict-type**, **value-type** *right* = **dict-type** · **matches?** *left* *right* ↔ (∀ *key*: `Value` · **dict-has-key?** *left* *key* ↔ **dict-has-key?** *right* *key*) ∧ (∀ *key*: `Value`, **dict-has-key?** *left* *key*, **dict-has-key?** *right* *key* · **matches?** (**dict-value-for-key** *left* *key*) (**dict-value-for-key** *right* *key*)).
 
 > A task value only matches itself.
 
-**value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** → (**matches?** *left* *right* ↔ *left* = *right*).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **task-type**, **value-type** *right* = **task-type** · **matches?** *left* *right* ↔ *left* = *right*.
 
 > A port value only matches itself.
 
-**value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type** → (**matches?** *left* *right* ↔ *left* = *right*).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **port-type**, **value-type** *right* = **port-type** · **matches?** *left* *right* ↔ *left* = *right*.
 
 > An address names the mailbox of one task capability.
 
-**value-type** (**address-mailbox** *value*) = **task-type**.
+∀ *value*: `Value`, **value-type** *value* = **address-type** · **value-type** (**address-mailbox** *value*) = **task-type**.
 
 > Address values match when they correspond to the same task.
 
-**value-type** *left* = **address-type** ∧ **value-type** *right* = **address-type** → (**matches?** *left* *right* ↔ **address-mailbox** *left* = **address-mailbox** *right*).
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **address-type**, **value-type** *right* = **address-type** · **matches?** *left* *right* ↔ **address-mailbox** *left* = **address-mailbox** *right*.
 
 > Scalar source kinds have readable representations.
 
-**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** → **readable?** *value*.
+∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type**) · **readable?** *value*.
 
 > Task, port, and address values have diagnostic displays but no readable representations.
 
-**value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **address-type** → ¬**readable?** *value*.
+∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **address-type**) · ¬**readable?** *value*.
 
 > A list is readable exactly when all its elements are readable.
 
-**value-type** *value* = **list-type** → (**readable?** *value* ↔ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **readable?** (**list-element** *value* *index*))).
+∀ *value*: `Value`, **value-type** *value* = **list-type** · **readable?** *value* ↔ (∀ *index*: `Nat`, *index* ≤ **list-length** *value* · **readable?** (**list-element** *value* *index*)).
 
 > A dictionary is readable exactly when all its keys and values are readable.
 
-**value-type** *value* = **dict-type** → (**readable?** *value* ↔ (∀ *key*: `Value`, **dict-has-key?** *value* *key* · **readable?** *key* ∧ **readable?** (**dict-value-for-key** *value* *key*))).
+∀ *value*: `Value`, **value-type** *value* = **dict-type** · **readable?** *value* ↔ (∀ *key*: `Value`, **dict-has-key?** *value* *key* · **readable?** *key* ∧ **readable?** (**dict-value-for-key** *value* *key*)).
 
 > Hashing is congruent with whole-value matching.
 
-**matches?** *left*
-*right* → **value-hash** *left* = **value-hash** *right*.
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left*
+*right* · **value-hash** *left* = **value-hash** *right*.
 
 #### Chapter 3
 
