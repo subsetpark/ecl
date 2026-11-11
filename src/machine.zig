@@ -1149,6 +1149,12 @@ pub const RootExecutionMetrics = struct {
     local_cache_misses: u64 = 0,
     plain_cache_hits: u64 = 0,
     plain_cache_misses: u64 = 0,
+    /// The deepest the frame stack grew.
+    max_frames: usize = 0,
+    /// Recognized idiom applications.
+    idiom_hits: u64 = 0,
+    /// The idiom hits that were phrases continued by following words.
+    phrase_hits: u64 = 0,
 };
 
 pub const root_execution_metrics_enabled = session_options.instrument_root_execution;
@@ -1413,7 +1419,6 @@ pub const Fiber = struct {
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
     /// What this fiber's code resolved its words to.
     resolutions: WordResolutions = .{},
-    max_frames: usize = 0,
     entry_base: usize,
     /// How far down a word may reach, and what `require` compares against.
     floor: paging_api.StackFloor = .{},
@@ -1422,9 +1427,6 @@ pub const Fiber = struct {
     /// intrusive chain so nested checks restore their predecessor exactly.
     effect_check_index: ?EffectCheckIndex = null,
     terminal: TerminalState = .evaluating,
-    idiom_hits: u64 = 0,
-    /// The idiom hits that were phrases continued by following words.
-    phrase_hits: u64 = 0,
     role: Role,
     root_entry: RootEntry,
     native: NativeContinuation = .idle,
@@ -3390,10 +3392,16 @@ pub const Fiber = struct {
         self.boundary_index = index;
         self.floor.set(stack_base, null);
     }
+    inline fn noteFrameDepth(self: *Fiber) void {
+        if (comptime root_execution_metrics_enabled) {
+            const metrics = &self.root_execution_metrics;
+            metrics.max_frames = @max(metrics.max_frames, self.frames.items.len);
+        }
+    }
     fn appendFrame(self: *Fiber, owned: *OwnedFrame) error{OutOfMemory}!void {
         try self.frames.append(self.allocator, owned.frame.?);
         _ = owned.take();
-        self.max_frames = @max(self.max_frames, self.frames.items.len);
+        self.noteFrameDepth();
     }
     fn enterRegistration(self: *Fiber, body: *Header, provenance: modules.RegistrationProvenance, after: load.AfterLoad) error{OutOfMemory}!void {
         var continuation = OwnedFrame.init(.{ .qualified_after_load = after });
@@ -3504,7 +3512,7 @@ pub const Fiber = struct {
         invocation.retainCopy();
         self.frames.appendAssumeCapacity(.{ .eval = caller });
         self.frames.appendAssumeCapacity(.{ .effect_check = check });
-        self.max_frames = @max(self.max_frames, self.frames.items.len);
+        self.noteFrameDepth();
         self.current = invocation;
     }
     /// Suspends a non-tail continuation. An exhausted anonymous quotation
@@ -3517,7 +3525,7 @@ pub const Fiber = struct {
             // into the array.
             const frame = try self.frames.addOne(self.allocator);
             frame.* = .{ .eval = current.* };
-            self.max_frames = @max(self.max_frames, self.frames.items.len);
+            self.noteFrameDepth();
             self.current = null;
             return no_word;
         }
@@ -3533,7 +3541,7 @@ pub const Fiber = struct {
     fn suspendCurrentForQualifiedLoad(self: *Fiber) error{OutOfMemory}!intern.TraceWord {
         const current = self.current.?;
         try self.frames.append(self.allocator, .{ .eval = current });
-        self.max_frames = @max(self.max_frames, self.frames.items.len);
+        self.noteFrameDepth();
         self.current = null;
         return no_word;
     }

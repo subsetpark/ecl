@@ -488,11 +488,18 @@ fn consShape(fiber: *Fiber, depth: usize) bool {
     return true;
 }
 
+/// Counts a recognition in the instrumented build; nothing otherwise.
+inline fn countHit(fiber: *Fiber, comptime kind: enum { application, phrase }) void {
+    if (comptime machine.root_execution_metrics_enabled) {
+        fiber.root_execution_metrics.idiom_hits += 1;
+        if (kind == .phrase) fiber.root_execution_metrics.phrase_hits += 1;
+    }
+}
+
 /// Consumes a matched phrase's following words, whose last one is now the
 /// active word.
 fn commitPhrase(fiber: *Fiber, count: u32, last: intern.TraceWord) void {
-    fiber.idiom_hits += 1;
-    fiber.phrase_hits += 1;
+    countHit(fiber, .phrase);
     fiber.skipFollowingForms(count);
     fiber.commitPhraseTrace();
     fiber.active_word = last;
@@ -545,7 +552,7 @@ const Recognized = union(enum) {
 /// Every recognized application starts here: it counts the hit and reports
 /// a fault or a continuing driver at the phrase's active word.
 inline fn applyRecognized(fiber: *Fiber, phrase: Value, recognized: Recognized, capture: Capture) MachineError!void {
-    fiber.idiom_hits += 1;
+    countHit(fiber, .application);
     const attribution: Attribution = .{
         .site = if (capture.active_index) |index| .{ .code = phrase.list, .index = index } else null,
     };
@@ -824,8 +831,7 @@ pub fn applyChain(fiber: *Fiber, operation: Operation) MachineError!bool {
     // A result no list operand reaches is scalar code, which the words
     // already run as such.
     if (!numeric.programResultVaries(&program, operands)) return false;
-    fiber.idiom_hits += 1;
-    fiber.phrase_hits += 1;
+    countHit(fiber, .phrase);
     fiber.skipFollowingForms(@intCast(extent.length - 1));
     fiber.commitPhraseTrace();
     try numeric.startProgramChain(fiber, forms.code, program);

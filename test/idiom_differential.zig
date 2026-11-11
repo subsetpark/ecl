@@ -56,6 +56,10 @@ const Execution = struct {
     }
 };
 
+fn metrics(runtime: *const ecl.session.Session) ecl.machine.RootExecutionMetrics {
+    return ecl.session.RootExecutionObservation.last(runtime);
+}
+
 fn execute(
     source: []const u8,
     mode: ecl.machine.IdiomMode,
@@ -85,8 +89,8 @@ fn compareExecutions(source: []const u8) !void {
     defer automatic.deinit();
     var generic = try execute(source, .generic_only, generic_heap.allocator());
     defer generic.deinit();
-    try std.testing.expectEqual(@as(u64, 1), automatic.runtime.lastIdiomHits());
-    try std.testing.expectEqual(@as(u64, 0), generic.runtime.lastIdiomHits());
+    try std.testing.expectEqual(@as(u64, 1), metrics(&automatic.runtime).idiom_hits);
+    try std.testing.expectEqual(@as(u64, 0), metrics(&generic.runtime).idiom_hits);
     try std.testing.expectEqual(generic.failure != null, automatic.failure != null);
     if (automatic.failure == null) {
         try expectStacksEquivalent(automatic.runtime.stackItems(), generic.runtime.stackItems());
@@ -527,9 +531,9 @@ fn expectPhraseHits(source: []const u8, expected: u64) !void {
     defer retireHeap(&heap);
     var run = try execute(source, .automatic, heap.allocator());
     defer run.deinit();
-    if (expected != run.runtime.lastPhraseHits())
-        std.log.err("phrase hit count for {s}: expected {d}, got {d}", .{ source, expected, run.runtime.lastPhraseHits() });
-    try std.testing.expectEqual(expected, run.runtime.lastPhraseHits());
+    if (expected != metrics(&run.runtime).phrase_hits)
+        std.log.err("phrase hit count for {s}: expected {d}, got {d}", .{ source, expected, metrics(&run.runtime).phrase_hits });
+    try std.testing.expectEqual(expected, metrics(&run.runtime).phrase_hits);
 }
 
 fn expectHits(source: []const u8, expected: u64) !void {
@@ -537,9 +541,9 @@ fn expectHits(source: []const u8, expected: u64) !void {
     defer retireHeap(&heap);
     var run = try execute(source, .automatic, heap.allocator());
     defer run.deinit();
-    if (expected != run.runtime.lastIdiomHits())
-        std.log.err("idiom hit count for {s}: expected {d}, got {d}", .{ source, expected, run.runtime.lastIdiomHits() });
-    try std.testing.expectEqual(expected, run.runtime.lastIdiomHits());
+    if (expected != metrics(&run.runtime).idiom_hits)
+        std.log.err("idiom hit count for {s}: expected {d}, got {d}", .{ source, expected, metrics(&run.runtime).idiom_hits });
+    try std.testing.expectEqual(expected, metrics(&run.runtime).idiom_hits);
 }
 
 test "idioms: where at fuses only the trusted at and keeps at's results" {
@@ -941,4 +945,28 @@ test "idioms: straight-line arithmetic chains run as one program" {
     try expectPhraseHits("[1 2 3] 2 *", 0);
     try expectPhraseHits("1 2 + 3 *", 0);
     try expectPhraseHits("(pop pop 9) `+ def [1 2] 2 * 1 +", 0);
+}
+
+/// The deepest frame stack a source reaches.
+fn maxFrames(source: []const u8) !usize {
+    var heap: SessionHeap = .init;
+    defer retireHeap(&heap);
+    var run = try execute(source, .automatic, heap.allocator());
+    defer run.deinit();
+    try std.testing.expect(run.failure == null);
+    return metrics(&run.runtime).max_frames;
+}
+
+test "frames: tail position reuses control" {
+    // A named tail call keeps no frame, at the root or inside a module.
+    try std.testing.expect(try maxFrames("(dup 0 > (1 - countdown) (pop) if) `countdown def 20000 countdown") <= 1);
+    const module = "(( n -- ) (dup 0 > (1 - countdown) (pop) if) `countdown def) `m @defm ";
+    try std.testing.expectEqual(try maxFrames(module ++ "20 m.countdown"), try maxFrames(module ++ "20000 m.countdown"));
+    // `linrec`'s pending applications are a count, and an iteration's
+    // finished continuations do not accumulate.
+    try std.testing.expectEqual(
+        try maxFrames("10000 (dup 0 =) () (1 -) (1 +) linrec"),
+        try maxFrames("20000 (dup 0 =) () (1 -) (1 +) linrec"),
+    );
+    try std.testing.expect(try maxFrames("100000 () times") <= 2);
 }

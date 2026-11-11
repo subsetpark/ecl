@@ -274,13 +274,10 @@ const SessionCore = struct {
     root_scope: ?*env.Scope = null,
     cancelled: std.atomic.Value(bool) = .init(false),
     requested_exit: ?u8 = null,
-    last_max_frames: usize = 0,
     last_polls: u64 = 0,
     last_root_execution_metrics: if (machine.root_execution_metrics_enabled) machine.RootExecutionMetrics else void = if (machine.root_execution_metrics_enabled) .{} else {},
     idiom_mode: machine.IdiomMode = .automatic,
     native_diagnostics: bool = false,
-    last_idiom_hits: u64 = 0,
-    last_phrase_hits: u64 = 0,
 
     fn moduleAccess(self: *const SessionCore) *const modules.ExecutionAccess {
         return @ptrCast(&self.module_access_seal);
@@ -681,13 +678,10 @@ pub const Session = enum(usize) {
 
     fn finishRootFiber(core: *SessionCore, fiber: *machine.Fiber) void {
         core.stack = fiber.takeStack();
-        core.last_max_frames = fiber.max_frames;
         core.last_polls = fiber.polls;
         if (comptime machine.root_execution_metrics_enabled)
             core.last_root_execution_metrics = fiber.root_execution_metrics;
         core.requested_exit = fiber.exitStatus();
-        core.last_idiom_hits = fiber.idiom_hits;
-        core.last_phrase_hits = fiber.phrase_hits;
         fiber.deinit();
     }
 
@@ -938,17 +932,8 @@ pub const Session = enum(usize) {
     pub fn requestedExit(self: *const Session) ?u8 {
         return self.coreState().requested_exit;
     }
-    fn lastMaxFramesForTest(self: *const Session) usize {
-        return self.coreState().last_max_frames;
-    }
     pub fn lastPolls(self: *const Session) u64 {
         return self.coreState().last_polls;
-    }
-    fn lastIdiomHitsForTest(self: *const Session) u64 {
-        return self.coreState().last_idiom_hits;
-    }
-    fn lastPhraseHitsForTest(self: *const Session) u64 {
-        return self.coreState().last_phrase_hits;
     }
     pub fn writeOutputLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeOutput(bytes, true);
@@ -988,9 +973,6 @@ pub const Session = enum(usize) {
     pub const requestCancellation = testOnly(requestCancellationForTest);
     pub const clearCancellation = testOnly(clearCancellationForTest);
     pub const setIdiomMode = testOnly(setIdiomModeForTest);
-    pub const lastMaxFrames = testOnly(lastMaxFramesForTest);
-    pub const lastIdiomHits = testOnly(lastIdiomHitsForTest);
-    pub const lastPhraseHits = testOnly(lastPhraseHitsForTest);
     pub const schedulerWorkerThreadCount = testOnly(schedulerWorkerThreadCountForTest);
     pub const schedulerTimerThreadCount = testOnly(schedulerTimerThreadCountForTest);
     pub const schedulerTimerEntryCount = testOnly(schedulerTimerEntryCountForTest);

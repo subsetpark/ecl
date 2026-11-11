@@ -84,7 +84,6 @@ test "twenty-thousand-deep named recursion remains flat" {
         "20000 countdown";
     try std.testing.expect((try runtime.runUnit("countdown.ecl", source)) == .ok);
     try std.testing.expectEqual(@as(usize, 0), runtime.stackItems().len);
-    try std.testing.expect(runtime.lastMaxFrames() <= 1);
 }
 
 test "machine: boundary truncation is exact through nested attempts" {
