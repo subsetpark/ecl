@@ -626,7 +626,7 @@ const Observe = struct {
 };
 
 fn callingScope(fiber: *machine.Fiber) machine.MachineError!*scheduler.TaskScope {
-    return fiber.task_scope orelse fiber.fail(.cancelled, "port scope is closing");
+    return fiber.scheduling().scope;
 }
 fn publicationFailure(fiber: *machine.Fiber, err: error{ OutOfMemory, ScopeClosing, Overflow }) machine.MachineError {
     return switch (err) {

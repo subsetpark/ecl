@@ -1156,7 +1156,7 @@ fn exit(fiber: *Fiber) MachineError!void {
     if (status.borrow() != .int or status.borrow().int < 0 or status.borrow().int > 255) {
         return fiber.typeError("an exit status from 0 through 255");
     }
-    if (fiber.role != .root or fiber.inAttempt()) {
+    if (fiber.role == .task or fiber.inAttempt()) {
         return fiber.fail(.domain, "exit is available only to the root unit outside @attempt");
     }
     try fiber.park(.{ .close_scope = @intCast(status.borrow().int) });

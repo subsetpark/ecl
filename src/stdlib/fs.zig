@@ -1071,10 +1071,7 @@ const Driver = struct {
     }
 
     fn publishDirectory(self: *Driver, fiber: *Fiber, dir: std.Io.Dir) MachineError!driver_completion.Progress {
-        const scope = fiber.task_scope orelse {
-            dir.close(self.io);
-            return fiber.fail(.cancelled, "directory scope is closing");
-        };
+        const scope = fiber.scheduling().scope;
         const adoption = if (self.operation == .open_list)
             directory.adoptEnumeration(self.access, scope, dir, self.inputs.root, if (self.root) |root| root.reservation() else null)
         else
@@ -1132,7 +1129,7 @@ const Driver = struct {
             error.Limit => return self.fail(fiber, .limit),
         };
         defer ticket.release();
-        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "directory scope is closing");
+        const scope = fiber.scheduling().scope;
         const dir = root.dir().openDir(self.io, ".", .{ .iterate = true }) catch |err| return self.fail(fiber, fsport.reasonForError(err));
         const result = directory.adoptChild(self.access, scope, dir, self.inputs.root, ticket) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1144,7 +1141,7 @@ const Driver = struct {
 
     fn stageDirectory(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(fiber, self.resolved.?);
-        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "directory scope is closing");
+        const scope = fiber.scheduling().scope;
         const stage = @import("../directory_stage.zig").Stage.create(self.access, entry.parent.dir, entry.name) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return self.fail(fiber, fsport.reasonForError(err));
@@ -1172,7 +1169,7 @@ const Driver = struct {
             try fiber.park(.{ .sleep = 10 });
             return .yielded;
         }
-        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "lock scope is closing");
+        const scope = fiber.scheduling().scope;
         // Adoption consumes the descriptor even on failure. Retirement cannot
         // close it again once the resource factory owns it.
         self.state = .complete;
@@ -1204,10 +1201,7 @@ const Driver = struct {
             },
             .regular => {},
         }
-        const scope = fiber.task_scope orelse {
-            file.close(self.io);
-            return fiber.fail(.cancelled, "reader scope is closing");
-        };
+        const scope = fiber.scheduling().scope;
         // Adoption consumes the descriptor on either outcome.
         self.state = .complete;
         const result = directory.adoptReader(self.access, scope, file) catch |err| switch (err) {
@@ -1601,10 +1595,7 @@ const Driver = struct {
             const target = self.resolved.?;
             self.resolved = null;
             const stream = try @import("../filesystem_stream.zig").Stream.create(self.access, root, slot, target, staged);
-            const scope = fiber.task_scope orelse {
-                stream.retire();
-                return fiber.fail(.cancelled, "directory scope is closing");
-            };
+            const scope = fiber.scheduling().scope;
             const result = directory.adoptStream(self.access, scope, stream, self.inputs.root) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),

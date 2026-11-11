@@ -1953,29 +1953,30 @@ pub const WorkerScheduler = enum(usize) {
 
         const execution = try self.allocator().create(TaskExecution);
         errdefer self.allocator().destroy(execution);
-        execution.* = .{ .fiber = machine.Fiber.init(
-            self.allocator(),
-            self.releaseDomain(),
-            request.parent_fiber.module_access,
-            .empty,
-            request.parent_fiber.environment,
-            request.parent_fiber.archive,
-            request.parent_fiber.inherited,
-            request.parent_fiber.arguments,
-            &cell.cancelled,
-        ) };
+        execution.* = .{
+            .fiber = machine.Fiber.init(
+                self.allocator(),
+                self.releaseDomain(),
+                request.parent_fiber.module_access,
+                .empty,
+                request.parent_fiber.environment,
+                request.parent_fiber.archive,
+                request.parent_fiber.inherited,
+                request.parent_fiber.arguments,
+                &cell.cancelled,
+                .{ .task = .{ .scheduler = self, .scope = &cell.scope } },
+                // A task runs in its spawner's scope, which is always a root: the
+                // session, which outlives every task in it, or a module image,
+                // which the generation pin below keeps alive. It may not define
+                // there.
+                switch (request.site) {
+                    .inherited => |scope| .{ .scope = scope },
+                    .module => |home| .{ .image = home },
+                },
+            ),
+        };
         const fiber = &execution.fiber;
         errdefer fiber.deinit();
-        // A task runs in its spawner's scope, which is always a root: the
-        // session, which outlives every task in it, or a module image, which
-        // the generation pin below keeps alive. It may not define there.
-        fiber.root_entry = switch (request.site) {
-            .inherited => |scope| .{ .scope = scope },
-            .module => |home| .{ .image = home },
-        };
-        fiber.role = .task;
-        fiber.scheduler = self;
-        fiber.task_scope = &cell.scope;
         if (modules.homeForModuleRootScope(fiber.lexicalScope())) |generation|
             try fiber.pinGeneration(generation);
         machine.initialize(fiber, request.quotation);
@@ -2183,7 +2184,7 @@ pub const WorkerScheduler = enum(usize) {
         if (request == .close_scope) {
             const status = request.close_scope;
             _ = fiber.takeParkRequest();
-            self.closeRootScope(fiber.task_scope.?);
+            self.closeRootScope(fiber.scheduling().scope);
             fiber.installParkResume(.{ .scope_closed = status });
             return;
         }

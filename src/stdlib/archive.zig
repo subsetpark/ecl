@@ -878,7 +878,7 @@ const UnpackDriver = struct {
     }
 
     fn publishView(self: *UnpackDriver, fiber: *Fiber, archive: *Archive) MachineError!driver_completion.Progress {
-        const scope = fiber.task_scope orelse return fiber.fail(.cancelled, "archive scope is closing");
+        const scope = fiber.scheduling().scope;
         const result = document.adopt(scope, archive.tar.borrow(), self.entries.borrow()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return fiber.fail(.cancelled, "archive scope is closing"),

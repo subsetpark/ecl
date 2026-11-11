@@ -65,7 +65,7 @@ fn untag(domain: Domain, item: Value) error{OutOfMemory}!?i64 {
 }
 
 fn now(fiber: *Fiber) MachineError!void {
-    const instant = fiber.scheduler.?.monotonicMilliseconds();
+    const instant = fiber.scheduling().scheduler.monotonicMilliseconds();
     try fiber.pushOwned(try tagged(fiber, .monotonic, instant));
 }
 
@@ -74,7 +74,7 @@ fn elapsed(fiber: *Fiber) MachineError!void {
     defer item.deinit();
     const start = (try untag(.monotonic, item.borrow())) orelse
         return fiber.typeError("a {monotonic milliseconds} instant from clock.now");
-    const current = fiber.scheduler.?.monotonicMilliseconds();
+    const current = fiber.scheduling().scheduler.monotonicMilliseconds();
     const delta = std.math.sub(i64, current, start) catch
         return fiber.fail(.overflow, "clock.elapsed left the millisecond range");
     try fiber.pushOwned(.{ .int = delta });
@@ -85,7 +85,7 @@ fn unix(fiber: *Fiber) MachineError!void {
         .host => |io| std.math.cast(i64, @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)) orelse
             return fiber.fail(.overflow, "clock.unix left the millisecond range"),
         .fixed => |timestamp| timestamp,
-        .anchored => |base| std.math.add(i64, base, fiber.scheduler.?.monotonicMilliseconds()) catch
+        .anchored => |base| std.math.add(i64, base, fiber.scheduling().scheduler.monotonicMilliseconds()) catch
             return fiber.fail(.overflow, "clock.unix left the millisecond range"),
     };
     try fiber.pushOwned(try tagged(fiber, .unix, milliseconds));
@@ -99,7 +99,7 @@ fn sleep(fiber: *Fiber) MachineError!void {
     const duration: u63 = @intCast(item.borrow().int);
     // The clock only moves forward, so a deadline the clock cannot reach now
     // cannot be reached at registration either; refuse it before parking.
-    fiber.scheduler.?.checkDeadline(duration) catch
+    fiber.scheduling().scheduler.checkDeadline(duration) catch
         return fiber.fail(.overflow, "clock.sleep deadline lies beyond the clock's range");
     // The deadline itself is captured by the scheduler at registration, after
     // this primitive returns, and a zero duration is already expired there:

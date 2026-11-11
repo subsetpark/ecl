@@ -93,6 +93,8 @@ pub fn installSource(
         .{ .registry = registry, .idiom_mode = .generic_only, .phase = .bootstrap },
         arguments.borrow(),
         cancelled,
+        .bootstrap,
+        .own,
     );
     defer fiber.deinit();
     fiber.replaceRootScope(building.rootScope(allocator));

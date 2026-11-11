@@ -643,7 +643,7 @@ pub const Session = enum(usize) {
     };
 
     fn initRootFiber(core: *SessionCore) machine.Fiber {
-        var fiber = machine.Fiber.init(
+        const fiber = machine.Fiber.init(
             core.allocator(),
             core.releaseDomain(),
             core.moduleAccess(),
@@ -673,10 +673,9 @@ pub const Session = enum(usize) {
             },
             core.arguments,
             &core.cancelled,
+            .{ .root = .{ .scheduler = core.scheduler.worker(), .scope = &core.root_tasks } },
+            .{ .scope = core.root_scope.? },
         );
-        fiber.scheduler = core.scheduler.worker();
-        fiber.task_scope = &core.root_tasks;
-        fiber.root_entry = .{ .scope = core.root_scope.? };
         return fiber;
     }
 

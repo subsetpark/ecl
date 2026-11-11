@@ -52,7 +52,7 @@ fn spawnTask(
     fiber: *Fiber,
     quotation: *value.ListHandle,
 ) MachineError!Value {
-    return fiber.scheduler.?.spawn(fiber.task_scope.?, .{
+    return fiber.scheduling().scheduler.spawn(fiber.scheduling().scope, .{
         .parent_fiber = fiber,
         .site = .{ .inherited = fiber.currentScope() },
         .quotation = quotation,
@@ -259,7 +259,7 @@ const GiveDriver = struct {
     }
 
     fn spawn(self: *GiveDriver, fiber: *Fiber) MachineError!Value {
-        return fiber.scheduler.?.spawn(fiber.task_scope.?, .{
+        return fiber.scheduling().scheduler.spawn(fiber.scheduling().scope, .{
             .parent_fiber = fiber,
             .site = .{ .inherited = fiber.currentScope() },
             .quotation = self.body.list,
@@ -303,7 +303,7 @@ fn give(fiber: *Fiber) MachineError!void {
         .moved = moved_list,
         .body = body.take(),
         .cursor = .{
-            .origin = fiber.task_scope.?.identity(),
+            .origin = fiber.scheduling().scope.identity(),
             .moved = moved_list,
             .count = moved_count,
         },
@@ -322,11 +322,11 @@ fn cancel(fiber: *Fiber) MachineError!void {
     var task = try fiber.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return fiber.typeError("a task");
-    fiber.scheduler.?.cancelOwned(task.take());
+    fiber.scheduling().scheduler.cancelOwned(task.take());
 }
 
 fn cancelSelf(fiber: *Fiber) MachineError!void {
-    if (!fiber.scheduler.?.cancelScopeOwner(fiber.task_scope.?))
+    if (!fiber.scheduling().scheduler.cancelScopeOwner(fiber.scheduling().scope))
         return fiber.fail(.domain, "task.cancel-self is legal only inside a task");
 }
 
@@ -334,7 +334,7 @@ fn address(fiber: *Fiber) MachineError!void {
     var task = try fiber.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return fiber.typeError("a task");
-    try fiber.pushOwned(try fiber.scheduler.?.taskAddress(task.borrow()));
+    try fiber.pushOwned(try fiber.scheduling().scheduler.taskAddress(task.borrow()));
 }
 
 fn selfAddress(fiber: *Fiber) MachineError!void {
@@ -345,7 +345,7 @@ fn selfAddress(fiber: *Fiber) MachineError!void {
 /// The executing task's mailbox. The root has none: it owns tasks but is
 /// not one, so nothing could ever address it.
 fn ownMailbox(fiber: *Fiber, comptime word: []const u8) MachineError!*mailbox.Mailbox {
-    return fiber.scheduler.?.currentMailbox(fiber.task_scope.?) orelse
+    return fiber.scheduling().scheduler.currentMailbox(fiber.scheduling().scope) orelse
         fiber.fail(.domain, word ++ " is legal only inside a task");
 }
 
@@ -416,7 +416,7 @@ fn receiveFor(fiber: *Fiber) MachineError!void {
     if (duration.borrow().int < 0) return fiber.fail(.domain, "task.receive-for duration must be nonnegative");
     _ = try ownMailbox(fiber, "task.receive-for");
     const milliseconds: u63 = @intCast(duration.borrow().int);
-    const deadline = fiber.scheduler.?.deadlineAfter(milliseconds) catch
+    const deadline = fiber.scheduling().scheduler.deadlineAfter(milliseconds) catch
         return fiber.fail(.overflow, "task.receive-for deadline lies beyond the clock's range");
     try fiber.startDriver(ReceiveDriver{ .deadline = deadline });
 }
@@ -430,7 +430,7 @@ const ReceiveDriver = struct {
 
     pub fn advance(fiber: *Fiber, self: *ReceiveDriver) MachineError!machine.WorkProgress {
         try fiber.pollKernel();
-        const own = fiber.scheduler.?.currentMailbox(fiber.task_scope.?).?;
+        const own = fiber.scheduling().scheduler.currentMailbox(fiber.scheduling().scope).?;
         if (own.dequeue()) |message| {
             if (self.deadline == null) return .{ .output = message.value };
             return .{ .output = try machine.outcomeDict(
@@ -441,7 +441,7 @@ const ReceiveDriver = struct {
             ) };
         }
         if (self.deadline) |deadline| {
-            if (deadline.reachedBy(fiber.scheduler.?.now())) {
+            if (deadline.reachedBy(fiber.scheduling().scheduler.now())) {
                 var timeout = machine.EclErr.init(.timeout, "task.receive-for timed out");
                 defer timeout.retire(fiber.releases);
                 const failure = try machine.errorValue(
@@ -465,7 +465,7 @@ const ReceiveDriver = struct {
 };
 
 fn tasks(fiber: *Fiber) MachineError!void {
-    try fiber.scheduler.?.installTasksDriver(fiber, fiber.task_scope.?);
+    try fiber.scheduling().scheduler.installTasksDriver(fiber, fiber.scheduling().scope);
 }
 
 fn awaitAny(fiber: *Fiber) MachineError!void {
@@ -492,7 +492,7 @@ fn awaitFor(fiber: *Fiber) MachineError!void {
     if (duration.borrow() != .int) return fiber.typeError("an integer millisecond duration");
     if (duration.borrow().int < 0) return fiber.fail(.domain, "task.await-for duration must be nonnegative");
     const milliseconds: u63 = @intCast(duration.borrow().int);
-    fiber.scheduler.?.checkDeadline(milliseconds) catch
+    fiber.scheduling().scheduler.checkDeadline(milliseconds) catch
         return fiber.fail(.overflow, "task.await-for deadline lies beyond the clock's range");
     try fiber.park(.{ .deadline = .{
         .task = task.take(),

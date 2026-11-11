@@ -186,11 +186,21 @@ const RootEntry = union(enum) {
     /// provenance. The fiber pins the generation before entering it.
     image: *modules.ModuleHome,
 };
-/// A fiber runs in one of two roles, and everything that differs between them
-/// follows from which. A root fiber runs a submission, the prelude, or host-driven loading and may
-/// define. A task fiber runs in its spawner's scope without being a root of
-/// its own, so it may not define.
-const FiberRole = enum { root, task };
+/// Who runs a fiber, and so what it may do. A root fiber runs a submission
+/// or a host-driven load and may define. A task fiber runs in its spawner's
+/// scope without being a root of its own, so it may not define. The bootstrap
+/// fiber builds the prelude before any scheduler exists.
+pub const Role = union(enum) {
+    bootstrap,
+    root: Membership,
+    task: Membership,
+
+    /// The scheduler a fiber runs under and the task scope it owns.
+    pub const Membership = struct {
+        scheduler: *const scheduler_api.WorkerScheduler,
+        scope: *scheduler_api.TaskScope,
+    };
+};
 
 const ErrorDataKey = enum {
     needed,
@@ -653,7 +663,7 @@ pub const ExecutionSite = struct {
 
     /// The base case: a fiber's root activation, built from nothing.
     fn root(fiber: *Fiber) ExecutionSite {
-        const defining = fiber.role == .root;
+        const defining = fiber.role != .task;
         return switch (fiber.root_entry) {
             .image => |home| image(home, fiber.module_access, defining),
             .own, .scope => .{
@@ -1415,10 +1425,8 @@ pub const Fiber = struct {
     idiom_hits: u64 = 0,
     /// The idiom hits that were phrases continued by following words.
     phrase_hits: u64 = 0,
-    scheduler: ?*const scheduler_api.WorkerScheduler = null,
-    task_scope: ?*scheduler_api.TaskScope = null,
-    role: FiberRole = .root,
-    root_entry: RootEntry = .own,
+    role: Role,
+    root_entry: RootEntry,
     native: NativeContinuation = .idle,
     current: ?Eval = null,
     active_index: u32 = 0,
@@ -1454,6 +1462,8 @@ pub const Fiber = struct {
         inherited: InheritedContext,
         arguments: Value,
         cancelled: *const std.atomic.Value(bool),
+        role: Role,
+        root_entry: RootEntry,
     ) Fiber {
         return .{
             .allocator = allocator,
@@ -1466,12 +1476,23 @@ pub const Fiber = struct {
             .inherited = inherited,
             .arguments = arguments,
             .cancelled = cancelled,
+            .role = role,
+            .root_entry = root_entry,
             .entry_base = stack.items.len,
             // SAFETY: this field supplies storage only. `driver_slot_busy` is the only
             // thing that says a driver lives here, and every read of the slot
             // goes through `acquireInlineDriver`, which writes the whole
             // driver before the pointer escapes.
             .driver_slot = undefined,
+        };
+    }
+
+    /// The scheduler this fiber runs under and the task scope it owns. Only
+    /// the bootstrap fiber has neither, and it runs no word that asks.
+    pub fn scheduling(self: *const Fiber) Role.Membership {
+        return switch (self.role) {
+            .root, .task => |membership| membership,
+            .bootstrap => @panic("scheduler requested during prelude construction"),
         };
     }
 

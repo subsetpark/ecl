@@ -306,7 +306,7 @@ const InvocationDriver = struct {
                     var target = invocation.enter(fiber.module_access);
                     defer target.deinit();
                     const home = target.home(fiber.module_access);
-                    const task = fiber.scheduler.?.spawn(fiber.task_scope.?, .{
+                    const task = fiber.scheduling().scheduler.spawn(fiber.scheduling().scope, .{
                         .parent_fiber = fiber,
                         .site = .{ .module = home },
                         .quotation = target.quotation(),

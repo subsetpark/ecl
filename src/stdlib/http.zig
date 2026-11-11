@@ -101,7 +101,7 @@ const RequestFields = struct {
 
 fn begin(fiber: *Fiber, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
     const access = fiber.inherited.runtime().http_access;
-    const deadline = fiber.scheduler.?.deadlineAfter(access.limits().deadline_ms) catch
+    const deadline = fiber.scheduling().scheduler.deadlineAfter(access.limits().deadline_ms) catch
         return fiber.fail(.overflow, "HTTP deadline lies beyond the clock's range");
     var request = try fiber.popValue();
     errdefer request.deinit();
@@ -286,7 +286,7 @@ const RequestDriver = struct {
 
     pub fn advance(fiber: *Fiber, self: *RequestDriver) MachineError!machine.WorkProgress {
         try fiber.pollKernel();
-        if (self.deadline.reachedBy(fiber.scheduler.?.now())) {
+        if (self.deadline.reachedBy(fiber.scheduling().scheduler.now())) {
             self.admitted.cancel();
             const failure = fiber.fail(.timeout, "HTTP request deadline expired");
             fiber.addErrorPath(self.fields.target.?);
@@ -451,7 +451,7 @@ const RequestDriver = struct {
             .exchange => |*exchange_state| {
                 const input = exchange_state.request;
                 self.state = .running;
-                self.admitted.start(input, self.method, self.follow_redirects, fiber.task_scope.?) catch |err| return switch (err) {
+                self.admitted.start(input, self.method, self.follow_redirects, fiber.scheduling().scope) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.ScopeClosing => fiber.fail(.cancelled, "HTTP scope is closing"),
                     else => self.failIo(fiber, input.url, @errorName(err)),
@@ -646,7 +646,7 @@ const RequestDriver = struct {
                     finish.dictionary.deinit();
                     const results = finish.results;
                     self.state = .{ .output = results };
-                    if (self.deadline.reachedBy(fiber.scheduler.?.now())) {
+                    if (self.deadline.reachedBy(fiber.scheduling().scheduler.now())) {
                         fiber.releases.releaseValue(built);
                         return fiber.fail(.timeout, "HTTP request deadline expired");
                     }
