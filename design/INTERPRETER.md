@@ -1019,8 +1019,13 @@ The window is a nominal value derived from a real stack depth. A callback
 cannot pair an arbitrary base with a count, and a nested application that
 suspends carries the exact continuation it must resume.
 
-A paging application is the third floor kind beside the caller's stack and
-the isolated substack. Its substack starts empty, and an operand check that
+An application names how its quotation meets the stack beneath it: in place
+on the caller's stack, isolated behind a hard floor, or over a paging floor.
+The three differ only in that floor, so they share one launch vocabulary,
+used when the application starts and for each quotation it applies next, and
+the floor and everything that moves it have one owner, `paging.zig`.
+
+A paging application's substack starts empty, and an operand check that
 comes up short pages the missing values across the floor: the frame retains
 a copy of each and the floor lowers to include it, so a quotation's
 consumption is the sum of what its words required, which is the stack effect
@@ -1038,10 +1043,11 @@ collected for a cleave), and pushes the originals back in order, in place on
 the stack. The guards therefore keep no checkpoint: a test takes what it
 requires and the finalize gives it back. Paging floors nest by chaining
 through the floor beneath, and the hard floor beneath them all is where
-underflow still happens. Every site that saves or restores the stack base
-also saves which paging floor is innermost, so a boundary or isolated
-application inside one blocks paging while it is open and restores it when
-it closes. A frame alternates its applications between a paging floor its
+underflow still happens. Whatever sets a floor over another, whether a
+boundary, an isolated application, or a paging one, keeps the floor beneath as
+one value, a hard depth or a paging floor, so a boundary or isolated
+application inside a paging floor blocks paging while it is open and restores
+it when it closes. A frame alternates its applications between a paging floor its
 context keeps in place and the caller's stack by naming the launch of each,
 so a guard runs its tests and actions under one frame.
 

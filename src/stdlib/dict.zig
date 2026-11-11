@@ -490,7 +490,7 @@ const MergeWithApplication = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     state: heap.Owned(*MergeWithState),
 
-    fn application(self: *MergeWithApplication) machine.IsolatedApplication {
+    fn application(self: *MergeWithApplication) machine.Application {
         const state = self.state.borrow();
         return machine.typedApplication(self, state.quotation.borrow(), state.site, 3);
     }
@@ -572,7 +572,7 @@ const MergeWithWorkDriver = struct {
                             stack.pushBorrowed(right_value);
                             const application_state = try fiber.allocator.create(MergeWithApplication);
                             application_state.* = .{ .state = .init(self.state.take()) };
-                            try fiber.beginIsolatedApplication(application_state.application());
+                            try fiber.beginApplication(application_state.application(), .isolated);
                             return .completed;
                         }
                         state.pairs.borrow()[state.pair_count] = .{ key, right_value };

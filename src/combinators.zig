@@ -7,6 +7,7 @@ const dict = @import("dict.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
+const paging = @import("paging.zig");
 const poll = @import("poll.zig");
 const support = @import("kernel_support.zig");
 
@@ -14,7 +15,7 @@ const Value = value.Value;
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
-const Application = machine.IsolatedApplication;
+const Application = machine.Application;
 const ApplicationStep = machine.ApplicationStep;
 const StackWindow = machine.StackWindow;
 
@@ -87,28 +88,16 @@ fn whileWord(fiber: *Fiber) MachineError!void {
         .provenance_target = provenance_target,
         .phase = .condition,
     };
-    try fiber.beginPagingApplication(
-        state.application(state.condition.borrow()),
-        &state.paged.borrowMut().floor,
-    );
+    try fiber.beginApplication(state.application(state.condition.borrow()), .{ .paging = &state.paged.borrowMut().floor });
 }
 
 fn selectedProvenance(target: ?*const machine.ApplicationProvenanceTarget) machine.ApplicationProvenance {
     return if (target) |selected| .{ .selected_target = selected } else .boundary;
 }
 
-/// The boolean a test left on top of its region. A test that left nothing
-/// took its result from beneath, like any operand its words required: the
-/// value is paged now, so the restore gives it back.
-fn popTestResult(fiber: *Fiber, paged: *PagedControl) MachineError!bool {
-    var result = if (fiber.stack.items.len != paged.base) try fiber.popValue() else taken: {
-        try paged.floor.originals.ensureUnusedCapacity(fiber.allocator, 1);
-        var taken = try fiber.popProtected();
-        heap.retainValue(taken.item.borrow());
-        paged.floor.originals.appendAssumeCapacity(.{ .value = taken.item.borrow(), .shared = taken.original });
-        paged.base -= 1;
-        break :taken taken.item;
-    };
+/// The boolean a test left for its guard.
+fn popTestResult(fiber: *Fiber, paged: *paging.Region) MachineError!bool {
+    var result = try paged.takeTestResult(fiber);
     defer result.deinit();
     return boolValue(fiber, &result);
 }
@@ -151,7 +140,7 @@ fn SuspendedWork(comptime State: type) type {
 const WhileState = struct {
     condition: heap.Owned(*Header),
     body: heap.Owned(*Header),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -223,7 +212,7 @@ const TimesState = struct {
         return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
     }
     fn step(self: *TimesState) ApplicationStep {
-        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = 0 } };
+        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = 0, .launch = .in_place } };
     }
 
     pub fn resumeApplication(
@@ -259,7 +248,7 @@ fn times(fiber: *Fiber) MachineError!void {
         .remaining = @intCast(count_value.borrow().int),
         .word = fiber.active_word,
     };
-    try fiber.beginInlineApplication(state.application());
+    try fiber.beginApplication(state.application(), .in_place);
 }
 
 /// The protected value rides in a continuation rather than in a capture
@@ -267,7 +256,7 @@ fn times(fiber: *Fiber) MachineError!void {
 fn dip(fiber: *Fiber) MachineError!void {
     var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var protected = try fiber.popProtected();
+    var protected = try paging.takeProtected(fiber);
     defer protected.item.deinit();
     try startDip(fiber, &quotation, &protected);
 }
@@ -281,13 +270,13 @@ pub fn dipBelowHead(fiber: *Fiber) MachineError!void {
     defer quotation.deinit();
     var head = try fiber.popValue();
     defer head.deinit();
-    var protected = try fiber.popProtected();
+    var protected = try paging.takeProtected(fiber);
     defer protected.item.deinit();
     try fiber.pushOwned(head.take());
     try startDip(fiber, &quotation, &protected);
 }
 
-fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *Fiber.Protected) MachineError!void {
+fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *paging.Protected) MachineError!void {
     const state = try fiber.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
@@ -296,7 +285,7 @@ fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *Fiber.Protec
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
     };
-    try fiber.beginInlineApplication(state.application());
+    try fiber.beginApplication(state.application(), .in_place);
 }
 
 const DipState = struct {
@@ -322,7 +311,7 @@ const DipState = struct {
     ) MachineError!?ApplicationStep {
         fiber.active_word = self.word;
         fiber.chargeContinuationStep();
-        try fiber.pushReturned(self.protected.take(), self.original);
+        try paging.returnProtected(fiber, self.protected.take(), self.original);
         return null;
     }
 
@@ -338,9 +327,8 @@ fn dipN(fiber: *Fiber) MachineError!void {
     if (count_value.borrow() != .int) return fiber.typeError("an int count");
     if (count_value.borrow().int < 0) return fiber.fail(.domain, "dip-n count must be nonnegative");
     const count: usize = @intCast(count_value.borrow().int);
-    // Checked before the buffers are sized by it; `require` would page early
-    // and lose which values `popProtected` finds to be originals.
-    if (count > fiber.reachable()) return fiber.failShort(count);
+    // Checked before the buffers are sized by it, and without paging.
+    try paging.requireReachable(fiber, count);
     // Each allocation precedes taking the quotation, and a later failure
     // retires the earlier ones: a struct literal would leak them.
     var control = blk: {
@@ -368,7 +356,7 @@ fn dipN(fiber: *Fiber) MachineError!void {
 fn launchDipN(fiber: *Fiber, control: *heap.Owned(DipControl)) MachineError!void {
     const state = try fiber.allocator.create(DipNState);
     state.* = .{ .control = .init(control.take()) };
-    try fiber.beginInlineApplication(state.application());
+    try fiber.beginApplication(state.application(), .in_place);
 }
 
 /// `dip-n` takes its `count` protected values off the stack one at a time,
@@ -396,7 +384,7 @@ const DipControl = struct {
             .take => {
                 const end = self.index + work.take(self.count - self.index);
                 while (self.index != end) : (self.index += 1) {
-                    var taken = try fiber.popProtected();
+                    var taken = try paging.takeProtected(fiber);
                     self.protected.borrowMut().appendOwned(taken.item.take());
                     if (taken.original) self.originals.set(self.index);
                 }
@@ -414,7 +402,7 @@ const DipControl = struct {
                     self.index -= 1;
                     const item = self.protected.borrow().values()[self.index];
                     heap.retainValue(item);
-                    try fiber.pushReturned(item, self.originals.isSet(self.index));
+                    try paging.returnProtected(fiber, item, self.originals.isSet(self.index));
                 }
                 if (self.index != 0) return .pending;
                 return .finished;
@@ -487,7 +475,7 @@ fn above(fiber: *Fiber) MachineError!void {
 fn below(fiber: *Fiber) MachineError!void {
     return startPaged(fiber, .below);
 }
-fn startPaged(fiber: *Fiber, placement: Placement) MachineError!void {
+fn startPaged(fiber: *Fiber, placement: paging.Placement) MachineError!void {
     var quotation = try fiber.popQuotation();
     defer quotation.deinit();
     const state = try fiber.allocator.create(PagedState);
@@ -497,166 +485,12 @@ fn startPaged(fiber: *Fiber, placement: Placement) MachineError!void {
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
     };
-    try fiber.beginPagingApplication(state.application(), &state.paged.borrowMut().floor);
+    try fiber.beginApplication(state.application(), .{ .paging = &state.paged.borrowMut().floor });
 }
-
-/// What becomes of the region a paged quotation leaves.
-const Placement = enum {
-    /// The restored originals go on top of the region.
-    above,
-    /// The restored originals go beneath the region.
-    below,
-    /// The region is dropped: a test's result was read from it, and the
-    /// test's only lasting effect on the stack is none.
-    discarded,
-    /// The region moves into the control's `results`, in stack order, for
-    /// a cleave to put back once every quotation has run.
-    collected,
-};
-
-/// A quotation run over a paging floor, and the bounded phases that put the
-/// stack back together once it returns: originals a `dip` returned are swept
-/// to the top of the region and dropped, the region is placed, and the paged
-/// originals come back in their original order. Each phase is user-sized and
-/// advances only as far as the turn's budget allows, and no phase takes a
-/// live value off the stack except to release it or to collect it.
-///
-/// A restored original the floor beneath holds too goes back as that
-/// floor's returned original, so restoring is never producing: a word that
-/// only looked at a value beneath the floor did not produce it.
-const PagedControl = struct {
-    placement: Placement,
-    floor: machine.PagingFloor = .{ .floor = 0, .beneath = .{ .hard = 0 } },
-    /// What a collected region held, in stack order.
-    results: heap.InlineList(Value, 4, .{ .int = 0 }) = .empty,
-    /// The region's base: the floor as the quotation left it.
-    base: usize = 0,
-    /// How many originals come back: the floor's count before they do.
-    restored: usize = 0,
-    sweep: machine.StackSweep = .from(0),
-    /// The reversal that orders a collected region, or the three that rotate
-    /// the restored originals beneath the region.
-    spans: [3]machine.StackReversal = @splat(.none),
-    reversed: usize = 0,
-    phase: Phase = .begin,
-
-    const Phase = enum { begin, sweep, drop, clear, reverse, gather, surface, rotate, finished };
-
-    fn init(placement: Placement) PagedControl {
-        return .{ .placement = placement };
-    }
-    /// Readies the floor for another quotation once a restore has finished.
-    fn reset(self: *PagedControl) void {
-        std.debug.assert(self.floor.paged() == 0 and self.floor.returned.items.len == 0);
-        self.phase = .begin;
-        self.reversed = 0;
-    }
-
-    fn advance(self: *PagedControl, fiber: *Fiber) MachineError!bool {
-        const work = fiber.workBudget();
-        while (true) switch (self.phase) {
-            .begin => {
-                self.restored = self.floor.paged();
-                const returned = self.floor.returned.items;
-                if (self.placement == .discarded) {
-                    self.phase = .clear;
-                } else if (returned.len == 0) {
-                    self.placeRegion(fiber);
-                } else {
-                    // The region lies above the floor beneath, whose returned
-                    // originals all sit below it, so only this floor's records
-                    // name slots in it.
-                    self.sweep = .from(returned[0]);
-                    self.phase = .sweep;
-                }
-            },
-            .sweep => {
-                if (!fiber.sweepStack(&self.sweep, self.floor.returned.items, work)) return false;
-                self.phase = .drop;
-            },
-            .drop => {
-                const returned = &self.floor.returned;
-                const granted = work.take(returned.items.len);
-                fiber.discard(granted);
-                returned.shrinkRetainingCapacity(returned.items.len - granted);
-                if (returned.items.len != 0) return false;
-                self.placeRegion(fiber);
-            },
-            .clear => {
-                const granted = work.take(fiber.stack.items.len - self.base);
-                fiber.discard(granted);
-                if (fiber.stack.items.len != self.base) return false;
-                self.floor.returned.clearRetainingCapacity();
-                self.phase = .surface;
-            },
-            .reverse => {
-                if (!fiber.reverseStack(&self.spans[0], work)) return false;
-                try self.results.ensureUnusedCapacity(fiber.allocator, fiber.stack.items.len - self.base);
-                self.phase = .gather;
-            },
-            .gather => {
-                const granted = work.take(fiber.stack.items.len - self.base);
-                for (0..granted) |_| {
-                    var item = try fiber.popValue();
-                    self.results.appendAssumeCapacity(item.take());
-                }
-                if (fiber.stack.items.len != self.base) return false;
-                self.phase = .surface;
-            },
-            .surface => {
-                const originals = &self.floor.originals;
-                const granted = work.take(originals.len());
-                for (0..granted) |_| {
-                    const index = self.restored - originals.len();
-                    const original = originals.pop().?;
-                    try fiber.pushOwned(original.value);
-                    // Beneath the region, the originals end up at the base
-                    // once rotated; the records name those slots now.
-                    const position = if (self.placement == .below) self.base + index else fiber.stack.items.len - 1;
-                    if (original.shared) try fiber.noteReturned(position);
-                }
-                if (originals.len() != 0) return false;
-                if (self.placement != .below) {
-                    self.phase = .finished;
-                    continue;
-                }
-                const top = fiber.stack.items.len;
-                const split = top - self.restored;
-                self.spans = .{ .of(self.base, split), .of(split, top), .of(self.base, top) };
-                self.phase = .rotate;
-            },
-            .rotate => {
-                while (self.reversed != self.spans.len) : (self.reversed += 1) {
-                    if (!fiber.reverseStack(&self.spans[self.reversed], work)) return false;
-                }
-                self.phase = .finished;
-            },
-            .finished => return true,
-        };
-    }
-
-    /// The region holds only results now; what happens to it is the placement.
-    fn placeRegion(self: *PagedControl, fiber: *const Fiber) void {
-        switch (self.placement) {
-            .above, .below => self.phase = .surface,
-            .collected => {
-                self.spans[0] = .of(self.base, fiber.stack.items.len);
-                self.phase = .reverse;
-            },
-            .discarded => unreachable,
-        }
-    }
-
-    pub fn retire(self: *PagedControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.results.items()) |item| releases.releaseValue(item);
-        self.results.deinit(allocator);
-        self.floor.retire(releases, allocator);
-    }
-};
 
 const PagedState = struct {
     quotation: heap.Owned(*Header),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     phase: enum { run, restored } = .run,
@@ -750,10 +584,7 @@ fn launchCleave(fiber: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!vo
     const state = owned.borrow();
     if (state.phase == .done) return owned.deinit(fiber.releases, fiber.allocator);
     state.running = true;
-    try fiber.beginPagingApplication(
-        owned.take().application(state.quotation()),
-        &state.paged.borrowMut().floor,
-    );
+    try fiber.beginApplication(owned.take().application(state.quotation()), .{ .paging = &state.paged.borrowMut().floor });
 }
 
 /// Finishes a cleave's validation when the turn ran out, then launches it.
@@ -825,7 +656,7 @@ const CleaveQuotations = union(enum) {
 /// input stays a value rather than becoming code.
 const CleaveState = struct {
     quotations: heap.Owned(CleaveQuotations),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     /// The most inputs any quotation consumed: consumption is a prefix from
@@ -942,7 +773,7 @@ const CleaveState = struct {
 /// place.
 const CondState = struct {
     clauses: heap.Owned(Value),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -1062,9 +893,9 @@ const CondDriver = struct {
         fiber.retireDriver(self);
         const first = state.clause(0);
         if (count == 1) {
-            try fiber.beginInlineApplication(state.application(first));
+            try fiber.beginApplication(state.application(first), .in_place);
         } else {
-            try fiber.beginPagingApplication(state.application(first), &state.paged.borrowMut().floor);
+            try fiber.beginApplication(state.application(first), .{ .paging = &state.paged.borrowMut().floor });
         }
         return .detached;
     }
@@ -1082,7 +913,7 @@ const LinrecState = struct {
     base: heap.Owned(*Header),
     pre: heap.Owned(*Header),
     post: heap.Owned(*Header),
-    paged: heap.Owned(PagedControl),
+    paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -1183,7 +1014,7 @@ fn linrec(fiber: *Fiber) MachineError!void {
         .word = fiber.active_word,
         .provenance_target = provenance_target,
     };
-    try fiber.beginPagingApplication(state.application(), &state.paged.borrowMut().floor);
+    try fiber.beginApplication(state.application(), .{ .paging = &state.paged.borrowMut().floor });
 }
 
 const IterationKind = enum { each, zip_with, for_word, fold, scan, lex_cmp, infra };
@@ -1207,7 +1038,7 @@ const IterationState = struct {
         return application_value;
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
-        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = seeded } };
+        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = seeded, .launch = .isolated } };
     }
 
     pub fn resumeApplication(
@@ -1442,6 +1273,7 @@ const UpdateApplication = struct {
         return .{ .apply = .{
             .quotation = self.state.borrow().quotation.borrow(),
             .seeded = 1,
+            .launch = .isolated,
         } };
     }
 
@@ -1505,7 +1337,7 @@ const UpdateWorkDriver = struct {
         state.phase = .apply;
         const application_state = try fiber.allocator.create(UpdateApplication);
         application_state.* = .{ .state = .init(self.state.take()) };
-        try fiber.beginIsolatedApplication(application_state.application());
+        try fiber.beginApplication(application_state.application(), .isolated);
         return .completed;
     }
 
@@ -1920,7 +1752,7 @@ const StencilBootstrapDriver = struct {
         fiber.retireDriver(self);
         stack.pushBorrowed(window_owner.borrow());
         state_owner = null;
-        try fiber.beginIsolatedApplication(state.application());
+        try fiber.beginApplication(state.application(), .isolated);
         return .detached;
     }
 
@@ -2071,6 +1903,7 @@ const UnfoldState = struct {
                 .step => self.step_quotation.borrow(),
             },
             .seeded = 1,
+            .launch = .isolated,
         } };
     }
 
@@ -2240,7 +2073,7 @@ fn unfold(fiber: *Fiber) MachineError!void {
     };
     try fiber.pushBorrowed(state.current.borrow());
     state_owner = null;
-    try fiber.beginIsolatedApplication(state.application());
+    try fiber.beginApplication(state.application(), .isolated);
 }
 
 const InfraResultDriver = struct {
@@ -2300,7 +2133,7 @@ const InfraBootstrapDriver = struct {
         std.debug.assert(self.stack.complete());
         const application = iteration.application(@intCast(iteration.count));
         _ = self.iteration.take();
-        try fiber.beginIsolatedApplication(application);
+        try fiber.beginApplication(application, .isolated);
         return .completed;
     }
 
@@ -2378,7 +2211,7 @@ fn startUnaryIteration(fiber: *Fiber, kind: IterationKind) MachineError!void {
     if (kind == .each) state.results = .init(try .init(fiber.releases, count));
     try state.pushInputs(fiber);
     state_owner = null;
-    try fiber.beginIsolatedApplication(state.application(1));
+    try fiber.beginApplication(state.application(1), .isolated);
 }
 
 fn zipWith(fiber: *Fiber) MachineError!void {
@@ -2427,7 +2260,7 @@ fn zipWithGeneric(fiber: *Fiber) MachineError!void {
     state.results = .init(try .init(fiber.releases, count));
     try state.pushInputs(fiber);
     state_owner = null;
-    try fiber.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
 fn fold(fiber: *Fiber) MachineError!void {
@@ -2472,7 +2305,7 @@ fn fold1Generic(fiber: *Fiber) MachineError!void {
     try fiber.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
     try fiber.pushBorrowed(list.atUnchecked(state.left.borrow(), 1));
     state_owner = null;
-    try fiber.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
 fn lexCmpWith(fiber: *Fiber) MachineError!void {
@@ -2508,7 +2341,7 @@ fn lexCmpWithGeneric(fiber: *Fiber) MachineError!void {
     const state = state_owner.?;
     try state.pushInputs(fiber);
     state_owner = null;
-    try fiber.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
 /// Two lists whose shared prefix is equal order by length.
@@ -2566,7 +2399,7 @@ fn startFold(fiber: *Fiber, kind: IterationKind) MachineError!void {
     try fiber.pushOwned(accumulator.take());
     try fiber.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
     state_owner = null;
-    try fiber.beginIsolatedApplication(state.application(2));
+    try fiber.beginApplication(state.application(2), .isolated);
 }
 
 fn infra(fiber: *Fiber) MachineError!void {

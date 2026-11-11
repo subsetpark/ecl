@@ -31,6 +31,8 @@ const module_lookup = @import("module_lookup.zig");
 const load = @import("load.zig");
 const failure_driver = @import("failure.zig");
 const module_construction = @import("module_construction.zig");
+const paging_api = @import("paging.zig");
+const PagingFloor = paging_api.PagingFloor;
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -477,8 +479,8 @@ const Boundary = struct {
     /// The locals depth on entry. `_dl` balances the normal path; a
     /// body that fails never reaches it, so unwinding restores this instead.
     locals_base: u32,
-    previous_base: u32,
-    previous_paging: ?*PagingFloor,
+    /// The floor this boundary's was set over.
+    beneath: paging_api.Beneath,
     previous_boundary: ?FrameIndex,
     word: intern.TraceWord,
     fn deinit(self: Boundary) void {
@@ -555,108 +557,6 @@ const EffectCheck = struct {
         self.provenance = .none;
     }
 };
-/// The floor of a paging application: its quotation runs on a substack that
-/// starts empty and takes operands from beneath on demand. When a word needs
-/// more operands than the substack holds, the fiber retains a copy of each
-/// missing value in `originals` and lowers the floor to include it, so the
-/// quotation consumes exactly what its words required: the stack effect it
-/// presents as a black box. Underflow remains the hard floor's beneath.
-///
-/// Restoring is not producing. A value `dip` took aside straight from
-/// across the floor returns as the same original, recorded here by its
-/// position until a later word requires it, and so does a value an inner
-/// restore puts back that this floor holds as an original too: one it paged
-/// for the inner floor, or one `dip` had returned to it. A finalize sweeps
-/// the recorded values out before it restores its own copies, so a word
-/// that only looked at a value beneath the floor did not produce it.
-pub const PagingFloor = struct {
-    /// This application's floor: the fiber's `stack_base` while it is the
-    /// innermost paging floor.
-    floor: usize,
-    beneath: Beneath,
-    /// Retained copies of the paged values, the one nearest the entry first.
-    /// A few live inline, so a small quotation pages without allocating.
-    originals: heap.InlineList(Original, 4, .{ .value = .{ .int = 0 }, .shared = false }) = .empty,
-    /// Positions of returned originals in the substack, ascending.
-    returned: std.ArrayList(u32) = .empty,
-
-    const Original = struct {
-        value: Value,
-        /// The floor beneath holds this value as an original as well, so a
-        /// restore puts it back as that floor's returned original.
-        shared: bool,
-    };
-
-    const Beneath = union(enum) {
-        hard: usize,
-        paging: *PagingFloor,
-    };
-
-    fn beneathFloor(self: *const PagingFloor) usize {
-        return switch (self.beneath) {
-            .hard => |base| base,
-            .paging => |outer| outer.floor,
-        };
-    }
-    /// The depth `require` compares against while this floor is innermost:
-    /// one past the highest returned original, or the floor itself.
-    fn watermark(self: *const PagingFloor) usize {
-        if (self.returned.items.len == 0) return self.floor;
-        return @as(usize, self.returned.items[self.returned.items.len - 1]) + 1;
-    }
-    /// Every returned original at or above `position` is consumed now.
-    fn dropReturnedFrom(self: *PagingFloor, position: usize) void {
-        while (self.returned.items.len != 0 and self.returned.items[self.returned.items.len - 1] >= position)
-            _ = self.returned.pop();
-    }
-    pub fn paged(self: *const PagingFloor) usize {
-        return self.originals.len();
-    }
-    /// Whether `position` is a returned original: the slot `dip` is about to
-    /// take, which then stays an original through its next return.
-    fn takeReturnedAt(self: *PagingFloor, position: usize) bool {
-        if (self.returned.items.len == 0) return false;
-        if (self.returned.items[self.returned.items.len - 1] != position) return false;
-        _ = self.returned.pop();
-        return true;
-    }
-    pub fn retire(self: *PagingFloor, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.originals.items()) |original| releases.releaseValue(original.value);
-        self.originals.deinit(allocator);
-        self.returned.deinit(allocator);
-    }
-};
-
-/// One in-place reversal of the stack span `[lo, hi)`, advanced under a
-/// work budget. Swapping inward from both ends keeps every slot live between
-/// steps, so a fiber torn down mid-reversal releases each value once.
-/// Rotating a block of the stack is three reversals.
-pub const StackReversal = struct {
-    lo: usize,
-    hi: usize,
-
-    pub const none: StackReversal = .{ .lo = 0, .hi = 0 };
-
-    pub fn of(lo: usize, hi: usize) StackReversal {
-        std.debug.assert(lo <= hi);
-        return .{ .lo = lo, .hi = hi };
-    }
-};
-/// One in-place sweep that carries the values at ascending stack positions
-/// to the top of the stack and closes the gaps beneath them in order,
-/// advanced under a work budget. Every step swaps rather than moves, so each
-/// slot stays live until the caller discards the swept top.
-pub const StackSweep = struct {
-    read: usize,
-    write: usize,
-    /// The next position to carry up.
-    next: usize = 0,
-
-    pub fn from(position: usize) StackSweep {
-        return .{ .read = position, .write = position };
-    }
-};
-
 pub const StackWindow = enum(u32) {
     _,
 
@@ -678,11 +578,10 @@ pub const ApplicationStep = union(enum) {
         quotation: *Header,
         seeded: u32,
         provenance: ApplicationProvenance = .boundary,
-        /// How the quotation runs: as this frame's application ran, in place
-        /// on the caller's stack, or over a paging floor the context keeps in
-        /// place. A guard alternates its tests over a floor with its actions
-        /// in place under one frame.
-        launch: ApplyLaunch = .inherited,
+        /// How the quotation runs. One frame may launch differently each
+        /// time: a guard alternates its tests over a paging floor with its
+        /// actions in place.
+        launch: Launch,
     },
     /// The callback installed bounded work which will launch a nested inline
     /// application. Reinsert this exact application continuation beneath that
@@ -690,7 +589,18 @@ pub const ApplicationStep = union(enum) {
     suspend_inline: *const ApplicationSuspension,
 };
 const ApplicationSuspension = opaque {};
-const ApplyLaunch = union(enum) { inherited, in_place, paging: *PagingFloor };
+/// How an application's quotation meets the stack beneath it. The three
+/// differ only in the floor: none, a hard one, or one that lowers on demand.
+const Launch = union(enum) {
+    /// On the caller's stack, with everything beneath in reach.
+    in_place,
+    /// Behind a hard floor at its seeded operands.
+    isolated,
+    /// Over a paging floor the application's context owns and keeps in place
+    /// until the application resumes, with the region above the lowered
+    /// floor as its window.
+    paging: *PagingFloor,
+};
 /// Opaque, non-dereferenced capability for one live application frame. The
 /// Fiber encodes a process-unique nonce with the frame index and validates
 /// both before use; ordinary callers can neither construct nor inspect it.
@@ -790,7 +700,7 @@ pub const ApplicationProvenance = union(enum) {
     boundary,
     selected_target: *const ApplicationProvenanceTarget,
 };
-pub const IsolatedApplication = struct {
+pub const Application = struct {
     quotation: *Header,
     context: *anyopaque,
     resume_fn: *const fn (*Fiber, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
@@ -803,7 +713,7 @@ pub const IsolatedApplication = struct {
     plan: ?*ResolutionPlan = null,
 
     /// Releases an application that never became a frame.
-    fn discard(self: IsolatedApplication, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+    fn discard(self: Application, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         self.deinit_fn(releases, allocator, self.context);
     }
 };
@@ -838,7 +748,7 @@ pub fn typedApplication(
     quotation: *Header,
     site: ExecutionSite,
     seeded: u32,
-) IsolatedApplication {
+) Application {
     const Context = @TypeOf(driver);
     const pointer = switch (@typeInfo(Context)) {
         .pointer => |info| info,
@@ -859,10 +769,8 @@ pub fn typedApplication(
 }
 const ApplicationMode = union(enum) {
     in_place: StackWindow,
-    isolated: struct {
-        previous_base: StackWindow,
-        previous_paging: ?*PagingFloor,
-    },
+    /// The floor the application's hard floor was set over.
+    isolated: paging_api.Beneath,
     /// The floor lives in the combinator state the frame's context names,
     /// which stays in place until the application resumes.
     paging: *PagingFloor,
@@ -1096,7 +1004,7 @@ const StackReplacement = struct {
         std.debug.assert(outputs.len == self.output_count);
         std.debug.assert(self.fiber.stack.items.len == self.base + self.input_count);
         for (self.fiber.stack.items[self.base..]) |item| self.fiber.releases.releaseValue(item);
-        self.fiber.noteShrink(self.base);
+        self.fiber.floor.noteShrink(self.base);
         self.fiber.stack.items.len = self.base;
         for (outputs) |item| self.fiber.stack.appendAssumeCapacity(item);
     }
@@ -1497,14 +1405,8 @@ pub const Fiber = struct {
     resolutions: WordResolutions = .{},
     max_frames: usize = 0,
     entry_base: usize,
-    stack_base: usize,
-    /// The innermost paging floor, when the current floor is one; it then
-    /// equals `stack_base`.
-    paging: ?*PagingFloor = null,
-    /// What `require` compares against: the stack base, or one past the
-    /// highest returned original of the innermost paging floor. Never above
-    /// the stack depth. Every floor change goes through `setFloor`.
-    guard: usize,
+    /// How far down a word may reach, and what `require` compares against.
+    floor: paging_api.StackFloor = .{},
     boundary_index: ?FrameIndex = null,
     /// The innermost active source effect check. Effect-check frames form an
     /// intrusive chain so nested checks restore their predecessor exactly.
@@ -1565,8 +1467,6 @@ pub const Fiber = struct {
             .arguments = arguments,
             .cancelled = cancelled,
             .entry_base = stack.items.len,
-            .stack_base = 0,
-            .guard = 0,
             // SAFETY: this field supplies storage only. `driver_slot_busy` is the only
             // thing that says a driver lives here, and every read of the slot
             // goes through `acquireInlineDriver`, which writes the whole
@@ -1835,7 +1735,7 @@ pub const Fiber = struct {
                 continue;
             }
             self.boundary_index = null;
-            self.setFloor(0, null);
+            self.floor.set(0, null);
             return .{ .complete = true, .consumed = consumed };
         }
         return .{ .complete = false, .consumed = consumed };
@@ -1956,8 +1856,8 @@ pub const Fiber = struct {
         // floor; nothing requires operands in between, but the pointer must
         // not outlive the state the frame's context owns.
         if (frame == .application and frame.application.mode == .paging and
-            self.paging == frame.application.mode.paging)
-            self.restoreFloorBeneath(frame.application.mode.paging);
+            self.floor.paging == frame.application.mode.paging)
+            self.floor.restore(frame.application.mode.paging.beneath);
         frame.deinit(self.releases, self.allocator);
     }
 
@@ -2485,151 +2385,16 @@ pub const Fiber = struct {
         self.pendingFailure().addData(.scope, .{ .symbol = .{ .name = named } });
     }
     pub fn available(self: *const Fiber) usize {
-        return self.stack.items.len - self.stack_base;
+        return self.stack.items.len - self.floor.base;
     }
     pub inline fn require(self: *Fiber, count: usize) MachineError!void {
         // One compare on the hot path: `guard` is the stack base unless the
         // innermost paging floor has returned originals above it.
-        if (count > self.stack.items.len - self.guard) return self.requireAcross(count);
+        if (count > self.stack.items.len - self.floor.guard) return self.requireAcross(count);
     }
     noinline fn requireAcross(self: *Fiber, count: usize) MachineError!void {
         @branchHint(.cold);
-        if (!try self.coverAcross(count)) return self.failUnderflow(count);
-    }
-    /// Makes `count` operands available across the innermost paging floor,
-    /// when there is one: a returned original the count reaches is consumed
-    /// now, and values the substack lacks are paged in from beneath. False
-    /// when a hard floor leaves the count short; the caller names the
-    /// failure.
-    fn coverAcross(self: *Fiber, count: usize) error{OutOfMemory}!bool {
-        const floor = self.paging orelse return false;
-        std.debug.assert(floor.floor == self.stack_base);
-        const held = self.stack.items.len - self.stack_base;
-        if (count <= held) {
-            floor.dropReturnedFrom(self.stack.items.len - count);
-            self.guard = floor.watermark();
-            return true;
-        }
-        return self.page(floor, count - held);
-    }
-    /// Pages `needed` values across `innermost`, and across each enclosing
-    /// paging floor whose region cannot cover them, so every floor the
-    /// values crossed accounts for them. Nothing changes when a hard floor
-    /// leaves the count short. The copies are bounded by the requiring
-    /// word's arity.
-    fn page(self: *Fiber, innermost: *PagingFloor, needed: usize) error{OutOfMemory}!bool {
-        var floor = innermost;
-        var deficit = needed;
-        while (true) {
-            try floor.originals.ensureUnusedCapacity(self.allocator, deficit);
-            const held = floor.floor - floor.beneathFloor();
-            if (deficit <= held) break;
-            switch (floor.beneath) {
-                .hard => return false,
-                .paging => |outer| {
-                    deficit -= held;
-                    floor = outer;
-                },
-            }
-        }
-        floor = innermost;
-        deficit = needed;
-        while (true) {
-            const held = floor.floor - floor.beneathFloor();
-            // The floor beneath holds a value as an original too when it
-            // lies beneath that floor, which the next round pages it across,
-            // or when it is one of that floor's returned originals.
-            const outer: ?*PagingFloor = switch (floor.beneath) {
-                .hard => null,
-                .paging => |outer| outer,
-            };
-            var records: usize = if (outer) |enclosing| enclosing.returned.items.len else 0;
-            for (1..deficit + 1) |offset| {
-                const position = floor.floor - offset;
-                const item = self.stack.items[position];
-                heap.retainValue(item);
-                var shared = false;
-                if (outer) |enclosing| {
-                    if (position < enclosing.floor) {
-                        shared = true;
-                    } else {
-                        while (records != 0 and enclosing.returned.items[records - 1] > position) records -= 1;
-                        shared = records != 0 and enclosing.returned.items[records - 1] == position;
-                    }
-                }
-                floor.originals.appendAssumeCapacity(.{ .value = item, .shared = shared });
-            }
-            floor.floor -= deficit;
-            floor.dropReturnedFrom(innermost.floor);
-            if (deficit <= held) break;
-            deficit -= held;
-            floor = floor.beneath.paging;
-        }
-        // Enclosing floors that paged nothing may still hold returned
-        // originals inside the region the innermost floor now covers.
-        while (floor.beneath == .paging) {
-            floor = floor.beneath.paging;
-            floor.dropReturnedFrom(innermost.floor);
-        }
-        self.setFloor(innermost.floor, innermost);
-        return true;
-    }
-    /// The floor an application or boundary sets or restores, and whether it
-    /// is a paging one. `guard` follows.
-    fn setFloor(self: *Fiber, base: usize, paging: ?*PagingFloor) void {
-        self.stack_base = base;
-        self.paging = paging;
-        self.guard = if (paging) |floor| floor.watermark() else base;
-    }
-    /// Restores the floor beneath a paging one.
-    fn restoreFloorBeneath(self: *Fiber, floor: *const PagingFloor) void {
-        switch (floor.beneath) {
-            .hard => |base| self.setFloor(base, null),
-            .paging => |outer| self.setFloor(outer.floor, outer),
-        }
-    }
-    /// A shrink to `depth` that no operand check covered consumes any
-    /// returned original at or above it.
-    fn noteShrink(self: *Fiber, depth: usize) void {
-        if (depth >= self.guard) return;
-        const floor = self.paging.?;
-        floor.dropReturnedFrom(depth);
-        self.guard = floor.watermark();
-    }
-    pub const Protected = struct { item: heap.OwnedValue, original: bool };
-    /// Pops the top operand for `dip` to hold aside, reporting whether it is
-    /// an original of the innermost paging floor: paged in just now for this
-    /// purpose, or returned by an inner `dip`. `pushReturned` puts it back.
-    pub fn popProtected(self: *Fiber) MachineError!Protected {
-        var original = false;
-        if (self.paging) |floor| {
-            const depth = self.stack.items.len;
-            if (depth == self.stack_base) {
-                if (!try self.coverAcross(1)) return self.failUnderflow(1);
-                original = true;
-            } else if (floor.takeReturnedAt(depth - 1)) {
-                self.guard = floor.watermark();
-                original = true;
-            }
-        }
-        return .{ .item = try self.popValue(), .original = original };
-    }
-    /// Consumes `item`, recording it as a returned original when `dip` took
-    /// it as one and the same paging floor is still innermost.
-    pub fn pushReturned(self: *Fiber, item: Value, original: bool) error{OutOfMemory}!void {
-        try self.pushOwned(item);
-        if (original) try self.noteReturned(self.stack.items.len - 1);
-    }
-    /// Records the value at `position` as a returned original of the
-    /// innermost paging floor, when there is one: a value put back that the
-    /// floor holds as an original too, so the first operand check that
-    /// reaches it consumes it and a finalize sweeps it out. Positions are
-    /// recorded ascending, above every record the floor holds.
-    pub fn noteReturned(self: *Fiber, position: usize) error{OutOfMemory}!void {
-        const floor = self.paging orelse return;
-        std.debug.assert(position >= floor.watermark());
-        try floor.returned.append(self.allocator, @intCast(position));
-        self.guard = position + 1;
+        if (!try paging_api.cover(self, count)) return self.failUnderflow(count);
     }
     noinline fn failUnderflow(self: *Fiber, count: usize) MachineError {
         @branchHint(.cold);
@@ -2665,18 +2430,6 @@ pub const Fiber = struct {
         self.pendingFailure().addData(.needed, .{ .int = @intCast(count) });
         self.pendingFailure().addData(.available, .{ .int = @intCast(self.available()) });
         return failure;
-    }
-    /// The hard floor beneath every paging floor: where underflow happens.
-    fn hardFloor(self: *const Fiber) usize {
-        var floor = self.paging orelse return self.stack_base;
-        while (true) switch (floor.beneath) {
-            .hard => |base| return base,
-            .paging => |outer| floor = outer,
-        };
-    }
-    /// The values a paging application could reach: everything above the hard floor.
-    pub fn reachable(self: *const Fiber) usize {
-        return self.stack.items.len - self.hardFloor();
     }
     /// Fails as an operand check short by `count` values would.
     pub fn failShort(self: *Fiber, count: usize) MachineError {
@@ -2758,42 +2511,8 @@ pub const Fiber = struct {
     }
     pub fn discard(self: *Fiber, count: usize) void {
         std.debug.assert(self.available() >= count);
-        self.noteShrink(self.stack.items.len - count);
+        self.floor.noteShrink(self.stack.items.len - count);
         for (0..count) |_| self.releases.releaseValue(self.takeStackOwned().?);
-    }
-    /// Advances `span` as far as `work` allows; true once it is reversed.
-    pub fn reverseStack(self: *Fiber, span: *StackReversal, work: *poll_api.WorkBudget) bool {
-        const items = self.stack.items;
-        std.debug.assert(span.hi <= items.len);
-        const granted = work.take((span.hi - span.lo) / 2);
-        for (0..granted) |_| {
-            span.hi -= 1;
-            std.mem.swap(Value, &items[span.lo], &items[span.hi]);
-            span.lo += 1;
-        }
-        return span.hi - span.lo < 2;
-    }
-    /// Advances `sweep` over the stack above its read position as far as
-    /// `work` allows; true once the values at `positions` occupy the top of
-    /// the stack, the values between them packed beneath in their order.
-    pub fn sweepStack(
-        self: *Fiber,
-        sweep: *StackSweep,
-        positions: []const u32,
-        work: *poll_api.WorkBudget,
-    ) bool {
-        const items = self.stack.items;
-        const granted = work.take(items.len - sweep.read);
-        for (0..granted) |_| {
-            if (sweep.next < positions.len and positions[sweep.next] == sweep.read) {
-                sweep.next += 1;
-            } else {
-                std.mem.swap(Value, &items[sweep.write], &items[sweep.read]);
-                sweep.write += 1;
-            }
-            sweep.read += 1;
-        }
-        return sweep.read == items.len;
     }
     pub fn reserveStack(self: *Fiber, count: usize) error{OutOfMemory}!StackReservation {
         try self.stack.ensureUnusedCapacity(self.allocator, count);
@@ -2823,7 +2542,7 @@ pub const Fiber = struct {
     /// no raw stack storage escapes this boundary.
     pub fn visibleOperandBorrowed(self: *const Fiber, index: usize) Value {
         std.debug.assert(index < self.available());
-        return self.stack.items[self.stack_base + index];
+        return self.stack.items[self.floor.base + index];
     }
     /// Consumes `item`. The stack owns it on success; the release domain owns
     /// its constant-time retirement if stack growth fails.
@@ -3237,42 +2956,19 @@ pub const Fiber = struct {
         }
         return false;
     }
-    /// Starts one quotation application behind a base-index stack barrier.
-    /// `application.context` is consumed on every path. Its callback either
-    /// returns null (finished) or transfers that same ownership into the next
-    /// application.
-    pub fn beginIsolatedApplication(
-        self: *Fiber,
-        application: IsolatedApplication,
-    ) MachineError!void {
-        return self.beginApplication(application, .isolated, null);
+    /// Starts one quotation application. `application.context` is consumed
+    /// on every path. Its callback either returns null (finished) or
+    /// transfers that same ownership into the next application.
+    pub fn beginApplication(self: *Fiber, application: Application, launch: Launch) MachineError!void {
+        return self.launchApplication(application, launch, null);
     }
-    /// Runs the quotation above a paging floor owned by the application's
-    /// context, which must keep `floor` in place until the application
-    /// resumes with the region above the lowered floor as its window.
-    pub fn beginPagingApplication(
-        self: *Fiber,
-        application: IsolatedApplication,
-        floor: *PagingFloor,
-    ) MachineError!void {
-        return self.beginApplication(application, .{ .paging = floor }, null);
-    }
-    /// The inline counterpart keeps the current stack and scope visible with the same bounded,
-    /// defunctionalized continuation representation.
-    pub fn beginInlineApplication(
-        self: *Fiber,
-        application: IsolatedApplication,
-    ) MachineError!void {
-        return self.beginApplication(application, .in_place, null);
-    }
-    const ApplicationLaunch = union(enum) { in_place, isolated, paging: *PagingFloor };
     /// Hands back an isolated application scope. One that never bound and is
     /// unshared is parked for the next application over the same parent rather
     /// than retired; anything else takes the ordinary path.
-    fn beginApplication(
+    fn launchApplication(
         self: *Fiber,
-        application: IsolatedApplication,
-        launch: ApplicationLaunch,
+        application: Application,
+        launch: Launch,
         inherited: ?intern.TraceWord,
     ) MachineError!void {
         self.require(application.seeded) catch |err| {
@@ -3304,10 +3000,7 @@ pub const Fiber = struct {
             .site = application.site,
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
-                .isolated => .{ .isolated = .{
-                    .previous_base = @fromBackingInt(@intCast(@as(u32, @intCast(self.stack_base)))),
-                    .previous_paging = self.paging,
-                } },
+                .isolated => .{ .isolated = self.floor.beneath() },
                 .paging => |floor| .{ .paging = floor },
             },
             .traced_word = inherited_trace,
@@ -3318,13 +3011,8 @@ pub const Fiber = struct {
         try self.appendFrame(&continuation);
         switch (launch) {
             .in_place => {},
-            .isolated => self.setFloor(base.base(), null),
-            .paging => |floor| {
-                std.debug.assert(floor.paged() == 0 and floor.returned.items.len == 0);
-                floor.floor = base.base();
-                floor.beneath = if (self.paging) |outer| .{ .paging = outer } else .{ .hard = self.stack_base };
-                self.setFloor(base.base(), floor);
-            },
+            .isolated => self.floor.set(base.base(), null),
+            .paging => |floor| self.floor.enter(floor, base.base()),
         }
         if (select_initial) {
             const target = provenance_target.?;
@@ -3492,7 +3180,7 @@ pub const Fiber = struct {
             return self.readLocal(operand);
         }
         if (name == locals.load) {
-            if (operand > self.stack.items.len - self.guard and !try self.coverAcross(operand))
+            if (operand > self.stack.items.len - self.floor.guard and !try paging_api.cover(self, operand))
                 return self.failBinding(operand);
             return self.bindLocals(operand);
         }
@@ -3669,8 +3357,7 @@ pub const Fiber = struct {
             .mode = mode,
             .stack_base = stack_base,
             .locals_base = @intCast(self.locals.items.len),
-            .previous_base = @intCast(self.stack_base),
-            .previous_paging = self.paging,
+            .beneath = self.floor.beneath(),
             .previous_boundary = self.boundary_index,
             .word = word,
         } });
@@ -3680,7 +3367,7 @@ pub const Fiber = struct {
             return error.OutOfMemory;
         };
         self.boundary_index = index;
-        self.setFloor(stack_base, null);
+        self.floor.set(stack_base, null);
     }
     fn appendFrame(self: *Fiber, owned: *OwnedFrame) error{OutOfMemory}!void {
         try self.frames.append(self.allocator, owned.frame.?);
@@ -3734,7 +3421,7 @@ pub const Fiber = struct {
         if (observed != 0) {
             const boundary = self.popFrame(.boundary);
             self.boundary_index = boundary.previous_boundary;
-            self.setFloor(boundary.previous_base, boundary.previous_paging);
+            self.floor.restore(boundary.beneath);
             self.active_word = boundary.word;
             boundary.deinit();
             return self.failFmt(
@@ -3760,7 +3447,7 @@ pub const Fiber = struct {
         releaseCurrent(self);
         const boundary = self.popFrame(.boundary);
         self.boundary_index = boundary.previous_boundary;
-        self.setFloor(boundary.previous_base, boundary.previous_paging);
+        self.floor.restore(boundary.beneath);
         self.active_word = boundary.word;
         return boundary.mode.module.image;
     }
@@ -4513,7 +4200,7 @@ fn prepareEffectCheck(
     };
     // Inputs beneath a paging floor count: the word pages them in as
     // originals, like any operand check across the floor.
-    if (self.available() < declared.inputs) _ = try self.coverAcross(declared.inputs);
+    if (self.available() < declared.inputs) _ = try paging_api.cover(self, declared.inputs);
     const available: u32 = @intCast(self.available());
     if (available < declared.inputs) {
         self.active_word = word;
@@ -4552,18 +4239,18 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
             const continuation = self.popFrame(.application);
             var application_selection = continuation.selection;
             defer application_selection.deinit(self.releases);
-            const launch: Fiber.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
+            const launch: Launch, const base: StackWindow = switch (continuation.mode) {
                 .in_place => |window| .{ .in_place, window },
                 .isolated => |isolated| blk: {
-                    const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(self.stack_base))));
-                    self.setFloor(isolated.previous_base.base(), isolated.previous_paging);
+                    const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(self.floor.base))));
+                    self.floor.restore(isolated);
                     break :blk .{ .isolated, window };
                 },
                 .paging => |floor| blk: {
                     // The window is the region above the lowered floor; the
                     // driver's finalize reads it with the floor beneath active.
                     const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(floor.floor))));
-                    self.restoreFloorBeneath(floor);
+                    self.floor.restore(floor.beneath);
                     break :blk .{ .{ .paging = floor }, window };
                 },
             };
@@ -4583,12 +4270,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
             };
             if (next) |step| switch (step) {
                 .apply => |application| {
-                    const relaunch: Fiber.ApplicationLaunch = switch (application.launch) {
-                        .inherited => launch,
-                        .in_place => .in_place,
-                        .paging => |floor| .{ .paging = floor },
-                    };
-                    try self.beginApplication(.{
+                    try self.launchApplication(.{
                         .quotation = application.quotation,
                         .context = continuation.context,
                         .resume_fn = continuation.resume_fn,
@@ -4597,7 +4279,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         .seeded = application.seeded,
                         .provenance = application.provenance,
                         .plan = continuation.plan,
-                    }, relaunch, continuation.traced_word);
+                    }, application.launch, continuation.traced_word);
                     return true;
                 },
                 .suspend_inline => |suspension| {
@@ -4672,7 +4354,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
             const boundary = self.popFrame(.boundary);
             std.debug.assert(@backingInt(self.boundary_index.?) == self.frames.items.len);
             self.boundary_index = boundary.previous_boundary;
-            self.setFloor(boundary.previous_base, boundary.previous_paging);
+            self.floor.restore(boundary.beneath);
             self.active_word = boundary.word;
             switch (boundary.mode) {
                 .attempt => {
@@ -4698,7 +4380,7 @@ fn finishEffectCheck(self: *Fiber, check: *EffectCheck) MachineError!void {
         .at_least => if (observed >= check.expected_depth) return,
     }
     self.active_word = check.word;
-    const observed_relative = observed - self.stack_base;
+    const observed_relative = observed - self.floor.base;
     const failure = self.failFmt(
         .contract,
         "{s} declared ({d} -- {s}{d}); seeded {d}, observed {d}",
@@ -4940,8 +4622,7 @@ pub const Unwind = struct {
             boundary_index: FrameIndex,
             stack_base: usize,
             locals_base: usize,
-            previous_base: usize,
-            previous_paging: ?*PagingFloor,
+            beneath: paging_api.Beneath,
             previous_boundary: ?FrameIndex,
         },
 
@@ -4963,16 +4644,10 @@ pub const Unwind = struct {
                 .caught => |caught| caught.stack_base,
             };
         }
-        fn previousBase(self: Target) usize {
+        fn beneath(self: Target) paging_api.Beneath {
             return switch (self) {
-                .uncaught => 0,
-                .caught => |caught| caught.previous_base,
-            };
-        }
-        fn previousPaging(self: Target) ?*PagingFloor {
-            return switch (self) {
-                .uncaught => null,
-                .caught => |caught| caught.previous_paging,
+                .uncaught => .{ .hard = 0 },
+                .caught => |caught| caught.beneath,
             };
         }
         fn previousBoundary(self: Target) ?FrameIndex {
@@ -5013,8 +4688,7 @@ pub const Unwind = struct {
                         .boundary_index = boundary_index,
                         .stack_base = boundary.stack_base,
                         .locals_base = boundary.locals_base,
-                        .previous_base = boundary.previous_base,
-                        .previous_paging = boundary.previous_paging,
+                        .beneath = boundary.beneath,
                         .previous_boundary = boundary.previous_boundary,
                     } } };
                 } else nearest.* = boundary.previous_boundary;
@@ -5044,7 +4718,7 @@ pub const Unwind = struct {
                     fiber.releases.releaseValue(fiber.stack.pop().?);
                     return .pending;
                 }
-                fiber.setFloor(target.previousBase(), target.previousPaging());
+                fiber.floor.restore(target.beneath());
                 fiber.boundary_index = target.previousBoundary();
                 return switch (target) {
                     .uncaught => .uncaught,

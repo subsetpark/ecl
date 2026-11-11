@@ -53,7 +53,7 @@ const source_groups = [_]SourceGroup{
     // public surface or a machine-minted view; none shares the machine's
     // file-level exemptions.
     embeddedGroup(true, &.{
-        "error_value.zig", "park.zig", "resolution_plan.zig", "module_lookup.zig", "word_resolutions.zig", "load.zig", "failure.zig", "module_construction.zig",
+        "error_value.zig", "park.zig", "resolution_plan.zig", "module_lookup.zig", "word_resolutions.zig", "load.zig", "failure.zig", "module_construction.zig", "paging.zig",
     }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
