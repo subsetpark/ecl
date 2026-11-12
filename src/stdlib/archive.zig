@@ -86,7 +86,6 @@ const MemberDriver = struct {
         releases.releaseValue(self.archive);
     }
     pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.state == .reading) {
             self.metadata = (document.next(self.archive, &self.path) catch |err| switch (err) {
                 error.Closed => return fiber.fail(.io, "archive resource is closed"),
@@ -142,7 +141,6 @@ const MemberReadDriver = struct {
         releases.releaseValue(self.archive);
     }
     pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.state == .reading) {
             const count = document.read(self.archive, self.buffer) catch return fiber.fail(.io, "archive resource is closed");
             self.state = .{ .bytes = .init(fiber.allocator, self.buffer[0..count]) };
@@ -182,7 +180,6 @@ const Sha256Driver = struct {
     text: ?heap.Owned(storage.ByteStringMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *Sha256Driver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.bytes == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return fiber.failAtIndex(
@@ -538,6 +535,9 @@ const UnpackDriver = struct {
         },
         cleanup: CleanupWork,
     };
+
+    /// Polls while its operation runs; its cleanup must finish under cancellation.
+    pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *UnpackDriver) MachineError!machine.WorkProgress {
         return self.completion.advance(fiber, self);

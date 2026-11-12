@@ -228,7 +228,6 @@ const NextEntry = struct {
         releases.releaseValue(self.cursor);
     }
     pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.state == .reading) switch (directory.next(self.cursor)) {
             .pending => return .stepped,
             .closed => return fiber.fail(.io, "directory enumeration is closed"),
@@ -289,7 +288,6 @@ const CommitDirectory = struct {
         releases.releaseValue(self.stage);
     }
     pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.state == .sealing) switch (if (self.kind == .directory) directory.commit(self.stage) else directory.commitFile(self.stage)) {
             .closed => return failResource(fiber, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", .io),
             .failed => |reason| return failResource(fiber, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", reason),
@@ -352,7 +350,6 @@ const WriteChunk = struct {
         releases.releaseValue(self.payload);
     }
     pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         switch (self.state) {
             .validating => |*index| {
                 const count = self.payload.list.length();
@@ -826,6 +823,9 @@ const Driver = struct {
         cleanup_values: struct { values: []Value, built: usize, index: usize },
         cleanup_done,
     };
+
+    /// Polls while its operation runs; its cleanup must finish under cancellation.
+    pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *Driver) MachineError!machine.WorkProgress {
         return self.completion.advance(fiber, self);

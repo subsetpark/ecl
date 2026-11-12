@@ -36,7 +36,6 @@ const DeclarationsDriver = struct {
     output: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
     pub fn advance(fiber: *machine.Fiber, self: *DeclarationsDriver) machine.MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const forms = self.forms.borrow();
         const end = self.index + fiber.workBudget().take(forms.list.length() - self.index);
         while (self.index < end) : (self.index += 1) {

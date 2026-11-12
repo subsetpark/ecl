@@ -221,7 +221,6 @@ pub fn ReadDriver(comptime Backend: type) type {
         }
 
         pub fn advance(fiber: *machine.Fiber, self: *Self) machine.MachineError!machine.WorkProgress {
-            try fiber.pollKernel();
             if (self.state == .reading) {
                 const count = switch (try self.backend.read(fiber, self.buffer)) {
                     .pending => {
@@ -291,7 +290,6 @@ pub fn WriteDriver(comptime Backend: type) type {
         }
 
         pub fn advance(fiber: *machine.Fiber, self: *Self) machine.MachineError!machine.WorkProgress {
-            try fiber.pollKernel();
             if (self.state == .encoding) {
                 const progress = self.state.encoding.encoder.advance(fiber.workBudget()) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,

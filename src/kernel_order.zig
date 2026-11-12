@@ -576,7 +576,6 @@ const CompareDriver = struct {
     right: heap.Owned(Value),
     cursor: heap.Owned(CompareCursor),
     pub fn advance(fiber: *Fiber, self: *CompareDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .not_comparable => fiber.typeError(incomparable_pair),
@@ -636,7 +635,6 @@ const GradeDriver = struct {
     };
 
     pub fn advance(fiber: *Fiber, self: *GradeDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
             .validate => |*index| {
@@ -856,7 +854,6 @@ const DistinctDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *DistinctDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) {
             if (self.materializer) |*materializer| {
@@ -1032,7 +1029,6 @@ const GroupDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *GroupDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (!work.exhausted()) switch (self.phase) {
             .validate => {

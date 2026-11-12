@@ -117,7 +117,6 @@ const ConstructionDriver = struct {
 
     pub fn advance(via: *Construction, self: *ConstructionDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         switch (self.state.borrowMut().*) {
             .rescope => |*rescope| {
                 const progress = try rescope.cursor.borrowMut().advance(fiber.workBudget());
@@ -194,7 +193,6 @@ const ModuleSealDriver = struct {
 
     pub fn advance(via: *Construction, self: *ModuleSealDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.phase.borrowMut().*) {
             .group => |*cursor| switch (cursor.advance() catch |err| switch (err) {
@@ -290,7 +288,6 @@ const ModuleCompletionDriver = struct {
     cursor: heap.Owned(modules.Registry.RegistrationCursor),
 
     pub fn advance(fiber: *Fiber, self: *ModuleCompletionDriver) MachineError!WorkProgress {
-        try fiber.pollKernel();
         return advanceRegistration(fiber, self.cursor.borrowMut());
     }
 };

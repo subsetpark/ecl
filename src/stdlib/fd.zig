@@ -68,7 +68,6 @@ const BytesPredicate = struct {
     index: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *BytesPredicate) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         const source = self.source.borrow();
         const count: usize = @intCast(source.list.length());

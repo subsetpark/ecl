@@ -147,7 +147,6 @@ const StackSnapshotDriver = struct {
     result: ?heap.Owned(Value) = null,
 
     pub fn advance(fiber: *Fiber, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (!self.snapshot.borrowMut().advanceCapture(fiber)) return .stepped;
 
         if (self.materializer == null) {
@@ -196,7 +195,6 @@ const MatchDriver = struct {
     cursor: heap.Owned(equal.MatchCursor),
 
     pub fn advance(fiber: *Fiber, self: *MatchDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |matches| .{ .output = .{ .int = @intFromBool(matches) } },
@@ -244,7 +242,6 @@ const ParseDriver = struct {
     encoder: heap.Owned(kernel_storage.StringEncoder),
     source: ?heap.Owned([]u8) = null,
     pub fn advance(fiber: *Fiber, self: *ParseDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.source == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return fiber.fail(.domain, "string contains an invalid Unicode scalar"),
@@ -317,7 +314,6 @@ const SpellingCharsDriver = struct {
     text: heap.Owned(kernel_storage.Utf8Materializer),
 
     pub fn advance(fiber: *Fiber, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (self.text.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return invalidUtf8(fiber, "spelling is not valid UTF-8"),
@@ -342,7 +338,6 @@ const BytesToCharsDriver = struct {
     text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.bytes == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return fiber.typeError(chars_expected),
@@ -390,7 +385,6 @@ const StringBytesDriver = struct {
     materializer: ?heap.Owned(list.ByteListMaterializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *StringBytesDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.encoded == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return fiber.fail(.domain, "string contains an invalid Unicode scalar"),
@@ -417,7 +411,6 @@ const ByteListIdentityDriver = struct {
     encoder: heap.Owned(kernel_storage.ByteVectorEncoder),
 
     pub fn advance(fiber: *Fiber, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return fiber.typeError("a string or byte list"),
@@ -478,7 +471,6 @@ const SymbolConversionDriver = struct {
     } = .none,
 
     pub fn advance(fiber: *Fiber, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.spelling == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return fiber.fail(.domain, "string contains an invalid Unicode scalar"),
@@ -625,7 +617,6 @@ const CodepointsDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *CodepointsDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         const source = self.source.borrow();
         const count: usize = @intCast(source.list.length());
@@ -712,7 +703,6 @@ const NumericParseDriver = struct {
     target: NumericParseTarget,
 
     pub fn advance(fiber: *Fiber, self: *NumericParseDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.classifier.advance()) {
             .pending => {},
@@ -783,7 +773,6 @@ fn ConversionEachDriver(comptime target: NumericParseTarget) type {
         classifier: ?lexer.ClassifyCursor = null,
 
         pub fn advance(fiber: *Fiber, self: *Self) MachineError!machine.WorkProgress {
-            try fiber.pollKernel();
             const work = fiber.workBudget();
             const count: usize = @intCast(self.input.list.length());
             while (self.index != count) {
@@ -869,7 +858,6 @@ const RaiseDriver = struct {
     phase: enum { lookup, trace, finish } = .lookup,
 
     pub fn advance(fiber: *Fiber, self: *RaiseDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         switch (self.phase) {
             .lookup => {
                 if (self.field_index == self.keys.len) {
@@ -957,7 +945,6 @@ const PpDriver = struct {
     render: heap.Owned(printer.OwnedStringCursor),
 
     pub fn advance(fiber: *Fiber, self: *PpDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.render.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |rendered| completed: {
@@ -988,7 +975,6 @@ const StackDisplayDriver = struct {
     written: usize = 0,
 
     pub fn advance(fiber: *Fiber, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (!self.snapshot.borrowMut().advanceCapture(fiber)) return .stepped;
 
         var prefix_buffer: [64]u8 = undefined;
@@ -1067,7 +1053,6 @@ const PrinDriver = struct {
     encoder: heap.Owned(kernel_storage.StringEncoder),
 
     pub fn advance(fiber: *Fiber, self: *PrinDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return fiber.fail(
@@ -1108,7 +1093,6 @@ const GetenvDriver = struct {
     text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
 
     pub fn advance(fiber: *Fiber, self: *GetenvDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         if (self.name == null) switch (self.encoder.borrowMut().advance(fiber.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return fiber.fail(

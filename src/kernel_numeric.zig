@@ -192,7 +192,6 @@ const PervadeDriver = struct {
     cursor: heap.Owned(PervadeCursor),
 
     pub fn advance(fiber: *Fiber, self: *PervadeDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.cursor.borrowMut().advance(fiber, fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
@@ -4179,7 +4178,6 @@ const ReductionDriver = struct {
         fiber: *Fiber,
         self: *ReductionDriver,
     ) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         // A fold whose accumulator and next row are typed leaves of one class
         // and length applies whole rows here, each charged before it runs,
         // without a cursor or a machine turn per row. Anything else, and any

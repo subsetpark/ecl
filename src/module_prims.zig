@@ -90,7 +90,6 @@ const DefmDriver = struct {
     doc: heap.Owned(Value) = .none,
 
     pub fn advance(fiber: *Fiber, self: *DefmDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.validation.advance()) {
             .pending => {},
@@ -148,7 +147,6 @@ const FileDriver = struct {
     text: heap.Owned(kernel_storage.TextMaterializer),
 
     pub fn advance(fiber: *Fiber, self: *FileDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         return switch (try self.text.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
@@ -259,7 +257,6 @@ const ImportDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *ImportDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) {
             if (self.module_name == null) switch (self.module_validation.advance()) {
@@ -488,7 +485,6 @@ const AliasDriver = struct {
     target: ?intern.ModuleName = null,
     cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
     pub fn advance(fiber: *Fiber, self: *AliasDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) {
             if (self.target == null) switch (self.target_validation.advance()) {
@@ -554,7 +550,6 @@ const QualifyDriver = struct {
     cursor: ?heap.Owned(intern.QualifiedCursor) = null,
 
     pub fn advance(fiber: *Fiber, self: *QualifyDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) {
             if (self.module_name == null) switch (self.module_validation.advance()) {
@@ -673,7 +668,6 @@ const ExportsDriver = struct {
     }
 
     pub fn advance(fiber: *Fiber, self: *ExportsDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .validate => |*validation| switch (validation.advance()) {
@@ -766,7 +760,6 @@ const ModuleDocDriver = struct {
     normalization: heap.Owned(definition_prims.DocumentNormalization) = .none,
 
     pub fn advance(fiber: *Fiber, self: *ModuleDocDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) {
             if (self.normalization.isPresent()) {
@@ -866,7 +859,6 @@ const WordsDriver = struct {
         try self.found.borrowMut().append(name);
     }
     pub fn advance(fiber: *Fiber, self: *WordsDriver) MachineError!machine.WorkProgress {
-        try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
             .visible => |*visible| switch (visible.borrowMut().advance()) {
