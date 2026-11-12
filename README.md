@@ -160,7 +160,11 @@ to format the whole buffer. Formatting partial ranges is not supported.
 
 ## Reference
 
-- [Language specification](design/SPEC.md): syntax and semantics.
-- [Standard library](design/STDLIB.md): words, stack effects, and examples.
+The following documents are partially or totally suitable for human
+consumption. The other design docs in this repo are written by AI.
+
+- [Getting Started](GETTING_STARTED.md)
+- [Language specification](design/SPEC.md)
+- [Standard library](design/STDLIB.md)
 
 ECL is distributed under the [BSD 3-Clause License](LICENSE).

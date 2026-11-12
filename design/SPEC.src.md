@@ -41,8 +41,8 @@ interpretation.
 
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
-name. Word occurrences retain the root their names are resolved in. Each word
-is resolved in its own root when it is reached, so a replacement reaches every
+name. Word occurrences retain the scope their names are resolved in. Each word
+is resolved in its own scope when it is reached, so a replacement reaches every
 later call, including calls from code defined before it.
 
 A unit is the boundary of failure and operand-stack rollback. Modules register
@@ -247,8 +247,8 @@ Reflection operations inspect binding metadata through separate mechanisms.
 
 ### Resolution
 
-Every word is resolved when it is reached, in the root that occurrence was
-written in (see Bindings and scope), against the current definitions and module
+Every word is resolved when it is reached, in the scope that occurrence was
+written in (see [Where a word resolves](#where-a-word-resolves)), against the current definitions and module
 registrations. This holds alike for top-level source, for definition bodies,
 and for every quotation applied at run time, by `call`, a combinator,
 `@attempt`, or as a task's body. A quotation applied at run time is not checked
@@ -266,7 +266,7 @@ A definition written to the session is published as `def` runs. Every word of
 its body outside a nested quotation must already resolve, so the body cannot
 refer forward to a later definition, and a misspelled word fails the
 definition. A qualified word whose module is not registered yet is the other
-exception: its lookup is deferred until the word is reached. The definition's own name, written in the root it is published
+exception: its lookup is deferred until the word is reached. The definition's own name, written in the scope it is published
 into, is the exception: it calls the definition itself.
 
 A definition written to a module image is staged by the module's construction
@@ -279,7 +279,7 @@ A body running when a word it calls is replaced may run the old definition for
 earlier calls and the new one for later ones. There is no historical view: a
 unit, a task, and an `@attempt` see the definitions current as each word is
 reached. Explicit operations on names — `execute`, `doc`, `effect`, `which`,
-and `see` — resolve the supplied symbol in its own root against the current
+and `see` — resolve the supplied symbol in its own scope against the current
 definitions each time they run. 
 
 A word written in a module image resolves in that image, so code written in an
@@ -288,30 +288,13 @@ replaced, while a qualified name reaches the registration current when it runs.
 Executing a word written in an image that was never published and has since
 been discarded is a `` `domain `` error.
 
-The reader links each symbol occurrence to the root the source is read into:
-the session, or core for the prelude. Moving, copying, concatenating, or
-splicing values preserves each occurrence's own root, so one quotation may
-contain symbols from several roots, and a quotation has no single resolution
-root. A module body is the one exception: `@defm` re-homes every occurrence in
-its body to the new image, whatever root each carried and however the body was
-built, so session code placed in a module body no longer reaches the session
-(see Modules). A symbol that `qualify`, `symbol`,
-`intern`, or native code builds links to the root of the activation that built
-it, so a quotation assembled from strings resolves where it was assembled
-rather than where it is later called. 
-
 A reader-produced aggregate may separately retain **source spans**, which
 record where the aggregate and its reader-built descendants were read. Spans
 support diagnostics and reflection; they are not an AST, a captured
-environment, or a quotation-wide resolution root. Runtime aggregate
+environment, or a quotation-wide resolution scope. Runtime aggregate
 reconstruction does not acquire spans. Resolution context, spans, and
 provenance are semantic metadata on stored occurrences and aggregates, but
 none is part of value identity.
-
-ECL therefore has syntactic closure without value capture: reader-authored
-identifiers retain their lookup scopes, while quotation values capture no
-bindings or ordinary values. An unannotated runtime-created word retains the
-dynamic behavior described above.
 
 ### Errors
 
@@ -460,9 +443,9 @@ order.
 
 ## Bindings and scope
 
-### Roots and names
+### Scopes and names
 
-Definitions live in *roots*. There are three kinds:
+Definitions live in *scopes*. There are three kinds:
 
 ```text
 core           frozen; primitives and the prelude
@@ -502,72 +485,64 @@ first use. `@defm` with a standard-library module name is `` `domain ``, as is
 `alias` with one as either the alias or its target. A dotted name below one,
 such as `dict.extra`, is an ordinary module name.
 
-Every activation has a **current root**. A word belonging to a module runs with
-that module's image as its current root; every other word, whether a session
-definition, a core primitive, or a prelude word, runs in its caller's root.
-Outside any module word the current root is the session, or the image under
-construction in a module's construction body. The current root decides where
-definition words write, what `*module*` reports, and the root a symbol built at
+Every activation has a **current scope**. A word belonging to a module runs with
+that module's image as its current scope; every other word, whether a session
+definition, a core primitive, or a prelude word, runs in its caller's scope.
+Outside any module word the current scope is the session, or the image under
+construction in a module's construction body. The current scope decides where
+definition words write, what `*module*` reports, and the scope a symbol built at
 run time links to. A core word such as `*module*` written in an escaped
-quotation runs in its caller's root, so it reports the caller's module, or is
-`` `domain `` at the session root.
+quotation runs in its caller's scope, so it reports the caller's module, or is
+`` `domain `` when the current scope is the session.
 
-### Binding model
+### Where a word resolves
 
-There is one namespace and one binding kind. A name binds an executable body
-plus metadata, and reference always invokes the body. Values are bound by
-capturing them in bodies. Public and private definitions differ in visibility,
-not invocation semantics. Native and builtin definitions may have different
-representations but expose the same binding model.
+Every word occurrence resolves first in the scope it was written in, and if
+there's no binding in that scope, then in core.
 
-- ``(body) `name def`` binds a word: reference applies the body. The body
-  must be a list (a non-list is an error directing to `set`); a list of
-  plain data is legal and yields a multi-value constant word.
-- ``annotation? value `name set`` binds a constant. It is sugar, defined in ecl
-  as `swap wrap swap def`: the value is wrapped, so the published body is
-  `(value)`, or ``(`value)`` when the value is a word.
-  Reference applies that body and pushes the captured value, quotations included — the capture is
-  inert, so nothing in it executes or resolves. ``v `name set`` is therefore
-  observationally ``v wrap `name def``: the sugar synthesizes no
-  annotation of its own, while an annotation beneath `v` is preserved for
-  `def` to consume. `which` reports the resulting public `def`, while `see`
-  prints its captured body, preceded by the annotation when one is
-  present; an unannotated `set` has no effect or documentation, and nothing
-  distinguishes it from the corresponding `wrap` plus `def` spelling. `set`
-  assigns the environment and introduces no lexical binding. For ordinary local
-  values, prefer stack flow or locals.
-- Redefinition (`def` or `set` over an existing name) replaces the
-  complete definition: omitting an effect or docstring clears the old one.
-  Every later call reaches the new definition, including calls from code
-  defined before it.
-- `see` prints the resolved binding's combined annotation, when present,
-  followed by its body through the standard source formatter. It omits the
-  navigation header, name, and `def`/`defp` terminator; `which` reports binding
-  and effect metadata, `doc` returns documentation, and `effect` returns the
-  declared effect as an annotation list, or `()` when none was declared.
-  `` `m exports `` returns module `m`'s public word names as sorted symbols
-  (`` `core exports `` lists core's), `` `m module-doc `` returns its
-  documentation, and `stdlib` returns the embedded standard-library module
-  names.
-- Names are introduced and replaced, never removed. No word removes a
-  definition or a module registration during a Session: a shadowed core word
-  stays reachable as `core.name`, and a new Session starts with no top-level
-  definitions.
-- `def`, `defp`, `set`, `setp`, `import`, and `importp` write the current
-  root, which is the session for top-level code and the image for a module's
-  construction body. An image accepts them only while it is under
-  construction: inside a word of a sealed module, where the current root is
-  that module's image, every one of these is `` `domain ``. A word that
-  belongs to no module writes its caller's current root. Every quotation a unit runs, under any combinator or `@attempt`, may
-  define; a definition is an environment effect, and like IO it survives the
-  failure of the `@attempt` that made it. A task runs in its spawner's root
-  without owning it, so inside a task every one of these is `` `domain ``.
-- `defp`/`setp`/`importp` are the private forms, legal only inside a module
-  body (see Modules); at top level they are errors.
-- Because `set`/`setp` are sugar, their failures are raised by the words
-  they call: an underflowing `set` is `` `underflow `` from `swap`, and a
-  non-symbol or reserved name is raised by `def`/`defp`. The error kind is
-  unchanged; the trace names `set`/`setp` as the parent.
+An occurrence gets its scope in one of three ways:
+
+- The reader gives a word the scope its source is read into: the session, or
+  core for the prelude.
+- `@defm` replaces that scope, for every word in a module body, with the new
+  image (see [Construction and definitions](#construction-and-definitions)).
+- A symbol built at run time by `qualify`, `symbol`, `intern`, or native code
+  takes the current scope of the activation that built it, so a quotation
+  assembled from strings resolves where it was assembled, not where it is
+  later called. 
+
+Individual words link to their own scopes; thus a quotation could consist of
+words which resolve in different contexts. ECL therefore has syntactic closure
+without value capture: a word keeps the scope it was written in, while a
+quotation value captures no bindings and no ordinary values.
+
+Two consequences follow:
+
+#### Core words can't have their behaviour changed
+
+A primitive or prelude definition was written in core, and thus the words it
+invokes are resolved there only. The words *can* be shadowed in session code,
+but the shadow will only apply within the session. 
+
+```ecl
+  1 wrap                                  
+[1] # wrap is defined as (() cons)
+  (pop pop 42) `cons def 1 wrap          
+[1] # `cons` has been shadowed in session scope, 
+    # but wrap was defined in the core and thus retains its semantics
+  (pop pop 42) `cons def 1 [] cons
+42 # inside the session, `cons` has a new sense
+  (pop pop 42) `cons def (() cons) `wrap def 1 wrap    
+42 # other words defined in the session scope also pick up the new sense
+```
+
+#### Code passed between scopes resolves where it was written 
+
+Any word which takes a quotation can execute the quotation *without* changing
+that quotation's semantics, even if the word and the quotation were defined in
+different places (eg., in a module and the session, or in the session and in
+core...). This is the quality of "syntactic closure": quotation *bindings* are
+stable when used as callbacks, even absent of lexical scoping.
 
 ### Definition annotations
 
@@ -580,49 +555,26 @@ A definition may place one annotation quotation immediately before its body:
 (before -- after : "Documentation.") (body) `name def
 ```
 
-The annotation is ordinary quotation data — no special grammar — and is
-recognized only when it contains a top-level word `--` or `:`. Nested
-markers and the quoted symbols `` `-- ``/`` `: `` are inert. A recognized
-annotation is validated as a whole before the binding publishes: at most
-one marker of each kind, `--` before `:`, only slots (see
-[Quotation slots](#quotation-slots)) around `--`, and one string
-after `:`. A malformed recognized annotation is a
-`` `domain `` error. The quotation adjacent to the name is unconditionally the
-body; only the value beneath it is considered for annotation recognition.
-`set`/`setp` wrap their value before `def`/`defp` sees it,
-so marker words belonging to the captured value sit nested inside the body
-and remain inert. A separate annotation beneath that value is still visible
-to `def`/`defp`, giving constants the same optional metadata as words.
+The annotation is ordinary quotation data and is recognized only when it
+contains a top-level word `--` or `:`. Nested markers and the quoted symbols ``
+`-- ``/`` `: `` are inert. A recognized annotation is validated as a whole
+before the binding publishes: at most one marker of each kind, `--` before `:`,
+and one string after `:`. A malformed recognized annotation is a `` `domain ``
+error. 
 
 Annotations are optional everywhere. Module `def`/`defp` accept the same four
 forms as top-level `def`: no annotation, effect only, documentation only, or
-both. A top-level effect is reflective metadata only; a module word's declared
-effect is a live contract, checked dynamically against the observed effect when
-application crosses a module boundary (violation: `` `contract ``). An omitted
-module effect means there is no such check, and so does a standard-library
-word's: the standard library's effects are reflective metadata, and a call with
-too few values fails inside the word, as the code it runs reports it. This
-source-language relaxation does not weaken the native ABI, whose `Call` effect
-and documentation remain mandatory; the shipped prelude keeps its stronger
-repository policy requiring meaningful documentation.
-
-Documentation has canonical form. Publication trims source-only indentation,
-folds physical line breaks within prose to spaces, collapses a paragraph
-boundary to one blank line, and preserves each `-`-prefixed Markdown item on
-its own logical line with its continuations folded in. A paragraph without
-items whose lines do not all start at one column, such as an example, is laid
-out by hand: it keeps its lines and their indentation past the documentation's
-margin. A first line beside the opening quote has no column of its own. `doc`
-returns this canonical string, so source formatting cannot change reflective
-documentation.
-Strings anywhere else retain their exact decoded codepoints.
+both. A top-level effect is reflective metadata only, whereas a module word's
+declared effect functions as a runtime arity contract, checked dynamically
+against the observed effect when application crosses a module boundary
+(violation: `` `contract ``). An omitted module effect means there is no such
+check. 
 
 #### Variable rows
 
 The token `...` stands for a variable row: zero or more values whose count
 the effect does not fix. Each portion of an effect may hold one `...`, at any
-position among its named slots, and the named slots of that portion become a
-minimum:
+position among its named slots: 
 
 ```ecl
 (result on-ok on-err -- ...) (body) `case def
@@ -630,50 +582,26 @@ minimum:
 (x (... -- ...) -- ... x) (body) `peek def
 ```
 
-A row in the before portion declares that the word consumes at least its
-named before slots and an unknown number more. A row in the after portion
-declares that the word leaves at least its named after slots, with an unknown
-number of further values where the row sits. The effect remains a genuine
-partial contract, checked as far as its named slots allow: the named before
-slots are checked at entry; with a fixed before portion, the word must leave
-exactly its named after slots, or at least them when the after portion holds a
-row; with a row in the before portion, the depth the word leaves is not
-checked, since how many values it consumed is unknown. A word that would
-otherwise carry a documentation-only annotation regains input checking and
-honest reflection.
+Variable rows can appear on either side of the `--`, and denote that the
+word in question either consumes or pushes (respectively) a number of values
+not known statically, or variable dependent on runtime behaviour.
 
-A second `...` in either portion is `` `domain ``. A `...` on one side never
-refers to a `...` on the other: it is a placeholder, not a row variable, so
-`(... a -- ... b)` says nothing about which values survive. Named row
-variables in the Factor style (..a, ..b) are deferred to the static checker.
-The native ABI is deliberately excluded: a native `Call` takes exactly its
-declared inputs and `complete` requires the exact output tuple, so `...`
-anywhere in a `Call` effect is refused.
+These can be combined with ordinary stack effect variables: for instance, `(
+... x --- )` denotes that the word expects at least one value on the stack, but
+may consume more below it.
 
 #### Quotation slots
 
-A slot is a word or a nested effect. A nested effect describes the quotation
-that occupies that position, and may name it with a label: a word ending in
-`:` as its first element.
+An annotation slot is a word or a nested effect. A nested effect describes the
+quotation that occupies that position, including an optional label as the
+first element:
 
 ```ecl
 (collection (a -- b) -- collection) (body) `each def
 (bool (then: -- ...) (else: -- ...) -- ...) (body) `if def
 ```
 
-The bare form is the default; a label names a quotation the documentation
-must refer to, typically where a word takes several. Every slot is one
-element of the effect, so a nested effect never changes the word's arity or
-its boundary check. A nested effect follows the same slot grammar as the
-effect around it, including `...` and further nesting, and carries no
-documentation string. It is documentation only: names are scoped to their
-own level and carry no identity across levels, and nothing checks the
-quotation against it. An isolated combinator's dynamic contract is stated
-here and checked by the combinator, not by the annotation. A label anywhere
-but first in a nested effect is `` `domain ``, as is nesting more than eight
-levels deep.
-
-The exact names `--`, `:`, and `...` are reserved against binding: they remain
+The words `--`, `:`, and `...` are reserved against binding: they remain
 legal symbol values and can be built into annotations at runtime, but cannot be
 introduced as definitions, values, locals, module names, aliases, exports, or
 native entries. Binding attempts are `` `domain ``; use as a local name is a
@@ -692,15 +620,6 @@ descent:
 - Dicts pervade over their values, preserving keys. A dict with a dict
   aligns by key: matching keys combine, unmatched keys pass through
   unchanged (union with identity fill).
-- Symbols are not numeric: pervading into a quotation errors at the first
-  symbol leaf, except under `=` and `<>`, which are total. Two symbols are
-  equal when they name the same symbol, whatever occurrence metadata either
-  carries, and a symbol equals no number: `` [`a 1] [a 2] = `` is `[1 0]`.
-- Chars enter every numeric word (arithmetic, comparison, the bitwise and
-  wrapping words) as their codepoints and leave as ints: `char int +` and
-  `char char -` are ints, `char int =` compares the codepoint with the int,
-  and no numeric result is a char. `char` is the way back: over a list of
-  codepoints it is the string they spell.
 
 Selection operations use the same recursive shape rule on their selector
 rather than on the collection value. For a list collection, `at`, `put`, and
@@ -724,9 +643,8 @@ into those keys.
   `inf` or `-inf`: overflow (`1e308 10 *`), poles (`0 log` is `-inf`), and
   division of a nonzero number by zero (`1 0 /` is `inf`, `1 -0.0 /` is
   `-inf`). Any operation whose IEEE result would be NaN is `` `domain `` (e.g.
-  `-1 log`, `0 0 /`, `inf -inf +`). NaN therefore never exists, and nothing
-  outside the language can introduce one: a NaN float that a native extension
-  returns or puts in a port message is rejected as an invalid value.
+  `-1 log`, `0 0 /`, `inf -inf +`). NaN therefore never occurs in the
+  language.
 - `floor`, `ceil`, and `round` return int64 (`` `overflow `` when the result
   exceeds the range): their results are indices and mask material, and int-ness
   keeps integer pipelines integer. `pow` returns float.
@@ -741,7 +659,7 @@ into those keys.
   other pervasive word.
 - The wrapping words `+%`, `-%`, and `*%` are the integer sum, difference, and
   product modulo 2^64 in two's complement: where `+`, `-`, and `*` raise
-  `` `overflow ``, they wrap, as Zig's operators of the same spelling do. They are
+  `` `overflow ``, they wrap. They are
   int-only like the bitwise words (a char is its codepoint, a float is
   `` `type ``), and with
   `band` they give arithmetic modulo any power of two up to 2^64.
@@ -749,20 +667,12 @@ into those keys.
 ## Randomness
 
 Randomness is *counter-based*: a generator state is a two-element list `[key
-counter]`, and every draw is a pure function of it. `rand.int`, `rand.ints`,
-and `rand.float` each take a state and return the advanced state alongside the
-result, so a program's draws are reproducible by construction — running it
-twice from the same key produces the same values, and nothing hidden
-accumulates between submissions, tasks, or module loads.
+counter]`. `rand.int`, `rand.ints`, and `rand.float` each take a state and
+return the advanced state alongside the result.
 
-- `rand.entropy` is the only word that reads the host, and the only
-  nondeterministic word in the language. A program is reproducible unless
-  it explicitly seeds from `rand.entropy`; there is no ambient default seed
-  drawn at startup, and no word silently reaches a CSPRNG.
-- `rand.shuffle` and `rand.deal` thread the same state through a permutation
-  and a draw without replacement. Code that wants an ambient generator keeps
-  the state in an agent: ``[0 0] agent.start `rng set`` then
-  `rng (5 rand.int) agent.call` (see The standard library).
+`rand.entropy` is the only word that reads the host, and the only
+nondeterministic word in the language. A program is reproducible unless it
+explicitly seeds from `rand.entropy`.
 
 ## Chars and strings
 
@@ -772,483 +682,311 @@ codepoints. UTF-8 exists only at IO boundaries: source files and
 `io.prin`/`io.pp` encode and decode UTF-8, and invalid UTF-8 on input is an
 error. Char semantics are codepoint semantics: grapheme segmentation,
 normalization, non-ASCII case mapping, and locale collation are not provided,
-so composed and decomposed `"café"` have lengths 4 and 5. Symbols are interned
-at parse; strings are plain uninterned vectors.
+so composed and decomposed `"café"` have lengths 4 and 5. 
 
 ### Conversions
 
-Conversion between kinds is explicit and names its target. `chars` yields a
-value's text content as a string: a string unchanged, a symbol's
-spelling, a char as a one-element string, or a byte list decoded as UTF-8. A
-byte list is an integer list whose every element is 0 through 255; bytes that
-are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``. `bytes` is the
-inverse: it encodes a string as UTF-8 and returns a byte list unchanged. `int`
-accepts an int, a string in the integer-literal grammar, or a char, whose
-codepoint it returns. `float` accepts a float, an int, or a string in the
-numeric-literal grammar. A float is not accepted by `int`: `floor`, `round`,
-and `ceil` name the rounding. `char` accepts a char or a string, returned
-unchanged, an int in the Unicode scalar range, or a list of such ints and
-chars, which becomes the string they spell. A string outside the literal
-grammar is `` `parse ``; an int outside the scalar range is `` `domain ``; every
-other operand kind is `` `type ``. `str` remains the readable
-representation and `parse` remains the reader; neither is a conversion.
+Conversion between kinds is explicit. `chars` yields a value's text content as
+a string. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason
+`invalid-utf8 ``. `bytes` is the inverse: it encodes a string as UTF-8 and
+returns a byte list unchanged. `int` accepts an int, a string in the
+integer-literal grammar, or a char, whose codepoint it returns. `float` accepts
+a float, an int, or a string in the numeric-literal grammar. `char` accepts a
+char or a string, returned unchanged, an int in the Unicode scalar range, or a
+list of such ints and chars. A string outside the literal grammar is `` `parse
+``; an int outside the scalar range is `` `domain ``; every other operand kind
+is `` `type ``. `str` remains the readable representation and `parse` remains
+the reader; neither is a conversion.
 
-Symbol conversion is split so that programs cannot grow the interned name
-space by accident. `symbol` accepts a symbol unchanged and converts a
-string only when that spelling is already interned, failing `` `domain ``
-otherwise; every symbol a program can meaningfully compare against was
-interned when its source was read, so lookup is the common case. `intern`
-accepts the same operands and creates the symbol when the spelling is new.
-Both reject a string that is not a valid symbol spelling as `` `domain ``. The
-interned name space grows only through reading source, `parse`, `intern`, and
-the module loaders; words that materialize values from external data produce
-strings, never symbols. A symbol built from a string is the same value as
-the symbol read from source, so `"dup" symbol wrap call` executes `dup`.
+Symbol conversion is split so that programs cannot grow the interned name space
+by accident. `symbol` accepts a symbol unchanged and converts a string only
+when that spelling is already interned, failing `` `domain `` otherwise.
+`intern` accepts the same operands and creates the symbol when the spelling is
+new. Both reject a string that is not a valid symbol spelling as `` `domain ``.
+The interned name space grows only through reading source, `parse`, `intern`,
+and the module loaders; words that materialize values from external data
+produce strings, never symbols. A symbol built from a string is the same value
+as the symbol read from source, so `"dup" symbol wrap call` executes `dup`.
 
 ## Modules
 
 A module is code published under a name: a *registration* assigns an immutable
 module image to a public name, and a per-session registry maps symbols to
-registrations; files are transport. Modules are not values. The only way to
-make one is to define it under a name, and the only way to reach one is through
-that name.
+registrations. Modules are not values. 
 
 ### Operations
 
-- `@defm` is ``( annotation? values body `module-name -- )``. It validates the name before
-  evaluating anything: a non-symbol is `` `type ``; a name that is not a valid
-  module path, the reserved name `core`, or a standard-library module name is
-  `` `domain ``, and in each case the body never runs. With a valid name it runs the
-  body on a fresh, isolated environment, freezes the resulting image (its
-  environment and its definitions), and publishes that image as the
-  registration's new generation. A body that leaves one or more values on its
-  stack is `` `domain `` at completion and publishes nothing: a module body
-  defines words and keeps no state. Publication is an upsert: a missing name
-  creates its registration, and an existing name installs the new image as the
-  current generation and carries nothing else over; the latter is a reload,
-  whether `@defm` or `@load` performs it. A body failure publishes
-  nothing. A registry change during construction, such as an alias now
-  occupying the name, can still refuse publication after the body has run;
-  the body's external effects then survive under ordinary unit semantics.
-- ``(body) `name @defm`` runs the body as a unit on an empty stack. It runs
-  stack-isolated: it never sees or disturbs the caller's stack.
-- **A module documents itself with a documentation-only annotation.** A
-  module declares no stack effect, so the value beneath the operands is its
-  annotation exactly when it is `(: "text")`: a colon and one string. Any
-  other value there, including a list that would be a definition's annotation,
-  is the caller's data and stays on its stack. The documentation belongs to
-  the generation the construction publishes, so a reload states its own and a
-  reload without one leaves the module undocumented. A native module states its
-  documentation in its descriptor, and every embedded standard-library module
-  has one. `` `m module-doc `` returns the current generation's documentation in
-  canonical form, loading the module on first mention; a module without
-  documentation, or `` `core ``, is `` `domain ``.
-- Modules are constructible by building the body quotation programmatically
-  and enumerable and diffable through their names.
-- **Module names are validated paths.** A module name is one or
-  more nonempty binding-name segments joined by dots: `stats`, `core.utils`,
-  and `company.data.csv` are valid; leading, trailing, and doubled dots are
-  not. Definition names and aliases remain one unqualified segment. Qualified
-  executable names split at their final dot, so `core.utils.f` always means
-  module `core.utils`, binding `f`. The exact name `core` is reserved for the
-  core qualifier (see Roots and names): registering a module or an alias under it
-  is `` `domain ``, while `core.utils` stays an ordinary module name. Host
-  and native factories apply the reader's single scalar-level symbol-segment
-  grammar; ASCII or Unicode whitespace, delimiters, malformed UTF-8, and other
-  unreadable spellings do not become validated names. Reserved syntax markers
-  are interned as syntax only and cannot be minted as binding names through a
-  privileged validation mode.
+- `@defm` has the signature ``( annotation? body `module-name -- )``. It
+  validates the name before evaluating anything: a non-symbol is `` `type ``; a
+  name that is not a valid module path, the reserved name `core`, or a
+  standard-library module name is `` `domain ``, and in each case the body
+  never runs. With a valid name it runs the body in a fresh, isolated
+  environment, freezes the resulting image (its environment and its
+  definitions), and publishes that image as the registration's new generation.
+  A body that leaves one or more values on its stack is `` `domain `` at
+  completion and publishes nothing. A body failure publishes nothing.
+- Module annotation never has a stack effect, only a docstring. `` `m
+  module-doc `` returns the current generation's documentation---a module
+  without documentation, or `` `core ``, is `` `domain ``.
 
 <!-- include:modules-model -->
 
 ### Construction and definitions
 
-- **Construction uses ordinary unit rollback.** Its scope and bindings are
-  provisional. On failure they are discarded and no
-  module is registered. I/O, completed registry publications, and other
-  external effects performed by the body are not rolled back. A construction
-  body starts no tasks: `@spawn`, `@give`, and `@each` are `` `domain `` while
-  construction is in progress, at any depth, including inside a helper word the
-  body calls and inside an `@attempt` nested in the body. Registration commits atomically
-  only after an image exists. A failed registration leaves the previous
-  directory entry and current generation as they were.
-- The registry is flat. A module body may define another module with `@defm`,
-  but that registration creates an independent module with its own name and
-  lifetime; it does not establish lexical nesting or parent ownership.
-  Registrations commit independently, so a completed inner registration
-  remains published if the outer construction body later fails.
-- **Privacy is set at the definition site**: inside a module body, `def` and
-  `set` bind public (exported); `defp` and `setp` bind private. Module bindings
-  carry the same optional annotations as top-level ones, so a module word may
-  be unannotated, documentation-only, effect-only, or both; `set`/`setp`
-  publish the bare literal capture. Privacy is subtractive: private definitions
-  are omitted entirely from the module's public face.
-- **Tests are a distinct module-owned namespace.**
-  ``annotation? (body) `name test`` accepts the same optional effect and
-  documentation forms as `def`, but only while the exact direct construction
-  body of `@defm` is executing. A nested quotation, child unit,
-  or top-level use is `` `domain ``. Test names may equal public or private word
-  names because catalog entries never enter local lookup, qualified lookup,
-  imports, `words`, reflection, or module invocation. Application Sessions
-  still validate placement, annotations, names, and bodies, then discard the
-  declaration without retaining it or checking test-name uniqueness. Test
-  Sessions retain the catalog; duplicate test names in one test image are
-  `` `domain ``.
-- A test-built module image freezes its definitions and test catalog
-  together; an application-built image has an empty catalog. Registration
-  publishes that image as one generation: reload replaces code and tests
-  atomically; removal removes both; and aliases never create another suite.
-- **Test discovery and execution form a closed Session mode.** Ordinary
-  Sessions reject `tests` and `@test` with `` `domain ``. A test Session's
-  `tests` returns each current module's tests once, aliases contributing
-  none, including root sources' private tests, sorted by module, test name, and
-  source identifier.
-  Descriptors contain symbol fields `` `module `` and `` `name `` plus any
-  declared `` `effect `` and `` `doc ``. Private tests also carry an
-  integer `` `source `` identifier local to the Session, distinguishing equal
-  names across files. Descriptors contain no body, generation handle, state
-  handle, or executable capability.
-- `descriptor @test` validates and looks up the descriptor against the
-  module's current generation and its source when specified. A present test
-  runs as a task whose current root is that generation's image, spawned in the current
-  scope and awaited, so it observes bindings and owns tasks as any task does. It
-  returns `{ok (values)}` or `{err error}`; a removed or
-  replaced-away test is a reified missing-test error. The test starts on an
-  empty stack, registry changes persist between invocations in
-  the Session, and Session teardown destroys them. External effects are
-  not transactional or rolled back.
-- **`ecl test` delegates framework policy to ECL.** The command requires a
-  valid module map with a local scope, loads each ECL artifact of that scope
-  once, including sources with no exports, then calls the public qualified
-  runner selected by `--runner` (default `test.default.run`). Tokens after `--`
-  are ordinary `args`. Successful completion is status 0; `exit` selects the
-  requested status; project, load, resolve, or runner failures are command
-  failures. The default runner is sequential and deterministic, reports every
-  result, continues after ordinary failures, and exits 1 when any test failed.
-- Module code always runs under the name of the image that defined it:
-  dispatch through a registered name, a construction body, an escaped
-  quotation, and a private call all run module-authored words under the same
-  module, so those words report the same `*module*` and spell
-  their trace words `name.word`. An application through escaped
-  module-authored code still crosses a module boundary for effect checking. An
-  exported word's body resolves against its module's internal environment and
-  then core — never the caller's environment. Publics therefore reach
-  privates, and callers cannot perturb a module's behavior by shadowing.
-  A module word's body is not reachable as a value: no operation extracts a
-  published body, so a module's code cannot be lifted out of the image it
-  resolves against.
-  The rule has no exceptions, and the chain is the one each binding was
-  actually defined in. A primitive or an embedded prelude definition was
-  published against core alone, so core alone is its chain: it never resolves
-  against a session or a module environment, whichever happens to be executing.
-  Every other binding resolves against the root it was defined in: the session
-  for a top-level definition and the image for a module's. There is no case
-  where a binding resolves against a chain it was not defined in. So a module
-  exporting a word named like a core one shadows it for that module's own
-  callers, never inside the prelude words the module calls: `table.where`
-  will shadow bare references to `where` inside of `table`, but it will not
-  be invoked by calls to `filter` (which includes `where` in its own
-  spelling), even inside of the `table` module. The same holds for the
-  session, which is what makes shadowing predictable:
+Inside a module body, `def` and `set` create public bindings, and `defp` and
+`setp` create private ones. Module bindings carry the same optional annotations
+as top-level ones, so a module word may be unannotated, documentation-only,
+effect-only, or both.
 
-  ```ecl
-  1 wrap                                  -- [1], reaching core's `cons`
-  (pop pop 42) `cons def   1 wrap          -- still [1]
-  (pop pop 42) `cons def   1 [] cons       -- 42, the session's own `cons`
-  (pop pop 42) `cons def   (() cons) `wrap def   1 wrap    -- 42
-  ```
+Executing a module body constructs a fresh image. `@defm` creates the image,
+and sets it as the scope for every word in the body. This is how new,
+bounded scopes are created, without introducing lexical scoping. Instead, each
+module scope has a simple, two-part resolution path: module words are looked up
+first in the module scope, and then in core.
 
-  A session `def` shadows a name *for session code*. Adopting new behavior
-  inside a prelude word is redefining that word: the replacement is a session
-  definition, so it resolves in the session and shadows the prelude one for
-  session callers from then on; what is fixed is which root each word resolves
-  in. A quotation literal written
-  inside a body is sealed the way the body's own references are: it resolves in
-  the scope its text was written in, whoever ends up applying it. `all?` is
-  `(|l q| l q each 1 (and) fold)` and `uncons` is `(dup first swap rest)`, but a
-  session `and` or `swap` leaves both alone:
+Module namespaces don't nest. A module body may define another module
+with `@defm`, but that registration creates an independent module with its
+own name and lifetime. Given `` (( ... ) `n @defm ) `m @defm ``, the inner
+module is registered under the name `n`, not `m.n`.
 
-  ```ecl
-  (pop pop 42) `and def   [1 1] (1 =) all?      -- 1
-  (pop pop 99) `swap def  [1 2] uncons          -- 1 [2]
-  ```
+### Registering and re-registering
 
-  Splicing or rearranging quotations preserves the roots of their existing
-  word occurrences. A word the implementation builds for itself carries no
-  root and resolves in core. Re-registering a module publishes a new image
-  under the module name, so a qualified word reached afterwards runs the new
-  code, in code defined earlier too. Words written in the old image go on
-  resolving there. Runtime-built captures retain their existing word
-  scopes.
-- `@defm` takes a body and a name — ``(body) `name @defm`` — and nothing
-  crosses the boundary. There is no ambient environment between a module's
-  own definitions and core.
+Once a module image is created, it's registered under the name passed to
+`@defm`. This isn't atomic, in the sense that construction can succeed and then
+registration can fail (for instance, another call can race to register the
+name)---but if this occurs the module image shouldn't be observable. 
 
-- **A word resolves in the scope its text was written in.** The word itself
-  carries the scope, so it
-  survives every operation that moves code around: `cat` splices
-  tokens from two sources into one list and each token keeps the scope it was
-  written in. A module word may hand `(private-helper)` to `each` and the
-  private still resolves, because the literal was written inside the module;
-  a module word may accept `(bump)` from its caller and that `bump` resolves in
-  the caller, because the caller wrote it; and both hold when the stdlib passes
-  the caller's quotation as ordinary data. A module body is the one place a
-  word changes scope: `@defm` re-homes it.
-- **Every word in a module body is module text.** `@defm` copies its body
-  and gives every word in it the new image's scope, including words nested in
-  quotation, list, and dict values, however the body was built. A body
-  produced by `cat`, `cons`, or any other list operation is re-homed
-  as a literal is; a stack value such an operation stored entered as data, so
-  a symbol among them is a quoted occurrence and the body pushes it (see
-  Lexical structure). For example, ``7 `k set ((k) `geta) (def) cat `m @defm``
-  builds the body at runtime, and `k` inside it is a module word: `m.geta`
-  fails with `` `undefined-word `` because the module defines no `k`.
-- **A module holds no state.** A registration publishes an image and nothing
-  else: there is no per-registration operand stack, no transaction against
-  one, and no operation that reads or writes a module's storage. A construction
-  body must consume everything it pushed; a body that leaves values on its
-  stack fails with `` `domain `` and publishes nothing. State that must outlive a
-  word lives in a task and is reached through its mailbox (see
-  [Mailboxes](#mailboxes)).
-- **Every published generation lasts the Session.** Reload publishes a new
-  generation under the name; words written in the old one keep resolving
-  there. Memory therefore grows with reload history within a
-  Session; how soon an unreachable generation is reclaimed is not part of the
-  language.
-- Failed registration changes nothing: the previous generation, if any,
-  stays current.
-- A registration is never removed during a Session; reload replaces it.
-- Modules are process-local: there is no persistence across process restart,
-  and the native ABI exposes no module capability, so an `.eclmod` word
-  cannot observe a module's internals.
-- **Surface**: `import` consumes a module-name symbol and a list of attribute
-  symbols, then publishes those attributes under their own names in the current
-  environment — which inside a module body means the image, publicly, on the
-  same terms `def` binds there. It validates every symbol and resolves every
-  public attribute against one module generation before publishing the
-  first name. A missing or private attribute is `` `undefined-word `` and
-  publishes none of the request; malformed operand and name domains are
-  `` `type `` and `` `domain ``, respectively. Each imported name is an alias,
-  `x` for `m.x`: every later binding or lookup of `x` follows it to the
-  definition `m.x` selects then, so an import never captures the definition it
-  validated, and reflection reports that definition's metadata. A public
-  import in a module re-exports the alias, which chains: `a.x` names `m.x`.
-  Alias cycles are `` `domain `` when reached or validated; an alias whose
-  target is missing is `` `undefined-word `` then.
-  Imports between modules do not depend on which file declares a module or
-  where in it. When a module body imports from a module that is unregistered
-  because its own load is still in progress (declared later in the same file,
-  or by a file whose load led to this one), the import publishes its aliases
-  without loading, and the load that registers the module validates them
-  before it completes. A missing or private attribute then fails that load as
-  `` `undefined-word ``, whose data names the importing module. Each deferred
-  name is checked once, by that load. Construction still cannot call such a
-  name, because it resolves only once its module is sealed. Top-level imports
-  are never deferred.
-  At top level, naming a binding that already exists replaces only that
-  binding; in a module body an imported name, like a defined one, may be
-  introduced once. Importing selected names never splices an entire module.
-  `importp` is the private form: the importing module uses the names without
-  re-exporting them.
-  Dotted words split at their final dot and give qualified access with no
-  import. `qualify` validates a module-name symbol, which may be `` `core ``,
-  and an unqualified binding-name symbol and constructs the corresponding
-  executable word; `execute` resolves that word when it runs, in the root the
-  symbol carries, and invokes it as dispatch would, preserving its current
-  root, private lookup, annotations, tracing, native/builtin path, and
-  cancellation. `alias` registers a short registry name; aliases and module
-  names may not collide in either direction. `which` shows any name's
-  resolution.
-- **Qualified resolution observes registrations only.** A qualified name
-  splits at its final dot into a module name and a public binding name. The
-  module name selects a registered module directly or through an alias,
-  except that the reserved module segment `core` selects the core scope (see
-  Roots and names) and never consults the registry.
-  A missing registration or public binding raises `` `undefined-word ``.
-  Filesystem search, embedded resources, module maps, native loading, and
-  eager or on-demand acquisition are host facilities outside the language
-  semantics. A host may obtain and register an image by any means, but ECL
-  programs observe only the resulting registration, never whether a module is
-  "loaded" or how it was transported.
+Rerunning `@defm` with the same name publishes a new module image and re-links
+to it from the image registry. Because binding happens within scopes, this
+model has two implications:
+
+- Code that's running under the predecessor image continues to resolve within
+  itself;
+- Code that reaches the module through a qualified name `m.x` is now routed to
+  the new image.
+
+The language offers no guarantees about stale images being reaped.
+
+### Imports and qualified names
+
+`import` consumes a module-name symbol and a list of attribute symbols, then
+publishes those attributes under the same names in the current environment.
+
+`import` validates every symbol and resolves every public attribute against one
+module generation before publishing the first name. A missing or private
+attribute is `` `undefined-word ``, malformed operand are `` `type ``, and
+malformed name domains are `` `domain ``.
+
+Imports behave like a simple alias (as opposed to capturing or republishing the
+actual contents of the aliased word). This makes import cycles theoretically
+possible, so they're checked and produce a `` `domain `` error if found.
+Because they behave like simple aliases for the qualified word, this also means
+that there's no loading-order dependency between modules.
+
+A qualified name looks like `module-name "." word`, where `word` can't contain
+any dots but `module-name` can. Core words aren't in their own module, but the
+synthetic module-name `core` allows qualified access to that scope. This allows
+reference to any core word that's been shadowed in the current scope. 
+
+`qualify` is the way to dynamically construct qualified names at runtime. It canstructs a symbol from any module name symbol (including `core`) and a binding symbol.  
+
+Qualified names can be resolved and executed with `execute`.
+
+`alias` registers a short registry name; aliases and module names may not
+collide in either direction. `which` shows any name's resolution.
+
+### Tests
+
+Tests are a distinct module-owned namespace. ``annotation? (body) `name test``
+accepts the same optional effect and documentation forms as `def`. Being
+defined inside a module, tests can invoke both private public words, but
+they're only exposed under `ecl test`.
+
+Test discovery and execution form a closed Session mode. There are two words
+that are valid exclusively in a test session: `tests` and `@test`.  
+
+Under the test session, the word `tests` returns test
+descriptors---dictionaries containing test metadata---for all tests in all
+available modules. The word `@test`, given a test descriptor, runs the test and
+returns a result value.
+
+These constitute the minimal language-level apparatus for discovering and
+running tests. They can then be called by user-level ECL code to form
+arbitrarily complex or expressive test runners. ECL ships with a simple default
+test runner at `test.default.run`, and will choose that word as the test runner
+if `ecl test` is called without a `--runner` argument.
 
 ## Concurrency
 
 <!-- include:concurrency-model -->
 
-### Task scopes and observation
+### Task ownership and observation
 
-Task scopes exist at two places: the session root and each spawned
-task. Code runs either in a task, its *current task*, or at the session root,
-and the words that park, own, or observe bindings act on that one. A spawn is
-owned by the current task, or by the session root when no task is executing.
-`@attempt`, `@load`, and module construction open no scope; they are units
-nested inside the current task or the root. Combinator applications open
-neither a scope nor a unit. A task's attached unit cannot become terminal while a task it owns is
-active: its completion cancels the remaining owned tasks and waits for their
-complete descendant scopes to quiesce. The session root scope closes only at
+Every task has an *owner*: the task that spawned it, or the session root if it
+was spawned outside any task. The *current task* is the task whose body is
+running. The session root is not a task. Code running there can still wait on
+a task or a port, and the wait blocks that submission. What it spawns or opens
+is owned by the root, and `task.pending` reports the root's descendants.
+A task's attached unit cannot become terminal while a task it owns is
+active: its completion cancels the remaining owned tasks and waits for all
+their descendants to quiesce. The session root releases what it owns only at
 `exit` or session end. `task.pending` reports pending descendants in
 deterministic spawn preorder.
 
-`task.await-any` accepts a nonempty task list and returns the selected index and
-cached task result. Among tasks terminal when the operation begins, the lowest
-input index wins; otherwise the first subsequent completion wins.
+### Spawning and awaiting tasks
 
-The composition `(task.await) each` awaits every input,
-returns cached results in input order, preserves failures as data, and does not
-cancel siblings.
+`@spawn` is the fundamental concurrency constructor. Given a quotation, it
+creates a new task that begins to evaluate that quotation. It immediately
+pushes a handle to that task onto its caller's stack.
 
 `@each` spawns one task per element and enforces exactly one result value
 from each. It returns results in input order. After the leftmost
 failure it cancels the remaining element tasks, waits for quiescence, and
 re-raises that failure. Selection of the leftmost failure is independent of
-schedule order. Element tasks have no simultaneous-progress guarantee; a
-program that requires cross-element rendezvous to make progress is invalid.
+schedule order. 
 
-Await order is program order. Nondeterminism enters through `task.await-any` and
-through I/O interleaving among concurrent tasks. I/O remains ordered within
-one task. Sequential combinators including `each`, `for`, and `fold` execute
-left to right.
+`task.await` parks the current task or root until its object finishes, and
+places a result dictionary on the stack.
+
+`task.await-any` accepts a nonempty task list and returns the selected index and
+cached task result. Among tasks terminal when the operation begins, the lowest
+input index wins; otherwise the first subsequent completion wins.
 
 `exit` is available only at the root, outside `@attempt`. Elsewhere it
-raises `` `domain ``. An allowed exit first cancels and quiesces the root task
-scope, then terminates the process with the supplied status.
+raises `` `domain ``. An allowed exit first cancels and quiesces every task the root
+owns, then terminates the process with the supplied status.
 
 ### Mailboxes
 
-Every task owns one mailbox, open while the task is active and closed when its
-attached unit becomes terminal; closing discards every queued message. An
-address is an opaque value that names a mailbox and nothing else.
-`task.address` derives a task's address from its handle; `task.self` yields the
-executing task's own address and raises `` `domain `` at the session root, which
-owns tasks but is not one and has no mailbox. Addresses match by mailbox
-identity, print as an unreadable marker, and are rejected by JSON, native
-views, and port messages as task handles are.
+Inter-process communication is accomplished through *mailboxes*: ordered
+message queues that tasks can park on in order to receive messages.
 
-A handle reaches a task's result; an address does not. That is why a handle can
-never travel through a mailbox while an address can be sent, stored, and
-forwarded freely: a message holding a handle could close a reference cycle
-through the result it reaches. `task.send ( address value -- )` first checks
-the value for handles, raising `` `type `` if it finds one, then queues it. A
-mailbox holds sixteen messages; a sender to a full mailbox parks until the
-receiver takes one. Sending to a closed mailbox raises `` `io `` with
-`` `reason `closed ``. Messages from one sender arrive in the order sent; order
-across senders is unspecified.
+Every running task owns one mailbox. `task.address` and `task.self` return
+opaque values of type `address`, which are be consumed as the destination
+argument to `task.send`. 
 
-`task.receive ( -- value )` takes the oldest queued message, parking until one
-arrives. `task.receive-for ( ms -- result )` bounds the wait and returns
-`{ok value}` or `{err {kind timeout}}`, with the same `` `overflow `` rule as
-`task.await-for`. Both raise `` `domain `` at the root. Cancellation of a parked
-sender or receiver is observed as for any wait.
-
-There is no request/reply primitive. A caller that wants an answer spawns a
-helper task, sends the helper's address along with the request, and awaits the
-helper, whose result is the reply; `task.await-for` bounds the exchange.
+Thus, messages are sent to tasks via `<address> task.send`, and tasks park on
+receive with a bare `task.receive` inside of the task body. Mailboxes can
+receive any value type *besides* `task`, which is necessary to ensure that a
+task's stack can never contain its own handle.
 
 ### External ports and processes
 
-An external port belongs to the scope it was created in: the current task's,
-or the session root's. The
-scope, not the number or location of port values, owns the live external
-resource. Closing a scope stops new operations, requests cancellation, and
-does not complete until each owned resource has published a terminal state and
-released its scope membership. Returning or storing a port neither detaches it
-nor transfers ownership; a port that outlives its owning scope remains an
-opaque handle to terminal state. Ownership moves only when a unit constructor
-moves it: `@give` makes the new child's scope the owner as part of
-constructing that child, so the resource is never unowned and is never
-reachable by the child before the child owns it. Ownership governs lifetime,
-not use: any code holding a port value may operate on it, but only code whose
-current scope owns a port may give it away.
+A *port* is a value that stands for a resource outside the runtime: a
+subprocess, a listener, or a connection. A *byte endpoint* is one readable or
+writable stream: a standard stream, an open file, a process pipe, or one
+direction of a connection.
 
-Port operations may suspend the current task, or the root, on external
-readiness. Such a
-suspension is an ordinary scheduler park: it consumes no worker while waiting,
-participates in the same cancellation and deadline arbitration as task waits,
-and resumes a bounded continuation. Input and output queues are bounded, so a
-producer waits under pressure rather than causing unbounded allocation.
+#### Ownership
 
-Filesystem words select a named directory root and a canonical relative path
-beneath it. The command line provides its startup working directory as `` `cwd ``.
-All operations are available on named roots, subject to operating-system
-permissions. Path manipulation is pure string computation and proves nothing
-about containment; containment is enforced at the root's retained directory
-handle. Filesystem operations are bounded drivers whose staged mutations either
-publish atomically or leave the destination unchanged.
+A port is owned by the task that created it, or by the session root.
+Ownership governs lifetime, not use: any code holding a port value may operate
+on it, and copying, storing, or returning the value does not change the owner.
 
-The standard streams are endpoints of this kind, named by `fd.in`, `fd.out`,
-and `fd.err`. They belong to the Session rather than to a task scope: every
-task and the root share the same three values, nothing closes them, and `@give` does not
-move them. Input reads return what the host has and `[]` at stable EOF, on
-every later read as well; one reader may be pending. Output writes from
-different tasks are served in the order they began, and each call's bytes
-stay contiguous. When standard input is the program source there is no input
-device, and `fd.in` is `` `io ``. Text crosses these endpoints only through the
-`io` words, which encode and decode UTF-8 at the boundary. A file opened with
-`fs.open-reader` and a process pipe are endpoints of the same kind. A read
-may leave bytes read ahead with the endpoint value, and `fd.close` closes an
-endpoint that is its own resource; one borrowed from a resource closes with
-it.
+When an owner ends, its ports accept no new operations and their pending
+operations are cancelled. The owner does not finish until every resource it
+owns has shut down. A port value that outlives its owner remains a valid
+handle to the resource's final state.
+
+Only `@give` transfers ownership, and only code running in a port's owner may
+give it. `@give` moves the ports into a child task as it creates that child,
+so a port always has exactly one owner.
+
+#### Waiting
+
+A port operation may park the current task, or the root, until the host is
+ready. Such a wait is cancelled and timed out exactly as a task wait is, and a
+cancelled wait fails only the task, or the root, that was waiting. Input and
+output queues are bounded: a writer that outpaces its reader waits rather than
+consuming more memory.
+
+#### Byte endpoints
+
+Endpoints carry exact byte lists. Text crosses them only through the `io`
+words, which encode and decode UTF-8 at the boundary.
+
+A read returns the bytes available, and `[]` at end of input and on every
+later read. One read may be pending per endpoint, and a read may leave bytes
+read ahead with the endpoint value. Writes from different tasks are served in
+the order they began, and each call's bytes stay contiguous.
+
+`fd.close` closes an endpoint that is its own resource, such as an open file.
+Such an endpoint is owned as a port is. An endpoint borrowed from a port
+closes with that port.
+
+The standard streams `fd.in`, `fd.out`, and `fd.err` belong to the session
+rather than to a task. Every task and the root share the same three values,
+nothing closes them, and `@give` does not move them. When standard input is
+the program source there is no input device, and `fd.in` raises `` `io ``.
+
+#### Filesystem
+
+Filesystem words take a named directory root and a relative path beneath it.
+The command line provides its startup working directory as `` `cwd ``. Every
+operation is available on every root, subject to operating-system permissions.
+The root itself enforces containment; path manipulation is pure string
+computation and proves nothing about it. A mutation either takes effect
+atomically or leaves its destination unchanged.
+
+#### Processes
 
 The shipped `proc` module provides subprocess words. A process specification
-names one absolute executable path, an argument vector, an optional absolute
-working directory, and the child's complete environment. A child inherits no
-host environment variable that the program did not pass it. It never denotes a
-shell command and never searches `PATH`. Process streams are byte lists; text
-encoding, stream merging, and line framing are user policy.
+names an absolute executable path, an argument vector, an optional absolute
+working directory, and the child's complete environment. It never denotes a
+shell command and never searches `PATH`, and the child inherits no host
+environment variable the program did not pass.
 
-A process port has stdin, stdout, stderr, and one immutable terminal result.
-The output streams remain independent and return an empty byte list only after
-stable EOF. Termination is tagged as exited-with-code, signaled, stopped, or an
-unknown host status. A nonzero exit code is result data, not an ECL error;
-spawn, pipe, timeout, cancellation, allocation, and cleanup failures
-remain errors of their corresponding ordinary kinds.
+A process port has three byte endpoints — stdin, stdout, and stderr — and one
+immutable result. The two output streams are independent. Merging them,
+decoding text, and framing lines are the program's business.
 
-The reference distribution initially provides process ports on POSIX hosts.
-Each child starts in a dedicated process group; scope cancellation signals the
-group and reaps the direct child before completing. Descendants that inherit
-that group are covered, while a hostile child that creates a new session is
-outside this portable process-group guarantee. A host without an equivalent
-tree-owning backend rejects process creation rather than silently weakening
-cleanup to one PID.
+The result reports how the process ended: exited with a code, signaled,
+stopped, or an unknown host status. A nonzero exit code is result data, not an
+error. Failures to spawn, pipe, allocate, or clean up, and timeouts and
+cancellation, are errors of their ordinary kinds.
 
-Inbound network listening requests one local IP literal and port, subject to
-operating-system restrictions and runtime limits. Addresses are normalized
-before binding and never resolved through a name service. Port zero requests
-an ephemeral port.
+Process ports are provided on POSIX hosts. Each child starts in its own
+process group; when its owner ends, the group is signaled and the child reaped
+before the owner finishes. Descendants that stay in the group are covered; a
+child that starts a new session escapes. A host that cannot own a process
+tree this way rejects process creation rather than cleaning up one PID.
 
-A listener is a port. Binding and listening complete before the value is
-returned, the value belongs to the scope it was created in, and accepting a
-connection is the only listener operation that parks. The bound address and
-port are observable data; closing a listener, explicitly or through scope
-closure, is one idempotent transition after which the address is no longer
-observable, every accept waiting on it fails, and the same address and
-port may be bound again. A host bind failure is `` `io `` carrying the requested
-address, the requested port, and one reason from a closed vocabulary.
+#### Listeners
 
-A connection is a port too, distinct from a listener and from a process port.
-It belongs to the scope that accepted it, not to the
-listener's scope: closing that scope aborts the connection even while its
-value is stored elsewhere, and closing the listener leaves accepted
-connections open. A connection not yet accepted stays in the host's backlog;
-the runtime takes one only while an accept is outstanding and a
-live-connection slot is available. Reads and writes park on readiness under
-the ordinary scheduler rules, are bounded by host-configured queue
-capacities, and exchange exact byte lists. One read may be pending per
-connection; writes are serialized in arrival order with each call's bytes
-contiguous. Explicit close delivers the bytes already queued and then shuts
-the socket down; scope closure discards them and shuts down at once. Both
-ends' addresses are observable data while the connection is open. A peer
-failure is `` `io `` carrying the peer's address, the peer's port, and one reason
-from a closed vocabulary; a cancelled wait fails only the task, or the root,
-that was waiting.
+Listening takes one local IP literal and a port number, subject to
+operating-system restrictions and runtime limits. The address is normalized
+before binding and never resolved through a name service. Port number zero
+requests an ephemeral one.
 
-A serving word built over connections applies its handler in a fresh unit per
-request under the checked one-result contract. A request's framing failure,
-or its handler's failure or ill-formed result, is data to the serving word
-and affects only that request. A serving word runs until it is cancelled or
-accept fails fatally; either ending quiesces its children by the
-ordinary scope rules, and the serving word never closes a listener it did not
-create.
+A listener is a port, bound and listening before its value is returned. Accept
+is its only operation that parks. Its bound address and port number are
+readable while it is open. A bind failure is `` `io `` carrying the requested
+address, the requested port number, and one reason from a closed vocabulary.
+
+Closing a listener, explicitly or by its owner ending, is idempotent.
+Afterwards its address is no longer readable, every pending accept fails, and
+the same address and port number may be bound again.
+
+#### Connections
+
+Accepting yields a connection: a port owned by whoever accepted it, not by
+the listener's owner. Closing the listener leaves accepted connections open. A
+connection not yet accepted stays in the host's backlog; the runtime takes one
+only while an accept is pending and a live-connection slot is free.
+
+A connection's two directions are byte endpoints. Both ends' addresses are
+readable while it is open. A peer failure is `` `io `` carrying the peer's
+address, the peer's port number, and one reason from a closed vocabulary.
+
+An explicit close delivers the bytes already queued and then shuts the socket
+down. An owner's end discards them and shuts down at once.
+
+A serving word built over connections runs its handler in a fresh unit per
+request, and the handler must leave exactly one result. A request's framing
+failure, or its handler's failure or ill-formed result, is data to the serving
+word and affects only that request. A serving word runs until it is cancelled
+or accept fails fatally. Either ending quiesces its children by the ordinary
+ownership rules, and it never closes a listener it did not create.
 
 ## Standard environment
 
