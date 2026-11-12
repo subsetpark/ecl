@@ -106,7 +106,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 `( path -- )` — Read a source file and run it as one stack-isolated unit on an empty stack. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
 
 ### @spawn
-`( quotation -- task )` — Run the quotation concurrently on an empty child stack; the ambient stack never crosses the boundary. To start the child on values, build them into the quotation: `values (q) cat @spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
+`( quotation -- task )` — Run the quotation concurrently on an empty child stack. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
 
 #### Examples
 

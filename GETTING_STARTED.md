@@ -7,8 +7,8 @@ idiom-recognition optimization of the array language family.
 
 The `ecl` interpreter is written in Zig, and has a very simple execution model,
 directly interpreting ECL source code as a series of operations on a stack
-machine. While there is no compilation step, ECL has first-class module
-and package systems built in for code organization, distribution, and encapsulation.
+machine. Despite the very simple structure of its interpreter, ECL has first-class module
+and package systems built in for code organization, distribution, and encapsulation, and optimized typed kernels for array operations.
 
 # Getting ECL
 
@@ -57,7 +57,7 @@ text:
 - `` `list ``: [1 2 3], (2 4 6), "hello world"
 - `` `dict ``: {'hello "world"}
 
-A couple things can be inferred by the above: 
+A couple things can be inferred from the above: 
 
 - There is no separate `` `boolean `` type; the ints `0` and `1` are used for
   _false_ and _true_.
@@ -80,7 +80,7 @@ in ECL every value is hashable and thus can be the key of a `` `dict ``.
 `` `list ``s are the other core composite data structure. They are ordered
 collections of values; like with `` `dict ``s, a list may contain any value.
 `` `list ``s are not typed and may be heterogeneous (though the representation and
-manipulation of a homogeneous list might be more efficient than that of a list
+manipulation of a homogeneous list is more efficient than that of a list
 that mixes multiple element types). As we've seen, strings are a special type
 of list; a list of chars is automatically displayed as a readable string:
 
@@ -90,24 +90,35 @@ ecl> 1 (pop 100) update
 (\h 100 \l \l \o \space \w \o \r \l \d)
 ```
 
-## Words, Symbols, and Quotations
+## Symbols and Quotations
 
-The first type that's not trivially constructable via literals is the `` `word ``.
-If the values we've covered are effectively values which evaluate to
-themselves, then a word is effectively a value which, when evaluated (by being
-placed on the _operand stack_), are treated as a binding to be looked up in the
-current environment.
-
-Thus the `` `word `` is the core primitive out of which ECL programs are composed.
-This includes built-in words that are implemented directly in the ECL
-interpreter:
+A `symbol` is an atomic value that acts as a unique identifier. All the core
+words in ECL are invoked by pushing their symbols, and new programs are
+constructed from lists of symbols. In the sample below, we push the symbol
+`swap` onto the stack, which resolves its binding and invokes the word that
+swaps the top two elements. Later we push the symbol `+` to perform addition
+via the same process.
 
 ```
 ecl> 3 5 swap 1 +
 5 4
 ```
 
-As well as words which are introduced by ECL programs:
+Because symbols are automatically resolved and executed when they're pushed
+onto the stack, we have to *quote* a symbol with `` ` `` if we want the symbol
+itself to remain on the stack.
+
+```
+ecl> `mockingbird
+mockingbird
+ecl> type
+symbol
+```
+
+`type` indicates that the type of `mockingbird` is indeed a symbol. The value
+that it leaves on the stack, `symbol`, is itself a symbol.
+
+We use quoted symbols to provide the identifiers for binding variables:
 
 ```
 ecl> 10 `my-constant set
@@ -120,27 +131,31 @@ A word which is not bound in the current environment results in an error:
 ```
 ecl> hotdogs
 {kind undefined-word 
- `msg "undefined word `hotdogs`" 
- `word `hotdogs 
- `trace [hotdogs] 
- `data {name hotdogs scope session source "<repl>" line 1 col 1}}
+ msg "undefined word `hotdogs`" 
+ word hotdogs 
+ trace (`hotdogs) 
+ data {name hotdogs 
+       scope session 
+       source "<repl>" 
+       line 1 
+       col 1}}
 ```
 
 This is why we needed to say `` `my-constant `` (note the `'`) when defining a new
 word; simply invoking the word directly would have caused the interpreter to
 try to look it up.
 
-Pushing a word onto the stack causes the interpreter to execute that word.
-Thus, whenever we want to manipulate or mention a sequence of words rather than
-execute them directly, we _quote_ them by wrapping them in a list:
+As mentioned above, programs in ECL are themselves represented by lists of
+symbols and literals. Pushing a list of symbols---known as a
+*quotation*---places it on the stack like any other inert value:
 
 ```
 ecl> 4 (1 +)
 4 (1 +)
 ```
 
-We can then call that sequence simply by "unwrapping" it and putting its
-elements onto the stack, in order:
+We can then call that sequence simply by "unwrapping" it, which will put its
+elements onto the stack (evaluating them), in order:
 
 ```
 4 (1 +)
@@ -198,11 +213,10 @@ rather than iterating over values one-by-one.
 
 ## Units and Errors
 
-An _execution unit_, or _unit_ for short, is the basic boundary for execution
-and error propagation. At the most basic level, a unit is simply a new stack,
-separate from the context from which it was called. This new stack evaluates
-some program and then the resulting stack is handed back. The simplest way to
-observe unit behaviour is through the REPL, where every line forms a unit: 
+A _unit_ is the basic boundary for execution and error propagation. At the most
+basic level, a unit acts like a transaction, protecting the state of the stack
+in case an operation inside of it raises an error. The simplest way to observe
+unit behaviour is through the REPL, where every line forms a unit: 
 
 ```
 ecl> 4 5
@@ -244,17 +258,17 @@ ecl> type
 ```
 
 This is the simplest form of error-handling in ECL: `@attempt` evaluates its
-quotation in an isolated stack and then returns a _result_ dictionary, which
+quotation in an isolated unit and then returns a _result_ dictionary, which
 contains either the final result of the computation, or the first error that
 was raised.
 
 We note two differences from the REPL case: first, the resulting error is left
-on the stack (we consume it by evaluating `type`). Second, the unit starts on
-a new, isolated stack, so any values it needs from the current stack must be
+on the stack (we consume it by evaluating `type`). Second, the unit is isolated
+from the stack below it, so any values it needs from the current stack must be
 built into its quotation.[^repl] In the slightly artificial example above, the
 attempted program is entirely isolated from the surrounding environment. A
-slightly more realistic example takes a value from the stack with `cons`, which
-builds a quotation that pushes it, and then attempts that quotation:
+slightly more realistic example pushes `7` to the left side of its quotation
+with `cons`, and then attempts that quotation:
 
 ```
 7
@@ -278,23 +292,27 @@ All unit constructors are marked with a `@`.
 
 ## Modules
 
-ECL's module system consists of two parts: _module images_, the code a module
-body defines, and _module registrations_, the names they are published under.
-`@defm` creates both in one step.
+ECL's modules are immutable code images that contain an enclosed set of
+bindings. `<module body> <name> @defm` evaluates the body in the context of a
+fresh image and then registers it globally under that name. Any bindings in
+that module are then available namespaced under the name.
 
 Modules are ECL's core primitive for encapsulation, distribution, and
 application structure. There's no special syntax for module construction;
 module image bodies are quotations, and @defm (as its name suggests) is a unit
-constructor that consumes a quotation and a name:
+constructor. Here we construct a module with one private constant and two
+public words:
 
 ```
-ecl> ( 10 `scale setp
+ecl> ( 10 `scale set
 ..        (scale *) `scale-up def
 ..        (scale /) `scale-down def ) `scaling @defm
 ecl> 5 scaling.scale-up
 50
 ecl> 5 scaling.scale-down
 50 0.5
+ecl> scaling.scale
+{kind undefined-word msg "undefined word `scaling.scale`" word scaling.scale trace (`scaling.scale) data {name scaling.scale scope qualified source "<repl>" line 1 col 1}}
 ```
 
 The word @defm performs two actions: 
@@ -308,9 +326,9 @@ The word @defm performs two actions:
 
 ## Concurrency
 
-The execution unit is also the basic unit of concurrency. The unit constructor
-`@spawn` executes its quotation and immediately hands back a `` `task `` value,
-which can be evaluated with `task.await`:
+The *task* is the concurrency primitive. The unit constructor `@spawn` executes
+its quotation and immediately hands back a `` `task `` value, which can be
+evaluated with `task.await`:
 
 ```
 ecl> (1 2 /) @spawn

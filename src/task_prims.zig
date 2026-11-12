@@ -16,7 +16,7 @@ const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "@spawn", .primitive = spawn, .effect = "quotation -- task", .doc = "Run the quotation concurrently on an empty child stack; the ambient stack never crosses the boundary. To start the child on values, build them into the quotation: `values (q) cat @spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency)." },
+        .{ .name = "@spawn", .primitive = spawn, .effect = "quotation -- task", .doc = "Run the quotation concurrently on an empty child stack. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency)." },
         .{ .name = "@give", .primitive = give, .effect = "ports quotation -- task", .doc = "Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The child stack starts with the ports, in list order. \n\nIncluding a port in `ports` which isn't owned by the calling unit is `` `domain ``, as is giving a closed port or the same port twice. At most 16 ports may be given at once; more is `` `domain ``. The transfer is all-or-nothing: on any refusal, no port changes owner.\n\nOwnership doesn't determine what unit(s) a port is accessible from, but which unit controls its lifetime. See [Concurrency](SPEC.md#concurrency)." },
     };
     try core.installBuiltins(&definitions);
