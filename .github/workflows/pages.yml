@@ -1,0 +1,60 @@
+# Publishes site/ to GitHub Pages. The page renders brzo.ecl from the
+# Brzozowski Variations repository at a pinned commit, highlighted by Neovim's
+# TOhtml with this repository's syntax file.
+name: Pages
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - site/**
+      - runtime/syntax/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  BRZO_COMMIT: 776509f9cb0750171789a6f1890b5842302c2df4
+  NVIM_VERSION: v0.12.6
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Neovim
+        run: |
+          curl -fsSL --retry 3 "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Render
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/brzo.ecl" "https://git.sr.ht/~subsetpark/the-brzozowski-variations/blob/${BRZO_COMMIT}/impls/ecl/src/brzo.ecl"
+          mkdir -p _site
+          timeout 120 nvim --headless --clean -l site/render.lua "$RUNNER_TEMP/brzo.ecl" site/index.html _site/index.html < /dev/null
+          grep -q 'class="Comment"' _site/index.html
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
