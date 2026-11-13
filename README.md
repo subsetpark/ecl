@@ -166,5 +166,7 @@ consumption. The other design docs in this repo are written by AI.
 - [Getting Started](GETTING_STARTED.md)
 - [Language specification](design/SPEC.md)
 - [Standard library](design/STDLIB.md)
+- [The Brzozowski Variations](https://subsetpark.github.io/ecl/): a worked,
+  annotated example program
 
 ECL is distributed under the [BSD 3-Clause License](LICENSE).
