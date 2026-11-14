@@ -34,7 +34,7 @@
 
  ### test ordering-laws
  (-- : "Prove strict total ordering over generated and SemVer reference corpora.")
- ([7 0] 24 4 rand.ints nip [8 3] reshape ((str) each "." join) each
+ ([7 0] 24 4 rand.ints nip [8 3] reshape ((str) each "." str.join) each
   dup ("-alpha.1" cat) each cat
   dup distinct len 16 equal
   dup pairs-of (call trichotomy) each (1 =) all? 1 equal

@@ -24,7 +24,7 @@
   "Read a byte endpoint to EOF and split the decoded text at every newline, without the newlines; a
    final newline ends the last line rather than starting an empty one. Invalid UTF-8 is `` `domain
    ``.")
- (read "\n" split dup empty? not (dup last "" match? (-1 drop) when) when) `lines def
+ (read "\n" str.split dup empty? not (dup last "" match? (-1 drop) when) when) `lines def
 
  ### def write
  (fd chardata -- :

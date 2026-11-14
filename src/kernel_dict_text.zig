@@ -28,8 +28,6 @@ fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
         .put => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector value -- collection", .doc = "Functional replacement. For a list collection, a nested list selector is pervasive and replacement lists conform recursively to its shape; an atomic replacement extends across every selected position. Selector leaves are integer indices. Repeated indices are processed left to right, so the last replacement wins. For a dictionary, the selector is always one whole-value key, including a list key." },
         .del => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector -- collection", .doc = "Functionally remove list positions through a pervasive selector, or one whole-value dictionary key. List selector leaves are nonnegative in-bounds integer positions in the original list; duplicates remove a position once, and the relative order of retained elements is unchanged. An empty selector returns the list unchanged. A missing dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a list of whole dictionary keys." },
-        .split => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "string separator -- parts", .doc = "Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list." },
-        .join => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "strings separator -- string", .doc = "Join a list of strings with a separator string." },
         .str => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value -- string", .doc = "The canonical printed representation; carries the round-trip guarantee (see [Readable representations and display](SPEC.md#readable-representations-and-display)): reading it back yields a structurally matching value for every recursively readable value." },
     };
 }
@@ -40,8 +38,6 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
             return switch (operation) {
                 .put => putPrimitive(fiber),
                 .del => delPrimitive(fiber),
-                .split => splitPrimitive(fiber),
-                .join => joinPrimitive(fiber),
                 .str => strPrimitive(fiber),
             };
         }
@@ -1286,7 +1282,8 @@ const MergeDriver = struct {
     }
 };
 
-fn splitPrimitive(fiber: *Fiber) MachineError!void {
+/// `str.split`, exported by `str.core` and re-exported by `str`.
+pub fn splitPrimitive(fiber: *Fiber) MachineError!void {
     try fiber.require(2);
     var separator = try fiber.popValue();
     defer separator.deinit();
@@ -1632,7 +1629,8 @@ const AnyCharReader = union(enum) {
     }
 };
 
-fn joinPrimitive(fiber: *Fiber) MachineError!void {
+/// `str.join`, exported by `str.core` and re-exported by `str`.
+pub fn joinPrimitive(fiber: *Fiber) MachineError!void {
     try fiber.require(2);
     var separator = try fiber.popValue();
     defer separator.deinit();

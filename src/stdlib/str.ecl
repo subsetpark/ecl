@@ -2,7 +2,7 @@
 (: "All case and whitespace operations use the ASCII character classes; every non-ASCII scalar
     passes through unchanged.")
 (
- `str.core [format] import
+ `str.core [format split join] import
 
  ### setp blanks
  (-- string : "Return the ASCII whitespace characters recognized by trimming operations.")

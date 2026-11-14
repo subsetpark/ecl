@@ -121,10 +121,10 @@
 
  ### defp split-target
  (target -- path query : "Split a request target at its first `?`; the query is empty when absent.")
- ("?" split
+ ("?" str.split
   dup len 1 =
   (first "")
-  (dup first swap rest "?" join)
+  (dup first swap rest "?" str.join)
   if) `split-target defp
 
  ### defp supported-version?
@@ -139,7 +139,7 @@
    `` `domain `` with `` `data {status 400} ``; a version other than `HTTP/1.1` or `HTTP/1.0` is ``
    `domain `` with `` `data {status 505} ``. A non-string is `` `type ``.")
  ("http.server.parse-request-line expects a string" checked-string
-  " " split
+  " " str.split
   dup len 3 = () (400 "malformed request line" framing-error) if
   dup 2 at supported-version? () (505 "unsupported HTTP version" framing-error) if
   (|tokens| tokens 0 at tokens 1 at tokens 1 at split-target tokens 2 at) call
@@ -345,7 +345,7 @@
    response `headers at header-lines cons
    response `status at [204 304] in? not (over len wrap "Content-Length: {}" str.format append) when
    "Connection: close" append "" append "" append
-   crlf join bytes swap cat)
+   crlf str.join bytes swap cat)
   call) `render-response def
 
  ### defp checked-route
@@ -367,7 +367,7 @@
  ### defp match-pattern
  (path pattern -- bool params :
   "Match a slash path against a pattern; params bind `:name` segments.")
- ("/" split swap "/" split swap
+ ("/" str.split swap "/" str.split swap
   dup2 len swap len =
   (zip dup (segment-ok?) all? swap (1 at ":" str.starts?) filter (dup 1 at 1 drop swap first pair)
    each
@@ -402,7 +402,7 @@
   (pop pop http.response.not-found)
   (over `method at over swap (|row method| row 0 at method match?) cons filter
    dup len 0 =
-   (pop (0 at) each ", " join "allow" swap wrap pair dict.from-flat
+   (pop (0 at) each ", " str.join "allow" swap wrap pair dict.from-flat
     405 "method not allowed" http.response.text swap over `headers at swap dict.merge `headers swap
     put nip)
    (nip first over `path at over 1 at match-pattern nip
@@ -482,7 +482,7 @@
 
  ### defp bracketed-host?
  (value -- bool : "Return 1 for [IP-literal] with an optional :port.")
- ("]" split dup len 2 =
+ ("]" str.split dup len 2 =
   (dup first 1 drop dup len 0 > swap (ip-literal-char?) all? and
    swap 1 at dup "" match? swap dup ":" str.starts? (1 drop port?) (pop 0) if or
    and)
@@ -495,7 +495,7 @@
  (dup "[" str.starts?
   (bracketed-host?)
   (dup ":" str.contains?
-   (":" split dup len 2 = (dup first (host-char?) all? swap 1 at port? and) (pop 0) if)
+   (":" str.split dup len 2 = (dup first (host-char?) all? swap 1 at port? and) (pop 0) if)
    ((host-char?) all?)
    if)
   if) `host-value? defp
@@ -552,7 +552,7 @@
  (|connection config|
   connection config `max-header-bytes at read-head
   (|connection buffer index| connection buffer index 4 + drop buffer index take decode-head crlf
-   split)
+   str.split)
   call
   dup first parse-request-line swap rest parse-headers
   over `version at "HTTP/1.1" match?

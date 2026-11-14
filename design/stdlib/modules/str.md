@@ -27,6 +27,15 @@
 # => "a+b+c"
 ```
 
+### split
+
+#### Examples
+
+```ecl
+"a,b,c" "," str.split
+# => ("a" "b" "c")
+```
+
 ### trim
 
 #### Examples

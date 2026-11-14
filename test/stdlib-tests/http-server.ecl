@@ -68,17 +68,17 @@
  ({status 200 headers {"set-cookie" ("a=1" "b=2")} body "ok"} http.server.render-response chars
   ["HTTP/1.1 200 OK" "set-cookie: a=1" "set-cookie: b=2" "Content-Length: 2" "Connection: close" ""
    "ok"]
-  crlf join
+  crlf str.join
   equal
   {status 299 headers {"X-One" "1"} body [1 2 255]} http.server.render-response
-  ["HTTP/1.1 299 " "X-One: 1" "Content-Length: 3" "Connection: close" "" ""] crlf join bytes
+  ["HTTP/1.1 299 " "X-One: 1" "Content-Length: 3" "Connection: close" "" ""] crlf str.join bytes
   [1 2 255] cat
   equal
   {status 204 headers {} body ""} http.server.render-response chars
-  ["HTTP/1.1 204 No Content" "Connection: close" "" ""] crlf join
+  ["HTTP/1.1 204 No Content" "Connection: close" "" ""] crlf str.join
   equal
   {status 304 headers {} body ""} http.server.render-response chars
-  ["HTTP/1.1 304 Not Modified" "Connection: close" "" ""] crlf join
+  ["HTTP/1.1 304 Not Modified" "Connection: close" "" ""] crlf str.join
   equal
   ({status 204 headers {} body "x"} http.server.render-response) `domain "empty body"
   raises-containing
@@ -91,7 +91,7 @@
   ({status 199 headers {} body ""} http.server.render-response) `domain "200...599"
   raises-containing
   {status 200 headers {} body "hé"} http.server.render-response chars
-  ["HTTP/1.1 200 OK" "Content-Length: 3" "Connection: close" "" "hé"] crlf join
+  ["HTTP/1.1 200 OK" "Content-Length: 3" "Connection: close" "" "hé"] crlf str.join
   equal
   ({status 200 headers {"Content-Length" "3"} body "ok"} http.server.render-response)
   `domain
@@ -140,7 +140,7 @@
   "without CR, LF" raises-containing
   {status 200 headers {"X-Ok_1!" ("a\tb" "c d")} body ""} http.server.render-response chars
   ["HTTP/1.1 200 OK" "X-Ok_1!: a\tb" "X-Ok_1!: c d" "Content-Length: 0" "Connection: close" "" ""]
-  crlf join
+  crlf str.join
   equal
   ("GET" "/r?next=%0D%0AX-Evil:%20yes" http.request.new http.request.query "next" at
    http.response.redirect

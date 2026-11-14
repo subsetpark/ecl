@@ -1,8 +1,8 @@
 //! Host primitives behind the `str` module, published as `str.core`. `kind`
 //! reads a list's physical representation so `str.str?` can answer in
 //! constant time for the representation every string producer uses, and scan
-//! only a generic list, whose elements may be anything. `format` is the text
-//! kernel `str` re-exports.
+//! only a generic list, whose elements may be anything. `format`, `split`, and
+//! `join` are the text kernels `str` re-exports.
 const env = @import("../env.zig");
 const dict_text = @import("../kernel_dict_text.zig");
 const intern = @import("../intern.zig");
@@ -14,7 +14,7 @@ const MachineError = machine.MachineError;
 /// The module's documentation, which `module-doc` reflects.
 pub const doc =
     \\Host kernels behind the `str` module, which validates their operands and composes them into
-    \\its public words, and re-exports `format`.
+    \\its public words, and re-exports `format`, `split`, and `join`.
 ;
 
 pub const words = [_]env.BuiltinWord{
@@ -29,6 +29,18 @@ pub const words = [_]env.BuiltinWord{
         .effect = "values template -- string",
         .doc = "Interpolate positional `{}` placeholders. Strings contribute their contents; other values contribute canonical `str`. `{{` and `}}` emit literal braces.",
         .primitive = dict_text.formatPrimitive,
+    },
+    .{
+        .name = "split",
+        .effect = "string separator -- parts",
+        .doc = "Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list.",
+        .primitive = dict_text.splitPrimitive,
+    },
+    .{
+        .name = "join",
+        .effect = "strings separator -- string",
+        .doc = "Join a list of strings with a separator string.",
+        .primitive = dict_text.joinPrimitive,
     },
 };
 

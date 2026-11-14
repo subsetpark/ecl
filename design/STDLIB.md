@@ -542,9 +542,6 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 # => fresh-name
 ```
 
-### join
-`( strings separator -- string )` — Join a list of strings with a separator string.
-
 ### last
 `( list -- value )` — Return the final element of a nonempty list.
 
@@ -746,16 +743,6 @@ Ex.:
 ```ecl
 [3 1 2] sort
 # => [1 2 3]
-```
-
-### split
-`( string separator -- parts )` — Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list.
-
-#### Examples
-
-```ecl
-"a,b,c" "," split
-# => ("a" "b" "c")
 ```
 
 ### sqrt
@@ -2168,6 +2155,19 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ```ecl
 ["Ada" 2] "name={} n={}" str.format
 # => "name=Ada n=2"
+```
+
+### join
+`( strings separator -- string )` — Join a list of strings with a separator string.
+
+### split
+`( string separator -- parts )` — Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list.
+
+#### Examples
+
+```ecl
+"a,b,c" "," str.split
+# => ("a" "b" "c")
 ```
 
 ### str?

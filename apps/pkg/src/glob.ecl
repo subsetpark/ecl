@@ -44,5 +44,5 @@
 
  ### def matches?
  (pattern path -- bool : "Match portable source globs; ** spans zero or more complete components.")
- ("/" split swap "/" split swap ("**" match?) (segment) matches) `matches? def
+ ("/" str.split swap "/" str.split swap ("**" match?) (segment) matches) `matches? def
 ) `pkg.glob @defm

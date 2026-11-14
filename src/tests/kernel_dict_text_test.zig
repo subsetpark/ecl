@@ -174,9 +174,9 @@ test "dict-text: dict.from-flat converts one flat list without evaluation" {
 
 test "dict-text: split handles codepoints substrings and empty separators" {
     try helper.expectStack(
-        "\"a—b—\" \"—\" split \"ab\" \"\" split " ++
-            "\"\" \"\" split \"a🙂λ\" \"\" split " ++
-            "\"abc\" \"🙂\" split \"a🙂b\" \"-\" split \"🙂a🙂\" \"🙂\" split",
+        "\"a—b—\" \"—\" str.split \"ab\" \"\" str.split " ++
+            "\"\" \"\" str.split \"a🙂λ\" \"\" str.split " ++
+            "\"abc\" \"🙂\" str.split \"a🙂b\" \"-\" str.split \"🙂a🙂\" \"🙂\" str.split",
         "(\"a\" \"b\" \"\") (\"a\" \"b\") () (\"a\" \"🙂\" \"λ\") " ++
             "(\"abc\") (\"a🙂b\") (\"\" \"a\" \"\")",
     );
@@ -187,32 +187,32 @@ test "dict-text: narrow split counts separators across budget steps and keeps pa
     // that straddles a step boundary is counted once, parts longer than a
     // step are copied whole, and the results match the general kernel's.
     try helper.expectStack(
-        "\"x\" 65535 take \"--\" cat \"y\" cat \"--\" split (len) each " ++
-            "\"ab--\" 80000 take \"--\" split dup len swap first " ++
-            "\"a,b,,c\" \",\" split \"xyx\" \"x\" split \"aaa\" \"aa\" split \"ab\\n\" \"\\n\" split \"\" \",\" split",
+        "\"x\" 65535 take \"--\" cat \"y\" cat \"--\" str.split (len) each " ++
+            "\"ab--\" 80000 take \"--\" str.split dup len swap first " ++
+            "\"a,b,,c\" \",\" str.split \"xyx\" \"x\" str.split \"aaa\" \"aa\" str.split \"ab\\n\" \"\\n\" str.split \"\" \",\" str.split",
         "[65535 1] 20001 \"ab\" (\"a\" \"b\" \"\" \"c\") (\"\" \"y\" \"\") (\"\" \"a\") (\"ab\" \"\") (\"\")",
     );
     // The same inputs widened past one byte go through the general kernel,
     // which must agree on the part count and on every part after the first.
     try helper.expectStack(
-        "\"λ\" \"ab--\" 80000 take cat \"--\" split dup len swap dup 1 at swap 20000 at " ++
-            "\"ab--\" 80000 take \"--\" split dup len swap dup 1 at swap 20000 at " ++
-            "\"λxyx\" \"x\" split dup 1 at swap 2 at \"xyx\" \"x\" split dup 1 at swap 2 at",
+        "\"λ\" \"ab--\" 80000 take cat \"--\" str.split dup len swap dup 1 at swap 20000 at " ++
+            "\"ab--\" 80000 take \"--\" str.split dup len swap dup 1 at swap 20000 at " ++
+            "\"λxyx\" \"x\" str.split dup 1 at swap 2 at \"xyx\" \"x\" str.split dup 1 at swap 2 at",
         "20001 \"ab\" \"\" 20001 \"ab\" \"\" \"y\" \"\" \"y\" \"\"",
     );
 }
 
 test "dict-text: join requires strings and chooses narrow char width" {
     try helper.expectStack(
-        "[\"a\" \"b\"] \"—\" join [\"a\" \"λ\" \"🙂\"] \"\" join " ++
-            "[\"a\"] \"🙂\" join [] \"🙂\" join",
+        "[\"a\" \"b\"] \"—\" str.join [\"a\" \"λ\" \"🙂\"] \"\" str.join " ++
+            "[\"a\"] \"🙂\" str.join [] \"🙂\" str.join",
         "\"a—b\" \"aλ🙂\" \"a\" \"\"",
     );
     try helper.expectError(.{
         .name = "join reports the non-string member",
-        .source = "[\"a\" 2] \"-\" join",
+        .source = "[\"a\" 2] \"-\" str.join",
         .kind = "type",
-        .word = "join",
+        .word = "str.core.join",
         .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
     });
 }
