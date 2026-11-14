@@ -2999,7 +2999,13 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
                         .negative => fiber.fail(.domain, "at index is negative"),
                         .out_of_bounds => fiber.fail(.domain, "at index is out of bounds"),
                     };
-                    for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
+                    // Eight loads a trip, written out: LLVM 22 (Zig 0.17.1)
+                    // no longer unrolls this loop and runs one a trip.
+                    var at: usize = 0;
+                    while (at + 8 <= out.len) : (at += 8) {
+                        inline for (0..8) |lane| out[at + lane] = source[@intCast(indices[at + lane])];
+                    }
+                    for (out[at..], indices[at..]) |*slot, position| slot.* = source[@intCast(position)];
                 },
                 .cons => |cons| {
                     var from = range.start;
