@@ -943,10 +943,10 @@ pub const SitesCursor = struct {
             self.pairs[2] = .{ .{ .symbol = .{ .name = self.names[2] } }, .{ .int = at.span.col } };
             count = 3;
         }
-        self.state = .{ .entry_build = .{
-            .index = index,
-            .builder = try dict.Materializer.init(self.allocator, self.pairs[0..count], false),
-        } };
+        // Build first: a failing `try` inside the state literal would leave the
+        // tag set over an undefined builder for `retire` to free.
+        const builder = try dict.Materializer.init(self.allocator, self.pairs[0..count], false);
+        self.state = .{ .entry_build = .{ .index = index, .builder = builder } };
     }
 
     /// Own transitions draw one unit each; the value builders draw on the
@@ -1007,6 +1007,8 @@ pub const SitesCursor = struct {
                 .complete => |text| result: {
                     const index = source.index;
                     source.builder.deinit();
+                    // The builder is gone: leave no state that retires it.
+                    self.state = .{ .entry = index };
                     const name = self.located[index].?.source_name;
                     if (self.source) |previous| self.releases.releaseValue(previous.text);
                     self.source = .{ .name = name, .text = text };
