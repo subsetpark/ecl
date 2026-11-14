@@ -43,12 +43,19 @@
 (dup type `symbol match? (chars dup "def" match? swap "defp" match? or) (pop 0) if)
 `definition-word? def
 
+### def helper-mark?
+(form -- bool : "Return 1 for the symbol helper.")
+(dup type `symbol match? (chars "helper" match?) (pop 0) if) `helper-mark? def
+
 ### def definitions
 (forms -- names bodies :
  "Return the name and body quotation of every def or defp form in a definition list, in source
-  order. A registration reads `(body) name def`, its name one quoted symbol.")
+  order. A registration reads `(body) name def`, or `(body) helper name def` for a helper, its name
+  one quoted symbol.")
 (dup (definition-word?) each where
- (|forms indices| forms indices 1 - at (chars) each forms indices 2 - at)
+ (|forms indices|
+  forms indices 1 - at (chars) each
+  indices 2 - dup forms swap at (helper-mark?) each - forms swap at)
  call) `definitions def
 
 ### def adjacency

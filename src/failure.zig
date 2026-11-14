@@ -106,13 +106,19 @@ const FailureDriver = struct {
         // The failing word was called at the failing token.
         if (self.failure.word) |word| self.appendTrace(.{
             .word = word,
-            .site = if (self.failure.site) |site| switch (site) {
+            // A word reported at its caller has no known call site here, and
+            // the failing token is inside its body.
+            .site = if (self.failure.word_attribution == .caller) null else if (self.failure.site) |site| switch (site) {
                 .token => |token| token,
                 .contract_quotation, .explicit_location => null,
             } else null,
-            .attribution = .own,
+            .attribution = self.failure.word_attribution,
         });
-        if (self.failure.trace_parent) |word| self.appendTrace(.{ .word = word, .site = null, .attribution = .own });
+        if (self.failure.trace_parent) |word| self.appendTrace(.{
+            .word = word,
+            .site = null,
+            .attribution = self.failure.trace_parent_attribution,
+        });
         if (via.currentTrace()) |entry| self.appendTrace(entry);
     }
     fn appendTrace(self: *FailureDriver, entry: TraceEntry) void {
@@ -125,12 +131,16 @@ const FailureDriver = struct {
     /// each enclosing helper to the first activation that is not one.
     fn attributedEntry(self: *const FailureDriver) ?usize {
         var chosen: ?usize = null;
-        // The failing word's own entry is the failing token.
-        var index: usize = @intFromBool(self.failure.word != null);
+        // The failing word's own entry is the failing token, unless that word
+        // is itself a helper reported at its caller.
+        var index: usize = @intFromBool(self.failure.word != null and self.failure.word_attribution != .caller);
         while (index < self.trace_count) : (index += 1) {
             const entry = self.trace[index];
-            if (entry.attribution != .caller or self.located[index] == null) break;
+            if (entry.attribution != .caller) break;
             chosen = index;
+            // An unknown call site ends the walk but keeps the attribution:
+            // the report omits a position rather than naming the helper body.
+            if (self.located[index] == null) break;
         }
         return chosen;
     }

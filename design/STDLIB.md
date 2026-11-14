@@ -395,9 +395,6 @@ Ex:
 # => (next-member open-tgz read-member sha256 unpack-tgz)
 ```
 
-### fail
-`( msg -- )` — Raise a user-kind error whose message is `msg`: `{kind user msg msg}`. A helper: the failure is reported where `fail` was called.
-
 ### filter
 `( list (a -- count) -- matches )` — Apply the predicate to every element, retaining each element as many times as its returned nonnegative int.
 
@@ -955,6 +952,9 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 
 ### converges
 `( value (a -- a) -- list )` — Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended.
+
+### fail
+`( msg -- )` — Raise a user-kind error whose message is `msg`: `{kind user msg msg}`. A helper: the failure is reported where `fail` was called.
 
 ### iterations
 `( value count (a -- a) -- list )` — Return `value` followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list.

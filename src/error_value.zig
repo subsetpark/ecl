@@ -898,8 +898,9 @@ pub const SitesCursor = struct {
     /// Borrowed from the failure driver for the cursor's lifetime.
     located: []const ?spans.LocatedSpan,
     names: [3]u32 = @splat(0),
-    items: []Value = &.{},
-    built: usize = 0,
+    /// The entry dicts built so far. Retiring it is one heap root, never a
+    /// walk of the entries, however deep the trace.
+    items: heap.OwnedValueBuffer = .moved,
     /// The most recent source name and the string built for it.
     source: ?struct { name: []const u8, text: Value } = null,
     pairs: [3]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
@@ -923,10 +924,7 @@ pub const SitesCursor = struct {
             .names, .name_insert, .allocate, .entry, .complete => {},
         }
         self.state = .complete;
-        for (self.items[0..self.built]) |item| releases.releaseValue(item);
-        self.allocator.free(self.items);
-        self.items = &.{};
-        self.built = 0;
+        self.items.deinit();
         if (self.source) |source| releases.releaseValue(source.text);
         self.source = null;
     }
@@ -982,13 +980,13 @@ pub const SitesCursor = struct {
                 },
             },
             .allocate => result: {
-                self.items = try self.allocator.alloc(Value, self.located.len);
+                self.items = try .init(self.releases, self.located.len);
                 self.state = .{ .entry = 0 };
                 break :result .pending;
             },
             .entry => |index| result: {
                 if (index == self.located.len) {
-                    self.state = .{ .list_build = .init(self.allocator, self.items) };
+                    self.state = .{ .list_build = .initOwned(self.allocator, self.items.take()) };
                     break :result .pending;
                 }
                 const located = self.located[index];
@@ -1022,8 +1020,7 @@ pub const SitesCursor = struct {
                 .complete => |item| result: {
                     const index = entry.index;
                     entry.builder.deinit();
-                    self.items[index] = item;
-                    self.built = index + 1;
+                    self.items.appendOwned(item);
                     self.state = .{ .entry = index + 1 };
                     break :result .pending;
                 },

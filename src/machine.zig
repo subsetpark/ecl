@@ -254,6 +254,11 @@ pub const EclErr = struct {
     message_len: usize = 0,
     word: ?intern.TraceWord = null,
     trace_parent: ?intern.TraceWord = null,
+    /// Whether a failure in `word` is reported at its caller. The call site
+    /// itself is not kept when the activation that held it is released first.
+    word_attribution: env.Attribution = .own,
+    /// The same for `trace_parent`.
+    trace_parent_attribution: env.Attribution = .own,
     site: ?FailureSite = null,
     data: [6]ErrorData = @splat(empty_error_data),
     data_len: usize = 0,
@@ -315,9 +320,19 @@ pub fn errorValue(
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
 ) error{OutOfMemory}!Value {
-    var cursor = ErrorValueCursor.init(allocator, failure, resolved, location);
-    defer cursor.retire(releases);
     var work = poll_api.unbounded();
+    // An error always carries `sites`, parallel to its trace, even an empty one.
+    var sites_cursor = error_values.SitesCursor.init(allocator, releases, &.{});
+    defer sites_cursor.retire();
+    var complete = resolved;
+    var sites: ?Value = null;
+    defer if (sites) |item| releases.releaseValue(item);
+    if (resolved.sites == null and resolved.trace.len == 0) {
+        sites = try poll_api.driveFallible(Value, &sites_cursor, .{&work});
+        complete.sites = sites;
+    }
+    var cursor = ErrorValueCursor.init(allocator, failure, complete, location);
+    defer cursor.retire(releases);
     return poll_api.driveFallible(Value, &cursor, .{&work});
 }
 pub fn stringValue(
@@ -2629,9 +2644,14 @@ pub const Fiber = struct {
         const owner = current.activation.bodyOwner();
         self.active_word = owner;
         if (owner == no_word) return self.failUnderflowOf("local binding", count);
+        const attribution = current.activation.attribution;
         current.activation.release(self.releases);
         current.activation = .none;
-        return self.failUnderflowOf(self.activeWordName(), count);
+        const failure = self.failUnderflowOf(self.activeWordName(), count);
+        // A helper's arity check fails at its caller; the call site went with
+        // the released activation, so the report omits a position instead.
+        self.pendingFailure().word_attribution = attribution;
+        return failure;
     }
     fn failUnderflowOf(self: *Fiber, subject: []const u8, count: usize) MachineError {
         const failure = self.failFmt(
@@ -2848,9 +2868,10 @@ pub const Fiber = struct {
     }
     /// Traces the pending failure through `word`, the definition whose frame
     /// the failing path elided, unless an inner one already holds it.
-    fn setFailureTraceParent(self: *Fiber, word: intern.TraceWord) void {
+    fn setFailureTraceParent(self: *Fiber, word: intern.TraceWord, attribution: env.Attribution) void {
         if (self.pendingFailureOptional()) |pending| if (pending.trace_parent == null) {
             pending.trace_parent = word;
+            pending.trace_parent_attribution = attribution;
         };
     }
     fn takePrimitiveFailure(self: *Fiber) ?EclErr {
@@ -3913,7 +3934,7 @@ fn loop(self: *Fiber) MachineError!RunStatus {
                         if (err == error.Ecl and self.pendingFailure().site == null) {
                             if (driver.site) |site| self.pendingFailure().site = .{ .token = site };
                         }
-                        if (err == error.Ecl) if (driver.trace_parent) |word| self.setFailureTraceParent(word);
+                        if (err == error.Ecl) if (driver.trace_parent) |word| self.setFailureTraceParent(word, .own);
                         clearWorkDriver(self);
                         switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
@@ -4568,7 +4589,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                 base,
                 @ptrCast(&application_selection),
             ) catch |err| {
-                if (activation.traced()) |word| self.setFailureTraceParent(word);
+                if (activation.traced()) |word| self.setFailureTraceParent(word, activation.attribution);
                 activation.release(self.releases);
                 continuation.deinit_fn(self.releases, self.allocator, continuation.context);
                 return err;
