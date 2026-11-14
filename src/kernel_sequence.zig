@@ -1538,6 +1538,14 @@ const RazeDriver = struct {
                         while (index != count and !work.exhausted()) {
                             const child = children[index].list;
                             const length: usize = @intCast(child.length());
+                            if (child_index == length) {
+                                // An empty child copies nothing and may have
+                                // storage `copyChild` does not handle.
+                                child_index = 0;
+                                index += 1;
+                                _ = work.spend();
+                                continue;
+                            }
                             const run = work.take(length - child_index);
                             copyChild(comptime builderKind(tag), out[destination..][0..run], child, child_index);
                             destination += run;
