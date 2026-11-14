@@ -701,6 +701,58 @@ pub const IndexFault = struct {
 /// lane group folded into a flag; only a flagged slice is rescanned in order,
 /// so the reported fault is the first one a sequential check would meet. A
 /// byte index cannot reach a collection longer than a byte's range.
+/// Copies `items` into `out`, which may overlap it in either direction, 64
+/// bytes a trip with every load of a trip before its stores. The `@memmove`
+/// this replaces for long runs goes to compiler_rt, whose loop LLVM 22 (Zig
+/// 0.17.1) leaves at one 16-byte vector a trip; the tail stays `@memmove`.
+pub fn moveBytes(out: []u8, items: []const u8) void {
+    std.debug.assert(out.len == items.len);
+    const len = items.len;
+    const Lane = @Vector(16, u8);
+    const trip = 64;
+    if (len < trip) return @memmove(out, items);
+    const destination = @intFromPtr(out.ptr);
+    const source = @intFromPtr(items.ptr);
+    if (destination == source) return;
+    if (destination < source or destination >= source + len) {
+        // Forward: a trip stores only below the sources still to be read.
+        var at: usize = 0;
+        while (at + trip <= len) : (at += trip) {
+            var lanes: [4]Lane = undefined;
+            inline for (0..4) |member| lanes[member] = items[at + member * 16 ..][0..16].*;
+            inline for (0..4) |member| out[at + member * 16 ..][0..16].* = lanes[member];
+        }
+        @memmove(out[at..], items[at..]);
+    } else {
+        // Backward: the destination lies above, so start from the end.
+        var end = len;
+        while (end >= trip) : (end -= trip) {
+            const at = end - trip;
+            var lanes: [4]Lane = undefined;
+            inline for (0..4) |member| lanes[member] = items[at + member * 16 ..][0..16].*;
+            inline for (0..4) |member| out[at + member * 16 ..][0..16].* = lanes[member];
+        }
+        @memmove(out[0..end], items[0..end]);
+    }
+}
+
+test "moveBytes copies disjoint and overlapping runs in both directions" {
+    var buffer: [1000]u8 = undefined;
+    var expected: [1000]u8 = undefined;
+    for ([_]usize{ 0, 1, 15, 63, 64, 65, 127, 128, 500, 900 }) |len| {
+        for ([_][2]usize{ .{ 0, 100 }, .{ 100, 0 }, .{ 0, 1 }, .{ 1, 0 }, .{ 10, 47 }, .{ 47, 10 }, .{ 30, 30 } }) |pair| {
+            if (pair[0] + len > buffer.len or pair[1] + len > buffer.len) continue;
+            for (&buffer, 0..) |*byte, index| byte.* = @truncate(index *% 7 +% 3);
+            expected = buffer;
+            var shifted: [1000]u8 = undefined;
+            @memcpy(shifted[0..len], buffer[pair[1]..][0..len]);
+            @memcpy(expected[pair[0]..][0..len], shifted[0..len]);
+            moveBytes(buffer[pair[0]..][0..len], buffer[pair[1]..][0..len]);
+            try std.testing.expectEqualSlices(u8, &expected, &buffer);
+        }
+    }
+}
+
 pub fn firstIndexFault(comptime Index: type, indices: []const Index, count: usize) ?IndexFault {
     comptime std.debug.assert(Index == u8 or Index == i64);
     if (Index == u8 and count > std.math.maxInt(u8)) return null;
