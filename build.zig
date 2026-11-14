@@ -4,6 +4,16 @@ const native_build = @import("src/native/build_helper.zig");
 /// Every non-fuzz test artifact runs under test/test_runner.zig, which keeps
 /// Zig's checked testing allocator but records only the allocation traces
 /// `-Dalloc-trace-frames` asks for.
+/// Every options step needs a distinct name. Zig 0.17.1 deduplicates build
+/// configuration entries by their serialized shape, and an options step's
+/// values are not part of that shape: two unnamed steps collapse into one, and
+/// every module importing either reads whichever generated file survives.
+fn namedOptions(b: *std.Build, name: []const u8) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.step.name = name;
+    return options;
+}
+
 fn addEclTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
     var with_runner = options;
     with_runner.test_runner = .{ .path = b.path("test/test_runner.zig"), .mode = .simple };
@@ -57,7 +67,7 @@ var alloc_options: *std.Build.Module = undefined;
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const alloc_values = b.addOptions();
+    const alloc_values = namedOptions(b, "allocation options");
     alloc_values.addOption(usize, "trace_frames", b.option(
         usize,
         "alloc-trace-frames",
@@ -71,7 +81,7 @@ pub fn build(b: *std.Build) void {
     const native = createNativeModules(b, target, optimize, .public);
     const native_abi = native.abi;
 
-    const runtime_options = b.addOptions();
+    const runtime_options = namedOptions(b, "runtime options");
     runtime_options.addOption(usize, "default_worker_count", 1);
     runtime_options.addOption(bool, "instrument_root_execution", false);
 
@@ -102,7 +112,7 @@ pub fn build(b: *std.Build) void {
     const fixture_files = b.addWriteFiles();
     _ = fixture_files.addCopyFile(fixture.getEmittedBin(), "sample.eclmod");
     for ([_][]const u8{ "portprobe", "foreignport" }) |name| {
-        const options = b.addOptions();
+        const options = namedOptions(b, b.fmt("{s} port fixture options", .{name}));
         options.addOption([]const u8, "module_name", name);
         const port_fixture = native_build.addExtension(b, .{
             .name = name,
@@ -136,12 +146,12 @@ pub fn build(b: *std.Build) void {
     instance_fixture.root_module.link_libc = true;
     native_fixture_step.dependOn(native_build.installExtension(b, instance_fixture, "native-fixture"));
     _ = fixture_files.addCopyFile(instance_fixture.getEmittedBin(), "instanceprobe.eclmod");
-    const native_fixture_options = b.addOptions();
+    const native_fixture_options = namedOptions(b, "native fixture options");
     native_fixture_options.addOptionPathDirectory(
         "directory",
         fixture_files.getDirectory(),
     );
-    const archive_fixture_options = b.addOptions();
+    const archive_fixture_options = namedOptions(b, "archive fixture options");
     archive_fixture_options.addOption([]const u8, "empty", @embedFile("test/fixtures/archive/empty.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "valid", @embedFile("test/fixtures/archive/valid.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "pax", @embedFile("test/fixtures/archive/pax.tgz.hex"));
@@ -186,7 +196,7 @@ pub fn build(b: *std.Build) void {
         "consume-without-state",
     };
     for (malformed_defects) |defect| {
-        const malformed_options = b.addOptions();
+        const malformed_options = namedOptions(b, b.fmt("malformed {s} options", .{defect}));
         malformed_options.addOption([]const u8, "defect", defect);
         const malformed_module = b.createModule(.{
             .root_source_file = b.path("test/native/malformed.zig"),
@@ -381,7 +391,7 @@ pub fn build(b: *std.Build) void {
         pkg_fetch_step.dependOn(&pkg_fetch_acceptance.step);
     }
     b.installFile("THIRD_PARTY_NOTICES.md", "share/doc/ecl/THIRD_PARTY_NOTICES.md");
-    const native_runtime_options = b.addOptions();
+    const native_runtime_options = namedOptions(b, "native runtime options");
     // The installed path rather than the emitted binary: an emitted path makes
     // every test compile that imports these options wait for the CLI to link.
     // An untracked path adds no build dependency, so each run of such a test
@@ -405,7 +415,7 @@ pub fn build(b: *std.Build) void {
         .name = "ecl-http-fixture",
         .root_module = http_fixture_mod,
     });
-    const http_fixture_options = b.addOptions();
+    const http_fixture_options = namedOptions(b, "http fixture options");
     http_fixture_options.addOptionPath("server_exe", http_fixture.getEmittedBin());
 
     // Hermetic child executable for process-port tests. Every caller receives
@@ -420,13 +430,13 @@ pub fn build(b: *std.Build) void {
         .name = "ecl-process-fixture",
         .root_module = process_fixture_mod,
     });
-    const process_fixture_options = b.addOptions();
+    const process_fixture_options = namedOptions(b, "process fixture options");
     process_fixture_options.addOptionPath("process_exe", process_fixture.getEmittedBin());
 
     // Hermetic HTTPS/package fixture. The test process receives every path
     // explicitly; it binds loopback only and generates its deterministic
     // package graph after learning the OS-selected port.
-    const pkg_fixture_options = b.addOptions();
+    const pkg_fixture_options = namedOptions(b, "pkg fixture options");
     pkg_fixture_options.addOptionPath("server_script", b.path("test/pkg_https_fixture.py"));
     pkg_fixture_options.addOptionPath("ca_file", b.path("test/fixtures/pkg/ca.pem"));
     pkg_fixture_options.addOptionPath("server_cert", b.path("test/fixtures/pkg/server.pem"));
@@ -460,7 +470,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const test_options = b.addOptions();
+    const test_options = namedOptions(b, "test runtime options");
     test_options.addOption(usize, "default_worker_count", 1);
     test_options.addOption(bool, "instrument_root_execution", false);
     configureRuntime(test_mod, native_abi, native_sdk, test_options);
@@ -713,7 +723,7 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .debug,
     });
-    const audit_options = b.addOptions();
+    const audit_options = namedOptions(b, "audit options");
     audit_options.addOption([:0]const u8, "git_extension_source", @embedFile("extensions/git/git.zig"));
     audit_options.addOption([:0]const u8, "proc_extension_source", @embedFile("extensions/proc/proc.zig"));
     audit_options.addOption([:0]const u8, "net_extension_source", @embedFile("extensions/net/net.zig"));
@@ -758,7 +768,7 @@ pub fn build(b: *std.Build) void {
     run_workdriver_timing.addArg("--timing");
     run_workdriver_timing.addPassthruArgs();
 
-    const instrumented_options = b.addOptions();
+    const instrumented_options = namedOptions(b, "instrumented runtime options");
     instrumented_options.addOption(usize, "default_worker_count", 1);
     instrumented_options.addOption(bool, "instrument_root_execution", true);
     const instrumented_ecl = b.createModule(.{
@@ -814,7 +824,7 @@ pub fn build(b: *std.Build) void {
     oom_core_step.dependOn(&run_audit.step);
     oom_surfaces_step.dependOn(&run_audit.step);
 
-    const e2e_options = b.addOptions();
+    const e2e_options = namedOptions(b, "e2e options");
     e2e_options.addOptionPath("ecl_exe", exe.getEmittedBin());
     e2e_options.addOptionPath("process_exe", process_fixture.getEmittedBin());
     e2e_options.addOption(std.lang.Optimize, "optimize", optimize);
@@ -886,7 +896,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        const worker_options = b.addOptions();
+        const worker_options = namedOptions(b, b.fmt("{d}-worker runtime options", .{worker_count}));
         worker_options.addOption(usize, "default_worker_count", worker_count);
         worker_options.addOption(bool, "instrument_root_execution", false);
         configureRuntime(worker_test_mod, native_abi, native_sdk, worker_options);
@@ -989,7 +999,7 @@ pub fn build(b: *std.Build) void {
     const differential_step = b.step("differential", "Compare automatic and generic idiom execution");
     differential_step.dependOn(&run_differential.step);
 
-    const reference_options = b.addOptions();
+    const reference_options = namedOptions(b, "reference options");
     reference_options.addOptionPath("zig_exe", exe.getEmittedBin());
     const reference_mod = b.createModule(.{
         .root_source_file = b.path("test/reference_snapshots.zig"),

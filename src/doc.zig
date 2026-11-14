@@ -37,17 +37,77 @@ pub fn normalize(
     return poll.driveFallible(Value, &cursor, .{&work});
 }
 
-/// Resumable two-pass documentation normalization. Line discovery, margin
-/// selection, collapsed rendering, and exact string materialization all keep
-/// their next position in this owned state.
+/// The codepoints normalization reads: a string value, or text a caller has
+/// already decoded.
+pub const Text = union(enum) {
+    string: Value,
+    codepoints: []const u32,
+
+    fn len(self: Text) usize {
+        return switch (self) {
+            .string => |item| @intCast(item.list.length()),
+            .codepoints => |items| items.len,
+        };
+    }
+    fn at(self: Text, index: usize) u32 {
+        return switch (self) {
+            .string => |item| list.atUnchecked(item, index).char,
+            .codepoints => |items| items[index],
+        };
+    }
+};
+
+/// Normalization as a string value: the codepoint normalization, then one
+/// polled materialization of its result.
 pub const NormalizeCursor = struct {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
 
+    normalizer: CodepointNormalizer,
+    output: ?[]u32 = null,
+    materializer: ?list.CodepointMaterializer = null,
+
+    pub fn init(allocator: std.mem.Allocator, document: Value) error{OutOfMemory}!NormalizeCursor {
+        std.debug.assert(document.isString());
+        return .{ .normalizer = try .init(allocator, .{ .string = document }) };
+    }
+
+    pub fn deinit(self: *NormalizeCursor) void {
+        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.output) |output| self.normalizer.allocator.free(output);
+        self.normalizer.deinit();
+        self.* = undefined;
+    }
+
+    pub fn retire(self: *NormalizeCursor, releases: *heap.ReleaseDomain) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
+        if (self.output) |output| self.normalizer.allocator.free(output);
+        self.normalizer.deinit();
+    }
+
+    pub fn advance(self: *NormalizeCursor, work: *poll.WorkBudget) error{OutOfMemory}!NormalizeProgress {
+        if (self.materializer == null) switch (try self.normalizer.advance(work)) {
+            .pending => return .pending,
+            .complete => |output| {
+                self.output = output;
+                self.materializer = .init(self.normalizer.allocator, output);
+            },
+        };
+        return switch (try self.materializer.?.advance(work)) {
+            .pending => .pending,
+            .complete => |result| .{ .complete = result },
+        };
+    }
+};
+
+/// Resumable two-pass documentation normalization to codepoints. Line
+/// discovery, margin selection, collapsed rendering, and the exact output
+/// fill all keep their next position in this owned state.
+pub const CodepointNormalizer = struct {
     allocator: std.mem.Allocator,
-    document: Value,
+    text: Text,
     lines: []Line,
     line_count: usize = 0,
-    phase: enum { scan, bounds, classify, render_count, render_fill, materialize } = .scan,
+    phase: enum { scan, bounds, classify, render_count, render_fill, complete } = .scan,
     source_index: usize = 0,
     line_start: usize = 0,
     leading: usize = 0,
@@ -80,57 +140,53 @@ pub const NormalizeCursor = struct {
     output_count: usize = 0,
     output: ?[]u32 = null,
     output_index: usize = 0,
-    materializer: ?list.CodepointMaterializer = null,
 
-    pub fn init(allocator: std.mem.Allocator, document: Value) error{OutOfMemory}!NormalizeCursor {
-        std.debug.assert(document.isString());
-        const count: usize = @intCast(document.list.length());
+    pub fn init(allocator: std.mem.Allocator, text: Text) error{OutOfMemory}!CodepointNormalizer {
         return .{
             .allocator = allocator,
-            .document = document,
-            .lines = try allocator.alloc(Line, count + 1),
+            .text = text,
+            .lines = try allocator.alloc(Line, text.len() + 1),
         };
     }
 
-    pub fn deinit(self: *NormalizeCursor) void {
-        if (self.materializer) |*materializer| materializer.deinit();
+    /// Frees the cursor's state, and its output unless `advance` returned it.
+    pub fn deinit(self: *CodepointNormalizer) void {
         if (self.output) |output| self.allocator.free(output);
         self.allocator.free(self.lines);
         self.* = undefined;
     }
 
-    pub fn retire(self: *NormalizeCursor, releases: *heap.ReleaseDomain) void {
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        if (self.output) |output| self.allocator.free(output);
-        self.allocator.free(self.lines);
+    /// The normalized codepoints, owned by the caller, once done.
+    pub fn advance(self: *CodepointNormalizer, work: *poll.WorkBudget) error{OutOfMemory}!poll.Progress([]u32) {
+        while (true) {
+            if (self.phase == .complete) {
+                const output = self.output.?;
+                self.output = null;
+                return .{ .complete = output };
+            }
+            if (!work.spend()) return .pending;
+            switch (self.phase) {
+                .scan => self.scanOne(),
+                .bounds => self.boundOne(),
+                .classify => self.classifyOne(),
+                .render_count, .render_fill => try self.renderOne(),
+                .complete => unreachable,
+            }
+        }
     }
 
-    pub fn advance(self: *NormalizeCursor, work: *poll.WorkBudget) error{OutOfMemory}!NormalizeProgress {
-        while (self.phase == .materialize or work.spend()) switch (self.phase) {
-            .scan => self.scanOne(),
-            .bounds => self.boundOne(),
-            .classify => self.classifyOne(),
-            .render_count, .render_fill => try self.renderOne(),
-            .materialize => return switch (try self.materializer.?.advance(work)) {
-                .pending => .pending,
-                .complete => |result| .{ .complete = result },
-            },
-        };
-        return .pending;
-    }
-
-    fn scanOne(self: *NormalizeCursor) void {
-        const count: usize = @intCast(self.document.list.length());
+    fn scanOne(self: *CodepointNormalizer) void {
+        const count = self.text.len();
         if (self.source_index == count) {
             self.finishLine(count);
             self.phase = .bounds;
             return;
         }
-        const codepoint = at(self.document, self.source_index);
+        const codepoint = self.text.at(self.source_index);
         if (isLineBreak(codepoint)) {
             const raw_end = self.source_index;
             self.source_index += if (codepoint == '\r' and self.source_index + 1 < count and
-                at(self.document, self.source_index + 1) == '\n') 2 else 1;
+                self.text.at(self.source_index + 1) == '\n') 2 else 1;
             self.finishLine(raw_end);
             self.line_start = self.source_index;
             self.leading = 0;
@@ -147,7 +203,7 @@ pub const NormalizeCursor = struct {
         }
     }
 
-    fn finishLine(self: *NormalizeCursor, raw_end: usize) void {
+    fn finishLine(self: *CodepointNormalizer, raw_end: usize) void {
         self.lines[self.line_count] = .{
             .start = self.line_start,
             .end = if (self.seen_content) self.last_content_end else raw_end,
@@ -157,7 +213,7 @@ pub const NormalizeCursor = struct {
         self.line_count += 1;
     }
 
-    fn boundOne(self: *NormalizeCursor) void {
+    fn boundOne(self: *CodepointNormalizer) void {
         if (self.bounds_index == self.line_count) {
             self.content_end = self.bounds_index;
             while (self.content_end > self.content_start and self.lines[self.content_end - 1].blank)
@@ -176,7 +232,7 @@ pub const NormalizeCursor = struct {
         self.bounds_index += 1;
     }
 
-    fn classifyOne(self: *NormalizeCursor) void {
+    fn classifyOne(self: *CodepointNormalizer) void {
         if (self.classify_index == self.content_end) {
             self.closeParagraph();
             self.resetRender();
@@ -193,7 +249,7 @@ pub const NormalizeCursor = struct {
             self.paragraph_ragged = false;
             self.paragraph_bulleted = false;
         }
-        if (isBullet(self.document, line.start + line.leading, line.end))
+        if (isBullet(self.text, line.start + line.leading, line.end))
             self.paragraph_bulleted = true;
         if (index == 0 and line.start == 0) return;
         if (self.paragraph_column) |column| {
@@ -201,7 +257,7 @@ pub const NormalizeCursor = struct {
         } else self.paragraph_column = line.leading;
     }
 
-    fn closeParagraph(self: *NormalizeCursor) void {
+    fn closeParagraph(self: *CodepointNormalizer) void {
         const first = self.paragraph_first orelse return;
         self.lines[first].verbatim = self.paragraph_ragged and !self.paragraph_bulleted;
         self.paragraph_first = null;
@@ -209,7 +265,7 @@ pub const NormalizeCursor = struct {
 
     /// Indentation a line keeps past the margin. The first line, when it opens
     /// the string, sits beside the quote and keeps none.
-    fn remainingIndent(self: *const NormalizeCursor, index: usize) usize {
+    fn remainingIndent(self: *const CodepointNormalizer, index: usize) usize {
         const line = self.lines[index];
         const removed = if (index == 0 and line.start == 0)
             line.leading
@@ -218,7 +274,7 @@ pub const NormalizeCursor = struct {
         return line.leading - removed;
     }
 
-    fn resetRender(self: *NormalizeCursor) void {
+    fn resetRender(self: *CodepointNormalizer) void {
         self.render_line = self.content_start;
         self.render_mode = .idle;
         self.paragraph_start = true;
@@ -231,19 +287,19 @@ pub const NormalizeCursor = struct {
         self.queue_len = 0;
     }
 
-    fn emit(self: *NormalizeCursor, codepoint: u32) error{OutOfMemory}!void {
+    fn emit(self: *CodepointNormalizer, codepoint: u32) error{OutOfMemory}!void {
         if (self.output) |output| output[self.output_index] = codepoint;
         self.output_index = std.math.add(usize, self.output_index, 1) catch return error.OutOfMemory;
     }
 
-    fn enqueue(self: *NormalizeCursor, items: []const u32) void {
+    fn enqueue(self: *CodepointNormalizer, items: []const u32) void {
         std.debug.assert(self.queue_len == self.queue_index and items.len <= self.queue.len);
         @memcpy(self.queue[0..items.len], items);
         self.queue_index = 0;
         self.queue_len = items.len;
     }
 
-    fn finishRenderedLine(self: *NormalizeCursor) void {
+    fn finishRenderedLine(self: *CodepointNormalizer) void {
         self.emitted = true;
         self.pending_blank = false;
         self.previous = self.current;
@@ -252,7 +308,7 @@ pub const NormalizeCursor = struct {
         self.pending_space = false;
     }
 
-    fn renderOne(self: *NormalizeCursor) error{OutOfMemory}!void {
+    fn renderOne(self: *CodepointNormalizer) error{OutOfMemory}!void {
         if (self.queue_index != self.queue_len) {
             try self.emit(self.queue[self.queue_index]);
             self.queue_index += 1;
@@ -261,7 +317,7 @@ pub const NormalizeCursor = struct {
         if (self.render_mode == .bullet_trim) {
             if (self.render_index == self.render_end) {
                 self.finishRenderedLine();
-            } else if (isHorizontal(at(self.document, self.render_index))) {
+            } else if (isHorizontal(self.text.at(self.render_index))) {
                 self.render_index += 1;
             } else {
                 self.render_mode = .content;
@@ -282,7 +338,7 @@ pub const NormalizeCursor = struct {
             if (self.render_index == self.render_end) {
                 self.finishRenderedLine();
             } else {
-                try self.emit(at(self.document, self.render_index));
+                try self.emit(self.text.at(self.render_index));
                 self.render_index += 1;
             }
             return;
@@ -292,7 +348,7 @@ pub const NormalizeCursor = struct {
                 self.finishRenderedLine();
                 return;
             }
-            const codepoint = at(self.document, self.render_index);
+            const codepoint = self.text.at(self.render_index);
             self.render_index += 1;
             if (isHorizontal(codepoint)) {
                 self.pending_space = self.output_index > 0;
@@ -311,8 +367,7 @@ pub const NormalizeCursor = struct {
                 self.phase = .render_fill;
             } else {
                 std.debug.assert(self.output_index == self.output_count);
-                self.materializer = .init(self.allocator, self.output.?);
-                self.phase = .materialize;
+                self.phase = .complete;
             }
             return;
         }
@@ -341,7 +396,7 @@ pub const NormalizeCursor = struct {
             self.render_mode = .verbatim_pad;
             return;
         }
-        const bullet = isBullet(self.document, item_start, line.end);
+        const bullet = isBullet(self.text, item_start, line.end);
         self.current = if (bullet) .bullet else if (self.previous == .bullet and remaining_indent > 0)
             .bullet
         else
@@ -369,13 +424,9 @@ pub const NormalizeCursor = struct {
     }
 };
 
-fn isBullet(document: Value, start: usize, end: usize) bool {
-    return start < end and at(document, start) == '-' and
-        (start + 1 == end or isHorizontal(at(document, start + 1)));
-}
-
-fn at(document: Value, index: usize) u32 {
-    return list.atUnchecked(document, index).char;
+fn isBullet(text: Text, start: usize, end: usize) bool {
+    return start < end and text.at(start) == '-' and
+        (start + 1 == end or isHorizontal(text.at(start + 1)));
 }
 
 fn isHorizontal(codepoint: u32) bool {

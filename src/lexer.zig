@@ -135,19 +135,6 @@ pub fn classify(token: []const u8) Classification {
 /// token, which declares a fixed before row and a variable after row.
 pub const row_token = "...";
 
-/// Whether `token` is a valid symbol spelling: the grammar `intern` and the
-/// binding validators apply to a name that never passed through the reader.
-pub fn validSymbol(token: []const u8) bool {
-    var cursor = SymbolCursor.init(token);
-    return poll.drive(bool, &cursor, .{});
-}
-
-/// Whether `token` spells a symbol as source does, bare or delimited.
-pub fn validSymbolSource(token: []const u8) bool {
-    var cursor = SymbolCursor.initSource(token);
-    return poll.drive(bool, &cursor, .{});
-}
-
 pub fn validSymbolSegment(token: []const u8) bool {
     var cursor = SymbolCursor.initSegment(token);
     return poll.drive(bool, &cursor, .{});

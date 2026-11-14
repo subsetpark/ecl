@@ -23,7 +23,7 @@ between prereleases.
 
 ## Get and build
 
-Building requires Zig 0.17.0, as pinned by `build.zig.zon`:
+Building requires Zig 0.17.1, as pinned by `build.zig.zon`:
 
 ```sh
 git clone https://github.com/subsetpark/ecl.git

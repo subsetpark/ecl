@@ -14,6 +14,7 @@ const dict = @import("../dict.zig");
 const equal = @import("../equal.zig");
 const doc = @import("../doc.zig");
 const print = @import("../print.zig");
+const formatter = @import("../formatter.zig");
 const poll = @import("../poll.zig");
 const storage = @import("../kernel_storage.zig");
 const testgen = @import("testgen.zig");
@@ -496,6 +497,64 @@ const SortAdapter = struct {
     }
 };
 
+const FormatAdapter = struct {
+    const Input = []const u8;
+    const Cursor = formatter.Cursor;
+    const Outcome = []u8;
+    fn start(_: *Fixture, input: Input) !Cursor {
+        return formatter.Cursor.init(allocator, input);
+    }
+    fn step(cursor: *Cursor, work: *poll.WorkBudget) !?Outcome {
+        return switch (try cursor.advance(work)) {
+            .pending => null,
+            .complete => |bytes| bytes,
+        };
+    }
+    fn finish(_: *Fixture, cursor: *Cursor) void {
+        cursor.deinit();
+    }
+    fn abandon(_: *Fixture, cursor: *Cursor) void {
+        cursor.deinit();
+    }
+    fn eql(a: Outcome, b: Outcome) !bool {
+        return std.mem.eql(u8, a, b);
+    }
+    fn releaseOutcome(_: *Fixture, outcome: Outcome) void {
+        allocator.free(outcome);
+    }
+};
+
+/// Source with every layout the formatter distinguishes: navigation headers,
+/// attached comments, documented definitions and registrations, locals, and
+/// documentation prose with escapes, bullets, and paragraph breaks.
+fn sourceFrom(fixture: *Fixture, recipe: testgen.ValueRecipe) ![]u8 {
+    const item = try testgen.valueFromRecipe(allocator, fixture.releases(), recipe, 3, .allowed, 1);
+    defer fixture.release(item);
+    const rendered = try print.toOwnedString(allocator, item);
+    defer allocator.free(rendered);
+    const alphabet = [_][]const u8{ "word", " ", "\\n", "\\n\\n", "\n- ", "  ", "\\t", "\\\"", "\\u{e9}", "\u{e9}", "x", "\\\\", "\n" };
+    var prose: std.ArrayList(u8) = .empty;
+    defer prose.deinit(allocator);
+    for (recipe.bytes) |byte| try prose.appendSlice(allocator, alphabet[byte % alphabet.len]);
+    return std.fmt.allocPrint(
+        allocator,
+        "# note\n# more\n(x -- y : \"{s}\") ({s}) `w def\n\n" ++
+            "(|a b| a b + {s}) `v def {s} `s set\n(: \"{s}\") ((1) `x def) `m @defm\n",
+        .{ prose.items, rendered, rendered, rendered, prose.items },
+    );
+}
+
+fn formatProperties(recipe: testgen.ValueRecipe) anyerror!void {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    const source = try sourceFrom(&fixture, recipe);
+    defer allocator.free(source);
+    const formatted = try formatter.format(allocator, source);
+    defer allocator.free(formatted);
+    // A probe for a group's fit charges at most its fixed step bound.
+    try checkCursor(FormatAdapter, &fixture, source, formatted, 2048 * (source.len + 1), seedOf(recipe));
+}
+
 fn codepointsFrom(recipe: testgen.ValueRecipe) ![]u32 {
     const codepoints = try allocator.alloc(u32, recipe.bytes.len);
     for (recipe.bytes, codepoints) |byte, *out| out.* = testgen.codepoint(byte);
@@ -693,6 +752,10 @@ test "cursor budget: text, encoding, and documentation pause only when their gra
 
 test "cursor budget: rendering pauses only when its grant is spent" {
     try minish.check(allocator, testgen.value_recipe_generator, renderProperties, options);
+}
+
+test "cursor budget: formatting pauses only when its grant is spent" {
+    try minish.check(allocator, testgen.value_recipe_generator, formatProperties, options);
 }
 
 test "cursor budget: sorting pauses only when its grant is spent" {
