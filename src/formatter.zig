@@ -1471,6 +1471,12 @@ const SequenceCursor = struct {
                         self.claim(header.part);
                         return;
                     }
+                    if (existingModuleHeader(sequence, part_index, trivia.bytes)) |header| {
+                        try output.appendHardlines(docs, if (self.have_content) 2 else 1);
+                        try output.append(docs, try moduleHeader(docs, header.name));
+                        self.claim(header.part);
+                        return;
+                    }
                     if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
                         if (self.pending_definition != header.part) {
                             try output.appendHardlines(docs, if (self.have_content) 2 else 1);
