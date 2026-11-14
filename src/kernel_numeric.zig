@@ -1407,6 +1407,10 @@ fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPo
     if (operand != .real and operation == .not_word) return .vector_checked;
     // No operand is NaN, so a float's negation or magnitude cannot fault.
     if (operand == .real and (operation == .neg or operation == .abs)) return .vector_infallible;
+    // Lane fault masks for the rest of the arithmetic: the least int for an
+    // int `neg`/`abs`, a negative `sqrt` operand, a rounding outside int64.
+    if (operand != .real and (operation == .neg or operation == .abs or operation == .sqrt)) return .vector_checked;
+    if (operand == .real and (operation == .sqrt or operation == .floor or operation == .ceil or operation == .round)) return .vector_checked;
     return .scalar_checked;
 }
 
@@ -1931,6 +1935,40 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
                         const zeros: @Vector(lanes, operand_class.Element()) = @splat(0);
                         // Faulting lanes are discarded, so narrowing may truncate them.
                         return .{ .values = narrowLanes(operand_class.Element(), out.Element(), lanes, a ^ ones), .faults = Vectors.mask(a & ~ones != zeros) };
+                    },
+                    .neg, .abs => {
+                        // Only an int operand reaches the least int; a
+                        // narrower one widens and cannot fault.
+                        const Wide = @Vector(lanes, i64);
+                        const wide: Wide = if (operand_class == .integer) a else @intCast(a);
+                        const zeros: Wide = @splat(0);
+                        const least: Wide = @splat(std.math.minInt(i64));
+                        const values: Wide = if (operation == .neg) zeros -% wide else @select(i64, wide < zeros, zeros -% wide, wide);
+                        return .{ .values = narrowLanes(i64, out.Element(), lanes, values), .faults = Vectors.mask(wide == least) };
+                    },
+                    .sqrt => {
+                        const Real = @Vector(lanes, f64);
+                        const real: Real = if (operand_class == .real) a else @floatFromInt(a);
+                        const zeros: Real = @splat(0.0);
+                        // A faulting lane takes the root of zero instead.
+                        const negative = real < zeros;
+                        return .{ .values = @sqrt(@select(f64, negative, zeros, real)), .faults = Vectors.mask(negative) };
+                    },
+                    .floor, .ceil, .round => {
+                        const Real = @Vector(lanes, f64);
+                        const rounded: Real = switch (operation) {
+                            .floor => @floor(a),
+                            .ceil => @ceil(a),
+                            .round => @round(a),
+                            else => unreachable,
+                        };
+                        // `floatToInt`'s range; a NaN fails both compares.
+                        const lower: Real = @splat(-9_223_372_036_854_775_808.0);
+                        const upper: Real = @splat(9_223_372_036_854_775_808.0);
+                        const zeros: Real = @splat(0.0);
+                        const inside = (rounded >= lower) & (rounded < upper);
+                        const values: @Vector(lanes, i64) = @intFromFloat(@select(f64, inside, rounded, zeros));
+                        return .{ .values = values, .faults = Vectors.mask(~inside) };
                     },
                     else => unreachable,
                 }
