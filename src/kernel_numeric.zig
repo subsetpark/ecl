@@ -3966,18 +3966,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
             while (start != out.len) {
                 const end = @min(start + flat.block_size, out.len);
                 if (unchecked) {
-                    var clean = true;
-                    for (start..end, 0..) |index, slot| {
-                        const next = switch (operation) {
-                            .add => left[index] + right[index],
-                            .sub => left[index] - right[index],
-                            .mul => left[index] * right[index],
-                            else => unreachable,
-                        };
-                        clean = clean and !std.math.isNan(next);
-                        block[slot] = next;
-                    }
-                    if (clean) {
+                    if (uncheckedFloatBlock(operation, left[start..end], right[start..end], block[0 .. end - start])) {
                         @memcpy(out[start..end], block[0 .. end - start]);
                         start = end;
                         continue;
@@ -3999,6 +3988,45 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
             }
         }
     };
+}
+
+/// Float `left op right` for `+ - *` over one block into `block`; false when
+/// a lane is NaN, the only fault, so the caller replays the block checked.
+/// Four vectors a trip, written out: LLVM 22 (Zig 0.17.1) keeps the scalar
+/// form of this loop to one element a trip.
+inline fn uncheckedFloatBlock(comptime operation: BinaryOp, left: []const f64, right: []const f64, block: []f64) bool {
+    const lanes = comptime std.simd.suggestVectorLength(f64) orelse 1;
+    const group = lanes * 4;
+    const Lanes = @Vector(lanes, f64);
+    var nan: @Vector(lanes, u1) = @splat(0);
+    var at: usize = 0;
+    while (at + group <= block.len) : (at += group) {
+        inline for (0..4) |member| {
+            const index = at + member * lanes;
+            const a: Lanes = left[index..][0..lanes].*;
+            const b: Lanes = right[index..][0..lanes].*;
+            const next = switch (operation) {
+                .add => a + b,
+                .sub => a - b,
+                .mul => a * b,
+                else => unreachable,
+            };
+            nan |= @intFromBool(next != next);
+            block[index..][0..lanes].* = next;
+        }
+    }
+    var clean = @reduce(.Or, nan) == 0;
+    for (left[at..block.len], right[at..block.len], block[at..]) |a, b, *slot| {
+        const next = switch (operation) {
+            .add => a + b,
+            .sub => a - b,
+            .mul => a * b,
+            else => unreachable,
+        };
+        clean = clean and !std.math.isNan(next);
+        slot.* = next;
+    }
+    return clean;
 }
 
 fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number, comptime row_class: Number) type {
@@ -4042,18 +4070,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
             while (start != out_items.len) {
                 const end = @min(start + flat.block_size, out_items.len);
                 if (unchecked) {
-                    var clean = true;
-                    for (start..end, 0..) |index, slot| {
-                        const next = switch (operation) {
-                            .add => left[index] + right[index],
-                            .sub => left[index] - right[index],
-                            .mul => left[index] * right[index],
-                            else => unreachable,
-                        };
-                        clean = clean and !std.math.isNan(next);
-                        block.items[slot] = next;
-                    }
-                    if (clean) {
+                    if (uncheckedFloatBlock(operation, left[start..end], right[start..end], block.items[0 .. end - start])) {
                         @memcpy(out_items[start..end], block.items[0 .. end - start]);
                         start = end;
                         continue;
