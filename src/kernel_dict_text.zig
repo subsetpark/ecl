@@ -485,11 +485,18 @@ const VectorReplacement = enum { atom, same, bytes };
 /// scatter. Validation reports the first bad index in selector order, as on
 /// the pervasive path. Operand 0 is the collection, operand 1 the indices,
 /// and operand 2, unless the replacement is an atom, the replacement leaf.
+/// `kind` is the result's representation and `source_kind` the collection's.
+/// They differ for a byte collection that takes ints: the copy widens it into
+/// a fresh int result, since int lists are bytes whenever they can be and a
+/// put of larger values must not fall to the pervasive path for that.
 fn VectorPutKernel(
     comptime kind: value.HeapKind,
+    comptime source_kind: value.HeapKind,
     comptime index_kind: value.HeapKind,
     comptime replacement: VectorReplacement,
 ) type {
+    comptime std.debug.assert(source_kind == kind or (source_kind == .leaf_u8 and kind == .leaf_i64));
+    const widens = source_kind != kind;
     const Element = heap.LeafElement(kind);
     const Index = heap.LeafElement(index_kind);
     return struct {
@@ -510,7 +517,7 @@ fn VectorPutKernel(
         /// The collection may become the result: indices are validated before
         /// the first store, so it is never left half-replaced, and a taken-over
         /// collection skips the copy.
-        pub const result: ?support.ResultShape = .{ .kind = kind, .overwritable = &.{0} };
+        pub const result: ?support.ResultShape = .{ .kind = kind, .overwritable = if (widens) &.{} else &.{0} };
 
         pub fn resultLength(_: Params, operands: [arity]Value, _: usize) usize {
             return @intCast(operands[0].list.length());
@@ -535,7 +542,10 @@ fn VectorPutKernel(
                     .negative => fiber.fail(.domain, "put index is negative"),
                     .out_of_bounds => fiber.fail(.domain, "put index is out of bounds"),
                 },
-                .copy => output.result.store(range.start, heap.leafElements(kind, operands[0].list)[range.start..range.end]),
+                .copy => if (widens) {
+                    const source = heap.leafElements(source_kind, operands[0].list)[range.start..range.end];
+                    for (output.result.range(range.start, range.len()), source) |*slot, item| slot.* = item;
+                } else output.result.store(range.start, heap.leafElements(kind, operands[0].list)[range.start..range.end]),
                 .scatter => {
                     const out = output.result.range(0, output.count);
                     switch (replacement) {
@@ -593,15 +603,18 @@ fn startTypedVectorPut(
             if (index_kind == candidate_index) {
                 switch (replacement.borrow()) {
                     .list => |items| if (items.kind() == candidate)
-                        try support.Kernel(VectorPutKernel(candidate, candidate_index, .same)).run(fiber, .{ collection, selector, replacement }, {}, selected)
+                        try support.Kernel(VectorPutKernel(candidate, candidate, candidate_index, .same)).run(fiber, .{ collection, selector, replacement }, {}, selected)
                     else if (candidate == .leaf_i64 and items.kind() == .leaf_u8)
-                        try support.Kernel(VectorPutKernel(candidate, candidate_index, .bytes)).run(fiber, .{ collection, selector, replacement }, {}, selected)
+                        try support.Kernel(VectorPutKernel(candidate, candidate, candidate_index, .bytes)).run(fiber, .{ collection, selector, replacement }, {}, selected)
+                    else if (candidate == .leaf_u8 and items.kind() == .leaf_i64)
+                        try support.Kernel(VectorPutKernel(.leaf_i64, .leaf_u8, candidate_index, .same)).run(fiber, .{ collection, selector, replacement }, {}, selected)
                     else
                         return false,
-                    else => {
-                        const atom = typedReplacement(candidate, replacement.borrow()) orelse return false;
-                        try support.Kernel(VectorPutKernel(candidate, candidate_index, .atom)).run(fiber, .{ collection, selector }, atom, selected);
-                    },
+                    else => if (typedReplacement(candidate, replacement.borrow())) |atom| {
+                        try support.Kernel(VectorPutKernel(candidate, candidate, candidate_index, .atom)).run(fiber, .{ collection, selector }, atom, selected);
+                    } else if (candidate == .leaf_u8 and replacement.borrow() == .int) {
+                        try support.Kernel(VectorPutKernel(.leaf_i64, .leaf_u8, candidate_index, .atom)).run(fiber, .{ collection, selector }, replacement.borrow().int, selected);
+                    } else return false,
                 }
                 return true;
             }

@@ -10,6 +10,102 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## Vector primitives under `csv`, and `csv.emit` as one gather — 2026-11-13
+
+Baseline is `e601af13`. Zig 0.17.1 ReleaseFast on macOS arm64 (M4 Max),
+unstripped. Six primitives that `csv` leans on were slow for reasons local to
+their kernels:
+
+| Primitive | Before | After | Unit |
+|---|---:|---:|---|
+| `text \, =`, a character leaf against a scalar | 2.14 | 0.38 | instructions per element |
+| `mask 1 =`, a byte leaf against a scalar | 2.14 | 0.43 | instructions per element |
+| `mask 0 (<>) scan` | 6.53 | 2.38 | instructions per element |
+| `raze` of 1.14M seven-character strings | 134 | 52 | instructions per string |
+| `1 wrap n take` | 20.1 | 0.36 | instructions per element |
+| `put` of 114k ints into 4M small ints | 12.7 | 1.2 | ms |
+
+A comparison of a narrow leaf with an int scalar widened every element to meet
+the int; it now narrows the scalar once when the element type holds it. A scan
+of `<>` over a mask is a running parity and takes eight positions a step.
+`raze` retained and released each child around its copy and made one trip
+through its driver per child; it now runs child after child and copies sixteen
+bytes or fewer inline. A cyclic `take` copied one period at a time and now
+doubles what it has written. A `put` of ints into a list stored a byte per
+element left the typed path, because the result had to widen, and boxed every
+element; the typed path now widens into a fresh int result.
+
+`csv.emit` built one `[quote body tail]` list per field and flattened twice.
+It now reads its output through one index vector over the doubled field text
+followed by the five pieces of punctuation, with no per-field list.
+
+`csv.parse` and `csv.emit`, `ECL_WORKERS=1`, in-process millisecond clock, the
+median over five alternating rounds of the best of three runs, on the
+synthetic inputs of the section below (8.8, 11.8, and 55.6 MB):
+
+| ms | Parse, before | Parse, after | Emit, before | Emit, after |
+|---|---:|---:|---:|---:|
+| 100,000 rows × 8 integers | 77 | 63 | 155 | 77 |
+| 100,000 rows × 3 quoted Unicode fields | 68 | 56 | 94 | 58 |
+| 613,295 rows × 12 mixed fields | 542 | 472 | 1372 | 635 |
+
+The new `csv.emit` writes the same bytes as the old on all three. With the
+earlier pieces of this series (no chain scan, the block-wise `or` fold), parse
+on these inputs was 90, 85, and 658 ms at `958ab67b`, and emit 173, 102, and
+1559.
+
+What remains in parse is one allocation a field: creating and destroying a
+seven-character string costs about 700 instructions.
+
+## Straight-line arithmetic chains no longer fuse — 2026-11-13
+
+Since `d588f1e5` a numeric word meeting a list scanned the words after it on
+every dispatch, to run a chain of them as one scalar program. The scan resolved
+each following word and compared spellings, and it ran whether or not a chain
+followed. Removing it leaves offered quotations (`(2 * 1 +) each`) as the only
+compiled arithmetic. Idiom recognition also compares interned names now, not
+spellings.
+
+Zig 0.17.1, macOS arm64 (M4 Max), unstripped. "With" is the tree before the
+removal, with name comparison already by id; "without" stubs the chain branch.
+
+`csv.parse` and `csv.emit`, `ECL_WORKERS=1`, in-process millisecond clock, the
+median over five alternating rounds of the best of three runs. Inputs are
+synthetic: 100,000 rows × 8 integers (8.8 MB); 100,000 rows × 3 quoted Unicode
+fields with embedded newlines and CRLF (11.8 MB); 613,295 rows × 12 mixed
+fields (55.6 MB).
+
+| ms | Parse, with | Parse, without | Emit, with | Emit, without |
+|---|---:|---:|---:|---:|
+| integers, ReleaseFast | 90 | 84 | 173 | 171 |
+| integers, ReleaseSafe | 163 | 148 | 322 | 329 |
+| quoted, ReleaseFast | 85 | 76 | 102 | 97 |
+| quoted, ReleaseSafe | 158 | 141 | 202 | 200 |
+| mixed, ReleaseFast | 658 | 608 | 1559 | 1584 |
+| mixed, ReleaseSafe | 1241 | 1131 | 2725 | 2841 |
+
+Parse retires 12–15% fewer instructions without the scan; emit is unchanged
+within its spread.
+
+The plain scalar n-body program (ten pairs per step, 3-vector arithmetic),
+ReleaseFast, instructions retired per step at 65,536 steps:
+
+| Build | Instructions per step |
+|---|---:|
+| `cb5e559` (2026-10-28, before chains) | 327k |
+| `958ab67b` | 432k |
+| names compared by id | 361k |
+| without chain fusion | 260k |
+
+A chain that did fuse was not faster here either. ReleaseFast, 200 passes
+over a million elements, wall seconds, the unfused control wrapping each later
+word in `(…) call`: a four-word float chain 0.14 fused against 0.12, a
+four-word int chain 0.36 against 0.31. A five-word boolean chain over
+24M-element masks, 30 passes, took 0.23 fused against 0.16 in ReleaseFast and
+0.19 against 0.29 in ReleaseSafe, the one case fusion won; `csv.parse`, which
+builds its masks 64K characters at a time, did not see that gain. The x86-64
+float-chain figures below were not re-measured.
+
 ## CSV in ECL — 2026-11-09
 
 `csv` at `87c55648` is an ECL module over the vector primitives; the native

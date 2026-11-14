@@ -1469,14 +1469,13 @@ const RazeDriver = struct {
     }
 
     /// Copies `out.len` elements of `child`, starting at `from`, into `out`,
-    /// whose representation the profile joined `child`'s into.
-    fn copyChild(comptime out_kind: value.HeapKind, out: []heap.LeafElement(out_kind), child: *heap.ListHandle, from: usize, releases: *heap.ReleaseDomain) void {
+    /// whose representation the profile joined `child`'s into. The collection
+    /// this driver owns keeps `child` alive, so the copy reads it in place.
+    fn copyChild(comptime out_kind: value.HeapKind, out: []heap.LeafElement(out_kind), child: *heap.ListHandle, from: usize) void {
         switch (child.kind()) {
             inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
                 if (comptime list.ListProfile.joinKinds(kind, out_kind) != out_kind) unreachable else {
-                    var reader = heap.LeafReader(kind).acquire(child);
-                    defer reader.release(releases);
-                    copyWidened(heap.LeafElement(out_kind), out, reader.slice()[from..][0..out.len]);
+                    copyWidened(heap.LeafElement(out_kind), out, heap.leafElements(kind, child)[from..][0..out.len]);
                 }
             },
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
@@ -1505,41 +1504,64 @@ const RazeDriver = struct {
                     self.phase = .fill;
                     continue;
                 }
-                const item = list.atUnchecked(self.collection.borrow(), self.index);
-                self.classify(item);
-                const contribution: usize = if (item == .list) @intCast(item.list.length()) else 1;
-                self.total = std.math.add(usize, self.total, contribution) catch
-                    return fiber.fail(.overflow, "raze result is too large");
-                self.index += 1;
-                _ = work.spend();
+                // One unit a child, counted in a run the turn can pay for.
+                const end = self.index + work.take(count - self.index);
+                var total = self.total;
+                defer self.total = total;
+                while (self.index != end) : (self.index += 1) {
+                    const item = list.atUnchecked(self.collection.borrow(), self.index);
+                    self.classify(item);
+                    const contribution: usize = if (item == .list) @intCast(item.list.length()) else 1;
+                    total = std.math.add(usize, total, contribution) catch
+                        return fiber.fail(.overflow, "raze result is too large");
+                }
             },
             .typed_fill => {
+                // One loop per result representation runs child after child
+                // while the turn lasts: a child costs its elements and one
+                // unit, and a child the budget cannot finish resumes here.
+                switch (self.output.?.borrowMut().builder) {
+                    .generic => unreachable,
+                    inline else => |*builder, tag| {
+                        const out = builder.items();
+                        // A typed result means every element is a list, so
+                        // the collection is a spine of them.
+                        const children = heap.valuesConst(self.collection.borrow().list);
+                        var index = self.index;
+                        var destination = self.destination;
+                        var child_index = self.child_index;
+                        defer {
+                            self.index = index;
+                            self.destination = destination;
+                            self.child_index = child_index;
+                        }
+                        while (index != count and !work.exhausted()) {
+                            const child = children[index].list;
+                            const length: usize = @intCast(child.length());
+                            if (child_index == length) {
+                                // An empty child copies nothing and may have
+                                // storage `copyChild` does not handle.
+                                child_index = 0;
+                                index += 1;
+                                _ = work.spend();
+                                continue;
+                            }
+                            const run = work.take(length - child_index);
+                            copyChild(comptime builderKind(tag), out[destination..][0..run], child, child_index);
+                            destination += run;
+                            child_index += run;
+                            if (child_index != length) break;
+                            child_index = 0;
+                            index += 1;
+                            _ = work.spend();
+                        }
+                    },
+                }
                 if (self.index == count) {
                     var output = self.output.?.take();
                     self.output = null;
                     return .{ .output = .{ .list = output.builder.finish() } };
                 }
-                const child = list.atUnchecked(self.collection.borrow(), self.index).list;
-                const length: usize = @intCast(child.length());
-                if (self.child_index == length) {
-                    self.child_index = 0;
-                    self.index += 1;
-                    _ = work.spend();
-                    continue;
-                }
-                const run = work.take(length - self.child_index);
-                switch (self.output.?.borrowMut().builder) {
-                    .generic => unreachable,
-                    inline else => |*builder, tag| copyChild(
-                        comptime builderKind(tag),
-                        builder.items()[self.destination..][0..run],
-                        child,
-                        self.child_index,
-                        fiber.releases,
-                    ),
-                }
-                self.destination += run;
-                self.child_index += run;
             },
             .fill => {
                 if (self.index == count) {
@@ -2178,7 +2200,6 @@ const FlipDriver = struct {
                     builder.items()[self.row..][0..run],
                     self.flat.?.borrow().list,
                     spine.len() * rows + self.row,
-                    fiber.releases,
                 ),
             }
             self.row += run;
@@ -2782,8 +2803,38 @@ const CopyShape = union(enum) {
 /// they match. Every typed list move widens through this.
 fn copyWidened(comptime Out: type, out: []Out, items: anytype) void {
     // A result may move within its own source, which `@memcpy` forbids.
-    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return @memmove(out, items);
-    for (out, items) |*slot, item| slot.* = item;
+    if (comptime std.meta.Elem(@TypeOf(items)) != Out) {
+        for (out, items) |*slot, item| slot.* = item;
+        return;
+    }
+    if (comptime @sizeOf(Out) == 1) if (copyShortBytes(std.mem.sliceAsBytes(out), std.mem.sliceAsBytes(items))) return;
+    @memmove(out, items);
+}
+
+/// Copies up to sixteen bytes as two loads and two stores that may overlap,
+/// every load before any store, so the runs may overlap too. Joining short
+/// strings is mostly this, and a call per string cost more than the copy.
+/// False when the run is longer.
+inline fn copyShortBytes(out: []u8, items: []const u8) bool {
+    const len = items.len;
+    if (len > 16) return false;
+    if (len >= 8) {
+        const head = std.mem.readInt(u64, items[0..8], .little);
+        const tail = std.mem.readInt(u64, items[len - 8 ..][0..8], .little);
+        std.mem.writeInt(u64, out[0..8], head, .little);
+        std.mem.writeInt(u64, out[len - 8 ..][0..8], tail, .little);
+    } else if (len >= 4) {
+        const head = std.mem.readInt(u32, items[0..4], .little);
+        const tail = std.mem.readInt(u32, items[len - 4 ..][0..4], .little);
+        std.mem.writeInt(u32, out[0..4], head, .little);
+        std.mem.writeInt(u32, out[len - 4 ..][0..4], tail, .little);
+    } else if (len >= 2) {
+        const head = std.mem.readInt(u16, items[0..2], .little);
+        const tail = std.mem.readInt(u16, items[len - 2 ..][0..2], .little);
+        std.mem.writeInt(u16, out[0..2], head, .little);
+        std.mem.writeInt(u16, out[len - 2 ..][0..2], tail, .little);
+    } else if (len == 1) out[0] = items[0];
+    return true;
 }
 
 /// The representation an `AnyListBuilder` variant writes.
@@ -2916,13 +2967,21 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
                     slot.* = source[reversed.end - index - 1];
                 },
                 .cyclic => |cyclic| {
-                    var from = (cyclic.start + range.start) % source.len;
-                    var written: usize = 0;
+                    // One period from the source, then the result repeats
+                    // itself: each copy doubles what is written, so a short
+                    // source fills a long result in a few large copies
+                    // instead of one small copy a period.
+                    const period = source.len;
+                    const from = (cyclic.start + range.start) % period;
+                    const head = @min(period, out.len);
+                    const first = @min(period - from, head);
+                    copyWidened(Out, out[0..first], source[from..][0..first]);
+                    copyWidened(Out, out[first..head], source[0 .. head - first]);
+                    var written = head;
                     while (written != out.len) {
-                        const run = @min(source.len - from, out.len - written);
-                        copyWidened(Out, out[written..][0..run], source[from..][0..run]);
+                        const run = @min(written, out.len - written);
+                        @memcpy(out[written..][0..run], out[0..run]);
                         written += run;
-                        from = 0;
                     }
                 },
                 .concat => |concat| {

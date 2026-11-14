@@ -2133,8 +2133,8 @@ pub const WorkerScheduler = enum(usize) {
         while (true) {
             if (!self.acquireAdmission(&admission, fiber.cancelled.load(.acquire))) {
                 if (state_.config.isCooperative()) _ = self.runNextCooperative();
-                _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
-                std.Thread.yield() catch @panic("root reclamation pressure yield failed");
+                if (!self.reclaimRootTurn())
+                    std.Thread.yield() catch @panic("root reclamation pressure yield failed");
                 continue;
             }
             const result = machine.runSlice(fiber);
@@ -2143,7 +2143,7 @@ pub const WorkerScheduler = enum(usize) {
                 if (err == error.OutOfMemory) self.drainAbandonedRootWork(fiber);
                 return err;
             };
-            _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
+            const reclaiming = self.reclaimRootTurn();
             switch (status) {
                 .completed => {
                     if (fiber.hasRequestedExit())
@@ -2156,18 +2156,30 @@ pub const WorkerScheduler = enum(usize) {
                 // executor still gets its turn because admission is released
                 // and re-acquired in FIFO order. A cooperative root also
                 // serves one queued turn. Only a root that stopped for
-                // something outside itself offers the processor.
+                // something outside itself offers the processor, and not
+                // while its own retirement turns are what it waits for.
                 .exhausted => if (state_.config.isCooperative()) {
                     _ = self.runNextCooperative();
                 },
-                .yielded => if (!state_.config.isCooperative() or !self.runNextCooperative())
-                    std.Thread.yield() catch @panic("scheduler root yield failed"),
+                .yielded => {
+                    const served = state_.config.isCooperative() and self.runNextCooperative();
+                    if (!served and !reclaiming)
+                        std.Thread.yield() catch @panic("scheduler root yield failed");
+                },
                 .parked => self.handleRootPark(fiber) catch |err| {
                     self.drainAbandonedRootWork(fiber);
                     return err;
                 },
             }
         }
+    }
+
+    /// One retirement turn on the root. True when it spent its whole quantum
+    /// and left work: the root is then relieving the backlog itself, and
+    /// offering its thread would only delay that. Otherwise the queue is
+    /// empty or another executor holds the claim.
+    fn reclaimRootTurn(self: *const WorkerScheduler) bool {
+        return self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum) == false;
     }
 
     fn drainAbandonedRootWork(self: *const WorkerScheduler, fiber: *machine.Fiber) void {

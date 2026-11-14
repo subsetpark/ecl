@@ -8,6 +8,7 @@ const lexer = @import("lexer.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
+const idioms = @import("idioms.zig");
 const native_module = @import("native_module.zig");
 const reader_types = @import("reader_types.zig");
 /// In-tree primitives use Fiber's ergonomic error helpers. This binding
@@ -1210,6 +1211,7 @@ const EnvState = struct {
     cells_mutex: std.Io.Mutex = .init,
     scopes: ScopeIndex = .{},
     locals_words: intern.LocalsWords,
+    idiom_names: idioms.Names,
 
     fn publishCore(self: *EnvState, name: intern.BindingName, definition: *Definition) CorePublisher.Error!void {
         // Core is fixed bootstrap input sized well inside its table, so a full
@@ -1236,6 +1238,7 @@ pub const Env = enum(usize) {
         const host = host_owner.cleanup();
         const allocator = host.allocator();
         const locals_words = try intern.LocalsWords.mint();
+        const idiom_names = try idioms.Names.mint();
         var core_init = NameMap.initCursor(allocator, core_capacity_hint);
         errdefer core_init.deinit();
         const core = while (true) switch (try core_init.advance()) {
@@ -1251,6 +1254,7 @@ pub const Env = enum(usize) {
             .host = host,
             .core = core,
             .locals_words = locals_words,
+            .idiom_names = idiom_names,
             .core_cell = .{ .id = .none, .kind = .core },
             .session_cell = .{ .id = .none, .kind = .session },
         };
@@ -1402,6 +1406,11 @@ pub const Env = enum(usize) {
     /// The reserved locals backend, bindable without a lookup in any scope.
     pub fn localsWords(self: *const Env) intern.LocalsWords {
         return self.privateState().locals_words;
+    }
+
+    /// The words idiom recognition compares, by interned name.
+    pub fn idiomNames(self: *const Env) *const idioms.Names {
+        return &self.privateState().idiom_names;
     }
 
     /// A fresh Env together with the one capability that may build its core.

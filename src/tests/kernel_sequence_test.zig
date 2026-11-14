@@ -114,6 +114,107 @@ test "sequence: fold and fold1 boolean and numeric results" {
     });
 }
 
+test "sequence: running int sums agree across blocks and fault where they overflow" {
+    try helper.expectStack(
+        "600 range 0 (+) fold 600 range 5 (+) scan last 600 range 2 mod 0 = 0 (+) fold " ++
+            "600 range 2 mod 0 = 7 (+) scan 0 (+) fold 600 range 2 mod 0 = 9223372036854775507 (+) fold " ++
+            "600 range 300 - 0 (+) scan (min) fold1",
+        "179700 179705 300 94500 9223372036854775807 -45150",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "a fold overflows in its last block", .source = "600 range 599 9223372036854775807 put 0 (+) fold", .kind = "overflow", .word = "+" },
+        .{ .name = "a scan overflows in a middle block", .source = "600 range 300 9223372036854775807 put 1 (+) scan", .kind = "overflow", .word = "+" },
+        // The wrapped total is back in range; the step that left it still faults.
+        .{ .name = "a sum that wraps back still faults", .source = "[9223372036854775807 1 -2] 300 take 0 (+) fold", .kind = "overflow", .word = "+" },
+        .{ .name = "a mask fold overflows its seed", .source = "600 range 2 mod 0 = 9223372036854775508 (+) fold", .kind = "overflow", .word = "+" },
+        .{ .name = "a mask scan overflows its seed", .source = "600 range 2 mod 0 = 9223372036854775807 (+) scan", .kind = "overflow", .word = "+" },
+    });
+}
+
+test "sequence: put stores ints into a list of small ints" {
+    // A list of small ints is stored a byte each; a put of larger or
+    // negative ints gives the list those values would have made.
+    try helper.expectStack(
+        "[1 2 3 4] 600 take [0 599 300] [1000 -5 70000] put dup 0 (+) fold swap [0 1 599 300 301] at " ++
+            "[1 2 3] [0 2] 999 put [1 2 3] [1 1] [500 600] put [1 2 3] [] [] put 1 wrap 5 take [4 0] [-1 300] put",
+        "72489 [1000 2 -5 70000 2] [999 2 999] [1 600 3] [1 2 3] [300 1 1 1 -1]",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "an index past the end", .source = "[1 2 3] [0 3] [500 600] put", .kind = "domain", .word = "put", .message = "put index is out of bounds" },
+        .{ .name = "a negative index", .source = "[1 2 3] [-1] [500] put", .kind = "domain", .word = "put", .message = "put index is negative" },
+        .{ .name = "too few replacements", .source = "[1 2 3] [0 1] [500] put", .kind = "conform", .word = "put" },
+    });
+}
+
+test "sequence: a short list taken cyclically fills a long one" {
+    try helper.expectStack(
+        "1 wrap 1000 take 0 (+) fold \"ab\" 7 take [1 2 3] 1000 take 0 (+) fold [1 2 3] 2 take " ++
+            "[1.5 2.5] 5 take \"aλ\" 5 take [1 2 3] -1000 take 0 (+) fold [1 2 3] 4 rotate",
+        "1000 \"abababa\" 1999 [1 2] [1.5 2.5 1.5 2.5 1.5] \"aλaλa\" 2001 [2 3 1]",
+    );
+}
+
+test "sequence: raze joins many short children, empty ones included" {
+    try helper.expectStack(
+        "[\"ab\" \"\" \"cde\"] 300 take raze dup len swap 5 take " ++
+            "[\"ab\" \"λ\" [1 2]] raze [[1 2] [3.5]] 200 take raze 0 (+) fold [] raze [[] []] raze",
+        "500 \"abcde\" (\\a \\b \\λ 1 2) 650.0 () ()",
+    );
+}
+
+test "sequence: a narrow leaf compares with an int it can and cannot hold" {
+    // Bytes and characters are stored narrower than the int they meet. One
+    // in their range compares as stored; one outside it never equals them.
+    try helper.expectStack(
+        "[0 1 255 7] 40 take dup 255 = 0 (+) fold swap dup 256 = 0 (+) fold swap dup -1 > 0 (+) fold swap " ++
+            "dup 256 < 0 (+) fold swap dup 7 >= 0 (+) fold swap 7 swap < 0 (+) fold",
+        "10 0 40 40 20 10",
+    );
+    try helper.expectStack(
+        "\"a,b,c\" 9 take dup \\, = swap dup 44 = swap dup 300 <> swap \\, swap =",
+        "[0 1 0 1 0 0 1 0 1] [0 1 0 1 0 0 1 0 1] [1 1 1 1 1 1 1 1 1] [0 1 0 1 0 0 1 0 1]",
+    );
+    try helper.expectStack("\"aλ,b\" 3 take dup \\, = swap dup \\λ = swap 70000 <", "[0 0 1] [0 1 0] [1 1 1]");
+}
+
+test "sequence: a scan of <> over a mask is its running parity, across blocks" {
+    // 600 elements span three 256-element blocks, and 601 leaves a partial
+    // word; the reference recomputes each parity from a running count.
+    try helper.expectStack(
+        "600 range 7 mod 0 = dup 0 (<>) scan swap 0 (+) scan 2 mod = 1 (and) fold " ++
+            "601 range 3 mod 0 = dup 1 (<>) scan swap 0 (+) scan 1 + 2 mod = 1 (and) fold " ++
+            "[1 0 1 1 0] 0 (<>) scan [1 0 1 1 0] 1 (<>) scan [1 1 0] (<>) scan1",
+        "1 1 [1 1 0 1 1] [0 0 1 0 0] [1 0 0]",
+    );
+    // `<>` compares; it is an XOR only over 0 and 1. A start or an element
+    // that is neither gives 1 wherever it differs.
+    try helper.expectStack(
+        "[1 0 1] 5 (<>) scan [0 0 1 1 0 0 0 0 0 0 1 0] 600 take 599 0 put 300 1 put 7 (<>) scan 0 (+) fold " ++
+            "600 range 7 mod 0 = 2 * 0 (<>) scan 0 (+) fold " ++
+            "[1 1 1 1 1 1 1 1 1 0 2 1] 600 take 0 (<>) scan 0 (+) fold",
+        "[1 1 0] 306 600 350",
+    );
+}
+
+test "sequence: boolean folds agree across blocks, over masks and ints" {
+    // 600 elements span three 256-element blocks; a mask is a byte per
+    // position and `range mod` is an int per position.
+    try helper.expectStack(
+        "600 range 599 = 0 (or) fold 600 range 600 = 0 (or) fold " ++
+            "600 range 0 >= 1 (and) fold 600 range 599 < 1 (and) fold " ++
+            "600 range 599 = 600 * 600 div 0 (or) fold 600 range 0 * 1 + 1 (and) fold " ++
+            "600 range 0 * 1 (or) fold 600 range 0 >= 0 (and) fold " ++
+            "600 range 300 = (or) fold1 600 range 300 <> (and) fold1",
+        "1 0 1 0 1 1 1 0 1 0",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "or meets a later block's 2", .source = "600 range 599 = 2 * 0 (or) fold", .kind = "type", .word = "or" },
+        .{ .name = "and meets a later block's -1", .source = "600 range 599 = 0 swap - 1 (and) fold", .kind = "type", .word = "and" },
+        .{ .name = "or refuses its seed over a mask", .source = "600 range 0 >= 5 (or) fold", .kind = "type", .word = "or" },
+        .{ .name = "and refuses a byte that is not a boolean", .source = "600 range 255 mod 1 (and) fold", .kind = "type", .word = "and" },
+    });
+}
+
 test "sequence: where, in?, and find validate and search" {
     try helper.expectStack(
         "[1 0 1 0] where [0 2 0] first-where [0 0] first-where [] first-where " ++

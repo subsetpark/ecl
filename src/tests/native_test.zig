@@ -1537,8 +1537,8 @@ test "native: column primitives cancel active work and reuse the session" {
     const cases = [_]struct { setup: []const u8, body: []const u8, word: []const u8 }{
         .{ .setup = "500000 range wrap", .body = "group", .word = "group" },
         .{ .setup = "[[]] 8000000 take wrap", .body = "(len) each", .word = "len" },
-        .{ .setup = "[1] 8000000 take 1 pair", .body = "(and) fold", .word = "and" },
-        .{ .setup = "[0] 8000000 take wrap", .body = "(or) fold1", .word = "or" },
+        .{ .setup = "[1] 100000000 take 1 pair", .body = "(and) fold", .word = "and" },
+        .{ .setup = "[0] 100000000 take wrap", .body = "(or) fold1", .word = "or" },
         .{ .setup = "[\"x\" [1]] [0] 8000000 take pair", .body = "at", .word = "at" },
         .{ .setup = "\"x\" 8000000 str.repeat dup \"😀\" swap cat 1 drop pair", .body = "match?", .word = "match?" },
         .{ .setup = "500000 range dup pair wrap", .body = "group-columns", .word = "group-columns" },

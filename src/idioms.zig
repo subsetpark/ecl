@@ -272,8 +272,10 @@ fn liveWord(peeked: ?machine.PeekedWord, primitive: ?env.PrimitiveImpl) ?intern.
 
 /// Matches an offered quotation against one entry's pattern, checking each
 /// pattern word's binding where the quotation runs.
-fn matchPhrase(fiber: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture {
+fn matchPhrase(fiber: *Fiber, phrase: Value, index: u16) ?Capture {
+    const entry = registry[index];
     if (phrase != .list or phrase.list.length() != entry.pattern.len) return null;
+    const names = &fiber.environment.idiomNames().entries[index];
     var capture: Capture = .{};
     for (entry.pattern, 0..) |atom, atom_index| {
         const actual = list.atUnchecked(phrase, atom_index);
@@ -285,14 +287,14 @@ fn matchPhrase(fiber: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture {
             .operation => {
                 // A quoted occurrence pushes its symbol; it is never the operation.
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
-                    !std.mem.eql(u8, intern.get(actual.symbol.name), entry.operation.spelling())) return null;
+                    actual.symbol.name != names.operation) return null;
                 if (!wordMatches(fiber, actual.symbol, operationPrimitive(entry.operation))) return null;
                 capture.active_word = actual.symbol.name;
                 capture.active_index = @intCast(atom_index);
             },
-            .word => |expected| {
+            .word => {
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
-                    !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return null;
+                    actual.symbol.name != names.pattern[atom_index]) return null;
                 if (!wordMatches(fiber, actual.symbol, null)) return null;
             },
         }
@@ -364,6 +366,8 @@ comptime {
     for (registry, 0..) |entry, index| {
         if (entry.following.len == 0) continue;
         if (entry.context != .phrase) @compileError("a phrase entry must have the phrase context");
+        if (!std.mem.eql(u8, entry.source_word.?, entry.operation.spelling()))
+            @compileError("a phrase entry's head is its operation's word: " ++ entry.source_word.?);
         const first = firstPhraseEntry(entry.source_word.?).?;
         for (registry[first..index]) |between| {
             if (between.following.len == 0 or !std.mem.eql(u8, between.source_word.?, entry.source_word.?))
@@ -381,30 +385,11 @@ comptime {
     };
 }
 
-/// Phrase words' interned names, interned on first use: each entry's head,
-/// then its following words. The intern table is one per process and never
-/// reset, so an id once learned stays valid.
 const max_following = blk: {
     var longest: usize = 0;
     for (registry) |entry| longest = @max(longest, entry.following.len);
     break :blk longest;
 };
-var phrase_atoms: [registry.len][1 + max_following]std.atomic.Value(u32) = @splat(@splat(.init(unknown_atom)));
-const unknown_atom = std.math.maxInt(u32);
-
-/// Position 0 is the head; position n is following word n - 1.
-fn phraseAtom(entry: u16, position: usize) error{OutOfMemory}!u32 {
-    const cell = &phrase_atoms[entry][position];
-    const cached = cell.load(.monotonic);
-    if (cached != unknown_atom) return cached;
-    const spelling = if (position == 0)
-        registry[entry].source_word.?
-    else
-        registry[entry].following[position - 1].spelling;
-    const id = try intern.intern(spelling);
-    cell.store(id, .monotonic);
-    return id;
-}
 
 /// A kernel word's primitive asks whether the words after it continue one of
 /// its phrases (see `kernel_support.headed`). Only the word being dispatched
@@ -412,7 +397,7 @@ fn phraseAtom(entry: u16, position: usize) error{OutOfMemory}!u32 {
 /// that runs generic code only.
 pub fn applyHeaded(fiber: *Fiber, first: u16) MachineError!bool {
     if (fiber.inherited.idiom_mode == .generic_only) return false;
-    if (fiber.active_word.atom() != try phraseAtom(first, 0)) return false;
+    if (fiber.active_word.atom() != fiber.environment.idiomNames().entries[first].operation) return false;
     return applyPhrase(fiber, first);
 }
 
@@ -423,17 +408,17 @@ pub fn applyHeaded(fiber: *Fiber, first: u16) MachineError!bool {
 /// following word would: it is the only word that can fault, and a builtin
 /// has no site inside a body.
 fn applyPhrase(fiber: *Fiber, first: u16) MachineError!bool {
-    const name = registry[first].source_word.?;
+    const names = &fiber.environment.idiomNames().entries;
     var index = first;
     while (index < registry.len) : (index += 1) {
         const entry = registry[index];
-        if (entry.following.len == 0 or !std.mem.eql(u8, entry.source_word.?, name)) break;
+        if (entry.following.len == 0 or names[index].operation != names[first].operation) break;
         const count: u32 = @intCast(entry.following.len);
         const forms = fiber.followingForms(count) orelse return false;
         var last: ?intern.TraceWord = null;
         const matched = for (0..entry.following.len) |offset| {
             const form = forms.at(@intCast(offset));
-            if (form != .symbol or env.isQuoted(form.symbol.slot) or form.symbol.name != try phraseAtom(index, offset + 1)) break false;
+            if (form != .symbol or env.isQuoted(form.symbol.slot) or form.symbol.name != names[index].following[offset]) break false;
             last = try followingWord(fiber, form.symbol) orelse break false;
         } else true;
         if (!matched) continue;
@@ -591,7 +576,7 @@ fn matchOffered(
 ) MachineError!void {
     var capture: Capture = .{};
     const matched: ?u16 = for (entries) |index| {
-        if (matchPhrase(fiber, candidate.phrase, registry[index])) |found| {
+        if (matchPhrase(fiber, candidate.phrase, index)) |found| {
             capture = found;
             break index;
         }
@@ -659,6 +644,70 @@ const ProgramForm = union(enum) {
     }
 };
 
+/// A word a scalar program may contain.
+const ProgramWord = union(enum) {
+    stack: ProgramStackWord,
+    operation: Operation,
+};
+
+/// Every word recognition compares, by interned name: the words a scalar
+/// program may contain, and each registry entry's operation, pattern, and
+/// following words. Recognition asks whether a form is one of these by
+/// comparing name ids, never spellings. Minted once per Env; the names
+/// themselves live in the process table.
+pub const Names = struct {
+    const word_count = program_operations.len + @typeInfo(ProgramStackWord).@"enum".field_names.len;
+    const slot_count = std.math.ceilPowerOfTwoAssert(usize, word_count * 2);
+    const Slot = struct { name: u32, word: ProgramWord };
+    const Entry = struct {
+        /// The entry's operation word, which heads a phrase entry.
+        operation: u32,
+        /// The name at each `.word` atom of the pattern.
+        pattern: [max_pattern_len]u32,
+        following: [max_following]u32,
+    };
+
+    program: [slot_count]?Slot,
+    entries: [registry.len]Entry,
+
+    pub fn mint() error{OutOfMemory}!Names {
+        // SAFETY: every entry is written below; a pattern or following slot
+        // past its entry's own length is never read.
+        var names: Names = .{ .program = @splat(null), .entries = undefined };
+        for (std.meta.tags(ProgramStackWord)) |stack_word|
+            names.insert(try intern.intern(@tagName(stack_word)), .{ .stack = stack_word });
+        for (program_operations) |candidate|
+            names.insert(try intern.intern(candidate.spelling), .{ .operation = candidate.operation });
+        for (registry, &names.entries) |entry, *minted| {
+            minted.* = .{ .operation = try intern.intern(entry.operation.spelling()), .pattern = @splat(0), .following = @splat(0) };
+            for (entry.pattern, 0..) |atom, index| switch (atom) {
+                .word => |expected| minted.pattern[index] = try intern.intern(expected.spelling),
+                .constant, .operation => {},
+            };
+            for (entry.following, 0..) |expected, index| minted.following[index] = try intern.intern(expected.spelling);
+        }
+        return names;
+    }
+
+    fn home(name: u32) usize {
+        return @as(usize, name *% 0x9E3779B1) & (slot_count - 1);
+    }
+
+    fn insert(self: *Names, name: u32, word: ProgramWord) void {
+        var index = home(name);
+        while (self.program[index]) |taken| : (index = (index + 1) & (slot_count - 1))
+            std.debug.assert(taken.name != name);
+        self.program[index] = .{ .name = name, .word = word };
+    }
+
+    fn programWord(self: *const Names, name: u32) ?ProgramWord {
+        var index = home(name);
+        while (self.program[index]) |taken| : (index = (index + 1) & (slot_count - 1))
+            if (taken.name == name) return taken.word;
+        return null;
+    }
+};
+
 /// What `form` is to a scalar program where it runs, or null when no program
 /// can hold it: a numeric constant, a stack word, or a numeric operation, each
 /// word bound as the program expects.
@@ -667,37 +716,31 @@ fn programForm(fiber: *Fiber, form: Value) ?ProgramForm {
     const word = form.symbol;
     // A quoted occurrence pushes a symbol, which no program register holds.
     if (env.isQuoted(word.slot)) return null;
-    const spelling = intern.get(word.name);
-    if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
-        if (!wordMatches(fiber, word, null)) return null;
-        return .{ .stack = stack_word };
+    switch (fiber.environment.idiomNames().programWord(word.name) orelse return null) {
+        .stack => |stack_word| {
+            if (!wordMatches(fiber, word, null)) return null;
+            return .{ .stack = stack_word };
+        },
+        .operation => |operation| {
+            if (!wordMatches(fiber, word, operationPrimitive(operation))) return null;
+            return .{ .operation = operation };
+        },
     }
-    const operation = chainHead(spelling) orelse return null;
-    if (!wordMatches(fiber, word, operationPrimitive(operation))) return null;
-    return .{ .operation = operation };
 }
 
-/// The numeric operation `spelling` names, which heads a straight-line chain.
-pub fn chainHead(spelling: []const u8) ?Operation {
-    for (program_operations) |candidate| {
-        if (std.mem.eql(u8, candidate.spelling, spelling)) return candidate.operation;
-    }
-    return null;
-}
-
-/// Compiles `length` forms of `code` from `start`, applied to `inputs`
-/// values, into a scalar program, or returns null when they are not one: every
-/// form must be a `programForm`, and the forms must leave exactly one value
-/// from their inputs. Operations keep their order, including one whose result
-/// is later popped, so a fault happens where the code's own would.
-fn compileProgram(fiber: *Fiber, code: Value, start: usize, length: usize, inputs: u8) ?numeric.ScalarProgram {
+/// Compiles the quotation `code`, applied to `inputs` values, into a scalar
+/// program, or returns null when it is not one: every form must be a
+/// `programForm`, and the forms must leave exactly one value from their
+/// inputs. Operations keep their order, including one whose result is later
+/// popped, so a fault happens where the code's own would.
+fn compileProgram(fiber: *Fiber, code: Value, inputs: u8) ?numeric.ScalarProgram {
     const Program = numeric.ScalarProgram;
     var program: Program = .{ .inputs = inputs, .registers = inputs };
     // SAFETY: only the first `depth` entries are read.
     var stack: [Program.max_registers]Program.Register = undefined;
     var depth: usize = inputs;
     for (0..inputs) |input| stack[input] = @intCast(input);
-    for (start..start + length) |position| {
+    for (0..@intCast(code.list.length())) |position| {
         const form = list.atUnchecked(code, position);
         switch (programForm(fiber, form) orelse return null) {
             .constant => |constant| {
@@ -769,75 +812,6 @@ fn compileProgram(fiber: *Fiber, code: Value, start: usize, length: usize, input
     return program;
 }
 
-/// How far a straight-line chain reaches: its forms, counting the head, and
-/// the stack values beneath it that they read.
-const ChainExtent = struct { length: usize, inputs: u8 };
-
-/// The longest run of forms from `head` that one scalar program can take: the
-/// head is `operation`, every form a `programForm`, at least one operation
-/// follows the head, and the run leaves exactly one value from everything it
-/// read. Inputs are read from beneath as the forms need them. Null when no
-/// such run exists.
-fn chainExtent(fiber: *Fiber, code: Value, head: usize, operation: Operation) ?ChainExtent {
-    const Program = numeric.ScalarProgram;
-    const count: usize = @intCast(code.list.length());
-    var depth: usize = 0;
-    var reached: usize = 0;
-    var instructions: usize = 0;
-    var registers: usize = 0;
-    var longest: ?ChainExtent = null;
-    for (head..count) |position| {
-        const form = programForm(fiber, list.atUnchecked(code, position)) orelse break;
-        if (position == head and !(form == .operation and std.meta.eql(form.operation, operation))) return null;
-        const effect = form.effect();
-        if (depth < effect.reads) {
-            registers += effect.reads - depth;
-            reached += effect.reads - depth;
-            depth = effect.reads;
-        }
-        depth = depth - effect.reads + effect.leaves;
-        switch (form) {
-            .constant => registers += 1,
-            .operation => {
-                instructions += 1;
-                registers += 1;
-            },
-            .stack => {},
-        }
-        if (reached > numeric.max_chain_inputs or instructions > Program.max_instructions or
-            registers > Program.max_registers or depth > Program.max_registers) break;
-        if (depth == 1 and instructions >= 2) longest = .{ .length = position + 1 - head, .inputs = @intCast(reached) };
-    }
-    return longest;
-}
-
-/// A numeric builtin dispatched from straight-line code, continued there by
-/// more arithmetic, runs the whole chain as one scalar program over its list
-/// operands, the same program `each` runs for a quotation of those words. The
-/// program is observed as the words would be, each pervading the whole list
-/// before the next, so a fault is the one they would meet first. Any other
-/// shape runs the words as written.
-pub fn applyChain(fiber: *Fiber, operation: Operation) MachineError!bool {
-    if (fiber.inherited.idiom_mode == .generic_only) return false;
-    const forms = fiber.followingForms(0) orelse return false;
-    const code: Value = .{ .list = forms.code };
-    const head = forms.start - 1;
-    const extent = chainExtent(fiber, code, head, operation) orelse return false;
-    if (fiber.available() < extent.inputs) return false;
-    const stack = fiber.stack.items;
-    const operands = stack[stack.len - extent.inputs ..];
-    if (!numeric.programCandidate(operands)) return false;
-    const program = compileProgram(fiber, code, head, extent.length, extent.inputs) orelse return false;
-    // A result no list operand reaches is scalar code, which the words
-    // already run as such.
-    if (!numeric.programResultVaries(&program, operands)) return false;
-    countHit(fiber, .phrase);
-    fiber.skipFollowingForms(@intCast(extent.length - 1));
-    fiber.commitPhraseTrace();
-    try numeric.startProgramChain(fiber, forms.code, program);
-    return true;
-}
-
 const OfferedProgram = struct {
     context: Context,
     compiled: numeric.ScalarProgram,
@@ -854,7 +828,7 @@ fn recognizeProgram(fiber: *Fiber, candidate: Candidate) ?OfferedProgram {
         .zip_with, .fold, .fold1, .scan => 2,
         else => return null,
     };
-    const compiled = compileProgram(fiber, candidate.phrase, 0, @intCast(candidate.phrase.list.length()), inputs) orelse return null;
+    const compiled = compileProgram(fiber, candidate.phrase, inputs) orelse return null;
     const admitted = switch (candidate.context) {
         .each, .zip_with => numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1]),
         // The accumulator is input 0 and the element input 1.

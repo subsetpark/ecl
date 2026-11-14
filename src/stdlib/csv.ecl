@@ -160,18 +160,38 @@
   if)
  `measured defp
 
+ ### defp gathered
+ (source starts lengths -- text :
+  "A source's runs joined in order; each run is a start and a length that is not zero.")
+ (|x s l|
+  x 1 wrap l 0 (+) fold take l 0 (+) scan 0 shifted s s l + 1 shifted - 1 + put 0 (+) scan at)
+ `gathered defp
+
+ ### defp runs
+ (source starts lengths -- text : "A source's runs joined in order, skipping the empty ones.")
+ (|x s l| x s l l 0 > where (|x s l k| x s k at l k at gathered) call) `runs defp
+
+ ### defp braided
+ (a b c -- list : "Three lists of one length interleaved, an element of each in turn.")
+ (|a b c| a b cat c cat a len (|all n| all n 3 * range dup 3 mod n * swap 3 div + at) call)
+ `braided defp
+
  ### defp assembled
- (quoted bodies last -- text : "Join each field's opening quote, body, and closing punctuation.")
- (|quoted bodies last|
-  ("" "\"") quoted at bodies ("," "\u{d}\n" "\"," "\"\u{d}\n") quoted 2 * last + at 3 pack flip raze
-  raze) `assembled defp
+ (text quoted lengths last -- text :
+  "Join each field's opening quote, body, and closing punctuation, as runs of the bodies followed by
+   the five pieces of punctuation.")
+ (|d quoted lens last|
+  d "\",\u{d}\n\",\"\u{d}\n" cat
+  quoted 0 * d len + lens 0 (+) scan 0 shifted [1 2 4 6] quoted 2 * last + at d len + braided
+  quoted lens [1 2 2 3] quoted 2 * last + at braided runs) `assembled defp
 
  ### defp joined
  (widths lengths text quote special doubled ends starts -- text :
   "Decide which fields need quotes, double their quotes, and mark each record's last field.")
  (|widths lens flat quote special doubled ends starts|
+  flat quote 1 + where at
   special ends at special starts at - 0 >
-  flat quote 1 + where at lens doubled ends at doubled starts at - + 0 (+) scan 0 shifted cut
+  lens doubled ends at doubled starts at - +
   widths where dup -1 followed <> assembled) `joined defp
 
  ### defp marked
