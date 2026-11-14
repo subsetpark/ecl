@@ -402,6 +402,7 @@ const DefineDriver = struct {
                 const visibility: env.Visibility = if (private) .private else .public;
                 const body = env.quotation(self.item.borrow().list) orelse
                     return fiber.fail(.domain, "definition body has an invalid heap representation");
+                const attribution: env.Attribution = if (fiber.archive.isHelper(self.item.borrow().list)) .caller else .own;
                 var owned_source: ?reader_types.SourceSlice = if (publication.source) |*owned| owned.take() else null;
                 defer if (owned_source) |*owned| owned.deinit();
                 const source = owned_source;
@@ -419,6 +420,7 @@ const DefineDriver = struct {
                             .visibility = visibility,
                             .effect = self.annotation.borrow().effect,
                             .doc = self.annotation.borrow().doc_value,
+                            .attribution = attribution,
                         } });
                         return .completed;
                     },
@@ -434,6 +436,7 @@ const DefineDriver = struct {
                         .doc = self.annotation.borrow().doc_value,
                         .source = source,
                         .root = root,
+                        .attribution = attribution,
                     },
                 );
                 var context = fiber.resolutionContext(fiber.inherited.registry.view());

@@ -344,6 +344,175 @@ const Program = union(enum) {
     /// A definition's body. Its code is borrowed from the definition, which
     /// the evaluation keeps alive by holding the executable's owner.
     definition: *const env.Executable,
+
+    fn release(self: Program, releases: *heap.ReleaseDomain, code: *Header) void {
+        switch (self) {
+            .owned => releases.releaseHeader(code),
+            .definition => |executable| executable.owner().release(releases),
+            .borrowed => {},
+        }
+    }
+};
+/// The code a call site points into, held the way its evaluation held it. A
+/// caller that stays suspended beneath its callee lends its code; a caller
+/// that a tail call retires hands its reference to the callee instead of
+/// releasing it, so recording the site costs no reference count.
+const CallerCode = struct {
+    code: *Header,
+    program: Program,
+
+    fn release(self: CallerCode, releases: *heap.ReleaseDomain) void {
+        self.program.release(releases, self.code);
+    }
+};
+/// A word about to run and where its failures are reported.
+const EnteredWord = struct {
+    word: intern.TraceWord,
+    attribution: env.Attribution,
+};
+/// The named word an evaluation is traced under, where that word was called
+/// from, and whether a failure inside it is reported at that call site.
+/// Every eval and application frame carries one and every call writes one, so
+/// it packs into three words: the code hold's address sits beside its tag, and
+/// only `entered` and `borrowed` set them, which the accessors below read.
+const Activation = struct {
+    word: intern.TraceWord,
+    /// The address `hold` names: a `*Header` for `borrowed` and `owned`, a
+    /// `*const env.Executable` for `definition`, and zero for `none`.
+    origin: usize = 0,
+    /// The calling form's index in that code.
+    index: u32 = 0,
+    hold: Hold = .none,
+    attribution: env.Attribution = .own,
+    /// The evaluation carrying this activation is `word`'s own body, entered
+    /// by dispatch. A locals binder opening that body is the word's arity
+    /// check, so its failure is the word's. An activation handed on to a
+    /// quotation or an application describes a word whose body that is not.
+    body: bool = false,
+
+    /// How the code holding the call is kept alive. The live tags follow
+    /// `Program`'s order, so recording a caller copies its hold.
+    const Hold = enum(u8) {
+        /// One header reference moved from a retired caller.
+        owned,
+        /// A frame beneath this activation's evaluation keeps the code.
+        borrowed,
+        /// A retired caller's definition, kept alive by its owner.
+        definition,
+        none,
+        /// A definition's code that a frame beneath keeps alive, as
+        /// `borrowed` is for a header.
+        lent_definition,
+    };
+
+    const none: Activation = .{ .word = no_word };
+
+    /// `word`'s body entered from `caller` at `index`, taking over the
+    /// caller's hold.
+    inline fn entered(word: intern.TraceWord, attribution: env.Attribution, caller: CallerCode, index: u32) Activation {
+        return .{
+            .word = word,
+            .origin = switch (caller.program) {
+                .owned, .borrowed => @intFromPtr(caller.code),
+                .definition => |definition| @intFromPtr(definition),
+            },
+            .index = index,
+            .hold = @fromBackingInt(@intCast(@backingInt(caller.program))),
+            .attribution = attribution,
+            .body = true,
+        };
+    }
+
+    inline fn traced(self: Activation) ?intern.TraceWord {
+        return if (self.word != no_word) self.word else null;
+    }
+
+    /// This activation handed to code that is not the word's body.
+    inline fn handedOn(self: Activation) Activation {
+        var copy = self;
+        copy.body = false;
+        return copy;
+    }
+
+    /// The word whose body the carrying evaluation is, if any.
+    inline fn bodyOwner(self: Activation) intern.TraceWord {
+        return if (self.body) self.word else no_word;
+    }
+
+    /// Where the word was called, valid while this activation is alive.
+    fn site(self: Activation) ?ErrorSite {
+        const code: *Header = switch (self.hold) {
+            .none => return null,
+            .borrowed, .owned => @ptrFromInt(self.origin),
+            .definition, .lent_definition => (@as(*const env.Executable, @ptrFromInt(self.origin))).code(),
+        };
+        return .{ .code = code, .index = self.index };
+    }
+
+    /// This activation lent to an evaluation running above its owner.
+    inline fn borrowed(self: Activation) Activation {
+        var copy = self.handedOn();
+        copy.hold = switch (self.hold) {
+            .owned, .borrowed => .borrowed,
+            .definition, .lent_definition => .lent_definition,
+            .none => .none,
+        };
+        return copy;
+    }
+
+    inline fn release(self: Activation, releases: *heap.ReleaseDomain) void {
+        switch (self.hold) {
+            .none, .borrowed, .lent_definition => {},
+            .owned => releases.releaseHeader(@as(*Header, @ptrFromInt(self.origin))),
+            .definition => (@as(*const env.Executable, @ptrFromInt(self.origin))).owner().release(releases),
+        }
+    }
+};
+comptime {
+    if (@sizeOf(Activation) != 24) @compileError("an activation must remain three words");
+    if (@sizeOf(Eval) > 104) @compileError("an evaluation must remain at most 104 bytes: every call copies one");
+    // `entered` copies a `Program` tag into a `Hold`.
+    const ProgramTag = @typeInfo(Program).@"union".tag_type.?;
+    for ([_][]const u8{ "owned", "borrowed", "definition" }) |name| {
+        if (@backingInt(@field(Activation.Hold, name)) != @backingInt(@field(ProgramTag, name)))
+            @compileError("Activation.Hold must follow Program's tag order");
+    }
+}
+/// A frame index, or none, in one word: three of these ride on every
+/// evaluation, where an optional would spend a second word on each flag.
+/// Frame counts stay below `max_frame_count`, so its value never names a
+/// frame.
+fn MaybeIndex(comptime Index: type) type {
+    return enum(u32) {
+        none = max_frame_count,
+        _,
+
+        const Self = @This();
+
+        inline fn some(index: Index) Self {
+            return @fromBackingInt(@intCast(@backingInt(index)));
+        }
+
+        inline fn of(index: ?Index) Self {
+            return if (index) |found| @fromBackingInt(@intCast(@backingInt(found))) else .none;
+        }
+
+        inline fn get(self: Self) ?Index {
+            return if (self == .none) null else @fromBackingInt(@backingInt(self));
+        }
+    };
+}
+/// What suspending the running evaluation leaves: the activation an exhausted
+/// quotation hands to whatever runs next, and the caller's code, which a
+/// retired caller transfers rather than releases.
+const Suspension = struct {
+    inherited: Activation,
+    caller: CallerCode,
+
+    fn release(self: Suspension, releases: *heap.ReleaseDomain) void {
+        self.inherited.release(releases);
+        self.caller.release(releases);
+    }
 };
 
 const Eval = struct {
@@ -366,47 +535,47 @@ const Eval = struct {
     /// whether it may define. One value, so a construction site cannot set
     /// one part and leave another describing different code.
     site: ExecutionSite,
-    traced_word: intern.TraceWord,
-    /// The word whose body this is, set only when dispatch entered that body.
-    /// `traced_word` cannot answer this: a tail position clears it, and an
-    /// application may borrow a word for attribution. A locals binder opening
-    /// the body is that word's arity check, so its failure is the word's.
-    body_owner: intern.TraceWord = no_word,
+    /// The word this evaluation is traced under, and that word's call site.
+    /// The evaluation owns it: retiring the evaluation releases it, and an
+    /// exhausted quotation moves it to whatever runs in its place.
+    activation: Activation,
     /// Nominal authority to replace one source effect check's completion
     /// provenance. A non-tail call and every application quotation receive
     /// no authority, so their internal tail calls cannot overwrite the
     /// checked activation's authored control choice.
-    effect_tail: ?EffectCheckIndex = null,
+    effect_tail: MaybeIndex(EffectCheckIndex) = .none,
     /// Authority for the current generic application's selection boundary.
     /// Iterative continuations mint a fresh boundary per element; explicitly
     /// tail-transparent control quotations inherit the enclosing boundary.
-    application_tail: ?ApplicationFrameIndex = null,
+    application_tail: MaybeIndex(ApplicationFrameIndex) = .none,
     /// This Eval was entered through a dynamic `call` while in the named
     /// application. If it completes or transfers tail control, its existing
     /// code-header ownership becomes the application's selected quotation.
-    application_selection: ?ApplicationFrameIndex = null,
+    application_selection: MaybeIndex(ApplicationFrameIndex) = .none,
 
     /// Releases what this evaluation owns.
-    inline fn release(self: Eval, releases: *heap.ReleaseDomain) void {
-        switch (self.program) {
-            .owned => releases.releaseHeader(self.code),
-            .definition => |executable| executable.owner().release(releases),
-            .borrowed => {},
-        }
+    inline fn release(self: *const Eval, releases: *heap.ReleaseDomain) void {
+        self.activation.release(releases);
+        self.program.release(releases, self.code);
     }
 
-    /// Takes one more reference for a copy of this evaluation.
-    fn retainCopy(self: Eval) void {
+    /// A copy of this evaluation holding its own reference to the code. The
+    /// copy is traced under no word: the activation stays with the original.
+    fn untracedCopy(self: Eval) Eval {
         switch (self.program) {
             .owned => heap.incRef(self.code),
             .definition => |executable| executable.owner().retain(),
             .borrowed => {},
         }
+        var copy = self;
+        copy.activation = .none;
+        return copy;
     }
 
     /// Moves this evaluation's ownership into one code reference, for a
     /// holder that keeps only the quotation.
-    fn intoCode(self: Eval, releases: *heap.ReleaseDomain) *Header {
+    /// The activation is not part of it: the caller has released or taken it.
+    fn intoCode(self: *const Eval, releases: *heap.ReleaseDomain) *Header {
         switch (self.program) {
             .owned => return self.code,
             .definition => |executable| {
@@ -791,12 +960,15 @@ const ApplicationFrame = struct {
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     site: ExecutionSite,
     mode: ApplicationMode,
-    traced_word: intern.TraceWord,
+    /// The activation every quotation this application runs is traced under.
+    /// The frame owns it; each launched evaluation borrows it.
+    activation: Activation,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
     /// Borrowed from the combinator state `context` names.
     plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.activation.release(releases);
         var selection = self.selection;
         selection.deinit(releases);
         switch (self.mode) {
@@ -859,6 +1031,8 @@ comptime {
     // on correlated Fiber fields. Application frames likewise own the lexical scope
     // provenance every sibling resumption must preserve.
     // File-owned execution provenance carries a Session-scoped source capability.
+    // Every eval and application frame also records its activation's call
+    // site; the activation packs into three words to stay within this.
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
@@ -2452,10 +2626,11 @@ pub const Fiber = struct {
     noinline fn failBinding(self: *Fiber, count: usize) MachineError {
         @branchHint(.cold);
         const current = &self.current.?;
-        const owner = current.body_owner;
+        const owner = current.activation.bodyOwner();
         self.active_word = owner;
         if (owner == no_word) return self.failUnderflowOf("local binding", count);
-        current.traced_word = no_word;
+        current.activation.release(self.releases);
+        current.activation = .none;
         return self.failUnderflowOf(self.activeWordName(), count);
     }
     fn failUnderflowOf(self: *Fiber, subject: []const u8, count: usize) MachineError {
@@ -2640,7 +2815,7 @@ pub const Fiber = struct {
     /// dispatched from a source position and `count` of them follow. A word
     /// reached any other way (an invocation, a replay) has no phrase after it.
     pub fn followingForms(self: *const Fiber, count: u32) ?FollowingForms {
-        const current = self.current orelse return null;
+        const current = if (self.current) |*running| running else return null;
         const next = switch (current.position) {
             .source => |index| index,
             .invocation, .replay, .redispatch => return null,
@@ -2665,7 +2840,11 @@ pub const Fiber = struct {
     /// A phrase that runs to the end of its code finishes that code as a
     /// tail call would, so the code's own word no longer traces.
     pub fn commitPhraseTrace(self: *Fiber) void {
-        if (self.current.?.nextIndex() >= self.current.?.code.length()) self.current.?.traced_word = no_word;
+        const current = &self.current.?;
+        if (current.nextIndex() >= current.code.length()) {
+            current.activation.release(self.releases);
+            current.activation = .none;
+        }
     }
     /// Traces the pending failure through `word`, the definition whose frame
     /// the failing path elided, unless an inner one already holds it.
@@ -2891,13 +3070,13 @@ pub const Fiber = struct {
         std.debug.assert(program == .owned);
         const effect_tail = self.replaceTailEffectCandidate(quotation);
         const application_tail = self.tailApplicationIndex();
-        if (application_tail) |application_index| {
+        if (application_tail.get()) |application_index| {
             const frame = &self.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(quotation);
         }
         const site = self.current.?.site.applied();
-        const inherited_trace = self.suspendCurrent() catch {
+        const inherited = self.suspendCurrent() catch {
             self.releases.releaseHeader(quotation);
             return error.OutOfMemory;
         };
@@ -2906,7 +3085,7 @@ pub const Fiber = struct {
             .program = program,
             .position = .{ .source = 0 },
             .site = site,
-            .traced_word = inherited_trace,
+            .activation = inherited,
             .effect_tail = effect_tail,
             .application_tail = application_tail,
             .application_selection = application_tail,
@@ -2917,25 +3096,25 @@ pub const Fiber = struct {
     /// machinery deliberately does not call this helper:
     /// their continuation restarts once per element and must not add a pair of
     /// code-header atomics to that hot path.
-    fn replaceTailEffectCandidate(self: *Fiber, code: *Header) ?EffectCheckIndex {
-        const current = self.current orelse return null;
-        const check_index = current.effect_tail orelse return null;
-        if (!self.isSourceTailPosition(current)) return null;
+    fn replaceTailEffectCandidate(self: *Fiber, code: *Header) MaybeIndex(EffectCheckIndex) {
+        const current = if (self.current) |*running| running else return .none;
+        const check_index = current.effect_tail.get() orelse return .none;
+        if (!self.isSourceTailPosition(current)) return .none;
         std.debug.assert(self.effect_check_index == check_index);
         const frame = &self.frames.items[@backingInt(check_index)];
         std.debug.assert(frame.* == .effect_check);
         frame.effect_check.replaceSourceCandidate(self.releases, code);
-        return check_index;
+        return current.effect_tail;
     }
 
     /// Propagates one application's authority through ordinary tail word
     /// dispatch without changing its selected quotation. Only a dynamic
     /// `call` marks code for ownership transfer into the candidate.
-    fn tailApplicationIndex(self: *Fiber) ?ApplicationFrameIndex {
-        const current = self.current orelse return null;
-        const application_index = current.application_tail orelse return null;
-        if (!self.isSourceTailPosition(current)) return null;
-        return application_index;
+    fn tailApplicationIndex(self: *Fiber) MaybeIndex(ApplicationFrameIndex) {
+        const current = if (self.current) |*running| running else return .none;
+        if (current.application_tail == .none) return .none;
+        if (!self.isSourceTailPosition(current)) return .none;
+        return current.application_tail;
     }
 
     fn validateApplicationProvenanceTarget(
@@ -2961,7 +3140,7 @@ pub const Fiber = struct {
     pub fn applicationProvenanceTarget(
         self: *Fiber,
     ) error{OutOfMemory}!?*const ApplicationProvenanceTarget {
-        const index = self.tailApplicationIndex() orelse return null;
+        const index = self.tailApplicationIndex().get() orelse return null;
         const frame = &self.frames.items[@backingInt(index)];
         std.debug.assert(frame.* == .application);
         if (frame.application.provenance_nonce == null)
@@ -2973,13 +3152,19 @@ pub const Fiber = struct {
     /// already-owned header into the application frame; every other Eval uses
     /// the ordinary release. This delays one existing release but creates no
     /// additional retain/release pair.
-    fn retireCompletedEval(self: *Fiber, current: Eval) void {
-        if (current.application_selection) |application_index| {
+    fn retireCompletedEval(self: *Fiber, current: *const Eval) void {
+        current.activation.release(self.releases);
+        self.retireCompletedCode(current);
+    }
+    /// `retireCompletedEval` for an evaluation whose activation has already
+    /// been handed on, so only its code remains to retire.
+    inline fn retireCompletedCode(self: *Fiber, current: *const Eval) void {
+        if (current.application_selection.get()) |application_index| {
             const frame = &self.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
             frame.application.selection.completeOwned(self.releases, current.intoCode(self.releases));
         } else {
-            current.release(self.releases);
+            current.program.release(self.releases, current.code);
         }
     }
 
@@ -2987,7 +3172,7 @@ pub const Fiber = struct {
     /// after the authored final form, but it does not make a final control
     /// transfer semantically non-tail. The exact reserved epilogue is the only
     /// continuation shape granted this exception.
-    fn isSourceTailPosition(self: *const Fiber, current: Eval) bool {
+    fn isSourceTailPosition(self: *const Fiber, current: *const Eval) bool {
         const length = current.code.length();
         if (current.nextIndex() == length) return true;
         if (length - current.nextIndex() == 1) {
@@ -3003,18 +3188,23 @@ pub const Fiber = struct {
     /// on every path. Its callback either returns null (finished) or
     /// transfers that same ownership into the next application.
     pub fn beginApplication(self: *Fiber, application: Application, launch: Launch) MachineError!void {
-        return self.launchApplication(application, launch, null);
+        return self.launchApplication(.fresh, application, launch, .none);
     }
     /// Hands back an isolated application scope. One that never bound and is
     /// unshared is parked for the next application over the same parent rather
     /// than retired; anything else takes the ordinary path.
     fn launchApplication(
         self: *Fiber,
+        /// A fresh application suspends the running evaluation and takes the
+        /// activation it hands on; a relaunch brings its frame's activation.
+        comptime kind: enum { fresh, relaunch },
         application: Application,
         launch: Launch,
-        inherited: ?intern.TraceWord,
+        /// A relaunch's activation, moved into the frame on every path.
+        inherited: Activation,
     ) MachineError!void {
         self.require(application.seeded) catch |err| {
+            inherited.release(self.releases);
             application.discard(self.releases, self.allocator);
             return err;
         };
@@ -3022,19 +3212,22 @@ pub const Fiber = struct {
         const provenance_target: ?ApplicationFrameIndex = switch (application.provenance) {
             .boundary => null,
             .selected_target => |target| self.validateApplicationProvenanceTarget(target) orelse {
+                inherited.release(self.releases);
                 application.discard(self.releases, self.allocator);
                 return self.fail(.domain, "application provenance target is stale or foreign");
             },
         };
         const select_initial = application.provenance != .boundary;
-        var inherited_trace = inherited orelse no_word;
-        if (self.current != null) {
-            std.debug.assert(inherited == null);
-            inherited_trace = self.suspendCurrent() catch {
+        const activation = switch (kind) {
+            .relaunch => inherited,
+            .fresh => if (self.current != null) self.suspendCurrent() catch {
                 application.discard(self.releases, self.allocator);
                 return error.OutOfMemory;
-            };
-        }
+            } else Activation.none,
+        };
+        // From here the frame owns the activation, so a failed append
+        // releases it with the rest of the frame.
+        const lent = activation.borrowed();
         const application_index: ApplicationFrameIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.frames.items.len))));
         var continuation = OwnedFrame.init(.{ .application = .{
             .context = application.context,
@@ -3046,7 +3239,7 @@ pub const Fiber = struct {
                 .isolated => .{ .isolated = self.floor.beneath() },
                 .paging => |floor| .{ .paging = floor },
             },
-            .traced_word = inherited_trace,
+            .activation = activation,
             .selection = .{},
             .plan = application.plan,
         } });
@@ -3070,9 +3263,9 @@ pub const Fiber = struct {
             .program = .borrowed,
             .position = .{ .source = 0 },
             .site = application.site,
-            .traced_word = inherited_trace,
-            .application_tail = provenance_target orelse application_index,
-            .application_selection = if (select_initial) provenance_target else null,
+            .activation = lent,
+            .application_tail = .some(provenance_target orelse application_index),
+            .application_selection = if (select_initial) .some(provenance_target.?) else .none,
         };
     }
     /// Opens `@attempt`'s boundary on an owned body. Consuming on success and
@@ -3103,10 +3296,11 @@ pub const Fiber = struct {
     ) MachineError!void {
         const home = candidate.executionHome(self.module_access);
         const site = ExecutionSite.image(home, self.module_access, true);
-        _ = self.suspendCurrent() catch {
+        const dropped = self.suspendCurrent() catch {
             self.releases.releaseHeader(body_header);
             return error.OutOfMemory;
         };
+        dropped.release(self.releases);
         if (self.frames.items.len >= max_frame_count) {
             self.releases.releaseHeader(body_header);
             return error.OutOfMemory;
@@ -3125,7 +3319,7 @@ pub const Fiber = struct {
             .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
-            .traced_word = no_word,
+            .activation = .none,
         };
     }
     /// The context a binding or explicit lookup resolves under, over `view`,
@@ -3197,7 +3391,7 @@ pub const Fiber = struct {
     /// code is the combinator's own quotation.
     fn applicationPlan(self: *Fiber) ?*ResolutionPlan {
         const current = &self.current.?;
-        const index = current.application_tail orelse return null;
+        const index = current.application_tail.get() orelse return null;
         const plan = switch (self.frames.items[@backingInt(index)]) {
             .application => |application| application.plan orelse return null,
             else => return null,
@@ -3326,10 +3520,11 @@ pub const Fiber = struct {
     fn openAttempt(self: *Fiber, body: *Header) error{OutOfMemory}!void {
         const invoker = self.current.?;
         const word = self.active_word;
-        _ = self.suspendCurrent() catch {
+        const dropped = self.suspendCurrent() catch {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         };
+        dropped.release(self.releases);
         if (self.frames.items.len >= max_frame_count) {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
@@ -3349,7 +3544,7 @@ pub const Fiber = struct {
             .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
-            .traced_word = no_word,
+            .activation = .none,
         };
     }
     /// Opens one `@load` boundary over a read source. Consuming: the body is
@@ -3363,10 +3558,11 @@ pub const Fiber = struct {
         provenance: modules.RegistrationProvenance,
     ) error{OutOfMemory}!void {
         const invoker = self.current.?;
-        _ = self.suspendCurrent() catch {
+        const dropped = self.suspendCurrent() catch {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         };
+        dropped.release(self.releases);
         if (self.frames.items.len >= max_frame_count) {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
@@ -3379,7 +3575,7 @@ pub const Fiber = struct {
             .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
-            .traced_word = no_word,
+            .activation = .none,
         };
     }
     /// Opens one stack boundary: the frame recording where to return to, and
@@ -3428,13 +3624,14 @@ pub const Fiber = struct {
         defer continuation.deinit(self.releases, self.allocator);
         var site = self.current.?.site.applied();
         site.registration_provenance = provenance;
-        _ = (if (after.request.preservesCaller())
+        const dropped = (if (after.request.preservesCaller())
             self.suspendCurrentForQualifiedLoad()
         else
             self.suspendCurrent()) catch {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         };
+        dropped.release(self.releases);
         self.appendFrame(&continuation) catch {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
@@ -3444,7 +3641,7 @@ pub const Fiber = struct {
             .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
-            .traced_word = no_word,
+            .activation = .none,
         };
     }
     fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite, trace_parent: ?intern.TraceWord, provenance: modules.RegistrationProvenance) error{OutOfMemory}!void {
@@ -3488,7 +3685,7 @@ pub const Fiber = struct {
             .program = .owned,
             .position = .{ .source = 0 },
             .site = .image(home, self.module_access, false),
-            .traced_word = no_word,
+            .activation = .none,
         };
         return built;
     }
@@ -3519,17 +3716,15 @@ pub const Fiber = struct {
             .code = caller.code,
             .index = self.active_index,
         } };
-        var invocation = caller;
+        var invocation = caller.untracedCopy();
         invocation.position = .{ .invocation = caller.nextIndex() };
-        invocation.traced_word = no_word;
-        if (!self.isSourceTailPosition(caller)) {
-            invocation.effect_tail = null;
-            invocation.application_tail = null;
+        if (!self.isSourceTailPosition(&caller)) {
+            invocation.effect_tail = .none;
+            invocation.application_tail = .none;
         }
         // Selection follows the invoked tail quotation. Resuming the caller
         // later must not overwrite that selection with its original body.
-        caller.application_selection = null;
-        invocation.retainCopy();
+        caller.application_selection = .none;
         self.frames.appendAssumeCapacity(.{ .eval = caller });
         self.frames.appendAssumeCapacity(.{ .effect_check = check });
         self.noteFrameDepth();
@@ -3537,33 +3732,64 @@ pub const Fiber = struct {
     }
     /// Suspends a non-tail continuation. An exhausted anonymous quotation
     /// inherits its named trace owner so inline control does not erase the
-    /// activation that selected it.
-    fn suspendCurrent(self: *Fiber) error{OutOfMemory}!intern.TraceWord {
+    /// activation that selected it. The caller owns the returned activation.
+    fn suspendCurrent(self: *Fiber) error{OutOfMemory}!Activation {
         const current = &self.current.?;
         if (current.hasInstructions()) {
-            // Built in place: an appended frame was a stack temporary copied
-            // into the array.
-            const frame = try self.frames.addOne(self.allocator);
-            frame.* = .{ .eval = current.* };
-            self.noteFrameDepth();
-            self.current = null;
-            return no_word;
+            try self.pushCurrent();
+            return .none;
         }
-        const inherited_trace = current.traced_word;
-        self.retireCompletedEval(current.*);
+        const inherited = current.activation.handedOn();
+        self.retireCompletedCode(current);
         self.current = null;
-        return inherited_trace;
+        return inherited;
+    }
+    /// `suspendCurrent` for a word about to run, which records where it was
+    /// called. A caller that stays suspended lends its code; one that has no
+    /// forms left gives its reference to the call site instead of releasing
+    /// it, so a tail call pays no extra reference count. The caller owns both
+    /// parts of the result.
+    fn suspendCaller(self: *Fiber) error{OutOfMemory}!Suspension {
+        const current = &self.current.?;
+        const code = current.code;
+        if (current.hasInstructions()) {
+            try self.pushCurrent();
+            return .{ .inherited = .none, .caller = .{ .code = code, .program = .borrowed } };
+        }
+        // Read in place: retiring an exhausted caller releases nothing here,
+        // so copying the evaluation out would be the whole cost of the call.
+        const inherited = current.activation;
+        if (current.application_selection != .none) {
+            // The selection takes the evaluation's reference; the call site
+            // needs its own, because a later selection can replace this one.
+            heap.incRef(code);
+            self.retireCompletedCode(current);
+            self.current = null;
+            return .{ .inherited = inherited, .caller = .{ .code = code, .program = .owned } };
+        }
+        const program = current.program;
+        self.current = null;
+        return .{ .inherited = inherited, .caller = .{ .code = code, .program = program } };
+    }
+    fn pushCurrent(self: *Fiber) error{OutOfMemory}!void {
+        // Built in place: an appended frame was a stack temporary copied into
+        // the array.
+        const current = &self.current.?;
+        const frame = try self.frames.addOne(self.allocator);
+        frame.* = .{ .eval = current.* };
+        self.noteFrameDepth();
+        self.current = null;
     }
     /// A source-backed module load nests inside the requesting evaluation.
     /// Preserve even an exhausted caller: after publication the qualified
     /// request still needs its resolution scope, home, and continuation, and
     /// only the eventual dispatched word may consume the tail position.
-    fn suspendCurrentForQualifiedLoad(self: *Fiber) error{OutOfMemory}!intern.TraceWord {
+    fn suspendCurrentForQualifiedLoad(self: *Fiber) error{OutOfMemory}!Activation {
         const current = self.current.?;
         try self.frames.append(self.allocator, .{ .eval = current });
         self.noteFrameDepth();
         self.current = null;
-        return no_word;
+        return .none;
     }
 };
 
@@ -3594,7 +3820,7 @@ pub fn initialize(fiber: *Fiber, code: *Header) void {
         .program = program,
         .position = .{ .source = 0 },
         .site = .root(fiber),
-        .traced_word = no_word,
+        .activation = .none,
     };
 }
 
@@ -3782,7 +4008,7 @@ fn loop(self: *Fiber) MachineError!RunStatus {
         if (self.hasWorkDriver()) continue;
         const current = &self.current.?;
         const index = current.takeInstruction() orelse {
-            self.retireCompletedEval(current.*);
+            self.retireCompletedEval(current);
             self.current = null;
             continue;
         };
@@ -4009,7 +4235,14 @@ const LookupDispatchDriver = struct {
                             self.context.borrow().provenance,
                             definition,
                         );
+                        const site = self.site;
                         fiber.retireDriver(self);
+                        // A module load ran other code in between, so the
+                        // form being dispatched is the one this lookup began
+                        // at, which the entered word records as its call site.
+                        if (site) |at| if (fiber.current) |current| if (current.code == at.code) {
+                            fiber.active_index = at.index;
+                        };
                         try invokeDefinition(fiber, definition, word.name);
                         return .detached;
                     },
@@ -4133,7 +4366,7 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
     const checked = cross_home and origin != .standard_library;
     const cross_home_effect = if (checked) definition.effect else null;
     switch (definition.code()) {
-        .source => |executable| try scheduleWord(self, executable, trace_word, home, cross_home_effect),
+        .source => |executable| try scheduleWord(self, executable, .{ .word = trace_word, .attribution = definition.attribution }, home, cross_home_effect),
         .builtin => |primitive| {
             // A declared effect is the called word's contract, so its check
             // names that word; a failure inside the builtin names it too.
@@ -4194,7 +4427,7 @@ pub const ModuleLookupCursor = module_lookup.ModuleLookupCursor;
 fn scheduleWord(
     self: *Fiber,
     executable: *const env.Executable,
-    word: intern.TraceWord,
+    word: EnteredWord,
     resolved_home: ?*modules.ModuleHome,
     effect: ?env.Effect,
 ) MachineError!void {
@@ -4205,21 +4438,39 @@ fn scheduleWord(
         .image(home, self.module_access, caller.defining)
     else
         caller;
-    const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
+    const check = if (effect != null) try prepareEffectCheck(self, effect, word.word) else null;
     return enterBody(self, executable, word, site, check);
 }
 /// Suspends the caller and makes `executable` the running evaluation at
 /// `site`, under its effect check if it has one. The callee's owner is secured
 /// before the caller can retire: in tail position the caller's executable may
 /// hold the callee's last reference.
-fn enterBody(self: *Fiber, executable: *const env.Executable, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
+fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
     executable.owner().retain();
     var entered = false;
     defer if (!entered) executable.owner().release(self.releases);
     var effect_tail = self.replaceTailEffectCandidate(executable.code());
     const application_tail = self.tailApplicationIndex();
-    _ = self.suspendCurrent() catch return error.OutOfMemory;
+    const call_index = self.active_index;
+    const suspension = self.suspendCaller() catch return error.OutOfMemory;
+    // The word's own activation replaces any a retired quotation passed on:
+    // a tail call does not keep its caller's frame. Leaving a helper's body
+    // that way, the word takes the helper's call site in place of its own,
+    // which lay inside the body whose failures belong to the helper's caller.
+    const activation = if (suspension.inherited.attribution == .caller and suspension.inherited.site() != null) inherited: {
+        suspension.caller.release(self.releases);
+        var moved = suspension.inherited;
+        moved.word = word.word;
+        moved.attribution = word.attribution;
+        moved.body = true;
+        break :inherited moved;
+    } else entered: {
+        suspension.inherited.release(self.releases);
+        break :entered Activation.entered(word.word, word.attribution, suspension.caller, call_index);
+    };
+    var installed = false;
+    defer if (!installed) activation.release(self.releases);
     if (check) |*effect_check| {
         const check_index: EffectCheckIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.frames.items.len))));
         effect_check.activateSource(executable.code(), check_index, self.effect_check_index);
@@ -4227,16 +4478,16 @@ fn enterBody(self: *Fiber, executable: *const env.Executable, word: intern.Trace
         defer continuation.deinit(self.releases, self.allocator);
         try self.appendFrame(&continuation);
         self.effect_check_index = check_index;
-        effect_tail = check_index;
+        effect_tail = .some(check_index);
     }
     entered = true;
+    installed = true;
     self.current = .{
         .code = executable.code(),
         .program = .{ .definition = executable },
         .position = .{ .source = 0 },
         .site = site,
-        .traced_word = word,
-        .body_owner = word,
+        .activation = activation,
         .effect_tail = effect_tail,
         .application_tail = application_tail,
     };
@@ -4291,6 +4542,9 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
             const continuation = self.popFrame(.application);
             var application_selection = continuation.selection;
             defer application_selection.deinit(self.releases);
+            // The popped frame's activation: moved into the next frame when
+            // the application continues, and released on every other path.
+            const activation = continuation.activation;
             const launch: Launch, const base: StackWindow = switch (continuation.mode) {
                 .in_place => |window| .{ .in_place, window },
                 .isolated => |isolated| blk: {
@@ -4314,15 +4568,14 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                 base,
                 @ptrCast(&application_selection),
             ) catch |err| {
-                if (continuation.traced_word != no_word) {
-                    self.setFailureTraceParent(continuation.traced_word);
-                }
+                if (activation.traced()) |word| self.setFailureTraceParent(word);
+                activation.release(self.releases);
                 continuation.deinit_fn(self.releases, self.allocator, continuation.context);
                 return err;
             };
             if (next) |step| switch (step) {
                 .apply => |application| {
-                    try self.launchApplication(.{
+                    try self.launchApplication(.relaunch, .{
                         .quotation = application.quotation,
                         .context = continuation.context,
                         .resume_fn = continuation.resume_fn,
@@ -4331,11 +4584,12 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         .seeded = application.seeded,
                         .provenance = application.provenance,
                         .plan = continuation.plan,
-                    }, application.launch, continuation.traced_word);
+                    }, application.launch, activation);
                     return true;
                 },
                 .suspend_inline => |suspension| {
                     const installed = self.workDriver() orelse {
+                        activation.release(self.releases);
                         continuation.deinit_fn(
                             self.releases,
                             self.allocator,
@@ -4349,6 +4603,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                     if (launch == .isolated or
                         @intFromPtr(suspension) != @intFromPtr(installed.context))
                     {
+                        activation.release(self.releases);
                         continuation.deinit_fn(
                             self.releases,
                             self.allocator,
@@ -4363,7 +4618,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         .deinit_fn = continuation.deinit_fn,
                         .site = continuation.site,
                         .mode = .{ .in_place = base },
-                        .traced_word = continuation.traced_word,
+                        .activation = activation,
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
                         .plan = continuation.plan,
@@ -4374,6 +4629,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                     return true;
                 },
             };
+            activation.release(self.releases);
             continuation.deinit_fn(self.releases, self.allocator, continuation.context);
             // Native work installed by an application continuation is the
             // continuation's tail. Do not cross later continuation frames until
@@ -4590,6 +4846,14 @@ pub const Construction = opaque {
     }
 };
 
+/// One activation as a failure's trace sees it: the word, where it was
+/// called, and where its failures are reported. The site borrows code the
+/// fiber's frames keep alive until the unwind.
+pub const TraceEntry = struct {
+    word: intern.TraceWord,
+    site: ?ErrorSite,
+    attribution: env.Attribution,
+};
 /// The fiber as its failure driver sees it, plus what building
 /// and delivering an error value needs of the continuation — the activation
 /// trace, the pending failure, and the unwind itself. Minted only by the
@@ -4614,18 +4878,32 @@ pub const Unwinding = opaque {
     }
 
     /// The word the running evaluation is traced under, if any.
-    pub fn currentTrace(self: *Unwinding) ?intern.TraceWord {
+    pub fn currentTrace(self: *Unwinding) ?TraceEntry {
         const current = self.fiber().current orelse return null;
-        return if (current.traced_word != no_word) current.traced_word else null;
+        return traceEntry(current.activation);
     }
 
     /// The word saved frame `index` is traced under, if it is a traced
     /// evaluation.
-    pub fn frameTrace(self: *Unwinding, index: usize) ?intern.TraceWord {
+    pub fn frameTrace(self: *Unwinding, index: usize) ?TraceEntry {
         return switch (self.fiber().frames.items[index]) {
-            .eval => |frame| if (frame.traced_word != no_word) frame.traced_word else null,
+            .eval => |frame| traceEntry(frame.activation),
             .effect_check, .application, .qualified_after_load, .boundary => null,
         };
+    }
+
+    fn traceEntry(activation: Activation) ?TraceEntry {
+        return .{
+            .word = activation.traced() orelse return null,
+            .site = activation.site(),
+            .attribution = activation.attribution,
+        };
+    }
+
+    /// Where a failure is reported: the failing token, or the call site a
+    /// helper's failure is attributed to.
+    pub fn locateSite(self: *Unwinding, site: ErrorSite) spans.SpanArchive.LocateCursor {
+        return self.fiber().archive.locateCursor(site.code, site.index);
     }
 
     /// Where the failure happened: already known, or a cursor that finds it

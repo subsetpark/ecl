@@ -261,10 +261,21 @@ test "embedded definitions retain provenance and deferred words stay absent" {
     try support.expectErrors(&.{
         .{
             .name = "prelude provenance",
+            .source = "1 1 case",
+            .kind = "type",
+            .word = "raise",
+            .data = &.{.{ .name = "source", .expected = .{ .string = "prelude.ecl" } }},
+        },
+        .{
+            .name = "a prelude helper reports its caller",
             .source = "\"boom\" fail",
             .kind = "user",
             .word = "raise",
-            .data = &.{.{ .name = "source", .expected = .{ .string = "prelude.ecl" } }},
+            .data = &.{
+                .{ .name = "source", .expected = .{ .string = "<kernel-test>" } },
+                .{ .name = "line", .expected = .{ .int = 1 } },
+                .{ .name = "col", .expected = .{ .int = 8 } },
+            },
         },
         .{ .name = "pp moved to io", .source = "1 pp", .kind = "undefined-word", .word = "pp" },
         .{ .name = "print moved to io", .source = "\"x\" print", .kind = "undefined-word", .word = "print" },

@@ -404,6 +404,22 @@ cannot name. An activation therefore records the word whose body it runs,
 set only when dispatch enters that body. The trace word cannot serve: a tail
 position clears it, and an application may borrow a word for attribution.
 
+The trace word travels with its call site and attribution as one activation
+value, so no path can move one without the others. The call site is the
+calling code and form index, held the way the caller held that code: a
+caller still suspended beneath lends it, and a caller retired by a tail call
+transfers its reference rather than releasing it, so entering a word costs no
+reference count and a tail-recursive loop holds one site. An application
+frame owns the activation its quotations run under and lends it to each.
+A helper word's activation attributes failures in its body to its call site;
+a word tail-called from that body takes the helper's call site, because the
+frame that would have pointed there no longer exists. Every call writes an
+activation and copies an evaluation, so both are size-bounded: the
+activation packs its hold's address beside its tag, and an evaluation's
+optional frame indices use a sentinel rather than a flag word. The helper mark is a
+property of the quotation's archive slot, read once when `def` seals the
+word, so it retires with the header and never reaches value equality.
+
 ### Source metadata lives on a separate code plane
 
 Executable values do not carry file names, line numbers, or slices of source.
@@ -901,7 +917,8 @@ through authorization and resumed dispatch.
 File identity, resolution scope, and the private registry are carried by one
 opaque source capability. The Session keeps it alive until execution stops;
 registry teardown uses the existing host-owned retirement protocol. Frame
-storage accommodates the lexical capability retained by a suspended load,
+storage accommodates the lexical capability retained by a suspended load and
+the activation call site every evaluation and application frame carries,
 with a 144-byte ceiling.
 
 ### Loading resumes a lookup
@@ -1065,9 +1082,11 @@ Language errors are ordinary dictionary values at observation boundaries, but
 the live Fiber carries a compact internal `EclErr`. On failure, one
 `FailureDriver`:
 
-1. walks explicit frames to collect the language trace;
+1. walks explicit frames to collect the language trace and each entry's
+   call site;
 2. resolves module-local diagnostic spellings;
-3. asks the source archive for the most precise available location;
+3. asks the source archive for each call site and for the failure's
+   location, moved out through any helper activations;
 4. materializes the error dictionary; and
 5. unwinds frames, locals, and operands in bounded steps.
 

@@ -130,9 +130,9 @@ const OrdinaryErrorCursor = struct {
     failure: *EclErr,
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
-    names: [9]u32 = @splat(0),
-    // Every recorded datum plus the three location fields.
-    data_pairs: [9]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
+    names: [10]u32 = @splat(0),
+    // Every recorded datum plus the three location fields and `sites`.
+    data_pairs: [10]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
     outer_pairs: [5]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
     state: State = .{ .names = 0 },
 
@@ -163,6 +163,7 @@ const OrdinaryErrorCursor = struct {
             6 => "source",
             7 => "line",
             8 => "col",
+            9 => "sites",
             else => unreachable,
         };
     }
@@ -330,9 +331,14 @@ const OrdinaryErrorCursor = struct {
                 },
             },
             .data_prepare => |*data| result: {
+                var count = data.index;
+                if (self.resolved.sites) |sites| {
+                    self.data_pairs[count] = .{ .{ .symbol = .{ .name = self.names[9] } }, sites };
+                    count += 1;
+                }
                 const builder = try dict.Materializer.init(
                     self.allocator,
-                    self.data_pairs[0..data.index],
+                    self.data_pairs[0..count],
                     false,
                 );
                 self.state = .{ .data_build = .{
@@ -397,6 +403,7 @@ const RaisedErrorCursor = struct {
         source: bool,
         line: bool,
         col: bool,
+        sites: bool,
     };
     const State = union(enum) {
         names: usize,
@@ -479,10 +486,11 @@ const RaisedErrorCursor = struct {
     failure: *EclErr,
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
-    names: [8]u32 = @splat(0),
+    names: [9]u32 = @splat(0),
     fields: [5]?Value = @splat(null),
     message_bytes: [512]u8 = @splat(0),
-    data_fields: [3]?Value = @splat(null),
+    /// The raised data's own `source`, `line`, `col`, and `sites`.
+    data_fields: [4]?Value = @splat(null),
     built: BuiltValues = .{},
     state: State = .{ .names = 0 },
 
@@ -504,7 +512,7 @@ const RaisedErrorCursor = struct {
         self.built.retire(releases);
     }
     fn nameBytes(index: usize) []const u8 {
-        const names = [_][]const u8{ "kind", "msg", "word", "trace", "data", "source", "line", "col" };
+        const names = [_][]const u8{ "kind", "msg", "word", "trace", "data", "source", "line", "col", "sites" };
         return names[index];
     }
     fn beginOptionalValues(self: *RaisedErrorCursor) error{OutOfMemory}!void {
@@ -521,20 +529,25 @@ const RaisedErrorCursor = struct {
             self.state = .{ .data_fields = 0 };
         }
     }
+    /// The call sites describe the trace this cursor builds; a raised value
+    /// that brought its own trace keeps whatever data it had.
+    fn addsSites(self: *const RaisedErrorCursor) bool {
+        return self.resolved.sites != null and self.fields[3] == null;
+    }
     fn beginData(self: *RaisedErrorCursor) error{OutOfMemory}!void {
         const old_data = self.fields[4];
-        if (old_data == null or self.location != null and
-            !(self.data_fields[0] != null and self.data_fields[1] != null and self.data_fields[2] != null))
-        {
+        const additions = DataAdditions{
+            .source = self.location != null and self.data_fields[0] == null,
+            .line = self.location != null and self.data_fields[1] == null,
+            .col = self.location != null and self.data_fields[2] == null,
+            .sites = self.addsSites() and self.data_fields[3] == null,
+        };
+        if (old_data == null or additions.source or additions.line or additions.col or additions.sites) {
             const old_count: usize = if (old_data) |item| @intCast(item.dict.length()) else 0;
-            const additions = DataAdditions{
-                .source = self.location != null and self.data_fields[0] == null,
-                .line = self.location != null and self.data_fields[1] == null,
-                .col = self.location != null and self.data_fields[2] == null,
-            };
             const count = old_count + @as(usize, @intFromBool(additions.source)) +
                 @as(usize, @intFromBool(additions.line)) +
-                @as(usize, @intFromBool(additions.col));
+                @as(usize, @intFromBool(additions.col)) +
+                @as(usize, @intFromBool(additions.sites));
             const pairs = try self.allocator.alloc(dict.Pair, count);
             self.state = .{ .data_copy = .{
                 .pairs = pairs,
@@ -570,6 +583,10 @@ const RaisedErrorCursor = struct {
         if (data.additions.col) {
             const located = self.location.?;
             data.pairs[index] = .{ .{ .symbol = .{ .name = self.names[7] } }, .{ .int = located.span.col } };
+            index += 1;
+        }
+        if (data.additions.sites) {
+            data.pairs[index] = .{ .{ .symbol = .{ .name = self.names[8] } }, self.resolved.sites.? };
             index += 1;
         }
         const builder = try dict.Materializer.init(
@@ -723,7 +740,7 @@ const RaisedErrorCursor = struct {
             },
             .data_fields => |index| result: {
                 const old_data = self.fields[4];
-                if (old_data == null or self.location == null) {
+                if (old_data == null or self.location == null and !self.addsSites()) {
                     try self.beginData();
                     break :result .pending;
                 }
@@ -852,8 +869,172 @@ pub const ErrorValueCursor = union(enum) {
 };
 /// The spellings a failure value needs, already interned. Qualifying a
 /// module-local trace word allocates, so it happens in the resumable failure
-/// driver rather than inside the value builder.
+/// driver rather than inside the value builder. `sites` is the list of each
+/// trace entry's call site, borrowed from the driver that built it.
 pub const ResolvedTrace = struct {
     word: ?u32 = null,
     trace: []const u32 = &.{},
+    sites: ?Value = null,
+};
+
+/// Builds the `sites` list: for each trace entry, a dict with the `source`,
+/// `line`, and `col` of the call that entered it, or an empty dict where no
+/// call site is known. Entries from one source share its name string.
+pub const SitesCursor = struct {
+    const Progress = poll_api.Progress(Value);
+    const State = union(enum) {
+        names: usize,
+        name_insert: struct { index: usize, cursor: intern.InternInsertionCursor },
+        allocate,
+        entry: usize,
+        source: struct { index: usize, builder: kernel_storage.TextMaterializer },
+        entry_build: struct { index: usize, builder: dict.Materializer },
+        list_build: list.ValueMaterializer,
+        complete,
+    };
+
+    allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
+    /// Borrowed from the failure driver for the cursor's lifetime.
+    located: []const ?spans.LocatedSpan,
+    names: [3]u32 = @splat(0),
+    items: []Value = &.{},
+    built: usize = 0,
+    /// The most recent source name and the string built for it.
+    source: ?struct { name: []const u8, text: Value } = null,
+    pairs: [3]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
+    state: State = .{ .names = 0 },
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
+        located: []const ?spans.LocatedSpan,
+    ) SitesCursor {
+        return .{ .allocator = allocator, .releases = releases, .located = located };
+    }
+
+    /// Releases everything built so far, after completion as well.
+    pub fn retire(self: *SitesCursor) void {
+        const releases = self.releases;
+        switch (self.state) {
+            .source => |*source| source.builder.retire(releases),
+            .entry_build => |*entry| entry.builder.retire(releases),
+            .list_build => |*builder| builder.retire(releases),
+            .names, .name_insert, .allocate, .entry, .complete => {},
+        }
+        self.state = .complete;
+        for (self.items[0..self.built]) |item| releases.releaseValue(item);
+        self.allocator.free(self.items);
+        self.items = &.{};
+        self.built = 0;
+        if (self.source) |source| releases.releaseValue(source.text);
+        self.source = null;
+    }
+
+    fn nameBytes(index: usize) []const u8 {
+        return ([_][]const u8{ "source", "line", "col" })[index];
+    }
+
+    fn beginEntry(self: *SitesCursor, index: usize, located: ?spans.LocatedSpan) error{OutOfMemory}!void {
+        var count: usize = 0;
+        if (located) |at| {
+            self.pairs[0] = .{ .{ .symbol = .{ .name = self.names[0] } }, self.source.?.text };
+            self.pairs[1] = .{ .{ .symbol = .{ .name = self.names[1] } }, .{ .int = at.span.line } };
+            self.pairs[2] = .{ .{ .symbol = .{ .name = self.names[2] } }, .{ .int = at.span.col } };
+            count = 3;
+        }
+        self.state = .{ .entry_build = .{
+            .index = index,
+            .builder = try dict.Materializer.init(self.allocator, self.pairs[0..count], false),
+        } };
+    }
+
+    /// Own transitions draw one unit each; the value builders draw on the
+    /// same allowance themselves.
+    pub fn advance(self: *SitesCursor, work: *poll_api.WorkBudget) error{OutOfMemory}!Progress {
+        while (true) {
+            const delegating = switch (self.state) {
+                .source, .entry_build, .list_build => true,
+                else => false,
+            };
+            if (!delegating and !work.spend()) return .pending;
+            const progress = try self.step(work);
+            if (progress != .pending) return progress;
+            if (delegating and work.exhausted()) return .pending;
+        }
+    }
+
+    fn step(self: *SitesCursor, work: *poll_api.WorkBudget) error{OutOfMemory}!Progress {
+        return switch (self.state) {
+            .names => |index| result: {
+                self.state = if (index == self.names.len)
+                    .allocate
+                else
+                    .{ .name_insert = .{ .index = index, .cursor = intern.insertionCursor(nameBytes(index)) } };
+                break :result .pending;
+            },
+            .name_insert => |*insertion| switch (try insertion.cursor.advance()) {
+                .pending => .pending,
+                .complete => |id| result: {
+                    self.names[insertion.index] = id;
+                    self.state = .{ .names = insertion.index + 1 };
+                    break :result .pending;
+                },
+            },
+            .allocate => result: {
+                self.items = try self.allocator.alloc(Value, self.located.len);
+                self.state = .{ .entry = 0 };
+                break :result .pending;
+            },
+            .entry => |index| result: {
+                if (index == self.located.len) {
+                    self.state = .{ .list_build = .init(self.allocator, self.items) };
+                    break :result .pending;
+                }
+                const located = self.located[index];
+                if (located) |at| if (self.source == null or self.source.?.name.ptr != at.source_name.ptr) {
+                    self.state = .{ .source = .{
+                        .index = index,
+                        .builder = .init(self.allocator, at.source_name),
+                    } };
+                    break :result .pending;
+                };
+                try self.beginEntry(index, located);
+                break :result .pending;
+            },
+            .source => |*source| switch (try source.builder.advance(work)) {
+                .pending => .pending,
+                .complete => |text| result: {
+                    const index = source.index;
+                    source.builder.deinit();
+                    const name = self.located[index].?.source_name;
+                    if (self.source) |previous| self.releases.releaseValue(previous.text);
+                    self.source = .{ .name = name, .text = text };
+                    try self.beginEntry(index, self.located[index]);
+                    break :result .pending;
+                },
+            },
+            .entry_build => |*entry| switch (try entry.builder.advance(work)) {
+                .pending => .pending,
+                .duplicate_key => unreachable,
+                .complete => |item| result: {
+                    const index = entry.index;
+                    entry.builder.deinit();
+                    self.items[index] = item;
+                    self.built = index + 1;
+                    self.state = .{ .entry = index + 1 };
+                    break :result .pending;
+                },
+            },
+            .list_build => |*builder| switch (try builder.advance(work)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    builder.deinit();
+                    self.state = .complete;
+                    break :result .{ .complete = item };
+                },
+            },
+            .complete => unreachable,
+        };
+    }
 };

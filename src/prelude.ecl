@@ -9,8 +9,10 @@
 (each 0 (or) fold) `any? def
 
 ### def assert
-(bool error -- : "Raise an error dict unless the condition is 1.")
-(swap (pop) (raise) if) `assert def
+(bool error -- :
+ "Raise an error dict unless the condition is 1. A helper: the failure is reported where `assert`
+  was called.")
+(swap (pop) (raise) if) helper `assert def
 
 ### def at-path
 (ds l -- x :
@@ -173,8 +175,10 @@
  unfold nip value swap cons) `converges def
 
 ### def fail
-(msg -- : "Raise a user-kind error whose message is `msg`: `{kind user msg msg}`.")
-(wrap (kind user msg) swap cat dict.core.from-flat raise) `fail def
+(msg -- :
+ "Raise a user-kind error whose message is `msg`: `{kind user msg msg}`. A helper: the failure is
+  reported where `fail` was called.")
+(wrap (kind user msg) swap cat dict.core.from-flat raise) helper `fail def
 
 ### def iterations
 (value count (a -- a) -- list :
