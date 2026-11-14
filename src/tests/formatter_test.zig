@@ -575,3 +575,10 @@ test "formatter keeps a ragged first documentation paragraph stable" {
         "### def f\n(x -- y :\n \"\n  first\n    second\")\n[] `f def\n",
     );
 }
+
+test "formatter handles a module registration after a comment in a nested sequence" {
+    const formatted = try formatter.format(allocator, "(\n# note\n() `m @defm\n)");
+    defer allocator.free(formatted);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "### module m") != null);
+    try expectParseEquivalent("(\n# note\n() `m @defm\n)");
+}

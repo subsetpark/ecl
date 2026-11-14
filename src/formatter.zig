@@ -1110,8 +1110,10 @@ const WordCursor = struct {
             self.width = 0;
             self.breaks = false;
         }
-        self.len += try escapeInto(self.bytes[self.len..], codepoint);
-        self.width += 1;
+        const emitted = try escapeInto(self.bytes[self.len..], codepoint);
+        self.len += emitted;
+        // An escape is several source columns; a plain codepoint is one.
+        self.width += if (isEscaped(codepoint)) emitted else 1;
         self.breaks = self.breaks or isLineBreak(@intCast(@min(codepoint, 0x10ffff)));
         return null;
     }
@@ -1124,6 +1126,13 @@ const WordCursor = struct {
         self.word_start = null;
     }
 };
+
+fn isEscaped(codepoint: u32) bool {
+    return switch (codepoint) {
+        '\\', '"', '\t', 0...8, 10...0x1f, 0x7f...0x9f => true,
+        else => false,
+    };
+}
 
 fn escapeInto(output: []u8, codepoint: u32) Error!usize {
     switch (codepoint) {
@@ -1152,12 +1161,15 @@ fn copyInto(output: []u8, bytes: []const u8) usize {
 const SequenceCursor = struct {
     sequence: *Sequence,
     root: bool,
-    phase: enum { previous, next, attached, locals, annotate, body } = .previous,
+    phase: enum { previous, next, attached, locals, locals_doc, annotate, body } = .previous,
     index: usize = 0,
     last_form: usize = none,
     locals_open: ?usize = null,
     locals_names: usize = 0,
     locals: ?LocalsBounds = null,
+    /// The locals' names laid out so far, then the finished layout.
+    locals_names_chain: Chain = .{},
+    locals_layout: ?*const Doc = null,
     annotation: ?AnnotationCursor = null,
     output: Chain = .{},
     line: Chain = .{},
@@ -1226,8 +1238,13 @@ const SequenceCursor = struct {
             },
             .locals => {
                 if (self.locals_open == none or self.index == parts.len) {
-                    self.phase = .annotate;
-                    self.index = 0;
+                    if (self.locals) |bounds| {
+                        self.phase = .locals_doc;
+                        self.index = neighbours.next[bounds.open];
+                    } else {
+                        self.phase = .annotate;
+                        self.index = 0;
+                    }
                     return .pending;
                 }
                 const index = self.index;
@@ -1252,6 +1269,28 @@ const SequenceCursor = struct {
                         } else self.locals_names += 1;
                     },
                 }
+            },
+            // One name per step, so a long locals list stays within budget.
+            .locals_doc => {
+                const bounds = self.locals.?;
+                if (self.index >= bounds.close) {
+                    const body = try docs.aligned(try self.locals_names_chain.doc(docs));
+                    self.locals_layout = try docs.group(try docs.concat(&.{
+                        try docs.text("|"),
+                        body,
+                        try docs.text("|"),
+                    }));
+                    self.phase = .annotate;
+                    self.index = 0;
+                    return .pending;
+                }
+                if (self.locals_names_chain.len != 0)
+                    try self.locals_names_chain.append(docs, try docs.softline());
+                try self.locals_names_chain.append(
+                    docs,
+                    try docs.text(parts[self.index].form.kind.atom.bytes),
+                );
+                self.index = neighbours.next[self.index];
             },
             .annotate => {
                 if (self.annotation) |*annotation| {
@@ -1435,7 +1474,10 @@ const SequenceCursor = struct {
                     if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
                         if (self.pending_definition != header.part) {
                             try output.appendHardlines(docs, if (self.have_content) 2 else 1);
-                            try output.append(docs, try definitionHeader(docs, header.name, header.declaration.?));
+                            try output.append(docs, if (header.module)
+                                try moduleHeader(docs, header.name)
+                            else
+                                try definitionHeader(docs, header.name, header.declaration.?));
                             self.claim(header.part);
                         }
                     }
@@ -1474,7 +1516,7 @@ const SequenceCursor = struct {
                 }
                 const item: ?*const Doc = if (self.locals) |bounds|
                     if (part_index == bounds.open)
-                        try formatLocals(docs, sequence, bounds)
+                        self.locals_layout.?
                     else if (part_index > bounds.close)
                         try partLayout(docs, sequence, part_index)
                     else
@@ -1575,16 +1617,6 @@ fn formatModuleRegistration(
     // A module's documentation stands on its own line above the operands.
     if (start == registration.body) return registered_body;
     return docs.concat(&.{ try partLayout(docs, sequence, start), try docs.hardline(), registered_body });
-}
-fn formatLocals(docs: *DocBuilder, sequence: Sequence, bounds: LocalsBounds) Error!*const Doc {
-    var names: Chain = .{};
-    var index = sequence.neighbours.next[bounds.open];
-    while (index < bounds.close) : (index = sequence.neighbours.next[index]) {
-        if (names.len != 0) try names.append(docs, try docs.softline());
-        try names.append(docs, try docs.text(sequence.parts[index].form.kind.atom.bytes));
-    }
-    const body = try docs.aligned(try names.doc(docs));
-    return docs.group(try docs.concat(&.{ try docs.text("|"), body, try docs.text("|") }));
 }
 /// An effect slot's layout: a word, or a nested effect, which keeps the
 /// layout of the quotation it is.
