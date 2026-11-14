@@ -1415,6 +1415,7 @@ pub const OwnedImage = enum(usize) {
                 .doc = word.doc,
                 .source = word.source,
                 .root = .image,
+                .attribution = word.attribution,
                 .home = handle,
             }) },
             .native => |native| .{ .definition = try env.Definition.create(image.allocator, .static, .{ .native = native.callable }, .{

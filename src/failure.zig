@@ -15,6 +15,8 @@ const EclErr = machine.EclErr;
 const MachineError = machine.MachineError;
 const WorkProgress = machine.WorkProgress;
 const ErrorValueCursor = error_values.ErrorValueCursor;
+const SitesCursor = error_values.SitesCursor;
+const TraceEntry = machine.TraceEntry;
 
 /// Starts the failure driver over the fiber's pending failure. The failure
 /// stays pending when this fails.
@@ -22,16 +24,19 @@ pub fn start(via: *Unwinding) error{OutOfMemory}!void {
     const fiber = via.fiber();
     const capacity = std.math.add(usize, fiber.frames.items.len, 3) catch
         return error.OutOfMemory;
-    const trace = try fiber.allocator.alloc(intern.TraceWord, capacity);
+    const trace = try fiber.allocator.alloc(TraceEntry, capacity);
     errdefer fiber.allocator.free(trace);
     const resolved = try fiber.allocator.alloc(u32, capacity);
     errdefer fiber.allocator.free(resolved);
+    const located = try fiber.allocator.alloc(?spans.LocatedSpan, capacity);
+    errdefer fiber.allocator.free(located);
     const driver = try fiber.allocator.create(FailureDriver);
     driver.* = .{
         .allocator = fiber.allocator,
         .failure = via.takeFailure(),
         .trace = trace,
         .resolved = resolved,
+        .located = located,
         .state = .{ .trace = fiber.frames.items.len },
     };
     driver.appendInitial(via);
@@ -45,6 +50,9 @@ const FailureDriver = struct {
         trace: usize,
         spell: usize,
         resolve: struct { index: usize, cursor: intern.TraceWordCursor },
+        /// Finds each trace entry's call site in the archive.
+        locate_sites: usize,
+        sites: SitesCursor,
         locate: spans.SpanArchive.LocateCursor,
         value: ErrorValueCursor,
         /// The machine unwinds to the boundary that catches the value, or to
@@ -62,6 +70,7 @@ const FailureDriver = struct {
         fn deinit(self: *State, releases: *heap.ReleaseDomain) void {
             switch (self.*) {
                 .resolve => |*resolve| resolve.cursor.deinit(),
+                .sites => |*cursor| cursor.retire(),
                 .value => |*cursor| cursor.retire(releases),
                 .unwinding => |unwinding| releases.releaseValue(unwinding.error_value),
                 .outcome_name => |outcome| releases.releaseValue(outcome.error_value),
@@ -71,30 +80,73 @@ const FailureDriver = struct {
                     releases.releaseValue(outcome.error_value);
                 },
                 .caught => |item| releases.releaseValue(item),
-                .trace, .spell, .locate, .failed => {},
+                .trace, .spell, .locate_sites, .locate, .failed => {},
             }
         }
     };
 
     allocator: std.mem.Allocator,
     failure: EclErr,
-    /// The activation chain, innermost first. Entries are trace words rather
-    /// than atoms because a module-local word's spelling depends on the
-    /// registration it ran under; `resolved` holds the interned spellings.
-    trace: []intern.TraceWord,
+    /// The activation chain, innermost first. Entries carry trace words
+    /// rather than atoms because a module-local word's spelling depends on
+    /// the registration it ran under; `resolved` holds the interned
+    /// spellings. Each entry's call site borrows code the fiber's frames keep
+    /// alive until the unwind, which starts only once the value is built.
+    trace: []TraceEntry,
     resolved: []u32,
+    /// Each entry's call site in source, where the archive knows it.
+    located: []?spans.LocatedSpan,
     trace_count: usize = 0,
+    /// The trace entry whose call site the failure is reported at, or null for
+    /// the failing token itself; built by `attribute` while sites are located.
+    attributed: ?usize = null,
+    attribution_closed: bool = false,
+    /// The `sites` list, owned until the error value has been built.
+    sites: ?Value = null,
     outcome_pair: [1]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }},
     state: State,
 
     fn appendInitial(self: *FailureDriver, via: *Unwinding) void {
-        if (self.failure.word) |word| self.appendTrace(word);
-        if (self.failure.trace_parent) |word| self.appendTrace(word);
-        if (via.currentTrace()) |word| self.appendTrace(word);
+        // The failing word was called at the failing token.
+        if (self.failure.word) |word| self.appendTrace(.{
+            .word = word,
+            // A word reported at its caller has no known call site here, and
+            // the failing token is inside its body.
+            .site = if (self.failure.word_attribution == .caller) null else if (self.failure.site) |site| switch (site) {
+                .token => |token| token,
+                .contract_quotation, .explicit_location => null,
+            } else null,
+            .attribution = self.failure.word_attribution,
+        });
+        if (self.failure.trace_parent) |word| self.appendTrace(.{
+            .word = word,
+            .site = null,
+            .attribution = self.failure.trace_parent_attribution,
+        });
+        if (via.currentTrace()) |entry| self.appendTrace(entry);
     }
-    fn appendTrace(self: *FailureDriver, word: intern.TraceWord) void {
-        self.trace[self.trace_count] = word;
+    fn appendTrace(self: *FailureDriver, entry: TraceEntry) void {
+        self.trace[self.trace_count] = entry;
         self.trace_count += 1;
+    }
+    /// Extends the attribution walk over entry `index`, called once per entry
+    /// in trace order as its call site is located, so the walk is charged with
+    /// the locating. A failure inside a helper word is the failure of the code
+    /// that called it, so the report moves out through each enclosing helper to
+    /// the first activation that is not one. The failing word's own entry is
+    /// the failing token, unless that word is itself a helper reported at its
+    /// caller. An unknown call site ends the walk but keeps the attribution:
+    /// the report omits a position rather than naming the helper body.
+    fn attribute(self: *FailureDriver, index: usize) void {
+        if (self.attribution_closed) return;
+        const first = @intFromBool(self.failure.word != null and self.failure.word_attribution != .caller);
+        if (index < first) return;
+        if (self.trace[index].attribution != .caller) {
+            self.attribution_closed = true;
+            return;
+        }
+        self.attributed = index;
+        if (self.located[index] == null) self.attribution_closed = true;
     }
     pub fn deinit(
         self: *FailureDriver,
@@ -103,10 +155,13 @@ const FailureDriver = struct {
     ) void {
         self.state.deinit(releases);
         self.failure.retire(releases);
+        if (self.sites) |sites| releases.releaseValue(sites);
         storage_allocator.free(self.trace);
         storage_allocator.free(self.resolved);
+        storage_allocator.free(self.located);
     }
     fn beginLocation(self: *FailureDriver, via: *Unwinding) void {
+        if (self.attributed) |index| return self.beginValue(self.located[index]);
         switch (via.locate(&self.failure)) {
             .locating => |cursor| self.state = .{ .locate = cursor },
             .located => |location| self.beginValue(location),
@@ -122,6 +177,7 @@ const FailureDriver = struct {
                 .{
                     .word = if (self.failure.word != null) self.resolved[0] else null,
                     .trace = self.resolved[0..self.trace_count],
+                    .sites = self.sites,
                 },
                 location,
             ),
@@ -137,7 +193,7 @@ const FailureDriver = struct {
         const fiber = via.fiber();
         const work = fiber.workBudget();
         while (switch (self.state) {
-            .value, .outcome => !work.exhausted(),
+            .sites, .value, .outcome => !work.exhausted(),
             else => work.spend(),
         }) switch (self.state) {
             .trace => |*frame_index| {
@@ -146,18 +202,18 @@ const FailureDriver = struct {
                     continue;
                 }
                 frame_index.* -= 1;
-                if (via.frameTrace(frame_index.*)) |word| self.appendTrace(word);
+                if (via.frameTrace(frame_index.*)) |entry| self.appendTrace(entry);
             },
             // Qualifying a module-local word interns its spelling. Failures
             // are rare, so this is the one place that cost is paid.
             .spell => |resolve_index| {
                 if (resolve_index == self.trace_count) {
-                    self.beginLocation(via);
+                    self.state = .{ .locate_sites = 0 };
                     continue;
                 }
                 const cursor = try intern.TraceWordCursor.init(
                     self.allocator,
-                    self.trace[resolve_index],
+                    self.trace[resolve_index].word,
                 );
                 self.state = .{ .resolve = .{
                     .index = resolve_index,
@@ -171,6 +227,33 @@ const FailureDriver = struct {
                     resolve.cursor.deinit();
                     self.resolved[index] = id;
                     self.state = .{ .spell = index + 1 };
+                },
+            },
+            .locate_sites => |*index| {
+                if (index.* == self.trace_count) {
+                    self.state = .{ .sites = .init(
+                        self.allocator,
+                        fiber.releases,
+                        self.located[0..self.trace_count],
+                    ) };
+                    continue;
+                }
+                self.located[index.*] = if (self.trace[index.*].site) |site| located: {
+                    var cursor = via.locateSite(site);
+                    break :located switch (cursor.advance()) {
+                        .pending => unreachable,
+                        .complete => |location| location,
+                    };
+                } else null;
+                self.attribute(index.*);
+                index.* += 1;
+            },
+            .sites => |*cursor| switch (try cursor.advance(work)) {
+                .pending => return .{ .yielded = .settle },
+                .complete => |sites| {
+                    cursor.retire();
+                    self.sites = sites;
+                    self.beginLocation(via);
                 },
             },
             .locate => |*cursor| switch (cursor.advance()) {

@@ -41,6 +41,11 @@ const IndexedSpan = struct {
     token_entry: *const reader.SpanTable.Entry,
     source_entry: ?*const reader.SpanTable.Entry,
     container_entry: ?*const reader.SpanTable.Entry,
+    /// `helper` marked this quotation: a word defined with it as its body
+    /// reports its failures at its caller. The mark belongs to the header's
+    /// slot, so it retires with the header and a rebuilt list does not carry
+    /// it.
+    helper: bool = false,
 };
 
 /// A three-level direct directory keyed by the 24 provenance bits in a heap
@@ -160,6 +165,21 @@ const HeaderIndex = struct {
         const leaf = branch.leaves[leaf_index] orelse return null;
         if (leaf.headers[entry_index] != header) return null;
         return leaf.entries[entry_index];
+    }
+
+    /// Marks the exact header's slot as a helper body, or answers false when
+    /// the header is not indexed.
+    fn markHelper(
+        self: *HeaderIndex,
+        identity: heap.CodeIdentity,
+        header: *value.ListHandle,
+    ) bool {
+        const branch_index, const leaf_index, const entry_index = coordinates(identity);
+        const branch = self.branches[branch_index] orelse return false;
+        const leaf = branch.leaves[leaf_index] orelse return false;
+        if (leaf.headers[entry_index] != header) return false;
+        leaf.entries[entry_index].helper = true;
+        return true;
     }
 
     fn deinit(self: *HeaderIndex, allocator: std.mem.Allocator) void {
@@ -315,6 +335,13 @@ const SpanArchiveState = struct {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         self.index.release(identity, header);
+    }
+
+    fn markHelper(self: *SpanArchiveState, header: *value.ListHandle) bool {
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        const identity = heap.codeIdentity(self.identity_issuer, header) orelse return false;
+        return self.index.markHelper(identity, header);
     }
 
     fn indexed(self: *SpanArchiveState, header: *value.ListHandle) ?IndexedSpan {
@@ -1356,6 +1383,18 @@ pub const SpanArchive = enum(usize) {
             .source_name = indexed.archive_entry.source_name,
             .span = indexed.token_entry.spans[index],
         } };
+    }
+
+    /// Marks a quotation read from source as a helper body. False when the
+    /// quotation was built at run time, which carries no source to mark.
+    pub fn markHelper(self: *const SpanArchive, header: *value.ListHandle) bool {
+        return self.privateState().markHelper(header);
+    }
+
+    /// Whether `helper` marked this quotation.
+    pub fn isHelper(self: *const SpanArchive, header: *value.ListHandle) bool {
+        const indexed = self.privateState().indexed(header) orelse return false;
+        return indexed.helper;
     }
 
     pub fn locateQuotationCursor(

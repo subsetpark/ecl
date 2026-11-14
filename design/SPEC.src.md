@@ -319,6 +319,18 @@ represented by an absent field, never by a nil value. Runtime-assembled code
 has no source position by construction, and no host exception or host stack
 frame is exposed as ECL error data.
 
+An error built from a failure records where it happened. `'data` carries
+`'source`, `'line`, and `'col` for the failure's position, and `'sites`, a
+list parallel to `'trace` giving each entry's call site as a dictionary of
+the same three fields, empty where no position is known. A word whose body
+was marked with `helper` is a helper: a failure inside it is positioned at
+the call that entered it, and that applies outward through every enclosing
+helper, so an assertion reports the code that asserted rather than its own
+body. `assert` and `fail` are helpers. A tail call does not keep its caller
+in the trace; a word tail-called from a helper's body takes that helper's
+call site. A raised dictionary keeps whichever of these fields it already
+has.
+
 <!-- include:errors-model -->
 
 ### Units and the transactional stack

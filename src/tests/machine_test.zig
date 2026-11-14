@@ -618,7 +618,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings(
         "{kind custom msg \"hello\" word raise trace (`raise) " ++
-            "data {source \"fixture.ecl\" line 1 col 27}}",
+            "data {source \"fixture.ecl\" line 1 col 27 sites ({source \"fixture.ecl\" line 1 col 27})}}",
         rendered,
     );
 
@@ -628,7 +628,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     defer allocator.free(defaulted_rendered);
     try std.testing.expectEqualStrings(
         "{kind custom msg \"raised custom\" word raise trace (`raise) " ++
-            "data {source \"fixture.ecl\" line 1 col 15}}",
+            "data {source \"fixture.ecl\" line 1 col 15 sites ({source \"fixture.ecl\" line 1 col 15})}}",
         defaulted_rendered,
     );
 
@@ -667,6 +667,97 @@ test "raise preserves valid user dicts and validates optional fields" {
     const malformed = (try execute(&runtime, "{kind 1} raise")).?;
     defer runtime.release(malformed);
     try std.testing.expectEqualStrings("type", try errorKind(allocator, malformed));
+}
+
+fn expectSite(
+    allocator: std.mem.Allocator,
+    error_value: Value,
+    index: u64,
+    expected_source: []const u8,
+    line: ?i64,
+    col: ?i64,
+) !void {
+    const sites = try field(allocator, try field(allocator, error_value, "data"), "sites");
+    try std.testing.expectEqual((try field(allocator, error_value, "trace")).list.length(), sites.list.length());
+    const site = list.atUnchecked(sites, index);
+    const source = try field(allocator, site, "source");
+    const rendered = try printer.toOwnedString(allocator, source);
+    defer allocator.free(rendered);
+    try std.testing.expectEqualStrings(expected_source, rendered);
+    if (line) |expected| try std.testing.expectEqual(expected, (try field(allocator, site, "line")).int);
+    if (col) |expected| try std.testing.expectEqual(expected, (try field(allocator, site, "col")).int);
+}
+
+fn expectReportedAt(runtime: *session.Session, source: []const u8, line: i64, col: i64) !void {
+    const allocator = std.testing.allocator;
+    const failure = (try execute(runtime, source)) orelse return error.TestUnexpectedResult;
+    defer runtime.release(failure);
+    expectLocation(allocator, try field(allocator, failure, "data"), "\"fixture.ecl\"", line, col) catch |err| {
+        const rendered = try printer.toOwnedString(allocator, failure);
+        defer allocator.free(rendered);
+        std.log.err("source: {s}\nerror: {s}", .{ source, rendered });
+        return err;
+    };
+}
+
+test "trace sites record each call and helpers report at their caller" {
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    // `assert` is a helper, so its failure is the caller's, in tail position
+    // and out of it. Every trace entry has the site of the call entering it.
+    {
+        const failure = (try execute(&runtime, "0 {kind t} assert")).?;
+        defer runtime.release(failure);
+        try expectLocation(allocator, try field(allocator, failure, "data"), "\"fixture.ecl\"", 1, 12);
+        try expectSite(allocator, failure, 0, "\"prelude.ecl\"", null, null);
+        try expectSite(allocator, failure, 1, "\"fixture.ecl\"", 1, 12);
+    }
+    try expectReportedAt(&runtime, "0 {kind t} assert 5", 1, 12);
+    try expectReportedAt(&runtime, "\"boom\" fail", 1, 8);
+
+    // A word marked with `helper` reports at its own caller, whether the
+    // failing call is its last form or not; an unmarked word does not.
+    try expectReportedAt(&runtime, "(0 {kind t} assert 1) helper `inner-check def inner-check", 1, 47);
+    try expectReportedAt(&runtime, "(0 {kind t} assert) helper `tail-check def tail-check", 1, 44);
+    try expectReportedAt(&runtime, "(0 {kind t} assert) `plain def plain", 1, 13);
+    // Helpers compose: the report moves out through each of them.
+    try expectReportedAt(&runtime, "(tail-check) helper `outer-check def 1 outer-check", 1, 40);
+    try expectReportedAt(&runtime, "(tail-check) `outer-plain def outer-plain", 1, 2);
+    // A tail-recursive helper holds one call site, however deep it runs.
+    try expectReportedAt(
+        &runtime,
+        "(dup 0 = ({kind t} raise) (1 - countdown) if) helper `countdown def 100000 countdown",
+        1,
+        76,
+    );
+    // A helper keeps its mark through module construction.
+    try expectReportedAt(&runtime, "((0 {kind t} assert) helper `check def) `checks @defm checks.check", 1, 55);
+
+    // A raised dict that already has a location keeps it and its sites.
+    {
+        const failure = (try execute(&runtime, "({kind t data {detail 7}} raise) @attempt `err at raise")).?;
+        defer runtime.release(failure);
+        try expectLocation(allocator, try field(allocator, failure, "data"), "\"fixture.ecl\"", 1, 27);
+        try expectSite(allocator, failure, 0, "\"fixture.ecl\"", 1, 27);
+    }
+
+    // Only a quotation read from source can be marked.
+    {
+        const failure = (try execute(&runtime, "1 2 pair helper")).?;
+        defer runtime.release(failure);
+        try std.testing.expectEqualStrings("domain", try errorKind(allocator, failure));
+    }
+    {
+        const failure = (try execute(&runtime, "1 helper")).?;
+        defer runtime.release(failure);
+        try std.testing.expectEqualStrings("type", try errorKind(allocator, failure));
+    }
 }
 
 test "over cat and at have exact stack effects" {
