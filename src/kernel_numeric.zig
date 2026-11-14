@@ -3425,6 +3425,46 @@ fn reduceKernel(
             return if (operation == .and_word) accumulator & low else accumulator | high;
         }
 
+        /// `max` and `min` of ints, or of floats, cannot fault, and the scalar
+        /// authority keeps the accumulator unless the element is strictly
+        /// past it. Its ordering is an out-of-line call per element, which
+        /// was nearly all of these reductions' cost.
+        const extremes = (operation == .max or operation == .min) and
+            ((accumulator_class == .integer and (element_class == .integer or element_class == .byte)) or
+                (accumulator_class == .real and element_class == .real));
+
+        /// An int fold's extreme over a block, a vector at a time: the
+        /// extreme of ints is the same whichever equal element supplies it.
+        fn extremeBlock(accumulator: i64, items: []const element_class.Element()) i64 {
+            const Element = element_class.Element();
+            const lanes = comptime std.simd.suggestVectorLength(Element) orelse 1;
+            const Lanes = @Vector(lanes, Element);
+            const group = lanes * 4;
+            var result = accumulator;
+            var index: usize = 0;
+            if (items.len >= group) {
+                var best: [4]Lanes = undefined;
+                inline for (0..4) |member| best[member] = items[member * lanes ..][0..lanes].*;
+                index = group;
+                while (index + group <= items.len) : (index += group) {
+                    inline for (0..4) |member| {
+                        const run: Lanes = items[index + member * lanes ..][0..lanes].*;
+                        best[member] = if (operation == .max) @max(best[member], run) else @min(best[member], run);
+                    }
+                }
+                const merged = if (operation == .max)
+                    @max(@max(best[0], best[1]), @max(best[2], best[3]))
+                else
+                    @min(@min(best[0], best[1]), @min(best[2], best[3]));
+                const extreme: i64 = if (operation == .max) @reduce(.Max, merged) else @reduce(.Min, merged);
+                result = if (operation == .max) @max(result, extreme) else @min(result, extreme);
+            }
+            for (items[index..]) |item| {
+                result = if (operation == .max) @max(result, item) else @min(result, item);
+            }
+            return result;
+        }
+
         /// A scan of `<>` over 0s and 1s from a 0 or 1 is a running parity,
         /// which eight positions take in one step: within a word each byte is
         /// the XOR of itself and the bytes before it, by three shifted XORs,
@@ -3506,7 +3546,16 @@ fn reduceKernel(
                 // from `elements`, so updating it there would store and reload
                 // it on every element.
                 var accumulator = accumulated(output);
-                if (compares_ints) {
+                if (extremes and !scan and accumulator_class == .integer) {
+                    accumulator = extremeBlock(accumulator, elements[piece.start..piece.end]);
+                } else if (extremes) {
+                    for (piece.start..piece.end) |index| {
+                        const element: accumulator_class.Element() = elements[index];
+                        const past = if (operation == .max) element > accumulator else element < accumulator;
+                        if (past) accumulator = element;
+                        if (scan) block.items[index - piece.start] = accumulator;
+                    }
+                } else if (compares_ints) {
                     for (piece.start..piece.end) |index| {
                         accumulator = integralComparison(operation, accumulator, elements[index]);
                         if (scan) block.items[index - piece.start] = @intCast(accumulator);
