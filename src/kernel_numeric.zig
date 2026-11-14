@@ -2463,13 +2463,7 @@ pub const ScalarProgram = struct {
     /// Runs every instruction over `registers`, reporting the instruction a
     /// fault happened in.
     fn run(self: *const ScalarProgram, registers: *[max_registers]Value, failed: *u8) ScalarError!Value {
-        try self.runPrefix(registers, self.len, failed);
-        return registers[self.result];
-    }
-
-    /// Runs the first `limit` instructions; see `run`.
-    fn runPrefix(self: *const ScalarProgram, registers: *[max_registers]Value, limit: u8, failed: *u8) ScalarError!void {
-        for (self.instructions[0..limit], 0..) |instruction, position| {
+        for (self.instructions[0..self.len], 0..) |instruction, position| {
             registers[instruction.destination] = (switch (instruction.operation) {
                 .unary => |operation| switch (operation) {
                     inline else => |selected| scalarUnary(selected, registers[instruction.left]),
@@ -2482,17 +2476,9 @@ pub const ScalarProgram = struct {
                 return fault;
             };
         }
+        return registers[self.result];
     }
 };
-
-/// Which order a program's applications are observed in, which decides the
-/// first fault and how it is reported. `each` applies the whole program to
-/// one element before the next, as a quotation applied per element does, and
-/// its fault carries no list position. `pervade` stands for the program's
-/// words run one at a time in straight-line code, each pervading the whole
-/// list before the next word starts: the first fault is the earliest
-/// instruction that faults at any position, reported at that position.
-pub const ProgramMode = enum { each, pervade };
 
 /// Whether `operand` can feed a scalar program: a numeric atom, or a nonempty
 /// numeric leaf.
@@ -2529,7 +2515,7 @@ pub fn programCandidate(operands: []const Value) bool {
 /// element. The quotation is held as an operand for that report.
 pub fn startProgramEach(fiber: *Fiber, input: *heap.OwnedValue, phrase: *heap.OwnedValue, program: ScalarProgram) MachineError!void {
     const count: usize = @intCast(input.borrow().list.length());
-    return startProgram(1, .each, fiber, .{ input, phrase }, &program, count);
+    return startProgram(1, fiber, .{ input, phrase }, &program, count);
 }
 
 /// A program is too large to travel by value in a driver; the kernel's output
@@ -2548,37 +2534,7 @@ pub fn startProgramZip(
     program: ScalarProgram,
 ) MachineError!void {
     const count: usize = @intCast(if (left.borrow() == .list) left.borrow().list.length() else right.borrow().list.length());
-    return startProgram(2, .each, fiber, .{ left, right, phrase }, &program, count);
-}
-
-/// The most stack values a straight-line chain may read.
-pub const max_chain_inputs = 4;
-
-/// Runs a program compiled from straight-line `code` over the top
-/// `program.inputs` stack values, which `programCandidate` admitted, as its
-/// words would run one at a time.
-pub fn startProgramChain(fiber: *Fiber, code: *value.ListHandle, program: ScalarProgram) MachineError!void {
-    return switch (program.inputs) {
-        inline 1...max_chain_inputs => |inputs| startChain(inputs, fiber, code, &program),
-        else => unreachable, // The compiler refuses a chain with more inputs.
-    };
-}
-
-fn startChain(comptime inputs: usize, fiber: *Fiber, code: *value.ListHandle, program: *const ScalarProgram) MachineError!void {
-    // SAFETY: every owner is set below before the kernel reads it.
-    var owners: [inputs + 1]heap.OwnedValue = undefined;
-    heap.retainValue(.{ .list = code });
-    owners[inputs] = .init(fiber.releases, .{ .list = code });
-    var popped: usize = 0;
-    defer for (owners[inputs - popped ..]) |*owner| owner.deinit();
-    while (popped != inputs) : (popped += 1) owners[inputs - 1 - popped] = try fiber.popValue();
-    // SAFETY: every pointer is set below.
-    var pointers: [inputs + 1]*heap.OwnedValue = undefined;
-    for (&pointers, &owners) |*pointer, *owner| pointer.* = owner;
-    const count: usize = for (owners[0..inputs]) |*owner| {
-        if (owner.borrow() == .list) break @intCast(owner.borrow().list.length());
-    } else unreachable; // `programCandidate` requires a leaf.
-    return startProgram(inputs, .pervade, fiber, pointers, program, count);
+    return startProgram(2, fiber, .{ left, right, phrase }, &program, count);
 }
 
 /// Runs `program` over its inputs, the last owner being the code it was
@@ -2586,7 +2542,6 @@ fn startChain(comptime inputs: usize, fiber: *Fiber, code: *value.ListHandle, pr
 /// result leaf a block at a time; any other computes element by element.
 fn startProgram(
     comptime inputs: usize,
-    comptime mode: ProgramMode,
     fiber: *Fiber,
     owners: [inputs + 1]*heap.OwnedValue,
     program: *const ScalarProgram,
@@ -2596,11 +2551,11 @@ fn startProgram(
     var operands: [inputs]Value = undefined;
     for (&operands, owners[0..inputs]) |*operand, owner| operand.* = owner.borrow();
     const classes = programClasses(program, &operands) orelse
-        return support.Kernel(ProgramValuesKernel(inputs, mode)).run(fiber, owners, program, length);
+        return support.Kernel(ProgramValuesKernel(inputs)).run(fiber, owners, program, length);
     return switch (classes[program.result]) {
-        .integer => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_i64)).run(fiber, owners, program, length),
-        .real => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_f64)).run(fiber, owners, program, length),
-        .byte => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_u8)).run(fiber, owners, program, length),
+        .integer => support.Kernel(ProgramLeafKernel(inputs, .leaf_i64)).run(fiber, owners, program, length),
+        .real => support.Kernel(ProgramLeafKernel(inputs, .leaf_f64)).run(fiber, owners, program, length),
+        .byte => support.Kernel(ProgramLeafKernel(inputs, .leaf_u8)).run(fiber, owners, program, length),
         .char1, .char2, .char4 => unreachable, // A program reads numeric leaves only.
     };
 }
@@ -2621,12 +2576,6 @@ fn programScalars(program: *const ScalarProgram, operands: []const Value) [Scala
         };
     }
     return scalar;
-}
-
-/// Whether running `program` over `operands` gives a list: its result
-/// depends on a list operand. A chain whose result does not is scalar code.
-pub fn programResultVaries(program: *const ScalarProgram, operands: []const Value) bool {
-    return !programScalars(program, operands)[program.result];
 }
 
 /// The one class each register holds for a whole run, from the inputs'
@@ -2930,76 +2879,21 @@ const BlockPlan = struct {
     }
 };
 
-/// A fault `pervade` has met so far, which an earlier instruction may still
-/// displace.
-const ProgramFault = struct { instruction: u8, index: usize, fault: ScalarError };
-
-/// How a program's first fault is found and reported, shared by both
-/// kernels. `each` reports the first element's first fault as it meets it.
-/// `pervade` keeps the earliest instruction to fault so far; each later
-/// position then runs only the instructions before it, so a fault it meets is
-/// an earlier instruction's, at a later position than any before it, and the
-/// answer is known once every position has run. An instruction whose result
-/// is the same at every position faults with no list position, as a word
-/// over atoms does.
-fn ProgramFaults(comptime inputs: usize, comptime mode: ProgramMode) type {
-    return struct {
-        const Self = @This();
-
-        /// The code the program was compiled from, borrowed from the
-        /// operands, which the kernel holds.
-        phrase: Value,
-        scalar: [ScalarProgram.max_registers]bool,
-        fault: ?ProgramFault = null,
-
-        fn init(program: *const ScalarProgram, operands: [inputs + 1]Value) Self {
-            return .{ .phrase = operands[inputs], .scalar = programScalars(program, operands[0..inputs]) };
-        }
-
-        /// Runs position `index` through the whole program. Null when it
-        /// faulted and the fault was recorded.
-        fn runAt(self: *Self, program: *const ScalarProgram, registers: *[ScalarProgram.max_registers]Value, operands: [inputs + 1]Value, index: usize, fiber: *Fiber) MachineError!?Value {
-            inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
-            var failed: u8 = 0;
-            return program.run(registers, &failed) catch |fault| {
-                try self.met(program, .{ .instruction = failed, .index = index, .fault = fault }, fiber);
-                return null;
-            };
-        }
-
-        /// Records a fault, or reports it when nothing can precede it: in
-        /// `each` mode always, in `pervade` mode at the first instruction.
-        fn met(self: *Self, program: *const ScalarProgram, fault: ProgramFault, fiber: *Fiber) MachineError!void {
-            if (mode == .each or fault.instruction == 0) return self.report(program, fault, fiber);
-            self.fault = fault;
-        }
-
-        /// `pervade`'s search over positions `start..end`.
-        fn search(self: *Self, program: *const ScalarProgram, operands: [inputs + 1]Value, start: usize, end: usize, fiber: *Fiber) MachineError!void {
-            if (mode == .each) unreachable else { // `met` reported the first fault.
-                // SAFETY: `load` fills the constants; inputs are set per position.
-                var registers: [ScalarProgram.max_registers]Value = undefined;
-                program.load(&registers);
-                for (start..end) |index| {
-                    inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
-                    var failed: u8 = 0;
-                    program.runPrefix(&registers, self.fault.?.instruction, &failed) catch |fault|
-                        try self.met(program, .{ .instruction = failed, .index = index, .fault = fault }, fiber);
-                }
-            }
-        }
-
-        /// Reports the fault the search settled on, once every position ran.
-        fn settle(self: *const Self, program: *const ScalarProgram, fiber: *Fiber) MachineError!void {
-            if (self.fault) |fault| return self.report(program, fault, fiber);
-        }
-
-        fn report(self: *const Self, program: *const ScalarProgram, fault: ProgramFault, fiber: *Fiber) MachineError {
-            const instruction = program.instructions[fault.instruction];
-            const positioned = mode == .pervade and !self.scalar[instruction.destination];
-            return failProgram(fiber, self.phrase, instruction, fault.fault, if (positioned) fault.index else null);
-        }
-    };
+/// Runs position `index` through the whole program, as the quotation applied
+/// to that element. A fault is reported at once, at the faulting word's
+/// position in the code the program was compiled from, the last operand.
+fn programAt(
+    comptime inputs: usize,
+    program: *const ScalarProgram,
+    registers: *[ScalarProgram.max_registers]Value,
+    operands: [inputs + 1]Value,
+    index: usize,
+    fiber: *Fiber,
+) MachineError!Value {
+    inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
+    var failed: u8 = 0;
+    return program.run(registers, &failed) catch |fault|
+        failProgram(fiber, operands[inputs], program.instructions[failed], fault);
 }
 
 /// The positions `0..inputs`, every input a planned program may write its
@@ -3013,10 +2907,9 @@ fn inputPositions(comptime inputs: usize) [inputs]usize {
 /// A planned program: each block computed through the typed kernels and
 /// stored into the result leaf, which may take over an input's buffer. A
 /// block that faults is replayed element by element, which meets the same
-/// first fault in `each` mode and starts `pervade`'s search for it. The last
-/// operand is the code the program was compiled from, which a fault names a
-/// position in.
-fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptime kind: value.HeapKind) type {
+/// first fault. The last operand is the code the program was compiled from,
+/// which a fault names a position in.
+fn ProgramLeafKernel(comptime inputs: usize, comptime kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     return struct {
         pub const arity = inputs + 1;
@@ -3026,13 +2919,11 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
         const positions = inputPositions(inputs);
         pub const result: support.ResultShape = .{ .kind = kind, .overwritable = &positions };
         const Leaf = support.LeafResult(kind);
-        const Faults = ProgramFaults(inputs, mode);
         pub const Output = struct {
             allocator: std.mem.Allocator,
             leaf: Leaf,
             program: *ScalarProgram,
             plan: *BlockPlan,
-            faults: Faults,
 
             pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
                 self.leaf.retire(releases);
@@ -3058,13 +2949,11 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
                 .leaf = leaf,
                 .program = program,
                 .plan = try BlockPlan.create(allocator, program, operands[0..inputs], length),
-                .faults = .init(program, operands),
             };
         }
 
         pub fn chunk(_: Params, operands: [arity]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
             const program = output.program;
-            if (output.faults.fault != null) return output.faults.search(program, operands, range.start, range.end, fiber);
             const plan = output.plan;
             var start = range.start;
             while (start != range.end) {
@@ -3076,8 +2965,7 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
                     var registers: [ScalarProgram.max_registers]Value = undefined;
                     program.load(&registers);
                     for (out, start..) |*slot, index| {
-                        const item = try output.faults.runAt(program, &registers, operands, index, fiber) orelse
-                            return output.faults.search(program, operands, index + 1, range.end, fiber);
+                        const item = try programAt(inputs, program, &registers, operands, index, fiber);
                         slot.* = switch (Element) {
                             u8 => @intCast(item.int),
                             i64 => item.int,
@@ -3090,8 +2978,7 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
             }
         }
 
-        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
-            try output.faults.settle(output.program, fiber);
+        pub fn next(_: *Fiber, _: *Output) MachineError!?usize {
             return null;
         }
 
@@ -3105,20 +2992,18 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
 
 /// A program no plan covers, computed element by element as atoms, then
 /// written in the representation its values profile to.
-fn ProgramValuesKernel(comptime inputs: usize, comptime mode: ProgramMode) type {
+fn ProgramValuesKernel(comptime inputs: usize) type {
     return struct {
         pub const arity = inputs + 1;
         /// The caller's program, read only by `prepare`, which copies it into
         /// the output.
         pub const Params = *const ScalarProgram;
-        const Faults = ProgramFaults(inputs, mode);
         pub const Output = struct {
             allocator: std.mem.Allocator,
             program: *ScalarProgram,
             results: []Value,
             profile: list.ListProfile = .{},
             builder: ?heap.AnyListBuilder = null,
-            faults: Faults,
 
             pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
                 if (self.builder) |*builder| builder.retirePartial(releases);
@@ -3131,7 +3016,7 @@ fn ProgramValuesKernel(comptime inputs: usize, comptime mode: ProgramMode) type 
             }
         };
 
-        pub fn prepare(fiber: *Fiber, operands: [arity]Value, borrowed: Params, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(fiber: *Fiber, _: [arity]Value, borrowed: Params, length: usize) error{OutOfMemory}!Output {
             const allocator = fiber.allocator;
             const program = try ownProgram(fiber, borrowed.*);
             errdefer allocator.destroy(program);
@@ -3139,14 +3024,12 @@ fn ProgramValuesKernel(comptime inputs: usize, comptime mode: ProgramMode) type 
                 .allocator = allocator,
                 .program = program,
                 .results = try allocator.alloc(Value, length),
-                .faults = .init(program, operands),
             };
         }
 
         pub fn chunk(_: Params, operands: [arity]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
             if (output.builder) |*builder| return builder.writeValues(range.start, output.results[range.start..range.end]);
             const program = output.program;
-            if (output.faults.fault != null) return output.faults.search(program, operands, range.start, range.end, fiber);
             // SAFETY: `load` fills the constants; inputs and results are
             // written before they are read.
             var registers: [ScalarProgram.max_registers]Value = undefined;
@@ -3154,14 +3037,12 @@ fn ProgramValuesKernel(comptime inputs: usize, comptime mode: ProgramMode) type 
             var profile = output.profile;
             defer output.profile = profile;
             for (output.results[range.start..range.end], range.start..) |*slot, index| {
-                slot.* = try output.faults.runAt(program, &registers, operands, index, fiber) orelse
-                    return output.faults.search(program, operands, index + 1, range.end, fiber);
+                slot.* = try programAt(inputs, program, &registers, operands, index, fiber);
                 profile = profile.add(slot.*);
             }
         }
 
-        pub fn next(fiber: *Fiber, output: *Output) MachineError!?usize {
-            try output.faults.settle(output.program, fiber);
+        pub fn next(_: *Fiber, output: *Output) MachineError!?usize {
             if (output.builder != null) return null;
             const length = output.results.len;
             output.builder = try heap.AnyListBuilder.init(output.allocator, output.profile.heapKind(), length, length);
@@ -3268,7 +3149,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
                 registers[1] = programElement(operands[0], params.start + position);
                 var failed: u8 = 0;
                 accumulator = program.run(&registers, &failed) catch |fault|
-                    return failProgram(fiber, operands[1], program.instructions[failed], fault, null);
+                    return failProgram(fiber, operands[1], program.instructions[failed], fault);
                 if (scan) {
                     output.results[position] = accumulator;
                     profile = profile.add(accumulator);
@@ -3295,12 +3176,11 @@ fn ProgramReduceKernel(comptime scan: bool) type {
 }
 
 /// Reports a program's fault as the faulting word would: that word active, at
-/// its position in the code, with the shared scalar diagnostic, and at the
-/// list position a pervading word reports.
-fn failProgram(fiber: *Fiber, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError, index: ?usize) MachineError {
+/// its position in the code, with the shared scalar diagnostic.
+fn failProgram(fiber: *Fiber, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
     @setEvalBranchQuota(10_000);
     fiber.active_word = .plain(instruction.word);
-    const failure = scalarFailure(fiber, fault, index);
+    const failure = scalarFailure(fiber, fault, null);
     fiber.setFailureSite(phrase.list, instruction.index);
     return failure;
 }

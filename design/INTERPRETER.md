@@ -1323,23 +1323,17 @@ as the last following word's own.
 Numeric arithmetic has one compiled form, the scalar program: a run of numeric
 constants, stack words, and core numeric operations compiled to a
 straight-line function over registers, executed a block at a time through the
-typed kernels. One compiler and one executor serve every place such a run
-appears. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or `scan`
-compiles whole, over the inputs the combinator seeds. In straight-line code a
-numeric word whose operands include a list heads a chain: the longest run of
-following forms that leaves one value compiles over the stack values it
-reaches, provided they are numeric atoms and conforming numeric leaves. The
-two differ only in the order the program's applications are observed in, which
-the executor takes as a mode. A quotation applied per element meets an
-element's first fault before the next element starts. Words run one at a time
-pervade the whole list before the next word starts, so a chain's first fault is
-the earliest instruction to fault at any position, reported at that position;
-once a block faults, the executor searches the rest of the list for an earlier
-instruction's fault before reporting. A register that varies along the list
-has the class its operation gives outside a program, so a mask stays one byte
-per position through a chain and a program's result has the representation its
-words would have produced one at a time. A register that does not vary is an
-int or a real.
+typed kernels. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or
+`scan` compiles whole, over the inputs the combinator seeds, and is observed as
+the quotation applied per element: an element's first fault is met before the
+next element starts. Only an offered quotation compiles. Arithmetic written
+in straight-line code runs its words one at a time, because finding a run
+there means inspecting the following words on every dispatch, which costs
+more than one pass over the operands saves. A register that varies along
+the list has the class its operation gives outside a program, so a mask stays
+one byte per position and a program's result has the representation its words
+would have produced one at a time. A register that does not vary is an int or
+a real.
 
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`

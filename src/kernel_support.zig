@@ -16,40 +16,20 @@ pub const Fiber = machine.Fiber;
 pub const MachineError = machine.MachineError;
 
 /// A kernel word's primitive, wrapped when the idiom registry has phrases it
-/// heads or when it is a numeric operation, which may head an arithmetic
-/// chain: the wrapper first asks whether the words after it continue one,
-/// which then runs in its place. A numeric operation asks only when an operand
-/// is a list, so scalar arithmetic pays one tag check. A word that heads
-/// nothing keeps its primitive unchanged, so it pays nothing. Every kernel
-/// family binds its words through this, so a phrase entry is the only change a
-/// new phrase needs, and recognition compares the same pointer the binding
-/// holds.
+/// heads: the wrapper first asks whether the words after it continue one,
+/// which then runs in its place. A word that heads nothing keeps its primitive
+/// unchanged, so it pays nothing. Every kernel family binds its words through
+/// this, so a phrase entry is the only change a new phrase needs, and
+/// recognition compares the same pointer the binding holds.
 pub fn headed(comptime spelling: []const u8, comptime primitive: env.PrimitiveImpl) env.PrimitiveImpl {
     const found = comptime idioms.firstPhraseEntry(spelling);
-    const chain = comptime idioms.chainHead(spelling);
-    if (found == null and chain == null) return primitive;
+    const first = found orelse return primitive;
     return struct {
         fn run(fiber: *Fiber) MachineError!void {
-            if (chain) |operation| if (meetsList(fiber, operation)) {
-                if (try fiber.continuesChain(operation)) return;
-            };
-            if (found) |first| if (try fiber.continuesPhrase(first)) return;
+            if (try fiber.continuesPhrase(first)) return;
             return @call(.always_inline, primitive, .{fiber});
         }
     }.run;
-}
-
-/// Whether a numeric operation's own operands include a list.
-inline fn meetsList(fiber: *Fiber, comptime operation: idioms.Operation) bool {
-    const arity: usize = switch (operation) {
-        .unary => 1,
-        .binary => 2,
-        else => unreachable,
-    };
-    if (fiber.available() < arity) return false;
-    const stack = fiber.stack.items;
-    for (stack[stack.len - arity ..]) |item| if (item == .list) return true;
-    return false;
 }
 
 pub const max_depth: usize = 256;

@@ -2636,11 +2636,6 @@ pub const Fiber = struct {
     pub fn continuesPhrase(self: *Fiber, first_entry: u16) MachineError!bool {
         return idioms.applyHeaded(self, first_entry);
     }
-    /// Whether the words after a numeric operation continue an arithmetic
-    /// chain, which then ran in its place.
-    pub fn continuesChain(self: *Fiber, operation: idioms.Operation) MachineError!bool {
-        return idioms.applyChain(self, operation);
-    }
     /// The forms after the dispatching word in its own code, when it was
     /// dispatched from a source position and `count` of them follow. A word
     /// reached any other way (an invocation, a replay) has no phrase after it.

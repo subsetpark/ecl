@@ -10,6 +10,55 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## Straight-line arithmetic chains no longer fuse — 2026-11-13
+
+Since `d588f1e5` a numeric word meeting a list scanned the words after it on
+every dispatch, to run a chain of them as one scalar program. The scan resolved
+each following word and compared spellings, and it ran whether or not a chain
+followed. Removing it leaves offered quotations (`(2 * 1 +) each`) as the only
+compiled arithmetic. Idiom recognition also compares interned names now, not
+spellings.
+
+Zig 0.17.1, macOS arm64 (M4 Max), unstripped. "With" is the tree before the
+removal, with name comparison already by id; "without" stubs the chain branch.
+
+`csv.parse` and `csv.emit`, `ECL_WORKERS=1`, in-process millisecond clock, the
+median over five alternating rounds of the best of three runs. Inputs are
+synthetic: 100,000 rows × 8 integers (8.8 MB); 100,000 rows × 3 quoted Unicode
+fields with embedded newlines and CRLF (11.8 MB); 613,295 rows × 12 mixed
+fields (55.6 MB).
+
+| ms | Parse, with | Parse, without | Emit, with | Emit, without |
+|---|---:|---:|---:|---:|
+| integers, ReleaseFast | 90 | 84 | 173 | 171 |
+| integers, ReleaseSafe | 163 | 148 | 322 | 329 |
+| quoted, ReleaseFast | 85 | 76 | 102 | 97 |
+| quoted, ReleaseSafe | 158 | 141 | 202 | 200 |
+| mixed, ReleaseFast | 658 | 608 | 1559 | 1584 |
+| mixed, ReleaseSafe | 1241 | 1131 | 2725 | 2841 |
+
+Parse retires 12–15% fewer instructions without the scan; emit is unchanged
+within its spread.
+
+The plain scalar n-body program (ten pairs per step, 3-vector arithmetic),
+ReleaseFast, instructions retired per step at 65,536 steps:
+
+| Build | Instructions per step |
+|---|---:|
+| `cb5e559` (2026-10-28, before chains) | 327k |
+| `958ab67b` | 432k |
+| names compared by id | 361k |
+| without chain fusion | 260k |
+
+A chain that did fuse was not faster here either. ReleaseFast, 200 passes
+over a million elements, wall seconds, the unfused control wrapping each later
+word in `(…) call`: a four-word float chain 0.14 fused against 0.12, a
+four-word int chain 0.36 against 0.31. A five-word boolean chain over
+24M-element masks, 30 passes, took 0.23 fused against 0.16 in ReleaseFast and
+0.19 against 0.29 in ReleaseSafe, the one case fusion won; `csv.parse`, which
+builds its masks 64K characters at a time, did not see that gain. The x86-64
+float-chain figures below were not re-measured.
+
 ## CSV in ECL — 2026-11-09
 
 `csv` at `87c55648` is an ECL module over the vector primitives; the native
