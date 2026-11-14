@@ -1380,6 +1380,7 @@ fn binaryLoopPolicy(
     comptime left: Number,
     comptime right: Number,
 ) LoopPolicy {
+    if (comptime mixedFloatArithmetic(operation, left, right)) return .vector_checked;
     // Bytes are ints to every loop: a byte lane widens to an int lane before
     // the operation, so byte and mixed pairs take the int loops.
     if (left != .real and right != .real) return switch (operation) {
@@ -1387,9 +1388,19 @@ fn binaryLoopPolicy(
         .wrap_add, .wrap_sub => .vector_infallible,
         .wrap_mul => if (support.targetHasNativePackedI64Multiply()) .vector_infallible else .scalar_infallible,
         .add, .sub => .vector_checked,
-        .mul => if (support.targetHasNativePackedI64Multiply()) .vector_checked else .scalar_checked,
         .and_word, .or_word => .vector_checked,
-        .div, .int_div, .mod, .pow, .atan2, .bsl, .bsr => .scalar_checked,
+        // Lane fault masks: overflow, a count outside 0..63, a zero divisor,
+        // or the least int over -1. Multiply and division have no packed
+        // instruction here; the lanes are still unrolled, where the checked
+        // scalar loop ran one a trip. Character pairs, which are rare, keep
+        // that loop and its smaller code.
+        .mul, .int_div, .mod, .bsl, .bsr => if (support.targetHasNativePackedI64Multiply() and operation == .mul)
+            .vector_checked
+        else if (intOrByte(left) and intOrByte(right))
+            .vector_checked
+        else
+            .scalar_checked,
+        .div, .pow, .atan2 => .scalar_checked,
     };
     if (left == .real and right == .real) return switch (operation) {
         // No operand is NaN, so comparison and selection cannot fail.
@@ -1400,6 +1411,22 @@ fn binaryLoopPolicy(
         .wrap_add, .wrap_sub, .wrap_mul => .scalar_checked,
     };
     return .scalar_checked;
+}
+
+fn intOrByte(number: Number) bool {
+    return number == .integer or number == .byte;
+}
+
+/// Float `+ - * /` where a side is an int or byte, or `/` of two ints or bytes:
+/// either side converts to a float and the only fault is a NaN result.
+fn mixedFloatArithmetic(comptime operation: BinaryOp, comptime left: Number, comptime right: Number) bool {
+    switch (operation) {
+        .add, .sub, .mul, .div => {},
+        else => return false,
+    }
+    if (!(intOrByte(left) or left == .real) or !(intOrByte(right) or right == .real)) return false;
+    if (left == .real and right == .real) return false;
+    return operation == .div or left == .real or right == .real;
 }
 
 fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPolicy {
@@ -1574,7 +1601,20 @@ fn binaryKernel(
     // stores, and the wider streams are the ones split. The count depends on
     // the pair and not on its order, so a mirrored plan runs its twin's loop
     // at its own speed.
-    const lanes = if (left_class != .real and right_class != .real)
+    //
+    // Operations without a packed instruction here (64-bit multiply and
+    // division, and shifts and float arithmetic, which widen every lane to 64
+    // bits) run as many lanes as one 64-bit vector holds: a byte pair's
+    // sixteen lanes made sixteen scalar divisions per step, which bought no
+    // speed and most of these kernels' size.
+    const wide_lanes = comptime switch (operation) {
+        .int_div, .mod, .mul, .bsl, .bsr => true,
+        .add, .sub, .div => mixedFloatArithmetic(operation, left_class, right_class),
+        else => false,
+    };
+    const lanes = if (wide_lanes)
+        std.simd.suggestVectorLength(i64) orelse 1
+    else if (left_class != .real and right_class != .real)
         std.simd.suggestVectorLength(Narrowest(left_class.Element(), Narrowest(right_class.Element(), out.Element()))) orelse 1
     else
         std.simd.suggestVectorLength(left_class.Element()) orelse 1;
@@ -1621,6 +1661,60 @@ fn binaryKernel(
     // Integral lanes as ints: a byte lane widens, an int lane is itself.
     const Wide = @Vector(lanes, i64);
     const integral = left_class != .real and right_class != .real;
+    // A shift, quotient, or remainder of a leaf by a scalar can fault only
+    // through the scalar: a count outside 0..63, a zero divisor, or `-1`, whose
+    // quotient of the least int overflows. A scalar outside those runs the
+    // infallible loop with no per-element check, which the compiler unrolls;
+    // the checked loop's per-element test and boxed dispatch keep it to one
+    // element a trip. Any other scalar takes the checked loop and its replay.
+    const scalar_right_admits: ?fn (right_class.Element()) bool = comptime if (integral and shape == .leaf_scalar) switch (operation) {
+        .bsl, .bsr => struct {
+            fn admits(b: right_class.Element()) bool {
+                return b >= 0 and b <= 63;
+            }
+        }.admits,
+        .int_div, .mod => struct {
+            fn admits(b: right_class.Element()) bool {
+                return b != 0 and b != -1;
+            }
+        }.admits,
+        else => null,
+    } else null;
+    const admitted_body = struct {
+        fn run(a: left_class.Element(), b: right_class.Element()) out.Element() {
+            const x: i64 = a;
+            const y: i64 = b;
+            return switch (operation) {
+                .bsl => @bitCast(@as(u64, @bitCast(x)) << @intCast(y)),
+                .bsr => @bitCast(@as(u64, @bitCast(x)) >> @intCast(y)),
+                .int_div => @divTrunc(x, y),
+                .mod => @rem(x, y),
+                else => unreachable,
+            };
+        }
+    }.run;
+    // The same operations a vector at a time. The loop is written in vectors
+    // rather than left to the auto-vectorizer: LLVM 22 (Zig 0.17.1) keeps the
+    // scalar loop to one element a trip.
+    const admitted_vector_body = struct {
+        fn run(
+            a: @Vector(lanes, left_class.Element()),
+            b: @Vector(lanes, right_class.Element()),
+        ) @Vector(lanes, out.Element()) {
+            comptime std.debug.assert(out.Element() == i64);
+            const x: @Vector(lanes, i64) = if (left_class == .integer) a else @intCast(a);
+            const y: @Vector(lanes, i64) = if (right_class == .integer) b else @intCast(b);
+            const Pattern = @Vector(lanes, u64);
+            const Count = @Vector(lanes, u6);
+            return switch (operation) {
+                .bsl => @bitCast(@as(Pattern, @bitCast(x)) << @as(Count, @intCast(y))),
+                .bsr => @bitCast(@as(Pattern, @bitCast(x)) >> @as(Count, @intCast(y))),
+                .int_div => @divTrunc(x, y),
+                .mod => @rem(x, y),
+                else => unreachable,
+            };
+        }
+    }.run;
     const wide = struct {
         fn left(a: @Vector(lanes, left_class.Element())) Wide {
             return if (left_class == .integer) a else @intCast(a);
@@ -1714,11 +1808,22 @@ fn binaryKernel(
             };
         }
     };
+    // Float arithmetic with an int or byte side, and `/` of two ints, which
+    // returns a float.
+    const float_lanes = comptime mixedFloatArithmetic(operation, left_class, right_class);
     const checked_vector_body = struct {
         fn run(
             a: @Vector(lanes, left_class.Element()),
             b: @Vector(lanes, right_class.Element()),
         ) Vectors.Masked {
+            if (float_lanes) {
+                // An int side converts as `asFloat` does; the only fault is a
+                // NaN result, as for two floats.
+                const ra: @Vector(lanes, f64) = if (left_class == .real) a else @floatFromInt(a);
+                const rb: @Vector(lanes, f64) = if (right_class == .real) b else @floatFromInt(b);
+                const result = real_lanes.arithmetic(ra, rb);
+                return .{ .values = result, .faults = Vectors.mask(result != result) };
+            }
             if (integral and (operation == .and_word or operation == .or_word)) {
                 // Both operands must be 0 or 1, exactly `boolean`'s test.
                 const wa = wide.left(a);
@@ -1732,14 +1837,64 @@ fn binaryKernel(
             if (integral) {
                 const wa = wide.left(a);
                 const wb = wide.right(b);
-                const result = switch (operation) {
-                    .add => @addWithOverflow(wa, wb),
-                    .sub => @subWithOverflow(wa, wb),
-                    .mul => @mulWithOverflow(wa, wb),
+                // Overflow of `+`/`-` read from sign bits as a lane compare.
+                // `@addWithOverflow`'s `u1` lanes went through memory as a
+                // bitmask on every vector, which cost more than the add.
+                const zeros: Wide = @splat(0);
+                switch (operation) {
+                    .add => {
+                        const sum = wa +% wb;
+                        return .{ .values = sum, .faults = Vectors.mask(((wa ^ sum) & (wb ^ sum)) < zeros) };
+                    },
+                    .sub => {
+                        const difference = wa -% wb;
+                        return .{ .values = difference, .faults = Vectors.mask(((wa ^ wb) & (wa ^ difference)) < zeros) };
+                    },
+                    .mul => {
+                        if (comptime support.targetHasNativePackedI64Multiply()) {
+                            const result = @mulWithOverflow(wa, wb);
+                            const no_overflow: @Vector(lanes, u1) = @splat(0);
+                            return .{ .values = result[0], .faults = Vectors.mask(result[1] != no_overflow) };
+                        }
+                        // No packed 64-bit multiply: each lane multiplies as
+                        // a scalar, inside the unrolled vector loop rather
+                        // than the checked scalar one.
+                        // The product overflows exactly when its high half
+                        // is not the sign of its low half.
+                        // SAFETY: the loop below writes every lane of both.
+                        var low: Wide = undefined;
+                        // SAFETY: as `low`.
+                        var high: Wide = undefined;
+                        inline for (0..lanes) |lane| {
+                            const product = @as(i128, wa[lane]) * @as(i128, wb[lane]);
+                            low[lane] = @truncate(product);
+                            high[lane] = @intCast(product >> 64);
+                        }
+                        const sign_shift: @Vector(lanes, u6) = @splat(63);
+                        return .{ .values = low, .faults = Vectors.mask(high != (low >> sign_shift)) };
+                    },
+                    .bsl, .bsr => {
+                        const Pattern = @Vector(lanes, u64);
+                        const count: Pattern = @bitCast(wb);
+                        // A faulting lane's count is cut to six bits; its
+                        // value is discarded with the mask.
+                        const amount: @Vector(lanes, u6) = @truncate(count);
+                        const pattern: Pattern = @bitCast(wa);
+                        const shifted = if (operation == .bsl) pattern << amount else pattern >> amount;
+                        const most: Pattern = @splat(63);
+                        return .{ .values = @bitCast(shifted), .faults = Vectors.mask(count > most) };
+                    },
+                    .int_div, .mod => {
+                        const ones: Wide = @splat(1);
+                        const least: Wide = @splat(std.math.minInt(i64));
+                        const fault = (wb == zeros) | ((wb == -ones) & (wa == least));
+                        // A faulting lane divides by one instead.
+                        const divisor = @select(i64, fault, ones, wb);
+                        const values = if (operation == .mod) @rem(wa, divisor) else @divTrunc(wa, divisor);
+                        return .{ .values = values, .faults = Vectors.mask(fault) };
+                    },
                     else => unreachable,
-                };
-                const no_overflow: @Vector(lanes, u1) = @splat(0);
-                return .{ .values = result[0], .faults = Vectors.mask(result[1] != no_overflow) };
+                }
             }
             if (left_class == .real and right_class == .real and
                 (operation == .add or operation == .sub or operation == .mul or operation == .div))
@@ -1804,6 +1959,12 @@ fn binaryKernel(
         /// written where `target` puts it: the kernel's output, or a program
         /// block's scratch run.
         inline fn runRange(left: Left, right: Right, target: anytype, placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
+            if (comptime scalar_right_admits) |admits| {
+                if (admits(right)) {
+                    Vectors.binaryScalarRight(admitted_vector_body, admitted_body, left, right, range, target.vector(range));
+                    return null;
+                }
+            }
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
