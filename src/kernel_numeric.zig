@@ -3368,6 +3368,38 @@ fn reduceKernel(
             else => false,
         };
 
+        /// A fold of `and` or `or` over ints faults only on a value that is
+        /// neither 0 nor 1, and its result over valid values is their minimum
+        /// or maximum. A block's extremes therefore decide both in one pass
+        /// with no dependence between elements; a block holding any other
+        /// value replays through the scalar authority to fault where it would.
+        const folds_booleans = !scan and accumulator_class == .integer and
+            (element_class == .byte or element_class == .integer) and
+            (operation == .and_word or operation == .or_word);
+
+        fn booleanBlock(accumulator: i64, items: []const element_class.Element()) ?i64 {
+            if (accumulator != 0 and accumulator != 1) return null;
+            const Element = element_class.Element();
+            const lanes = comptime std.simd.suggestVectorLength(Element) orelse 1;
+            const Lanes = @Vector(lanes, Element);
+            var lows: Lanes = @splat(1);
+            var highs: Lanes = @splat(0);
+            var index: usize = 0;
+            while (index + lanes <= items.len) : (index += lanes) {
+                const run: Lanes = items[index..][0..lanes].*;
+                lows = @min(lows, run);
+                highs = @max(highs, run);
+            }
+            var low = @reduce(.Min, lows);
+            var high = @reduce(.Max, highs);
+            for (items[index..]) |item| {
+                low = @min(low, item);
+                high = @max(high, item);
+            }
+            if (low < 0 or high > 1) return null;
+            return if (operation == .and_word) accumulator & low else accumulator | high;
+        }
+
         fn uncheckedBlock(output: *ReduceOutput, elements: []const element_class.Element(), piece: flat.Chunk, block: *Staging) bool {
             var accumulator = accumulated(output);
             for (piece.start..piece.end) |index| {
@@ -3401,6 +3433,11 @@ fn reduceKernel(
                     offset += piece.len();
                     continue;
                 }
+                if (folds_booleans) if (booleanBlock(accumulated(output), elements[piece.start..piece.end])) |folded| {
+                    store(output, folded);
+                    offset += piece.len();
+                    continue;
+                };
                 // The accumulator stays in a local for the block: `output`
                 // is reached through a pointer the loop cannot prove distinct
                 // from `elements`, so updating it there would store and reload

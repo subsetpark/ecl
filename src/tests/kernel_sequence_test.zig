@@ -114,6 +114,25 @@ test "sequence: fold and fold1 boolean and numeric results" {
     });
 }
 
+test "sequence: boolean folds agree across blocks, over masks and ints" {
+    // 600 elements span three 256-element blocks; a mask is a byte per
+    // position and `range mod` is an int per position.
+    try helper.expectStack(
+        "600 range 599 = 0 (or) fold 600 range 600 = 0 (or) fold " ++
+            "600 range 0 >= 1 (and) fold 600 range 599 < 1 (and) fold " ++
+            "600 range 599 = 600 * 600 div 0 (or) fold 600 range 0 * 1 + 1 (and) fold " ++
+            "600 range 0 * 1 (or) fold 600 range 0 >= 0 (and) fold " ++
+            "600 range 300 = (or) fold1 600 range 300 <> (and) fold1",
+        "1 0 1 0 1 1 1 0 1 0",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "or meets a later block's 2", .source = "600 range 599 = 2 * 0 (or) fold", .kind = "type", .word = "or" },
+        .{ .name = "and meets a later block's -1", .source = "600 range 599 = 0 swap - 1 (and) fold", .kind = "type", .word = "and" },
+        .{ .name = "or refuses its seed over a mask", .source = "600 range 0 >= 5 (or) fold", .kind = "type", .word = "or" },
+        .{ .name = "and refuses a byte that is not a boolean", .source = "600 range 255 mod 1 (and) fold", .kind = "type", .word = "and" },
+    });
+}
+
 test "sequence: where, in?, and find validate and search" {
     try helper.expectStack(
         "[1 0 1 0] where [0 2 0] first-where [0 0] first-where [] first-where " ++
