@@ -903,7 +903,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (`raise `assert `str.index-of) data {source "prelude.ecl" line <^\d+$> col <^\d+$> sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {} {source "<command>" line 1 col 11})}}
+        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (`raise `assert `str.index-of) data {sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {} {source "<command>" line 1 col 11})}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d,,f" csv.parse
