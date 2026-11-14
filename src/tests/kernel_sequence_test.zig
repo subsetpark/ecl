@@ -367,6 +367,23 @@ test "sequence: flip and reshape obey rectangular row-major semantics" {
         "[0 1 2 3 4 5] [2 3] reshape str",
         "\"([0 1 2] [3 4 5])\"",
     );
+    try helper.expectStack(
+        "[] [0 3] reshape () match? " ++
+            "[1 2 3] [0 2] reshape () match? " ++
+            "([1] \"ab\") [0 2 2] reshape () match? " ++
+            "[] [2 0 3] reshape (() ()) match? " ++
+            "[1 2] [2 1 0 4] reshape (([]) ([])) match? " ++
+            "[1 2] [2 0 5] reshape shape",
+        "1 1 1 1 1 [2 0]",
+    );
+    try helper.expectStack(
+        "[[] []] flip () match? " ++
+            "(\"\" \"\" \"\") flip () match? " ++
+            "([] ()) flip () match? " ++
+            "[[]] flip () match? " ++
+            "[] [3 0] reshape flip () match?",
+        "1 1 1 1 1",
+    );
     try helper.expectErrors(&.{
         .{
             .name = "flip rejects unequal row widths",
@@ -387,19 +404,18 @@ test "sequence: flip and reshape obey rectangular row-major semantics" {
             .word = "flip",
         },
         .{
-            .name = "reshape cannot hide a later axis behind zero",
-            .source = "[] [0 3] reshape",
+            .name = "reshape validates axes after a zero dimension",
+            .source = "[] [0 -1] reshape",
             .kind = "shape",
             .word = "reshape",
-            .data = &.{.{ .name = "index", .expected = .{ .int = 0 } }},
-            .message_contains = "cannot retain axes",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+            .message_contains = "non-negative",
         },
         .{
-            .name = "flip cannot hide trailing axes",
-            .source = "[[] []] flip",
+            .name = "flip rejects a nonempty row after empty rows",
+            .source = "[[] [] [1]] flip",
             .kind = "shape",
             .word = "flip",
-            .message_contains = "cannot retain trailing axes",
         },
     });
 }

@@ -424,7 +424,7 @@ Ex:
 ### flip
 `( list -- list )` — Exchange the first two axes of a list of equally wide rows. Cells are preserved whole: strings, nested lists, dictionaries, and mixed values need not share a type or shape. Only the immediate row lengths must agree. Strings used as rows transpose their characters.
 
-An empty list or a list containing no list items is unchanged. Mixing list rows with non-list items, unequal row lengths, or nonempty collections of zero-width rows raises `` `shape ``; the last case cannot retain the other axis after transposition. A non-list argument raises `` `type ``.
+An empty list or a list containing no list items is unchanged. Rows that are all empty transpose to the empty list; it cannot retain the other axis. Mixing list rows with non-list items or unequal row lengths raises `` `shape ``. A non-list argument raises `` `type ``.
 
 #### Examples
 
@@ -679,7 +679,7 @@ Ex.:
 `( list -- list )` — Flatten one level. Flat-map is `each raze`.
 
 ### reshape
-`( list shape -- list )` — Cycle the data into the exact nested-list shape; a zero axis must be final.
+`( list shape -- list )` — Cycle the data into the nested-list shape; a zero axis yields empty lists and drops the axes after it.
 
 #### Examples
 
