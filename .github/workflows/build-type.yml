@@ -88,7 +88,7 @@ jobs:
       OOM_TARGET: ${{ inputs.oom_target }}
       OOM_FILTER: ${{ inputs.oom_filter }}
       PANT_VERSION: 0.25.1
-      ZIG_VERSION: 0.17.0
+      ZIG_VERSION: 0.17.1
       VALGRIND_VERSION: 3.27.1
       VALGRIND_SHA256: 5d589152eb8071c02feab8ce6ab719e431a1fbc3e2b1700f5432632a8b9264dc
       ZIG_GLOBAL_CACHE_HOST: /tmp/ecl-zig-cache/global
@@ -155,8 +155,8 @@ jobs:
             done
             timeout 5m apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y --no-install-recommends \
               ca-certificates curl expect git libc6-dev python3 xz-utils z3
-            curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-            echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  /tmp/zig.tar.xz" | sha256sum -c -
+            curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+            echo "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a  /tmp/zig.tar.xz" | sha256sum -c -
             mkdir -p /opt/zig /build /root/.cache/zig/tmp
             tar -C /opt/zig --strip-components=1 -xf /tmp/zig.tar.xz
             ln -s /opt/zig/zig /usr/local/bin/zig
@@ -188,8 +188,8 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends \
                 ca-certificates curl git libc6-dev python3 xz-utils
-              curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-              echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  /tmp/zig.tar.xz" | sha256sum -c -
+              curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+              echo "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a  /tmp/zig.tar.xz" | sha256sum -c -
               mkdir -p /opt/zig /build /root/.cache/zig/tmp
               tar -C /opt/zig --strip-components=1 -xf /tmp/zig.tar.xz
               cp -a /work/. /build/

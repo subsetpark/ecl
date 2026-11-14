@@ -260,8 +260,8 @@ reason before selecting the matrix.
   container's PID 1, which ignores SIGTERM, so the run continues to completion and
   still reports 124.
 
-  For arm64, use `--platform linux/arm64`, the `zig-aarch64-linux-0.17.0`
-  tarball (sha256 `9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8`),
+  For arm64, use `--platform linux/arm64`, the `zig-aarch64-linux-0.17.1`
+  tarball (sha256 `a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795`),
   and add `llvm-18` with `TSAN_OPTIONS=external_symbolizer_path=/usr/bin/llvm-symbolizer-18`
   so reports carry symbols. Run one TSan container at a time: two concurrent
   builds exhaust Docker Desktop's memory and the compiler is killed.
@@ -272,8 +272,8 @@ reason before selecting the matrix.
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
       apt-get install -y --no-install-recommends ca-certificates curl libc6-dev python3 xz-utils
-      curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-      echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  /tmp/zig.tar.xz" | sha256sum -c -
+      curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+      echo "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a  /tmp/zig.tar.xz" | sha256sum -c -
       mkdir -p /tmp/zig
       tar -C /tmp/zig --strip-components=1 -xf /tmp/zig.tar.xz
       # Copy sources only; a host .zig-cache can be hundreds of GB and fills the VM disk.
