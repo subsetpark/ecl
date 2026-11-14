@@ -1433,7 +1433,8 @@ A cursor of many small steps therefore costs one turn rather than one per
 step, and a wait never spends the budget polling. A slice reports the two
 endings apart: an exhausted fiber is still runnable, so the root starts its next
 turn without offering its host thread, while a root that stopped to wait,
-settle, or relieve backpressure yields the thread. Root fairness comes from
+settle, or relieve backpressure yields the thread, unless its own retirement
+turn left work, which is then the progress it waits for. Root fairness comes from
 releasing and re-acquiring admission each turn, not from the host yield. The
 machine observes cancellation before each driver step, so the rule is not a
 driver's to restate; a driver whose step must run regardless, or must act
