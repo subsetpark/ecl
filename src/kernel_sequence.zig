@@ -37,8 +37,8 @@ fn definition(comptime operation: Op) env.BuiltinWord {
         .range => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "bound -- list", .doc = "The ints `[0 1 … bound-1]`; the bound must be a nonnegative int." },
         .shape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- shape", .doc = "The dimensions of rectangular data; `` `shape `` error on ragged data (`len` is the word that works on anything)." },
         .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Top-level list element count. Lists may be ragged. Dictionary entry count is provided by `dict.size`." },
-        .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Exchange the first two axes of a list of equally wide rows. Cells are preserved whole: strings, nested lists, dictionaries, and mixed values need not share a type or shape. Only the immediate row lengths must agree. Strings used as rows transpose their characters.\n\nAn empty list or a list containing no list items is unchanged. Mixing list rows with non-list items, unequal row lengths, or nonempty collections of zero-width rows raises `` `shape ``; the last case cannot retain the other axis after transposition. A non-list argument raises `` `type ``." },
-        .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle the data into the exact nested-list shape; a zero axis must be final." },
+        .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Exchange the first two axes of a list of equally wide rows. Cells are preserved whole: strings, nested lists, dictionaries, and mixed values need not share a type or shape. Only the immediate row lengths must agree. Strings used as rows transpose their characters.\n\nAn empty list or a list containing no list items is unchanged. Rows that are all empty transpose to the empty list; it cannot retain the other axis. Mixing list rows with non-list items or unequal row lengths raises `` `shape ``. A non-list argument raises `` `type ``." },
+        .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle the data into the nested-list shape; a zero axis yields empty lists and drops the axes after it." },
         .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into one piece per start index. Each piece runs from its start up to the next start, and the last runs to the end of the list; elements before the first start belong to no piece. Starts must be integers from zero through the length, in nondecreasing order, so equal starts give empty pieces. A start out of range or below its predecessor fails with `` `domain `` at that start's position. Strings cut into strings." },
         .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate top-level element order left by a count, wrapping cyclically; a negative count rotates right, counts beyond the length wrap, and the empty list is returned unchanged. Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K composes it from an index permutation). The count must be an int." },
         .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list; an empty list is `` `domain ``." },
@@ -2078,10 +2078,10 @@ const FlipDriver = struct {
                     if (self.leaf_kind != null and row.list.kind() != self.leaf_kind.?) self.leaf_kind = null;
                 }
                 if (validation.next != rows) return .stepped;
-                if (validation.columns == 0) return fiber.fail(
-                    .shape,
-                    "flip cannot retain trailing axes after a transposed zero dimension",
-                );
+                // Zero-width rows transpose to zero rows. The empty result
+                // has no element to carry the old row count, as in K.
+                if (validation.columns == 0)
+                    return .{ .output = try emptyLike(fiber.allocator, self.collection.borrow()) };
                 self.validation = .{ .ready = validation.columns };
                 return .stepped;
             },
@@ -2585,13 +2585,9 @@ const ReshapeDriver = struct {
                         "reshape dimension exceeds addressable size",
                         self.dimension_index,
                     );
-                if (self.dimensions.borrow()[self.dimension_index] == 0 and
-                    self.dimension_index + 1 < self.dimensions.borrow().len)
-                    return fiber.failAtIndex(
-                        .shape,
-                        "reshape cannot retain axes after a zero dimension",
-                        self.dimension_index,
-                    );
+                // Axes after a zero dimension are still validated, but a
+                // nested list has no element to carry them: the builder ends
+                // each zero-length frame as an empty list.
                 self.volume = std.math.mul(usize, self.volume, self.dimensions.borrow()[self.dimension_index]) catch
                     return fiber.fail(.overflow, "reshape volume overflows addressable size");
             }
