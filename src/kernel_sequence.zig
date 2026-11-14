@@ -2808,7 +2808,9 @@ fn copyWidened(comptime Out: type, out: []Out, items: anytype) void {
         return;
     }
     if (comptime @sizeOf(Out) == 1) if (copyShortBytes(std.mem.sliceAsBytes(out), std.mem.sliceAsBytes(items))) return;
-    @memmove(out, items);
+    // A short run is one `@memmove` call; `moveBytes` pays off past a few trips.
+    if (out.len * @sizeOf(Out) < 256) return @memmove(out, items);
+    kernel_flat.moveBytes(std.mem.sliceAsBytes(out), std.mem.sliceAsBytes(items));
 }
 
 /// Copies up to sixteen bytes as two loads and two stores that may overlap,
