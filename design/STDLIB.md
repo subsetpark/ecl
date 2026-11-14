@@ -147,7 +147,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 `( -- arguments )` — The process arguments following the script or source, as a list of strings.
 
 ### assert
-`( bool error -- )` — Raise an error dict unless the condition is 1.
+`( bool error -- )` — Raise an error dict unless the condition is 1. A helper: the failure is reported where `assert` was called.
 
 ### at
 `( collection key -- value )` — Index a list or look up a dict key. Pervades over nested list selectors, preserving their shape, so an index vector selects: `[10 20 30] [2 0] at` is `[30 10]`. A dictionary key is always one whole value, including when that value is a list. A missing dict key is an error.
@@ -395,6 +395,9 @@ Ex:
 # => (next-member open-tgz read-member sha256 unpack-tgz)
 ```
 
+### fail
+`( msg -- )` — Raise a user-kind error whose message is `msg`: `{kind user msg msg}`. A helper: the failure is reported where `fail` was called.
+
 ### filter
 `( list (a -- count) -- matches )` — Apply the predicate to every element, retaining each element as many times as its returned nonnegative int.
 
@@ -489,6 +492,9 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 
 ### group-columns
 `( columns -- groups )` — Group rows from a nonempty list of equal-length columns. Keys are whole composite lists, in first-occurrence order; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``.
+
+### helper
+`( quotation -- quotation )` — Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`. The mark belongs to that quotation, not to an equal one; a list built at run time is `` `domain ``, and any other value is `` `type ``.
 
 ### if
 `( bool then else -- ... )` — Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``.
@@ -949,9 +955,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 
 ### converges
 `( value (a -- a) -- list )` — Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended.
-
-### fail
-`( msg -- )` — Raise a user-kind error whose message is `msg`: `{kind user msg msg}`.
 
 ### iterations
 `( value count (a -- a) -- list )` — Return `value` followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list.

@@ -353,6 +353,7 @@ pub const ModulePublication = union(enum) {
         visibility: Visibility,
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
+        attribution: Attribution = .own,
     },
     native: struct {
         callable: NativeCallable,
@@ -382,6 +383,11 @@ pub const Lifetime = enum { static, counted };
 /// names and lands nested definitions there.
 pub const DefinitionRoot = enum { core, session, image };
 
+/// Where a failure inside a word is reported. A `caller` word is a helper,
+/// like an assertion: its failures point at the code that called it rather
+/// than at its own body. The definition's body was marked with `helper`.
+pub const Attribution = enum(u8) { own, caller };
+
 /// One immutable, sealed definition. Construction reserves its storage before
 /// its body is validated, so a body may call itself (and a module group's
 /// members one another), but hands out only a `Reservation` for it: a
@@ -403,6 +409,7 @@ pub const Definition = struct {
     doc: ?*DocumentationString = null,
     source: ?reader_types.SourceSlice = null,
     root: DefinitionRoot,
+    attribution: Attribution = .own,
     /// The module image the definition belongs to, as `modules` names it.
     /// Opaque here: `env` never dereferences it.
     home: ?*anyopaque = null,
@@ -437,6 +444,7 @@ pub const Definition = struct {
         doc: ?*DocumentationString = null,
         source: ?reader_types.SourceSlice = null,
         root: DefinitionRoot,
+        attribution: Attribution = .own,
         home: ?*anyopaque = null,
     };
 
@@ -490,6 +498,7 @@ pub const Definition = struct {
             .doc = metadata.doc,
             .source = metadata.source,
             .root = metadata.root,
+            .attribution = metadata.attribution,
             .home = metadata.home,
         };
         return result;

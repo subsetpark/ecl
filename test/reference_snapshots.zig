@@ -214,7 +214,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "kernel arithmetic is outside its domain" word / trace (`/) data {source "<command>" line 1 col 5}}
+        \\{kind domain msg "kernel arithmetic is outside its domain" word / trace (`/) data {source "<command>" line 1 col 5 sites ({source "<command>" line 1 col 5})}}
         \\=== div ===
         \\source: 7 3 div
         \\exit: 0
@@ -368,7 +368,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind shape msg "shape requires a rectangular list" word shape trace (`shape) data {source "<command>" line 1 col 13}}
+        \\{kind shape msg "shape requires a rectangular list" word shape trace (`shape) data {source "<command>" line 1 col 13 sites ({source "<command>" line 1 col 13})}}
         \\=== first ===
         \\source: "ab" first
         \\exit: 0
@@ -536,7 +536,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "join expected a list of strings" word join trace (`join) data {index 1 source "<command>" line 1 col 13}}
+        \\{kind type msg "join expected a list of strings" word join trace (`join) data {index 1 source "<command>" line 1 col 13 sites ({source "<command>" line 1 col 13})}}
         \\=== str.format ===
         \\source: [3.14 2] "pi={} n={}" str.format
         \\exit: 0
@@ -564,7 +564,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind shape msg "parse-one requires exactly one form" word raise trace (`raise `assert `parse-one) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
+        \\{kind shape msg "parse-one requires exactly one form" word raise trace (`raise `assert `parse-one) data {source "prelude.ecl" line <^\d+$> col <^\d+$> sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<command>" line 1 col 7})}}
         \\=== int ===
         \\source: "42" int "a" first int
         \\exit: 0
@@ -757,7 +757,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind user msg "bad" word raise trace (`raise `fail) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
+        \\{kind user msg "bad" word raise trace (`raise `fail) data {source "<command>" line 1 col 7 sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<command>" line 1 col 7})}}
         \\=== result.ok? ===
         \\source: (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -838,7 +838,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (`defp `setp) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
+        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (`defp `setp) data {source "prelude.ecl" line <^\d+$> col <^\d+$> sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<command>" line 1 col 6})}}
         \\=== qualify execute ===
         \\source: ((41) `f def) `core.utils @defm `core.utils `f qualify execute
         \\exit: 0
@@ -852,7 +852,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "execute expected a symbol" word execute trace (`execute) data {source "<command>" line 1 col 3}}
+        \\{kind type msg "execute expected a symbol" word execute trace (`execute) data {source "<command>" line 1 col 3 sites ({source "<command>" line 1 col 3})}}
         \\=== doc qualify ===
         \\source: `qualify doc
         \\exit: 0
@@ -889,7 +889,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "an ok result must carry a list of success values" word raise trace (`raise `assert `result.map) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
+        \\{kind type msg "an ok result must carry a list of success values" word raise trace (`raise `assert `result.map) data {source "<stdlib:result>" line 33 col 90 sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<stdlib:result>" line 33 col 90} {source "<command>" line 1 col 18})}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -903,7 +903,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (`raise `assert `str.index-of) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
+        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (`raise `assert `str.index-of) data {source "prelude.ecl" line <^\d+$> col <^\d+$> sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {} {source "<command>" line 1 col 11})}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d,,f" csv.parse
@@ -925,7 +925,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind parse msg "csv: malformed quoting at record 1, column 1" word raise trace (`raise `csv.refuse `csv.misquoted `csv.unclosed `csv.checked `csv.fielded `csv.separated `csv.quoted `csv.lexed `csv.tail `csv.finished `csv.parse) data {source "<stdlib:csv>" line <^\d+$> col <^\d+$>}}
+        \\{kind parse msg "csv: malformed quoting at record 1, column 1" word raise trace (`raise `csv.refuse `csv.misquoted `csv.unclosed `csv.checked `csv.fielded `csv.separated `csv.quoted `csv.lexed `csv.tail `csv.finished `csv.parse) data {source "<stdlib:csv>" line 12 col 60 sites ({source "<stdlib:csv>" line 12 col 60} {source "<stdlib:csv>" line 36 col 92} {source "<stdlib:csv>" line 41 col 11} {source "<stdlib:csv>" line 64 col 19} {source "<stdlib:csv>" line 75 col 39} {source "<stdlib:csv>" line 81 col 81} {source "<stdlib:csv>" line 86 col 52} {source "<stdlib:csv>" line 90 col 26} {source "<stdlib:csv>" line 120 col 67} {source "<stdlib:csv>" line 124 col 2} {source "<stdlib:csv>" line 154 col 32} {source "<command>" line 1 col 7})}}
         \\=== json parse ===
         \\source: "{\"a\":[1,null,true]}" json.parse
         \\exit: 0
@@ -946,7 +946,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "json.emit requires string or symbol dictionary keys" word json.emit trace (`json.emit) data {source "<command>" line 1 col 7}}
+        \\{kind type msg "json.emit requires string or symbol dictionary keys" word json.emit trace (`json.emit) data {source "<command>" line 1 col 7 sites ({source "<command>" line 1 col 7})}}
         \\=== table rows ===
         \\source: {"a" [1 2] "b" ["x" "y"]} table.rows
         \\exit: 0
@@ -974,28 +974,28 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind shape msg "table columns must share one length" word raise trace (`raise `assert `table.rows) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
+        \\{kind shape msg "table columns must share one length" word raise trace (`raise `assert `table.rows) data {source "<stdlib:table>" line 32 col 77 sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<stdlib:table>" line 32 col 77} {source "<command>" line 1 col 21})}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind io msg "environment variable `ECL_SNAPSHOT_ABSENT` is not set" word getenv trace (`getenv) data {name "ECL_SNAPSHOT_ABSENT" source "<command>" line 1 col 23}}
+        \\{kind io msg "environment variable `ECL_SNAPSHOT_ABSENT` is not set" word getenv trace (`getenv) data {name "ECL_SNAPSHOT_ABSENT" source "<command>" line 1 col 23 sites ({source "<command>" line 1 col 23})}}
         \\=== read-text missing ===
         \\source: `cwd "no-such-file.ecl" fs.read-text
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind io msg "entry does not exist" word fs.read-text trace (`fs.read-text) data {operation read-text root cwd path "no-such-file.ecl" reason not-found source "<command>" line 1 col 25}}
+        \\{kind io msg "entry does not exist" word fs.read-text trace (`fs.read-text) data {operation read-text root cwd path "no-such-file.ecl" reason not-found source "<command>" line 1 col 25 sites ({source "<command>" line 1 col 25})}}
         \\=== http dead port ===
         \\source: {target "http://127.0.0.1:1/x"} http.get
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind io msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" word http.get trace (`http.get) data {path "http://127.0.0.1:1/x" source "<command>" line 1 col 33}}
+        \\{kind io msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" word http.get trace (`http.get) data {path "http://127.0.0.1:1/x" source "<command>" line 1 col 33 sites ({source "<command>" line 1 col 33})}}
         \\=== band ===
         \\source: [12 10] 6 band
         \\exit: 0
@@ -1051,7 +1051,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "a shift count must be from 0 to 63" word bsl trace (`bsl) data {source "<command>" line 1 col 6}}
+        \\{kind domain msg "a shift count must be from 0 to 63" word bsl trace (`bsl) data {source "<command>" line 1 col 6 sites ({source "<command>" line 1 col 6})}}
         \\=== rand.int ===
         \\source: [7 0] 6 rand.int
         \\exit: 0
@@ -1079,7 +1079,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "rand.int expected a positive bound, not 0" word rand.int trace (`rand.int) data {source "<command>" line 1 col 9}}
+        \\{kind domain msg "rand.int expected a positive bound, not 0" word rand.int trace (`rand.int) data {source "<command>" line 1 col 9 sites ({source "<command>" line 1 col 9})}}
         \\=== rand.deal ===
         \\source: [7 0] 3 10 rand.deal
         \\exit: 0
@@ -1110,6 +1110,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\        source "<command>"
         \\        line 1
         \\        col 6
+        \\        sites ({source "<command>" line 1 col 6})
         \\      }
         \\    }
         \\3 }
@@ -1121,7 +1122,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind underflow msg "+ needs 2 stack values, but found 1" word + trace (`+) data {needed 2 available 1 source "<command>" line 1 col 10}}
+        \\{kind underflow msg "+ needs 2 stack values, but found 1" word + trace (`+) data {needed 2 available 1 source "<command>" line 1 col 10 sites ({source "<command>" line 1 col 10})}}
         \\=== values in the body ===
         \\source: (3 1 +) @attempt
         \\exit: 0
@@ -1142,7 +1143,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "malformed definition annotation" word def trace (`def) data {source "<command>" line 1 col 29}}
+        \\{kind domain msg "malformed definition annotation" word def trace (`def) data {source "<command>" line 1 col 29 sites ({source "<command>" line 1 col 29})}}
         \\
     , transcript.written());
 }

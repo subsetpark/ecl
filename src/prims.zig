@@ -44,6 +44,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, whatever its length, and a list of chars or codepoints becomes the string of those chars. An int outside the Unicode scalar range, or a list element outside it, is `` `domain ``; any other value is `` `type ``." },
         .{ .name = "@attempt", .primitive = attempt, .effect = "quotation -- result", .doc = "Run the quotation as a new unit on an empty, isolated stack. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`. To start the unit on values, build them into the quotation: `values (q) cat @attempt`." },
         .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise an error from an error dict." },
+        .{ .name = "helper", .primitive = helper, .effect = "quotation -- quotation", .doc = "Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`. The mark belongs to that quotation, not to an equal one; a list built at run time is `` `domain ``, and any other value is `` `type ``." },
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "The process arguments following the script or source, as a list of strings." },
         .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status." },
         .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error. Absent host IO is `` `io ``." },
@@ -834,6 +835,13 @@ fn ConversionEachDriver(comptime target: NumericParseTarget) type {
 fn attempt(fiber: *Fiber) MachineError!void {
     var body = try fiber.popQuotation();
     try fiber.attemptOwned(body.take().list);
+}
+fn helper(fiber: *Fiber) MachineError!void {
+    try fiber.require(1);
+    const top = fiber.stack.items[fiber.stack.items.len - 1];
+    if (top != .list) return fiber.typeError("a quotation/list");
+    if (!fiber.archive.markHelper(top.list))
+        return fiber.fail(.domain, "helper needs a quotation read from source");
 }
 fn raise(fiber: *Fiber) MachineError!void {
     var raised = try fiber.popValue();

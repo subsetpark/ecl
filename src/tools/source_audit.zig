@@ -466,7 +466,9 @@ fn sameSourcePath(actual: []const u8, expected: []const u8) bool {
     return true;
 }
 
-const PreludeStage = enum { header, annotation, body, name, def };
+/// A definition block is its header, annotation, body quotation, an
+/// optional `helper` marking the body, the quoted name, and `def`.
+const PreludeStage = enum { header, annotation, body, marker, name, def };
 
 fn auditPreludeLayout() bool {
     const source = @embedFile("../prelude.ecl");
@@ -516,7 +518,12 @@ fn auditPreludeLayout() bool {
                     });
                     return true;
                 }
-                stage = if (stage == .annotation) .body else .name;
+                stage = if (stage == .annotation) .body else .marker;
+            },
+            .marker => {
+                const end = preludeTokenEnd(source, index);
+                if (std.mem.eql(u8, source[index..end], "helper")) index = end;
+                stage = .name;
             },
             .name => {
                 if (source[index] != '`') {
