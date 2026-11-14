@@ -97,6 +97,10 @@ const FailureDriver = struct {
     /// Each entry's call site in source, where the archive knows it.
     located: []?spans.LocatedSpan,
     trace_count: usize = 0,
+    /// The trace entry whose call site the failure is reported at, or null for
+    /// the failing token itself; built by `attribute` while sites are located.
+    attributed: ?usize = null,
+    attribution_closed: bool = false,
     /// The `sites` list, owned until the error value has been built.
     sites: ?Value = null,
     outcome_pair: [1]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }},
@@ -125,24 +129,24 @@ const FailureDriver = struct {
         self.trace[self.trace_count] = entry;
         self.trace_count += 1;
     }
-    /// The trace entry whose call site the failure is reported at, or null
-    /// for the failing token itself. A failure inside a helper word is the
-    /// failure of the code that called it, so the report moves out through
-    /// each enclosing helper to the first activation that is not one.
-    fn attributedEntry(self: *const FailureDriver) ?usize {
-        var chosen: ?usize = null;
-        // The failing word's own entry is the failing token, unless that word
-        // is itself a helper reported at its caller.
-        var index: usize = @intFromBool(self.failure.word != null and self.failure.word_attribution != .caller);
-        while (index < self.trace_count) : (index += 1) {
-            const entry = self.trace[index];
-            if (entry.attribution != .caller) break;
-            chosen = index;
-            // An unknown call site ends the walk but keeps the attribution:
-            // the report omits a position rather than naming the helper body.
-            if (self.located[index] == null) break;
+    /// Extends the attribution walk over entry `index`, called once per entry
+    /// in trace order as its call site is located, so the walk is charged with
+    /// the locating. A failure inside a helper word is the failure of the code
+    /// that called it, so the report moves out through each enclosing helper to
+    /// the first activation that is not one. The failing word's own entry is
+    /// the failing token, unless that word is itself a helper reported at its
+    /// caller. An unknown call site ends the walk but keeps the attribution:
+    /// the report omits a position rather than naming the helper body.
+    fn attribute(self: *FailureDriver, index: usize) void {
+        if (self.attribution_closed) return;
+        const first = @intFromBool(self.failure.word != null and self.failure.word_attribution != .caller);
+        if (index < first) return;
+        if (self.trace[index].attribution != .caller) {
+            self.attribution_closed = true;
+            return;
         }
-        return chosen;
+        self.attributed = index;
+        if (self.located[index] == null) self.attribution_closed = true;
     }
     pub fn deinit(
         self: *FailureDriver,
@@ -157,7 +161,7 @@ const FailureDriver = struct {
         storage_allocator.free(self.located);
     }
     fn beginLocation(self: *FailureDriver, via: *Unwinding) void {
-        if (self.attributedEntry()) |index| return self.beginValue(self.located[index]);
+        if (self.attributed) |index| return self.beginValue(self.located[index]);
         switch (via.locate(&self.failure)) {
             .locating => |cursor| self.state = .{ .locate = cursor },
             .located => |location| self.beginValue(location),
@@ -241,6 +245,7 @@ const FailureDriver = struct {
                         .complete => |location| location,
                     };
                 } else null;
+                self.attribute(index.*);
                 index.* += 1;
             },
             .sites => |*cursor| switch (try cursor.advance(work)) {
