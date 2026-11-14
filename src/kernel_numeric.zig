@@ -1761,8 +1761,33 @@ fn binaryKernel(
         /// must rescan when a checked piece faulted: it begins at the first
         /// position whose operands are still the input's.
         fn runPieces(left: Left, right: Right, output: *support.LeafResult(out.kind()), placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
+            if (comptime narrowed) |class| {
+                const Narrow = binaryKernel(operation, class, class, shape);
+                if (shape == .leaf_scalar) {
+                    if (std.math.cast(class.Element(), right)) |scalar| return Narrow.runPieces(left, scalar, output, placement, range);
+                } else if (std.math.cast(class.Element(), left)) |scalar| return Narrow.runPieces(scalar, right, output, placement, range);
+            }
             return runRange(left, right, OutputTarget(out){ .output = output }, placement, range);
         }
+
+        /// The leaf's own class, when this is a comparison of a leaf narrower
+        /// than an int with an int scalar. A scalar the leaf's element can
+        /// hold compares against the elements as they are stored, a full
+        /// vector of them at a time, where the general loop widens every
+        /// element to meet the int. Any other scalar takes the general loop.
+        const narrowed: ?Number = blk: {
+            switch (operation) {
+                .eq, .ne, .lt, .gt, .le, .ge => {},
+                else => break :blk null,
+            }
+            const leaf, const scalar = switch (shape) {
+                .leaf_scalar => .{ left_class, right_class },
+                .scalar_leaf => .{ right_class, left_class },
+                .leaf_leaf, .leaf_only => break :blk null,
+            };
+            if (scalar != .integer or leaf == .integer or leaf == .real) break :blk null;
+            break :blk leaf;
+        };
 
         /// Computes positions `0..dest.len` of one scalar-program block into
         /// `dest`. True when a position faulted; `dest` is then not to be read,
@@ -3400,6 +3425,37 @@ fn reduceKernel(
             return if (operation == .and_word) accumulator & low else accumulator | high;
         }
 
+        /// A scan of `<>` over 0s and 1s from a 0 or 1 is a running parity,
+        /// which eight positions take in one step: within a word each byte is
+        /// the XOR of itself and the bytes before it, by three shifted XORs,
+        /// and the parity carried in flips them all. A block holding any
+        /// other value, or a start that is neither, takes the loop below,
+        /// where `<>` is a comparison and not an XOR.
+        const scans_parity = scan and operation == .ne and accumulator_class == .integer and element_class == .byte;
+
+        fn parityBlock(start: i64, items: []const u8, out: []u8) ?i64 {
+            if (start != 0 and start != 1) return null;
+            const every: u64 = 0x0101010101010101;
+            var parity: u64 = @intCast(start);
+            var index: usize = 0;
+            while (index + 8 <= items.len) : (index += 8) {
+                var word = std.mem.readInt(u64, items[index..][0..8], .little);
+                if (word & ~every != 0) return null;
+                word ^= word << 8;
+                word ^= word << 16;
+                word ^= word << 32;
+                word ^= parity * every;
+                std.mem.writeInt(u64, out[index..][0..8], word, .little);
+                parity = word >> 56;
+            }
+            for (items[index..], out[index..]) |item, *slot| {
+                if (item > 1) return null;
+                parity ^= item;
+                slot.* = @intCast(parity);
+            }
+            return @intCast(parity);
+        }
+
         fn uncheckedBlock(output: *ReduceOutput, elements: []const element_class.Element(), piece: flat.Chunk, block: *Staging) bool {
             var accumulator = accumulated(output);
             for (piece.start..piece.end) |index| {
@@ -3433,6 +3489,13 @@ fn reduceKernel(
                     offset += piece.len();
                     continue;
                 }
+                if (scans_parity) if (parityBlock(accumulated(output), elements[piece.start..piece.end], block.items[0..piece.len()])) |parity| {
+                    store(output, parity);
+                    block.len = piece.len();
+                    output.scan.?.leaf(stored_class).store(piece.start, block.written());
+                    offset += piece.len();
+                    continue;
+                };
                 if (folds_booleans) if (booleanBlock(accumulated(output), elements[piece.start..piece.end])) |folded| {
                     store(output, folded);
                     offset += piece.len();
