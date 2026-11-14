@@ -887,7 +887,8 @@ const SeeDriver = struct {
             requirement_separator: bool,
         },
         render: Context,
-        format: struct { context: Context, source: heap.Owned([]u8) },
+        /// The cursor reads `source`, which outlives it.
+        format: struct { context: Context, source: heap.Owned([]u8), cursor: heap.Owned(formatter.Cursor) },
         write: struct { context: Context, rendered: heap.Owned([]u8) },
 
         pub fn deinit(
@@ -904,6 +905,7 @@ const SeeDriver = struct {
                 .plan => |*plan| plan.context.deinit(releases, allocator),
                 .render => |*context| context.deinit(releases, allocator),
                 .format => |*format_state| {
+                    format_state.cursor.deinit(releases, allocator);
                     format_state.source.deinit(releases, allocator);
                     format_state.context.deinit(releases, allocator);
                 },
@@ -1053,31 +1055,37 @@ const SeeDriver = struct {
             .render => |*context| switch (try self.actions.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |source| {
+                    var owned_source: heap.Owned([]u8) = .init(source);
+                    const cursor = formatter.Cursor.init(fiber.allocator, source) catch |err| {
+                        owned_source.deinit(fiber.releases, fiber.allocator);
+                        return err;
+                    };
                     const moved = context.*;
                     self.state.borrowMut().* = .{ .format = .{
                         .context = moved,
-                        .source = .init(source),
+                        .source = owned_source,
+                        .cursor = .init(cursor),
                     } };
                 },
             },
-            .format => |*format_state| {
-                const rendered = formatter.format(
-                    fiber.allocator,
-                    format_state.source.borrow(),
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    // The reflection plan emits only reader-valid canonical
-                    // values and fixed binding descriptors. Failure here is an
-                    // internal disagreement between those two production
-                    // boundaries and is unreachable from a user program.
-                    error.InvalidUtf8, error.InvalidSource => unreachable,
-                };
-                const context = format_state.context;
-                format_state.source.deinit(fiber.releases, fiber.allocator);
-                self.state.borrowMut().* = .{ .write = .{
-                    .context = context,
-                    .rendered = .init(rendered),
-                } };
+            .format => |*format_state| switch (format_state.cursor.borrowMut().advance(work) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // The reflection plan emits only reader-valid canonical
+                // values and fixed binding descriptors. Failure here is an
+                // internal disagreement between those two production
+                // boundaries and is unreachable from a user program.
+                error.InvalidUtf8, error.InvalidSource => unreachable,
+            }) {
+                .pending => {},
+                .complete => |rendered| {
+                    const context = format_state.context;
+                    format_state.cursor.deinit(fiber.releases, fiber.allocator);
+                    format_state.source.deinit(fiber.releases, fiber.allocator);
+                    self.state.borrowMut().* = .{ .write = .{
+                        .context = context,
+                        .rendered = .init(rendered),
+                    } };
+                },
             },
             .write => |*write| {
                 fiber.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(fiber);

@@ -435,10 +435,18 @@ failure and cancellation ownership explicit on both sides of the commit.
 
 `formatter.zig` builds a formatter-only CST that retains comments, trivia, and
 delimiters, then lowers it to a Wadler/Oppen-style document and renders that
-document iteratively. The ordinary reader validates the source, and the
+document iteratively. The ordinary reader validates host source, and the
 formatter discards that executable result without scheduling it. The dedicated
 CST gives formatting a lossless source-preservation mechanism while runtime
 provenance stays focused on diagnostics.
+
+Formatting is one budgeted cursor, because `see` formats a user-sized
+definition inside a unit's turn. Scanning, parsing, layout, documentation
+normalization, and rendering each charge the lent budget per codepoint, part,
+or document node. The parse runs twice so every sequence is allocated at its
+exact size, and each sequence is indexed by its neighbours before layout, so
+no part's layout decision rescans a run of trivia. Host tools drive the same
+cursor to completion.
 
 ## 3. Values and storage
 
