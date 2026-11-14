@@ -37,28 +37,17 @@ pub fn isRegistrationWord(bytes: []const u8) bool {
 /// namespace and export validation belong to the consumer's schema.
 /// This scanner owns no values and does no evaluation or nested traversal.
 pub const DeclarationScan = struct {
-    /// The forms before the current one: a registration's name arrives as a
-    /// quoted symbol ahead of `@defm`, or spelled out as `(name) core.first`.
-    quoted_name: ?u32 = null,
-    previous_first: bool = false,
+    /// The form before the current one, when it is a quoted symbol: a
+    /// registration's name arrives that way ahead of `@defm`.
     previous_quoted: ?u32 = null,
 
     pub fn feed(self: *DeclarationScan, form: Value) ?u32 {
-        const std = @import("std");
         const intern = @import("intern.zig");
-        const list = @import("list.zig");
         const value_module = @import("value.zig");
-        const declared = if (self.previous_quoted) |name| name else if (self.previous_first) self.quoted_name else null;
-        self.previous_quoted = if (form == .symbol and value_module.isQuotedSlot(form.symbol.slot)) form.symbol.name else null;
-        const is_first = form == .symbol and std.mem.eql(u8, intern.get(form.symbol.name), "core.first");
-        if (!is_first) {
-            self.quoted_name = if (form == .list and form.list.length() == 1 and !form.isString()) name: {
-                const element = list.atUnchecked(form, 0);
-                break :name if (element == .symbol) element.symbol.name else null;
-            } else null;
-        }
-        self.previous_first = is_first;
-        if (form == .symbol and !value_module.isQuotedSlot(form.symbol.slot) and isRegistrationWord(intern.get(form.symbol.name))) return declared;
+        const declared = self.previous_quoted;
+        const quoted = form == .symbol and value_module.isQuotedSlot(form.symbol.slot);
+        self.previous_quoted = if (quoted) form.symbol.name else null;
+        if (form == .symbol and !quoted and isRegistrationWord(intern.get(form.symbol.name))) return declared;
         return null;
     }
 };
