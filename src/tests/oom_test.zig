@@ -576,7 +576,13 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1] 0 (|acc x| acc x +) fold pop " ++
             "[1] 0 (|acc x| acc x +) scan pop " ++
             "[1] (|x| x) infra pop " ++
-            "[1 2] 2 (sum) stencil pop " ++
+            // Two windows each: the second continues the first's application,
+            // copied from a typed list or profiled from a boxed one.
+            "[1 2 3] 2 (sum) stencil pop " ++
+            "(1 \"a\" 2) 2 (len) stencil pop " ++
+            "[1 2 3] 2 windows pop " ++
+            "(1 \"a\" 2) 2 windows pop " ++
+            "\"abc\" 2 (\"bc\" match?) stencil pop " ++
             "1 (0 >) (dup 1 - swap) unfold pop pop " ++
             // Paging floors: a page across the floor, a returned original,
             // a guard's unpage, a counted dip, and the finalize's tail.

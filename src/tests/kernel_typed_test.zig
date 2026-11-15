@@ -967,6 +967,12 @@ test "typed kernels: typed stencil windows match the profiled route across budge
     try expectParity(&runtime, .{ .ints = numbers }, "65540 (dup len swap last pair) stencil");
     try expectParity(&runtime, .{ .ints = numbers[0..9] }, "3 () stencil");
     try expectParity(&runtime, .{ .floats = &.{ 1.5, -0.0, 2.5 } }, "2 () stencil");
+    // Narrow windows continue one application across many turns: typed
+    // windows are copied inline, boxed ones profiled inline until a turn's
+    // budget leaves one unfinished for the driver.
+    try expectParity(&runtime, .{ .ints = numbers }, "3 (sum) stencil");
+    try expectParity(&runtime, .{ .ints = numbers }, "2 () stencil len");
+    try expectParity(&runtime, .{ .ints = numbers }, "300 (first) stencil");
     // `windows` copies range pieces under the same budget: one window wider
     // than a step, and many narrow windows that span several steps.
     try expectParity(&runtime, .{ .ints = numbers }, "65537 windows (sum) each");
