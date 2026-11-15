@@ -2173,46 +2173,8 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ### str?
 `( value -- bool )` — Return 1 when a value is a string, a list whose every element is a char, and 0 for every other value. The empty string answers 1, and so does the empty list: they are one value. Never raises.
 
-### contains?
-`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.
-
-#### Examples
-
-```ecl
-"hello" "ell" str.contains?
-# => 1
-```
-
-### ends?
-`( string suffix -- bool )` — Return 1 when the string ends with the suffix.
-
-### index-of
-`( string needle -- index )` — Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and raise `` `domain `` when a nonempty needle is absent.
-
 ### lower
 `( string -- string )` — Lowercase ASCII letters, leaving every other scalar unchanged.
-
-### pad-left
-`( string width -- string )` — Add leading spaces until the string reaches the requested width; return a longer string unchanged.
-
-### pad-right
-`( string width -- string )` — Add trailing spaces until the string reaches the requested width; return a longer string unchanged.
-
-### repeat
-`( string count -- string )` — Concatenate `count` copies of a string; `count` must be nonnegative.
-
-### replace
-`( string needle replacement -- string )` — Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent scalars only, with no boundary insertion.
-
-#### Examples
-
-```ecl
-"a-b-c" "-" "+" str.replace
-# => "a+b+c"
-```
-
-### starts?
-`( string prefix -- bool )` — Return 1 when the string starts with the prefix.
 
 ### trim
 `( string -- string )` — Remove ASCII whitespace from both ends of a string.
@@ -2239,6 +2201,44 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 "Hello, wörld!" str.upper
 # => "HELLO, WöRLD!"
 ```
+
+### contains?
+`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.
+
+#### Examples
+
+```ecl
+"hello" "ell" str.contains?
+# => 1
+```
+
+### ends?
+`( string suffix -- bool )` — Return 1 when the string ends with the suffix.
+
+### index-of
+`( string needle -- index )` — Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and raise `` `domain `` when a nonempty needle is absent.
+
+### pad-left
+`( string width -- string )` — Add leading spaces until the string reaches the requested width; return a longer string unchanged.
+
+### pad-right
+`( string width -- string )` — Add trailing spaces until the string reaches the requested width; return a longer string unchanged.
+
+### repeat
+`( string count -- string )` — Concatenate `count` copies of a string; `count` must be nonnegative.
+
+### replace
+`( string needle replacement -- string )` — Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent scalars only, with no boundary insertion.
+
+#### Examples
+
+```ecl
+"a-b-c" "-" "+" str.replace
+# => "a+b+c"
+```
+
+### starts?
+`( string prefix -- bool )` — Return 1 when the string starts with the prefix.
 
 ## table
 
