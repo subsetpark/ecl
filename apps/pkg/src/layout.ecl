@@ -12,7 +12,7 @@
  ### def generation?
  (value -- bool : "Recognize project-local or vendored immutable generation locations.")
  (dup str.str?
-  ("/" split dup len 3 =
+  ("/" str.split dup len 3 =
    (dup first ".ecl" match? over 1 at "generations" match? and swap 2 at identifier? and)
    (dup len 2 = (dup first "vendor" match? swap 1 at identifier? and) (pop 0) if)
    if)
@@ -29,7 +29,7 @@
  ### def local-root
  (generation -- relative-root :
   "Locate live project sources relative to a complete generation map.")
- (dup generation? require "/" split len 3 = ("../../..") ("../..") if) `local-root def
+ (dup generation? require "/" str.split len 3 = ("../../..") ("../..") if) `local-root def
 
  ### def reference
  (generation -- text : "Render the root runtime map reference without package metadata.")

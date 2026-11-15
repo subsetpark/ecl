@@ -971,11 +971,11 @@ test "typed kernels: split finds leftmost separators across budget boundaries" {
     // Expected outputs are the per-codepoint scan's, recorded before the
     // search changed; split has no boxed route to compare against.
     for ([_]struct { source: []const u8, expected: []const u8 }{
-        .{ .source = "\"x\" 70000 str.repeat \",\" cat \"y\" 70000 str.repeat cat \",\" split (len) each", .expected = "[70000 70000]" },
-        .{ .source = "\"ab\" 40000 str.repeat \"abx\" cat dup cat \"abx\" split (len) each", .expected = "[80000 80000 0]" },
-        .{ .source = "\"aaa\" 30000 str.repeat \"aa\" split len", .expected = "45001" },
-        .{ .source = "\"λ,\" 40000 str.repeat \",\" split len", .expected = "40001" },
-        .{ .source = "\"x\" 70000 str.repeat \"x\" 69000 str.repeat split (len) each", .expected = "[0 1000]" },
+        .{ .source = "\"x\" 70000 str.repeat \",\" cat \"y\" 70000 str.repeat cat \",\" str.split (len) each", .expected = "[70000 70000]" },
+        .{ .source = "\"ab\" 40000 str.repeat \"abx\" cat dup cat \"abx\" str.split (len) each", .expected = "[80000 80000 0]" },
+        .{ .source = "\"aaa\" 30000 str.repeat \"aa\" str.split len", .expected = "45001" },
+        .{ .source = "\"λ,\" 40000 str.repeat \",\" str.split len", .expected = "40001" },
+        .{ .source = "\"x\" 70000 str.repeat \"x\" 69000 str.repeat str.split (len) each", .expected = "[0 1000]" },
     }) |case| {
         const rendered = try outcome(&runtime, &.{}, case.source);
         defer allocator.free(rendered);

@@ -1548,7 +1548,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
             "-e",
             "`cwd \"round-trip.txt\" \"alpha\\nbeta\\n\" fs.create-text " ++
                 "`cwd \"round-trip.txt\" fs.read-text io.pp " ++
-                "`cwd \"round-trip.txt\" fs.read-text \"\\n\" split io.pp " ++
+                "`cwd \"round-trip.txt\" fs.read-text \"\\n\" str.split io.pp " ++
                 "`cwd \".\" fs.list (`name at \"round-trip.txt\" match?) filter io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
@@ -1737,7 +1737,7 @@ test "e2e: result.or-raise returns an existing failure unchanged" {
 
 test "e2e: stdin is data in -e mode and refuses to be read as program source" {
     var piped = try runWithInput(
-        &.{ build_options.ecl_exe, "-e", "io.stdin \"\\n\" split io.pp" },
+        &.{ build_options.ecl_exe, "-e", "io.stdin \"\\n\" str.split io.pp" },
         "one\ntwo\n",
     );
     defer piped.deinit();

@@ -45,22 +45,22 @@
  ### defp hyphen-parts
  (candidate -- parts :
   "Split a version at hyphens. The first item is the core; later items make up the prerelease.")
- ("-" split) `hyphen-parts defp
+ ("-" str.split) `hyphen-parts defp
 
  ### defp core-fields
  (candidate -- fields : "Return the dot-separated fields before the first hyphen.")
- (hyphen-parts first "." split) `core-fields defp
+ (hyphen-parts first "." str.split) `core-fields defp
 
  ### defp identifiers
  (candidate -- identifiers :
   "Return the dot-separated prerelease identifiers, or an empty list when none are present.")
- (hyphen-parts dup len 1 = (pop []) (rest "-" join "." split) if) `identifiers defp
+ (hyphen-parts dup len 1 = (pop []) (rest "-" str.join "." str.split) if) `identifiers defp
 
  ### def validate
  (candidate -- parts : "Validate a version and return [core-fields prerelease-identifiers].")
  (dup str.str?
   `type error.new "a package version is a string" error.with-message assert
-  dup "+" split len 1 =
+  dup "+" str.split len 1 =
   `domain error.new "build metadata is not part of a package version" error.with-message assert
   dup core-fields
   dup len 3 =

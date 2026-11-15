@@ -35,7 +35,7 @@
     text 1 at \: = and)
    (pop 0)
    if not and
-   candidate "/" split (glob-segment-valid?) all? and)
+   candidate "/" str.split (glob-segment-valid?) all? and)
   (pop 0)
   if) `glob-valid? defp
 
@@ -171,7 +171,8 @@
 
  ### defp render-requirements
  (requirements -- text : "Render manifest requirements in their retained insertion order.")
- (dict.pairs (render-requirement-entry) each " " join wrap "{{{}}}" str.format) `render-requirements
+ (dict.pairs (render-requirement-entry) each " " str.join wrap "{{{}}}" str.format)
+ `render-requirements
  defp
 
  ### def write

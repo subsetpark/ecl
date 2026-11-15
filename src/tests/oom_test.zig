@@ -530,7 +530,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-dict-text.ecl",
-        "{a 1} `b 2 put dict.keys pop [\"a\" \"b\"] \"—\" join \"—\" split pop " ++
+        "{a 1} `b 2 put dict.keys pop [\"a\" \"b\"] \"—\" str.join \"—\" str.split pop " ++
             "[a b] [1 2] dict.from-lists dict.keys pop [c 3] dict.from-flat dict.keys pop " ++
             "[1 2 3] 1 9 put pop [1 2] 0 del pop \"ab\" reverse 0 \\λ put pop " ++
             "[a 1] str [1] \"{}\" str.format pop [\"raw\"] \"{}\" str.format pop",

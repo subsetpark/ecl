@@ -33,7 +33,7 @@
 ### def embed-fragment
 (fragment -- fragment : "Demote Markdown headings for inclusion beneath an authored section.")
 (|fragment|
- fragment "\n" split
+ fragment "\n" str.split
  (|line|
   line "#" str.starts?
   ("##")
@@ -41,7 +41,7 @@
   if
   line cat)
  each
- "\n" join) `embed-fragment def
+ "\n" str.join) `embed-fragment def
 
 ### def assemble-spec
 (root arguments -- output document :

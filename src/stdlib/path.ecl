@@ -56,10 +56,10 @@
    paths remain relative.")
  ("path.normalize expects a string path" checked
   dup "/" str.starts?
-  swap "/" split
+  swap "/" str.split
   over `absolute swap `parts [] 4 pack dict.from-flat
   (clean-step) fold
-  `parts at "/" core.join
+  `parts at "/" str.join
   swap ("/" swap cat) () if
   dup "" match? (pop ".") () if) `normalize def
 
@@ -71,17 +71,17 @@
   `type error.new "path.join expects a list of string segments" error.with-message assert
   dup (str.str?) all?
   `type error.new "path.join expects a list of string segments" error.with-message assert
-  ("" match? not) filter "/" core.join normalize) `join def
+  ("" match? not) filter "/" str.join normalize) `join def
 
  ### def dirname
  (path -- path :
   "Return the normalized directory portion before the last slash, or `.` when the path has no slash.
    `dirname` of `/a` is `/`.")
  ("path.dirname expects a string path" checked
-  "/" split
+  "/" str.split
   dup len 1 =
   (pop ".")
-  (pop-component "/" core.join "/" cat normalize)
+  (pop-component "/" str.join "/" cat normalize)
   if) `dirname def
 
  ### defp strip-trailing-slashes
@@ -95,7 +95,7 @@
  ("path.basename expects a string path" checked
   dup "" match?
   (pop ".")
-  (strip-trailing-slashes dup "" match? (pop "/") ("/" split last) if)
+  (strip-trailing-slashes dup "" match? (pop "/") ("/" str.split last) if)
   if) `basename def
 
  ### def extension
@@ -104,7 +104,7 @@
    string when that element has no dot: `.gz` for `x/y.tar.gz`, `.bashrc` for `.bashrc`, and `.` for
    `a.`.")
  ("path.extension expects a string path" checked
-  "/" split last "." split
+  "/" str.split last "." str.split
   dup len 1 =
   (pop "")
   (last "." swap cat)
@@ -116,7 +116,7 @@
    yield an empty list; retained leading `..` components remain; absoluteness is observable only
    through `absolute?`.")
  ("path.components expects a string path" checked normalize
-  dup "." match? (pop []) ("/" split ("" match? not) filter) if) `components def
+  dup "." match? (pop []) ("/" str.split ("" match? not) filter) if) `components def
 
  ### defp valid-component?
  (component -- bool : "Test one component of the canonical `fs` grammar.")
@@ -131,6 +131,6 @@
  ("path.valid-relative? expects a string path" checked
   dup "." match?
   (pop 1)
-  (dup "" match? (pop 0) ("/" split (valid-component?) all?) if)
+  (dup "" match? (pop 0) ("/" str.split (valid-component?) all?) if)
   if) `valid-relative? def
 ) `path @defm

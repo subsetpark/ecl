@@ -16,7 +16,7 @@
  (pkg.resolution.validate
   (|lock|
    lock `requires at pkg.data.sorted-entries lock (edges) cons each raze
-   lock `root at swap cons "\n" join "\n" cat) call) `tree def
+   lock `root at swap cons "\n" str.join "\n" cat) call) `tree def
 
  ### defp enqueue
  (state child -- state : "Enqueue each package once, bounding path search by the selected graph.")
@@ -66,6 +66,6 @@
   lock `packages at dict.keys module (pkg.name.owns?) cons filter
   dup len 1 = `domain error.new "no locked package owns the requested module" error.with-message
   assert
-  first lock swap path lock (node) cons each " -> " join
+  first lock swap path lock (node) cons each " -> " str.join
   module ": " cat swap cat "\n" cat) `why def
 ) `pkg.report @defm

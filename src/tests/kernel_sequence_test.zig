@@ -317,7 +317,7 @@ test "sequence: zero-length string results remain strings" {
         "\"a\" rest \"\" reverse \"a\" 1 drop \"abc\" 0 take \"\" \"\" cat \"\" [] cat",
         "\"\" \"\" \"\" \"\" \"\" \"\"",
     );
-    try helper.expectStack("\"a\" rest \",\" split", "(\"\")");
+    try helper.expectStack("\"a\" rest \",\" str.split", "(\"\")");
 }
 
 test "sequence: raze and cat specialize their outputs" {

@@ -59,8 +59,8 @@ const cases = [_]Case{
     .{ .name = "del", .source = "{a 1 b 2} `a del" },
     .{ .name = "dict.merge", .source = "{a 1 b 2} {b 20 c 3} dict.merge" },
     .{ .name = "dict.has?", .source = "{\"ab\" 9} \"ab\" dict.has? {[1 2] 9} [1 2] dict.has?" },
-    .{ .name = "split", .source = "\"a—b—\" \"—\" split first" },
-    .{ .name = "join", .source = "[\"a\" 2] \"-\" join" },
+    .{ .name = "split", .source = "\"a—b—\" \"—\" str.split first" },
+    .{ .name = "join", .source = "[\"a\" 2] \"-\" str.join" },
     .{ .name = "str.format", .source = "[3.14 2] \"pi={} n={}\" str.format" },
     .{ .name = "parse", .source = "\"42\" parse first" },
     .{ .name = "parse-one", .source = "\"{kind io msg \\\"x\\\"}\" parse-one" },
@@ -524,19 +524,19 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== split ===
-        \\source: "a—b—" "—" split first
+        \\source: "a—b—" "—" str.split first
         \\exit: 0
         \\stdout:
         \\"a"
         \\stderr:
         \\<empty>
         \\=== join ===
-        \\source: ["a" 2] "-" join
+        \\source: ["a" 2] "-" str.join
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "join expected a list of strings" word join trace (`join) data {index 1 source "<command>" line 1 col 13 sites ({source "<command>" line 1 col 13})}}
+        \\{kind type msg "join expected a list of strings" word str.core.join trace (`str.core.join) data {index 1 source "<command>" line 1 col 13 sites ({source "<command>" line 1 col 13})}}
         \\=== str.format ===
         \\source: [3.14 2] "pi={} n={}" str.format
         \\exit: 0

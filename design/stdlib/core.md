@@ -334,15 +334,6 @@ wrap (net.local-address `port at 0 >) @give task.await
 # => [1 2 3]
 ```
 
-### split
-
-#### Examples
-
-```ecl
-"a,b,c" "," split
-# => ("a" "b" "c")
-```
-
 ### stencil
 
 #### Examples

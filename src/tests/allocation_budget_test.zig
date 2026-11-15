@@ -615,7 +615,7 @@ const construction = [_]Case{
     .{
         .name = "join",
         .setup = "{d} range",
-        .workload = "(pop [\"a\" \"b\"] \",\" join len) each len",
+        .workload = "(pop [\"a\" \"b\"] \",\" str.join len) each len",
         .per_element = 3,
     },
     .{
@@ -669,7 +669,7 @@ const construction = [_]Case{
     .{
         .name = "split",
         .setup = "{d} range",
-        .workload = "(pop \"a,b\" \",\" split len) each len",
+        .workload = "(pop \"a,b\" \",\" str.split len) each len",
         .per_element = 9,
     },
     .{

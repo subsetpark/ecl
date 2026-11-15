@@ -77,10 +77,10 @@
 
  ### defp split-target
  (target -- path query : "Split a request target at its first `?`; the query is empty when absent.")
- ("?" split
+ ("?" str.split
   dup len 1 =
   (first "")
-  (dup first swap rest "?" join)
+  (dup first swap rest "?" str.join)
   if) `split-target defp
 
  ### def new
@@ -123,12 +123,12 @@
  ### defp percent-decode
  (text -- text :
   "Decode %XX escapes into UTF-8 text; malformed escapes and invalid UTF-8 are `domain.")
- ("%" split dup first bytes swap rest (decode-escape) each raze cat chars) `percent-decode defp
+ ("%" str.split dup first bytes swap rest (decode-escape) each raze cat chars) `percent-decode defp
 
  ### defp query-pair
  (params part -- params :
   "Decode one key=value part into the params dict; later keys replace earlier.")
- ("=" split dup first percent-decode swap rest "=" join percent-decode put) `query-pair defp
+ ("=" str.split dup first percent-decode swap rest "=" str.join percent-decode put) `query-pair defp
 
  ### def query
  (request -- params :
@@ -139,7 +139,7 @@
    and values and the decoded text must be valid UTF-8; `+` is left as it is. An empty query is
    `{}`. A `%` not followed by two hexadecimal digits, or a decoded key or value that is not valid
    UTF-8, is `` `domain ``; a non-request is `` `type ``.")
- (checked `query "" dict.get "&" split ("" match? not) filter {} (query-pair) fold) `query def
+ (checked `query "" dict.get "&" str.split ("" match? not) filter {} (query-pair) fold) `query def
 
  ### def param
  (request name -- value :

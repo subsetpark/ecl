@@ -285,16 +285,12 @@ pub const OrderOp = enum {
 pub const TextOp = enum {
     put,
     del,
-    split,
-    join,
     str,
 
     pub fn spelling(self: TextOp) []const u8 {
         return switch (self) {
             .put => "put",
             .del => "del",
-            .split => "split",
-            .join => "join",
             .str => "str",
         };
     }

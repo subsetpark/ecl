@@ -35,7 +35,7 @@
    continues with lowercase letters, digits, or hyphens.")
  ([(str.str? not) (pop 0)
    (empty?) (pop 0)
-   ("." split (segment?) all?)]
+   ("." str.split (segment?) all?)]
   cond) `valid? def
 
  ### def hash?
@@ -53,9 +53,9 @@
  ### defp hostname?
  (authority -- bool : "Require a host before an optional port, including bracketed IPv6 hosts.")
  (dup "[" str.starts?
-  (1 drop "]" split dup len 2 =
+  (1 drop "]" str.split dup len 2 =
    (|parts| parts first empty? not parts 1 at port-suffix? and) (pop 0) if)
-  (dup ":" split first
+  (dup ":" str.split first
    (|authority host| host empty? not authority host len drop port-suffix? and) call)
   if) `hostname? defp
 
@@ -68,7 +68,7 @@
    url "\\" str.contains? not and
    url "#" str.contains? not and
    url (int 32 >) all? and
-   url 8 drop "/" split first "?" split first hostname? and) (pop 0) if) `url? def
+   url 8 drop "/" str.split first "?" str.split first hostname? and) (pop 0) if) `url? def
 
  ### def commit?
  (value -- bool : "Return 1 for a full lowercase SHA-1 Git commit identifier.")

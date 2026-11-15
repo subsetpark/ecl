@@ -130,7 +130,7 @@
 
 ### def slot-text
 (slot -- text : "Render an effect slot: a word's spelling, or a nested effect in parentheses.")
-(dup type `list match? ((slot-text) each " " join "(" swap cat ")" cat) (word-spelling) if)
+(dup type `list match? ((slot-text) each " " str.join "(" swap cat ")" cat) (word-spelling) if)
 `slot-text def
 
 ### def effect-text
@@ -139,7 +139,7 @@
   empty string for a documentation-only annotation.")
 ((slot-text) each dup ":" find take
  dup "--" find over len <
- ((|words| "`( " words " " join cat " )` — " cat) call)
+ ((|words| "`( " words " " str.join cat " )` — " cat) call)
  (pop "")
  if) `effect-text def
 
@@ -164,23 +164,23 @@
 
 ### def entry-name
 (block -- name : "Return the unescaped word name from an entry block's heading.")
-("\n" split first 4 drop ("\\" first match? not) filter) `entry-name def
+("\n" str.split first 4 drop ("\\" first match? not) filter) `entry-name def
 
 ### def blocks
 (text -- header entries :
  "Split a fragment into its header block and one block per `### ` entry, each without trailing blank
   lines. Headings inside fenced code are ordinary text.")
-("\n" split
+("\n" str.split
  dup ("```" starts?) each 0 (+) scan 2 mod 0 =
  over ("~~~" starts?) each 0 (+) scan 2 mod 0 = and
  over ("### " starts?) each and where 0 swap cons
- cut (trim-trailing "\n" join) each uncons) `blocks def
+ cut (trim-trailing "\n" str.join) each uncons) `blocks def
 
 ### def examples-of
 (block -- text :
  "Return what a fragment entry holds beneath its heading, which may only be an examples section.")
-(dup entry-name swap "\n" split rest
- dup (len 0 >) each where dup empty? (pop pop "") (first drop "\n" join) if
+(dup entry-name swap "\n" str.split rest
+ dup (len 0 >) each where dup empty? (pop pop "") (first drop "\n" str.join) if
  dup empty? over "#### Examples" starts? or
  rolldown ": a fragment entry may hold only examples" cat check)
 `examples-of def
@@ -193,14 +193,15 @@
 (paragraph -- bool :
  "Return 1 when a normalized documentation paragraph is laid out by hand: it has no bullet, and
   either several lines or an indented one.")
-("\n" split
+("\n" str.split
  dup (dup "- " starts? swap "-" match? or) any? not
  over len 1 > rolldown (" " starts?) any? or and) `verbatim? def
 
 ### def doc-text
 (doc -- text :
  "Render documentation as Markdown, fencing each hand-laid paragraph so its lines survive.")
-("\n\n" split (dup verbatim? ("```\n" swap cat "\n```" cat) when) each "\n\n" join) `doc-text def
+("\n\n" str.split (dup verbatim? ("```\n" swap cat "\n```" cat) when) each "\n\n" str.join)
+`doc-text def
 
 ### def entry-text
 (name qualifier -- text :
@@ -215,7 +216,7 @@
 (names known message -- : "Fail, naming every name the known list lacks, unless it holds them all.")
 (|names known message|
  names known (member? not) cons each where names swap at
- dup empty? swap ", " join message swap cat check) `require-all def
+ dup empty? swap ", " str.join message swap cat check) `require-all def
 
 ### def fragment
 (path title -- header entries :
@@ -226,7 +227,7 @@
  path title pair
  (|path title|
   `cwd path fs.read-text blocks
-  over "\n" split first "## " title cat match?
+  over "\n" str.split first "## " title cat match?
   "a section fragment's heading does not match its name" check)
  cat
  title wrap ("## " swap cat []) cat
@@ -263,14 +264,14 @@
   rest of the header must open with a `#### ` subsection and hold no other heading outside fenced
   code.")
 (|header module|
- header "\n" split rest stray-heading? not
+ header "\n" str.split rest stray-heading? not
  module ": a module fragment may hold no heading above #### level" cat check
- header "\n" split rest
- dup (len 0 >) each where dup empty? (pop pop "") (first drop "\n" join) if
+ header "\n" str.split rest
+ dup (len 0 >) each where dup empty? (pop pop "") (first drop "\n" str.join) if
  dup empty? over "#### " starts? or
  module ": a module's introduction is its module-doc; put fragment material under #### headings"
  cat check
- header "\n" split first "\n\n" cat module intern module-doc cat
+ header "\n" str.split first "\n\n" cat module intern module-doc cat
  swap dup empty? (pop) ("\n\n" swap cat cat) if) `module-header def
 
 ### def section
@@ -281,7 +282,7 @@
  path title fragment swap introduce call swap names examples qualifier pair
  names ranks rank-order names swap at
  swap (|name context| name context first context 1 at render-entry) cons each
- cons "\n\n" join) `section def
+ cons "\n\n" str.join) `section def
 
 ### def documented-modules
 (-- names : "Return every standard-library module name except the `.core` implementations.")
@@ -315,10 +316,10 @@
 (module-sections
  "design/stdlib/core.md" "Prelude and core" "" `core exports (chars) each prelude-ranks () section
  swap cons
- `cwd "design/stdlib/preamble.md" fs.read-text "\n" split trim-trailing "\n" join swap cons
+ `cwd "design/stdlib/preamble.md" fs.read-text "\n" str.split trim-trailing "\n" str.join swap cons
  "<!-- Generated from design/stdlib by design/stdlib/assemble.ecl; edit the fragments. -->" swap
  cons
- "\n\n" join "\n" cat) `document def
+ "\n\n" str.join "\n" cat) `document def
 
 args dup len 0 = swap ["--check"] match? or
 "usage: assemble.ecl [--check]" check
