@@ -504,6 +504,9 @@ test "typed differential: sequence order text and random operation parity across
         "0 wrap cut",
         "dup len 1 - wrap cut",
         "3 chunk",
+        "1 windows",
+        "2 windows",
+        "dup len windows",
         // Same-kind list put. `dup` forces the allocating copy path and keeps
         // the original live so copy-on-write is observable.
         "dup 0 9 put swap pop",
@@ -958,6 +961,11 @@ test "typed kernels: typed stencil windows match the profiled route across budge
     try expectParity(&runtime, .{ .ints = numbers }, "65540 (dup len swap last pair) stencil");
     try expectParity(&runtime, .{ .ints = numbers[0..9] }, "3 () stencil");
     try expectParity(&runtime, .{ .floats = &.{ 1.5, -0.0, 2.5 } }, "2 () stencil");
+    // `windows` copies range pieces under the same budget: one window wider
+    // than a step, and many narrow windows that span several steps.
+    try expectParity(&runtime, .{ .ints = numbers }, "65537 windows (sum) each");
+    try expectParity(&runtime, .{ .ints = numbers }, "3 windows (sum) each");
+    try expectParity(&runtime, .{ .ints = numbers }, "3 windows len");
 }
 
 // `split` searches a granted run of start positions per transition, sized by

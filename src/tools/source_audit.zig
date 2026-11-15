@@ -953,6 +953,7 @@ const kernel_driver_exceptions = [_]KernelDriverException{
     .{ .file = "kernel_sequence.zig", .function = "flipPrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "reshapePrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "cutPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "windowsPrimitive" },
     .{ .file = "kernel_order.zig", .function = "cmpPrimitive" },
     .{ .file = "kernel_order.zig", .function = "startGrade" },
     .{ .file = "kernel_order.zig", .function = "distinctPrimitive" },

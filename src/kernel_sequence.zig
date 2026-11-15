@@ -40,6 +40,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
         .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Exchange the first two axes of a list of equally wide rows. Cells are preserved whole: strings, nested lists, dictionaries, and mixed values need not share a type or shape. Only the immediate row lengths must agree. Strings used as rows transpose their characters.\n\nAn empty list or a list containing no list items is unchanged. Rows that are all empty transpose to the empty list; it cannot retain the other axis. Mixing list rows with non-list items or unequal row lengths raises `` `shape ``. A non-list argument raises `` `type ``." },
         .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle the data into the nested-list shape; a zero axis yields empty lists and drops the axes after it." },
         .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into one piece per start index. Each piece runs from its start up to the next start, and the last runs to the end of the list; elements before the first start belong to no piece. Starts must be integers from zero through the length, in nondecreasing order, so equal starts give empty pieces. A start out of range or below its predecessor fails with `` `domain `` at that start's position. Strings cut into strings." },
+        .windows => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list width -- windows", .doc = "Return every overlapping window of a positive int width, left-to-right: `\"abcd\" 2 windows` is `(\"ab\" \"bc\" \"cd\")`. The result has `max(len-width+1, 0)` elements, so a width larger than the list gives `()`; zero and negative widths are `` `domain ``. Strings window into strings." },
         .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate top-level element order left by a count, wrapping cyclically; a negative count rotates right, counts beyond the length wrap, and the empty list is returned unchanged. Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K composes it from an index permutation). The count must be an int." },
         .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list; an empty list is `` `domain ``." },
         .reverse => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return a list with its top-level element order reversed." },
@@ -78,6 +79,7 @@ fn primitive(fiber: *Fiber, comptime operation: Op) MachineError!void {
         .flip => flipPrimitive(fiber),
         .reshape => reshapePrimitive(fiber),
         .cut => cutPrimitive(fiber),
+        .windows => windowsPrimitive(fiber),
         .rotate => rotatePrimitive(fiber),
     };
 }
@@ -2639,19 +2641,61 @@ fn cutPrimitive(fiber: *Fiber) MachineError!void {
     defer collection.deinit();
     if (collection.borrow() != .list or starts.borrow() != .list)
         return fiber.typeError("a list and a list of integer start indices");
+    const count: usize = @intCast(starts.borrow().list.length());
     try fiber.runDriver(CutDriver{
         .collection = .init(collection.take()),
-        .starts = .init(starts.take()),
+        .ranges = .init(.{ .starts = .init(starts.take()) }),
+        .count = count,
     });
 }
+
+fn windowsPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var width_value = try fiber.popValue();
+    defer width_value.deinit();
+    var collection = try fiber.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list or width_value.borrow() != .int)
+        return fiber.typeError("a list and a positive int width");
+    if (width_value.borrow().int <= 0)
+        return fiber.fail(.domain, "windows requires a positive width");
+    const width = std.math.cast(usize, width_value.borrow().int) orelse
+        return fiber.fail(.domain, "windows width is too large");
+    const length: usize = @intCast(collection.borrow().list.length());
+    if (width > length)
+        return fiber.pushOwned(try list.fromValuesGeneric(fiber.allocator, &.{}));
+    try fiber.runDriver(CutDriver{
+        .collection = .init(collection.take()),
+        .ranges = .init(.{ .windows = width }),
+        .count = length - width + 1,
+    });
+}
+
+/// Where each piece of a `CutDriver` lies in its collection.
+const PieceRanges = union(enum) {
+    /// `cut`: piece `i` runs from `starts[i]` up to the next start, and the
+    /// last piece to the end. Validated before any piece is built.
+    starts: heap.Owned(Value),
+    /// `windows`: piece `i` runs from `i` to `i + width`; always in range.
+    windows: usize,
+
+    pub fn retire(self: *PieceRanges, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .starts => |*starts| starts.deinit(releases, allocator),
+            .windows => {},
+        }
+    }
+};
 
 /// Validates every start, then materializes each piece and finally the list
 /// of pieces. A piece of a typed leaf is one range copy into a leaf of the
 /// same kind. A piece of a generic spine goes through borrowed cells, one
-/// buffer sized for the longest piece and reused for every piece.
+/// buffer sized for the longest piece and reused for every piece. `windows`
+/// shares it with overlapping fixed-width ranges and nothing to validate.
 const CutDriver = struct {
     collection: heap.Owned(Value),
-    starts: heap.Owned(Value),
+    ranges: heap.Owned(PieceRanges),
+    count: usize,
     validated: usize = 0,
     previous: usize = 0,
     pieces: ?heap.Owned(heap.OwnedValueBuffer) = null,
@@ -2663,23 +2707,29 @@ const CutDriver = struct {
     empty: ?heap.Owned(Value) = null,
 
     fn start(self: *const CutDriver, index: usize) usize {
-        return @intCast(list.atUnchecked(self.starts.borrow(), index).int);
+        return switch (self.ranges.borrow()) {
+            .starts => |starts| @intCast(list.atUnchecked(starts.borrow(), index).int),
+            .windows => index,
+        };
     }
 
     fn end(self: *const CutDriver, index: usize) usize {
-        const count: usize = @intCast(self.starts.borrow().list.length());
-        return if (index + 1 == count)
-            @intCast(self.collection.borrow().list.length())
-        else
-            self.start(index + 1);
+        return switch (self.ranges.borrow()) {
+            .starts => if (index + 1 == self.count)
+                @intCast(self.collection.borrow().list.length())
+            else
+                self.start(index + 1),
+            .windows => |width| index + width,
+        };
     }
 
     pub fn advance(fiber: *Fiber, self: *CutDriver) MachineError!machine.WorkProgress {
-        const count: usize = @intCast(self.starts.borrow().list.length());
+        const count = self.count;
         const length: usize = @intCast(self.collection.borrow().list.length());
-        if (self.validated != count) {
+        if (self.ranges.borrow() == .starts and self.validated != count) {
+            const starts = self.ranges.borrow().starts.borrow();
             while (self.validated != count and fiber.workBudget().spend()) : (self.validated += 1) {
-                const item = list.atUnchecked(self.starts.borrow(), self.validated);
+                const item = list.atUnchecked(starts, self.validated);
                 if (item != .int) return fiber.typeError("a list of integer start indices");
                 if (item.int < 0 or item.int > length) return fiber.failAtIndex(
                     .domain,
@@ -2753,7 +2803,7 @@ const CutDriver = struct {
     fn finishPiece(self: *CutDriver, fiber: *Fiber, piece_value: Value) void {
         self.pieces.?.borrowMut().appendOwned(piece_value);
         self.piece += 1;
-        if (self.piece == @as(usize, @intCast(self.starts.borrow().list.length())))
+        if (self.piece == self.count)
             self.outer = .init(.init(fiber.allocator, self.pieces.?.borrow().values()));
     }
 

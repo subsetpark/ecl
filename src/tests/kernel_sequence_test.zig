@@ -305,6 +305,44 @@ test "sequence: cut splits at nondecreasing starts" {
     });
 }
 
+test "sequence: windows yields every overlapping piece" {
+    // Rectangular numeric results print as a matrix, so they are compared
+    // against literals rather than through their display.
+    try helper.expectStack(
+        "[1 2 3 4] 2 windows [[1 2] [2 3] [3 4]] match? [1 2 3] 3 windows [[1 2 3]] match? " ++
+            "[1 2 3] 1 windows [[1] [2] [3]] match? [1.5 2.5 3.5] 2 windows [[1.5 2.5] [2.5 3.5]] match?",
+        "1 1 1 1",
+    );
+    try helper.expectStack(
+        "[1 2] 3 windows \"\" 1 windows \"abcd\" 3 windows \"λμν\" 2 windows [[1 2] 3 \"x\"] 2 windows",
+        "() () (\"abc\" \"bcd\") (\"λμ\" \"μν\") (([1 2] 3) (3 \"x\"))",
+    );
+    try helper.expectError(.{
+        .name = "zero windows width",
+        .source = "[0 1 2] 0 windows",
+        .kind = "domain",
+        .word = "windows",
+    });
+    try helper.expectError(.{
+        .name = "negative windows width",
+        .source = "[0 1 2] -1 windows",
+        .kind = "domain",
+        .word = "windows",
+    });
+    try helper.expectError(.{
+        .name = "non-integer windows width",
+        .source = "[0 1 2] 1.5 windows",
+        .kind = "type",
+        .word = "windows",
+    });
+    try helper.expectError(.{
+        .name = "windows of a dict",
+        .source = "{a 1} 1 windows",
+        .kind = "type",
+        .word = "windows",
+    });
+}
+
 test "sequence: first rest take drop reverse and range preserve representation" {
     try helper.expectStack(
         "\"abc\" first \"abc\" rest [1 2 3] -2 take [1 2 3] -1 drop \"abc\" reverse 4 range",

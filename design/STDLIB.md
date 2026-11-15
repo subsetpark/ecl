@@ -889,7 +889,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### windows
-`( list width -- windows )` — Return overlapping windows of width `width`.
+`( list width -- windows )` — Return every overlapping window of a positive int width, left-to-right: `"abcd" 2 windows` is `("ab" "bc" "cd")`. The result has `max(len-width+1, 0)` elements, so a width larger than the list gives `()`; zero and negative widths are `` `domain ``. Strings window into strings.
 
 #### Examples
 
