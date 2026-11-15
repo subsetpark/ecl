@@ -200,7 +200,8 @@
 ### def doc-text
 (doc -- text :
  "Render documentation as Markdown, fencing each hand-laid paragraph so its lines survive.")
-("\n\n" str.split (dup verbatim? ("```\n" swap cat "\n```" cat) when) each "\n\n" str.join) `doc-text def
+("\n\n" str.split (dup verbatim? ("```\n" swap cat "\n```" cat) when) each "\n\n" str.join)
+`doc-text def
 
 ### def entry-text
 (name qualifier -- text :
