@@ -96,10 +96,6 @@
 (bool then -- ... : "Call `then` when the condition is 1; otherwise do nothing.")
 (() if) `when def
 
-### def windows
-(list width -- windows : "Return overlapping windows of width `width`.")
-(() stencil) `windows def
-
 ### def wrap
 (value -- list : "Wrap `value` in a list.")
 (() cons) `wrap def

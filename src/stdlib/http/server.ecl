@@ -458,7 +458,7 @@
 
  ### defp head-end
  (bytes -- index : "Return the index of the first CR LF CR LF in a byte list, or -1.")
- (4 windows ([13 10 13 10] match?) each where dup len 0 = (pop -1) (first) if) `head-end defp
+ (4 ([13 10 13 10] match?) stencil where dup len 0 = (pop -1) (first) if) `head-end defp
 
  ### defp hex-digit?
  (char -- bool : "Return 1 for an ASCII hexadecimal digit.")

@@ -58,13 +58,16 @@ pub const testing = if (@import("builtin").is_test) struct {
     }
 } else struct {};
 
-/// The comparison a match needs no worklist for: any pair that is not a list
-/// against a list or a dict against a dict. `null` means the pair has
-/// structure to walk. `MatchCursor` answers its own leaf case from here, so a
-/// caller that takes this answer directly cannot disagree with the cursor.
+/// The comparison a match needs no worklist for, answered within one charged
+/// transition: any pair that is not a list against a list or a dict against a
+/// dict, and two flat leaves of at most `flat_leaf_grain` elements. `null`
+/// means the pair has structure to walk. `MatchCursor` answers its own leaf
+/// case from here, so a caller that takes this answer directly cannot
+/// disagree with the cursor.
 pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
     if (numericPair(a, b)) return numberEqual(a, b);
     if (a.tag() != b.tag()) return false;
+    if (a == .list) return matchFlatLeaves(a.list, b.list);
     return switch (a) {
         .int, .float => unreachable,
         .char => |codepoint| codepoint == b.char,
@@ -82,7 +85,8 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
         // Image identity, never structural traversal: two references to one
         // image match and two constructions never do, and no comparison
         // enters the frozen environment or initial-state template.
-        .list, .dict => null,
+        .list => unreachable,
+        .dict => null,
     };
 }
 
@@ -542,16 +546,113 @@ fn stringSlice(comptime kind: value.HeapKind, header: *value.ListHandle) []const
     };
 }
 
+/// The most elements two flat leaves compare in one charged transition: the
+/// grain of the cursor's own string comparison.
+pub const flat_leaf_grain = 256;
+
+/// Every typed leaf representation, numeric and string.
+pub const flat_leaf_kinds = [_]value.HeapKind{ .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 };
+
+/// Two typed leaves compared element by element under the scalar rules, with
+/// no worklist. `null` for a generic spine or a leaf longer than one grain.
+fn matchFlatLeaves(a: *value.ListHandle, b: *value.ListHandle) ?bool {
+    const a_kind = a.kind();
+    const b_kind = b.kind();
+    if (!isFlatLeaf(a_kind) or !isFlatLeaf(b_kind)) return null;
+    if (a == b) return true;
+    const length = a.length();
+    if (length != b.length()) return false;
+    if (length == 0) return true;
+    if (length > flat_leaf_grain) return null;
+    inline for (flat_leaf_kinds) |left_kind| {
+        if (a_kind == left_kind) inline for (flat_leaf_kinds) |right_kind| {
+            if (b_kind == right_kind)
+                return leafElementsMatch(left_kind, right_kind, heap.leafElements(left_kind, a), heap.leafElements(right_kind, b));
+        };
+    }
+    unreachable;
+}
+
+/// Whether two equally long runs of typed-leaf elements match element by
+/// element under the scalar rules: numbers by mathematical value across
+/// widths and int/float, characters by codepoint across widths, and no
+/// character ever matching a number. Every flat comparison, inside a cursor
+/// or a fused kernel, decides elements here. The caller charges the work.
+pub fn leafElementsMatch(
+    comptime left_kind: value.HeapKind,
+    comptime right_kind: value.HeapKind,
+    left: []const heap.LeafElement(left_kind),
+    right: []const heap.LeafElement(right_kind),
+) bool {
+    std.debug.assert(left.len == right.len);
+    const left_string = comptime isStringKind(left_kind);
+    if (comptime left_string != isStringKind(right_kind)) return left.len == 0;
+    // Floats exclude NaN, so `==` is value equality; only their bits differ
+    // from it, at signed zero, and so they never compare as bytes.
+    if (comptime left_kind == right_kind and left_kind != .leaf_f64)
+        return std.mem.eql(heap.LeafElement(left_kind), left, right);
+    if (comptime left_string) {
+        for (left, right) |l, r| if (@as(u32, l) != @as(u32, r)) return false;
+        return true;
+    }
+    for (left, right) |l, r|
+        if (!numberEqual(numericElement(left_kind, l), numericElement(right_kind, r))) return false;
+    return true;
+}
+
+/// Whether boxed `values` match the equally long typed-leaf `items` element
+/// by element. A typed element is a scalar, so every pair is decided by
+/// `matchWithoutStructure` with no worklist. The caller charges the work.
+pub fn valuesMatchLeafElements(
+    comptime kind: value.HeapKind,
+    values: []const Value,
+    items: []const heap.LeafElement(kind),
+) bool {
+    std.debug.assert(values.len == items.len);
+    for (values, items) |boxed, item|
+        if (!(matchWithoutStructure(boxed, leafElementValue(kind, item)) orelse unreachable)) return false;
+    return true;
+}
+
+fn leafElementValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value {
+    return switch (kind) {
+        .leaf_u8, .leaf_i64, .leaf_f64 => numericElement(kind, item),
+        .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = item },
+        else => @compileError("a typed leaf is required"),
+    };
+}
+
+pub fn isFlatLeaf(kind: value.HeapKind) bool {
+    return switch (kind) {
+        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,
+        .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
+    };
+}
+
+fn isStringKind(kind: value.HeapKind) bool {
+    return switch (kind) {
+        .leaf_char1, .leaf_char2, .leaf_char4 => true,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => false,
+    };
+}
+
+fn numericElement(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value {
+    return switch (kind) {
+        .leaf_u8, .leaf_i64 => .{ .int = item },
+        .leaf_f64 => .{ .float = item },
+        else => @compileError("a numeric leaf is required"),
+    };
+}
+
 fn matchStringRange(a: *value.ListHandle, b: *value.ListHandle, start: usize, count: usize) bool {
     inline for (string_kinds) |left_kind| {
         if (a.kind() == left_kind) inline for (string_kinds) |right_kind| {
-            if (b.kind() == right_kind) {
-                const left = stringSlice(left_kind, a)[start..][0..count];
-                const right = stringSlice(right_kind, b)[start..][0..count];
-                if (left_kind == right_kind) return std.mem.eql(heap.LeafElement(left_kind), left, right);
-                for (left, right) |l, r| if (@as(u32, l) != @as(u32, r)) return false;
-                return true;
-            }
+            if (b.kind() == right_kind) return leafElementsMatch(
+                left_kind,
+                right_kind,
+                stringSlice(left_kind, a)[start..][0..count],
+                stringSlice(right_kind, b)[start..][0..count],
+            );
         };
     }
     unreachable;

@@ -26,6 +26,8 @@ pub const Context = enum {
     fold1,
     scan,
     lex_cmp,
+    /// A quotation `stencil` applies to every window of its list.
+    stencil,
 };
 pub const PhraseOp = enum {
     /// `reshape` continued by `sum` or `product`: the fold over the rows a
@@ -106,7 +108,7 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 6 + 6 + 5]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 6 + 8 + 5]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -144,13 +146,17 @@ pub const registry = blk: {
         .{ .pattern = &constant_operation_pattern, .constant_left = false },
         .{ .pattern = &constant_swap_operation_pattern, .constant_left = true },
     }) |match_each| {
-        entries[index] = .{
-            .context = .each,
-            .pattern = match_each.pattern,
-            .operation = .match,
-            .constant_left = match_each.constant_left,
-        };
-        index += 1;
+        // `(constant match?) stencil` is the mask of windows that match the
+        // constant, decided without building the windows.
+        for ([_]Context{ .each, .stencil }) |context| {
+            entries[index] = .{
+                .context = context,
+                .pattern = match_each.pattern,
+                .operation = .match,
+                .constant_left = match_each.constant_left,
+            };
+            index += 1;
+        }
     }
     for (std.meta.tags(numeric.BinaryOp)) |operation| {
         entries[index] = .{
@@ -342,6 +348,7 @@ fn requestCandidate(fiber: *Fiber, request: machine.IdiomRequest) ?Candidate {
         .each => .{ .each, 2 },
         .fold1 => .{ .fold1, 2 },
         .lex_cmp => .{ .lex_cmp, 3 },
+        .stencil => .{ .stencil, 3 },
         .zip_with => .{ .zip_with, 3 },
         .fold => .{ .fold, 3 },
         .scan => .{ .scan, 3 },
@@ -876,11 +883,11 @@ fn startProgram(fiber: *Fiber, program: *const OfferedProgram) MachineError!void
 fn applyMatched(fiber: *Fiber, phrase: Value, matched: ?u16, capture: Capture, fallback: machine.IdiomFallback) MachineError!void {
     const index = matched orelse return fallback(fiber);
     const selected = registry[index];
-    if (!canApplyEntry(fiber, selected)) return fallback(fiber);
+    if (!canApplyEntry(fiber, selected, capture)) return fallback(fiber);
     return applyRecognized(fiber, phrase, .{ .entry = selected }, capture);
 }
 
-fn canApplyEntry(fiber: *Fiber, entry: RegistryEntry) bool {
+fn canApplyEntry(fiber: *Fiber, entry: RegistryEntry, capture: Capture) bool {
     const stack = fiber.stack.items;
     return switch (entry.operation) {
         .unary => entry.context == .each and stack[stack.len - 2] == .list,
@@ -894,9 +901,14 @@ fn canApplyEntry(fiber: *Fiber, entry: RegistryEntry) bool {
             },
             .fold, .scan => stack[stack.len - 3] == .list,
             .fold1 => stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0,
-            .phrase, .lex_cmp => false,
+            .phrase, .lex_cmp, .stencil => false,
         },
-        .length, .match, .conversion => entry.context == .each and stack[stack.len - 2] == .list,
+        .match => switch (entry.context) {
+            .each => stack[stack.len - 2] == .list,
+            .stencil => sequence.windowsMatchWidth(stack[stack.len - 3], stack[stack.len - 2], capture.constant.?) != null,
+            else => false,
+        },
+        .length, .conversion => entry.context == .each and stack[stack.len - 2] == .list,
         .cmp => order.lexCompareCandidate(stack[stack.len - 3], stack[stack.len - 2]),
         .phrase => unreachable, // See `applyPhrase`.
     };
@@ -915,9 +927,13 @@ fn applyEntry(fiber: *Fiber, entry: RegistryEntry, capture: Capture) MachineErro
             ),
             .zip_with => applyZipWith(fiber, operation),
             .fold, .fold1, .scan => applyReduction(fiber, operation, entry.context),
-            .phrase, .lex_cmp => unreachable,
+            .phrase, .lex_cmp, .stencil => unreachable,
         },
-        .match => applyMatchEach(fiber, capture.constant.?),
+        .match => switch (entry.context) {
+            .each => applyMatchEach(fiber, capture.constant.?),
+            .stencil => applyMatchStencil(fiber, capture.constant.?),
+            else => unreachable,
+        },
         .length => applyLengthEach(fiber),
         .conversion => |target| if (fiber.stack.items[fiber.stack.items.len - 2].list.length() == 0)
             finishCollected(fiber, &.{}, 2)
@@ -1149,6 +1165,23 @@ fn applyMatchEach(fiber: *Fiber, constant: Value) MachineError!void {
         .constant = constant,
         .writer = .init(writer),
     });
+}
+
+/// `list width (constant match?) stencil`, admitted by
+/// `kernel_sequence.windowsMatchWidth`: the mask of windows that match the
+/// constant, without building the windows. The constant is borrowed from the
+/// quotation, so it takes a reference of its own before the quotation goes.
+fn applyMatchStencil(fiber: *Fiber, constant: Value) MachineError!void {
+    heap.retainValue(constant);
+    var constant_owner = heap.OwnedValue.init(fiber.releases, constant);
+    defer constant_owner.deinit();
+    var quotation = try fiber.popValue();
+    defer quotation.deinit();
+    var width = try fiber.popValue();
+    defer width.deinit();
+    var source = try fiber.popValue();
+    defer source.deinit();
+    try sequence.windowsMatch(fiber, &source, &constant_owner, @intCast(width.borrow().int));
 }
 
 /// The recognized `(constant match?) each` family writes its known boolean

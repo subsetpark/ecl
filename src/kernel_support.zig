@@ -233,6 +233,7 @@ pub const SequenceOp = enum {
     flip,
     reshape,
     cut,
+    windows,
     rotate,
     cons,
 
@@ -256,6 +257,7 @@ pub const SequenceOp = enum {
             .flip => "flip",
             .reshape => "reshape",
             .cut => "cut",
+            .windows => "windows",
             .rotate => "rotate",
             .cons => "cons",
         };

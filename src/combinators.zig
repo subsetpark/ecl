@@ -1681,9 +1681,11 @@ const StencilWindow = struct {
     }
 };
 
+/// Builds a window the application could not build within its turn, then
+/// begins a fresh application with it. A boxed window is profiled from the
+/// input's own cells, which `control` holds.
 const StencilBootstrapDriver = struct {
     control: heap.Owned(StencilControl),
-    window_values: heap.Owned(heap.OwnedValueBuffer),
     stack: machine.StackReservation,
     fill_index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
@@ -1729,20 +1731,7 @@ const StencilBootstrapDriver = struct {
             self.typed_window = null;
             return self.apply(fiber, .{ .list = window.builder.finish() });
         };
-        if (self.materializer == null) {
-            const end = self.fill_index + fiber.workBudget().take(control.width - self.fill_index);
-            while (self.fill_index != end) : (self.fill_index += 1) {
-                self.window_values.borrowMut().appendBorrowed(list.atUnchecked(
-                    control.input.borrow(),
-                    control.index + self.fill_index,
-                ));
-            }
-            if (self.fill_index != control.width) return .stepped;
-            self.materializer = .init(.init(
-                fiber.allocator,
-                self.window_values.borrow().values(),
-            ));
-        }
+        if (self.materializer == null) self.materializer = .init(boxedWindow(fiber, &control));
         switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => return .stepped,
             .complete => |window| return self.apply(fiber, window),
@@ -1821,16 +1810,31 @@ const StencilApplication = struct {
             });
             return null;
         }
+        // The next window continues this application, as `each` continues
+        // with its next element, when it can be built within the turn.
+        var started: ?heap.Owned(list.ValueMaterializer) = null;
+        errdefer if (started) |*materializer| materializer.deinit(fiber.releases, fiber.allocator);
+        switch (try nextWindow(fiber, control)) {
+            .built => |next_window| {
+                var owner = heap.OwnedValue.init(fiber.releases, next_window);
+                defer owner.deinit();
+                try fiber.pushBorrowed(owner.borrow());
+                return .{ .apply = .{
+                    .quotation = control.quotation.borrow(),
+                    .seeded = 1,
+                    .launch = .isolated,
+                } };
+            },
+            .profiling => |materializer| started = materializer,
+            .deferred => {},
+        }
         const stack = try fiber.reserveStack(1);
-        const window_values = try heap.OwnedValueBuffer.init(
-            fiber.releases,
-            control.width,
-        );
         const next = StencilBootstrapDriver{
             .control = .init(self.control.take()),
-            .window_values = .init(window_values),
             .stack = stack,
+            .materializer = started,
         };
+        started = null;
         try fiber.startDriver(next);
         return null;
     }
@@ -1838,7 +1842,59 @@ const StencilApplication = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
+/// The next window, as far as the turn's remaining budget builds it.
+const NextWindow = union(enum) {
+    /// Finished: the application continues with it.
+    built: Value,
+    /// A boxed window whose profiling the budget left unfinished.
+    profiling: heap.Owned(list.ValueMaterializer),
+    /// A typed window wider than the budget left, copied by the driver in
+    /// granted runs.
+    deferred,
+};
+
+/// Builds the window at `control.index`: a typed input's in one charged copy
+/// when the remaining budget covers its width, a boxed input's by profiling
+/// the input's own cells against the same budget.
+fn nextWindow(fiber: *Fiber, control: *const StencilControl) error{OutOfMemory}!NextWindow {
+    const input = control.input.borrow().list;
+    switch (input.kind()) {
+        inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
+            const work = fiber.workBudget();
+            if (work.remaining < control.width) return .deferred;
+            var builder = try heap.AnyListBuilder.init(fiber.allocator, kind, control.width, control.width);
+            const items = switch (builder) {
+                inline else => |*typed| if (@TypeOf(typed.items()) == []heap.LeafElement(kind)) typed.items() else unreachable,
+            };
+            @memcpy(items, heap.leafElements(kind, input)[control.index..][0..control.width]);
+            _ = work.take(control.width);
+            return .{ .built = .{ .list = builder.finish() } };
+        },
+        .generic_spine => {
+            var materializer = heap.Owned(list.ValueMaterializer).init(boxedWindow(fiber, control));
+            errdefer materializer.deinit(fiber.releases, fiber.allocator);
+            return switch (try materializer.borrowMut().advance(fiber.workBudget())) {
+                .pending => .{ .profiling = materializer },
+                .complete => |window| blk: {
+                    materializer.deinit(fiber.releases, fiber.allocator);
+                    break :blk .{ .built = window };
+                },
+            };
+        },
+        .dict, .task, .port, .address, .reserved_mask => unreachable,
+    }
+}
+
+/// Profiles the boxed window at `control.index` from the input's own cells.
+fn boxedWindow(fiber: *Fiber, control: *const StencilControl) list.ValueMaterializer {
+    const cells = heap.valuesConst(control.input.borrow().list)[control.index..][0..control.width];
+    return .init(fiber.allocator, cells);
+}
+
 fn stencil(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.stencil, stencilGeneric);
+}
+fn stencilGeneric(fiber: *Fiber) MachineError!void {
     try fiber.require(3);
     var quotation = try fiber.popQuotation();
     defer quotation.deinit();
@@ -1866,8 +1922,6 @@ fn stencil(fiber: *Fiber) MachineError!void {
     defer expected.deinit();
     var results = try heap.OwnedValueBuffer.init(fiber.releases, count);
     defer results.deinit();
-    var window_values = try heap.OwnedValueBuffer.init(fiber.releases, width);
-    defer window_values.deinit();
     const stack = try fiber.reserveStack(1);
     const control = StencilControl{
         .input = .init(input.take()),
@@ -1881,7 +1935,6 @@ fn stencil(fiber: *Fiber) MachineError!void {
     };
     try fiber.startDriver(StencilBootstrapDriver{
         .control = .init(control),
-        .window_values = .init(window_values.take()),
         .stack = stack,
     });
 }

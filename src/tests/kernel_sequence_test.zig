@@ -305,6 +305,58 @@ test "sequence: cut splits at nondecreasing starts" {
     });
 }
 
+test "sequence: windows yields every overlapping piece" {
+    // Rectangular numeric results print as a matrix, so they are compared
+    // against literals rather than through their display.
+    try helper.expectStack(
+        "[1 2 3 4] 2 windows [[1 2] [2 3] [3 4]] match? [1 2 3] 3 windows [[1 2 3]] match? " ++
+            "[1 2 3] 1 windows [[1] [2] [3]] match? [1.5 2.5 3.5] 2 windows [[1.5 2.5] [2.5 3.5]] match?",
+        "1 1 1 1",
+    );
+    try helper.expectStack(
+        "[1 2] 3 windows \"\" 1 windows \"abcd\" 3 windows \"λμν\" 2 windows [[1 2] 3 \"x\"] 2 windows",
+        "() () (\"abc\" \"bcd\") (\"λμ\" \"μν\") (([1 2] 3) (3 \"x\"))",
+    );
+    try helper.expectError(.{
+        .name = "zero windows width",
+        .source = "[0 1 2] 0 windows",
+        .kind = "domain",
+        .word = "windows",
+    });
+    try helper.expectError(.{
+        .name = "negative windows width",
+        .source = "[0 1 2] -1 windows",
+        .kind = "domain",
+        .word = "windows",
+    });
+    try helper.expectError(.{
+        .name = "non-integer windows width",
+        .source = "[0 1 2] 1.5 windows",
+        .kind = "type",
+        .word = "windows",
+    });
+    try helper.expectError(.{
+        .name = "windows of a dict",
+        .source = "{a 1} 1 windows",
+        .kind = "type",
+        .word = "windows",
+    });
+}
+
+test "sequence: match? compares flat leaves by value across representations and lengths" {
+    // Strings across character widths, numbers across int and float leaves,
+    // signed zero, a string against its codepoints, and leaves on either side
+    // of one comparison grain.
+    try helper.expectStack(
+        "\"aλ\" 1 take \"a\" match? \"aλb\" 2 windows (\"λb\" match?) each [1 2] [1.0 2.0] match? " ++
+            "[0.0] [-0.0] match? [1 2] [1 2.5] match? [97 98] \"ab\" match? [] \"\" match? " ++
+            "[9007199254740993] [9007199254740992.0] match? " ++
+            "[1] [256] reshape [1.0] [256] reshape match? [1] [257] reshape [1.0] [257] reshape match? " ++
+            "[1] [256] reshape [1] [255] reshape [2] cat match?",
+        "1 [0 1] 1 1 0 0 1 0 1 1 0",
+    );
+}
+
 test "sequence: first rest take drop reverse and range preserve representation" {
     try helper.expectStack(
         "\"abc\" first \"abc\" rest [1 2 3] -2 take [1 2 3] -1 drop \"abc\" reverse 4 range",
