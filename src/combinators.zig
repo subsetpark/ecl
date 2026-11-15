@@ -1839,6 +1839,9 @@ const StencilApplication = struct {
 };
 
 fn stencil(fiber: *Fiber) MachineError!void {
+    return fiber.continueWithIdiom(.stencil, stencilGeneric);
+}
+fn stencilGeneric(fiber: *Fiber) MachineError!void {
     try fiber.require(3);
     var quotation = try fiber.popQuotation();
     defer quotation.deinit();

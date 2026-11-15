@@ -600,6 +600,28 @@ pub fn leafElementsMatch(
     return true;
 }
 
+/// Whether boxed `values` match the equally long typed-leaf `items` element
+/// by element. A typed element is a scalar, so every pair is decided by
+/// `matchWithoutStructure` with no worklist. The caller charges the work.
+pub fn valuesMatchLeafElements(
+    comptime kind: value.HeapKind,
+    values: []const Value,
+    items: []const heap.LeafElement(kind),
+) bool {
+    std.debug.assert(values.len == items.len);
+    for (values, items) |boxed, item|
+        if (!(matchWithoutStructure(boxed, leafElementValue(kind, item)) orelse unreachable)) return false;
+    return true;
+}
+
+fn leafElementValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value {
+    return switch (kind) {
+        .leaf_u8, .leaf_i64, .leaf_f64 => numericElement(kind, item),
+        .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = item },
+        else => @compileError("a typed leaf is required"),
+    };
+}
+
 pub fn isFlatLeaf(kind: value.HeapKind) bool {
     return switch (kind) {
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,

@@ -169,7 +169,7 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                     @tagName(entry.context),
                 },
             ),
-            .phrase, .lex_cmp => unreachable,
+            .phrase, .lex_cmp, .stencil => unreachable,
         },
         .length => std.fmt.allocPrint(allocator, "{s} ({s}) each", .{ switch (variant) {
             .atom => "[[] [1] [2 3]]",
@@ -178,7 +178,11 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             .float => "[[1.5] [2.5 3.5]]",
             .failure => "[[1] 2]",
         }, phrase }),
-        .match => std.fmt.allocPrint(
+        .match => if (entry.context == .stencil) std.fmt.allocPrint(
+            allocator,
+            "{s} ({s}) stencil",
+            .{ stencilMatchInput(variant), phrase },
+        ) else std.fmt.allocPrint(
             allocator,
             "{s} ({s}) each",
             .{ matchInput(variant), phrase },
@@ -214,7 +218,7 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
     for (entry.pattern, 0..) |atom, index| {
         if (index > 0) try result.append(allocator, ' ');
         switch (atom) {
-            .constant => try result.appendSlice(allocator, constantFor(entry.operation, variant)),
+            .constant => try result.appendSlice(allocator, constantFor(entry, variant)),
             .operation => try result.appendSlice(allocator, entry.operation.spelling()),
             .word => |word| try result.appendSlice(allocator, word.spelling),
         }
@@ -222,11 +226,36 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
     return result.toOwnedSlice(allocator);
 }
 
-fn constantFor(operation: ecl.idioms.Operation, variant: Variant) []const u8 {
-    return switch (operation) {
+fn constantFor(entry: ecl.idioms.RegistryEntry, variant: Variant) []const u8 {
+    return switch (entry.operation) {
         .binary => |binary| binaryConstant(binary, variant),
-        .match => matchConstant(variant),
+        .match => if (entry.context == .stencil) stencilMatchConstant(variant) else matchConstant(variant),
         else => unreachable,
+    };
+}
+
+/// A list and window width for `(constant match?) stencil`. A stencil that
+/// applies nothing is not recognized, so `empty` is instead a constant no
+/// window can match; `spine` is a boxed source against a typed constant,
+/// `float` matches signed zero by value, and `failure` compares dictionary
+/// elements, which `match?` answers without faulting.
+fn stencilMatchInput(variant: Variant) []const u8 {
+    return switch (variant) {
+        .atom => "\"abcabc\" 2",
+        .empty => "\"abc\" 2",
+        .spine => "(1 2 \"x\" 1 2) 2",
+        .float => "[0.0 1.5 -0.0 1.5] 2",
+        .failure => "({} {a 1}) 1",
+    };
+}
+
+fn stencilMatchConstant(variant: Variant) []const u8 {
+    return switch (variant) {
+        .atom => "\"bc\"",
+        .empty => "\"abc\"",
+        .spine => "[1 2]",
+        .float => "[0 1.5]",
+        .failure => "{a 1}",
     };
 }
 
@@ -583,6 +612,54 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
     try expectPhraseHits("([1] \"a\" [2]) [1 0 3] where at", 0);
     // Symbols have no typed leaf, so a symbol list is a generic source too.
     try expectPhraseHits("[a b c] [1 0 1] where at", 0);
+}
+
+test "idioms: match stencil decides windows without building them" {
+    const grain = std.fmt.comptimePrint("{d}", .{ecl.equal.flat_leaf_grain});
+    const at_grain = "\"" ++ @as([ecl.equal.flat_leaf_grain]u8, @splat('a')) ++ "\"";
+    const past_grain = "\"" ++ @as([ecl.equal.flat_leaf_grain + 1]u8, @splat('a')) ++ "\"";
+    // Typed sources of every representation against typed constants across
+    // widths, boxed sources and constants against typed ones, constants no
+    // window can match, the widest window one grain allows, masks long enough
+    // to cross budget boundaries, and a needle consed in at run time, against
+    // the quotation applied to each window.
+    for ([_][]const u8{
+        "\"abcabc\" 2 (\"bc\" match?) stencil",
+        "\"abcabc\" 2 (\"bc\" swap match?) stencil",
+        "\"a\u{2713}b\u{2713}b\" 2 (\"\u{2713}b\" match?) stencil",
+        "\"ab\u{2713}\" 2 (\"ab\" match?) stencil",
+        "\"ab\" bytes 2 ([97 98] match?) stencil",
+        "\"ab\" 2 ([97 98] match?) stencil",
+        "[1 2 3 1 2] 2 ([1 2.0] match?) stencil",
+        "[0.0 1.5 -0.0 1.5] 2 ([0 1.5] match?) stencil",
+        "(1 2 \"x\" 1 2) 2 ([1 2] match?) stencil",
+        "([1] 2 \\a) 1 (\"a\" match?) stencil",
+        "\"abc\" 2 (\"abc\" match?) stencil",
+        "\"abc\" 2 (5 match?) stencil",
+        "\"a\" [300] reshape " ++ grain ++ " (" ++ at_grain ++ " match?) stencil",
+        "\"ab\" [140000] reshape 3 (\"bab\" match?) stencil",
+        "\"ab\" [140000] reshape 3 ([1 2] match?) stencil",
+        "\"abcabc\" \"bc\" dup len swap (match?) cons stencil",
+    }) |source| {
+        compareExecutions(source) catch |err| {
+            std.log.err("match stencil differs for `{s}`", .{source});
+            return err;
+        };
+    }
+    // A user `match?` in scope is not the trusted word, and a symbol constant
+    // or another quotation shape is not the idiom.
+    try expectHits("(pop pop 1) `match? def \"abc\" 1 (\"b\" match?) stencil", 0);
+    try expectHits("\"abc\" 1 (`b match?) stencil", 0);
+    try expectHits("\"abc\" 1 (\"b\" match? not) stencil", 0);
+    // Two boxed lists may hold lists to walk; a window wider than one grain,
+    // a stencil that applies nothing, and every shape `stencil` faults on
+    // keep the generic route, whose own results and errors stand.
+    try expectHits("((1) (2)) 1 (((1)) match?) stencil", 0);
+    try expectHits("\"a\" [300] reshape 257 (" ++ past_grain ++ " match?) stencil", 0);
+    try expectHits("\"ab\" 3 (\"abc\" match?) stencil", 0);
+    try expectHits("[] 1 (\"\" match?) stencil", 0);
+    try expectHits("\"ab\" 0 (\"\" match?) stencil", 0);
+    try expectHits("{a 1} 1 (\"a\" match?) stencil", 0);
 }
 
 test "idioms: a caller's quotation is recognized inside prelude definitions" {

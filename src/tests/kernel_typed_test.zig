@@ -972,6 +972,10 @@ test "typed kernels: typed stencil windows match the profiled route across budge
     try expectParity(&runtime, .{ .ints = numbers }, "65537 windows (sum) each");
     try expectParity(&runtime, .{ .ints = numbers }, "3 windows (sum) each");
     try expectParity(&runtime, .{ .ints = numbers }, "3 windows len");
+    // A recognized `(constant match?) stencil` decides typed and boxed
+    // windows by one rule, in budgeted ranges over the whole source.
+    try expectParity(&runtime, .{ .ints = numbers }, "2 ([1007 1014] match?) stencil where");
+    try expectParity(&runtime, .{ .ints = numbers }, "2 ([1007 1014.0] match?) stencil where");
 }
 
 // `split` searches a granted run of start positions per transition, sized by

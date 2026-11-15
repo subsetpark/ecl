@@ -1051,7 +1051,7 @@ comptime {
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
-pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan, lex_cmp };
+pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan, lex_cmp, stencil };
 /// The combinator's generic path, run when recognition declines its quotation.
 pub const IdiomFallback = *const fn (*Fiber) MachineError!void;
 

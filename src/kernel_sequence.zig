@@ -2671,6 +2671,135 @@ fn windowsPrimitive(fiber: *Fiber) MachineError!void {
     });
 }
 
+/// How `(constant match?) stencil` decides each window without building
+/// it: no window matches a constant that is not a list of the window width;
+/// otherwise each window is compared element by element, typed against typed,
+/// or boxed against typed, whose typed side holds only scalars.
+const WindowsMatchPlan = union(enum) {
+    none,
+    typed: struct { source: value.HeapKind, constant: value.HeapKind },
+    boxed_source: value.HeapKind,
+    boxed_constant: value.HeapKind,
+};
+
+fn listRepresentation(item: Value) ?enum { typed, boxed } {
+    if (item != .list) return null;
+    if (equal.isFlatLeaf(item.list.kind())) return .typed;
+    return if (item.list.kind() == .generic_spine) .boxed else null;
+}
+
+fn windowsMatchPlan(source: Value, constant: Value, width: usize) ?WindowsMatchPlan {
+    const source_form = listRepresentation(source) orelse return null;
+    if (constant != .list or constant.list.length() != width) return .none;
+    const constant_form = listRepresentation(constant) orelse return null;
+    return switch (source_form) {
+        .typed => switch (constant_form) {
+            .typed => .{ .typed = .{ .source = source.list.kind(), .constant = constant.list.kind() } },
+            .boxed => .{ .boxed_constant = source.list.kind() },
+        },
+        .boxed => switch (constant_form) {
+            .typed => .{ .boxed_source = constant.list.kind() },
+            // Two boxed elements may both be lists, which need the cursor.
+            .boxed => null,
+        },
+    };
+}
+
+/// The width at which `source width (constant match?) stencil` can run as one
+/// pass over `source`, or null to apply the quotation to each window. The pass
+/// needs at least one window, no wider than one comparison grain, and a
+/// constant every window can be decided against flat (see
+/// `WindowsMatchPlan`). Every rejected shape, including each one `stencil`
+/// faults on or applies nothing to, keeps the generic route.
+pub fn windowsMatchWidth(source: Value, width_value: Value, constant: Value) ?usize {
+    if (source != .list) return null;
+    if (width_value != .int or width_value.int < 1 or width_value.int > equal.flat_leaf_grain) return null;
+    const width: usize = @intCast(width_value.int);
+    if (width > source.list.length()) return null;
+    _ = windowsMatchPlan(source, constant, width) orelse return null;
+    return width;
+}
+
+/// `(constant match?) stencil` without the windows: position `i` of the
+/// mask is whether `source[i..i+width]` matches the constant, decided by the
+/// same element rules as `match?`. A window charges one unit, the grain a
+/// whole-leaf comparison is charged at. Admitted by `windowsMatchWidth`.
+pub fn windowsMatch(fiber: *Fiber, source: *heap.OwnedValue, constant: *heap.OwnedValue, width: usize) MachineError!void {
+    const count: usize = @as(usize, @intCast(source.borrow().list.length())) - width + 1;
+    const owners = .{ source, constant };
+    switch (windowsMatchPlan(source.borrow(), constant.borrow(), width).?) {
+        .none => return support.Kernel(NoWindowMatchKernel).run(fiber, .{}, {}, count),
+        .typed => |kinds| inline for (equal.flat_leaf_kinds) |left| if (left == kinds.source) {
+            inline for (equal.flat_leaf_kinds) |right| if (right == kinds.constant)
+                return support.Kernel(WindowMatchKernel(.{ .typed = .{ left, right } })).run(fiber, owners, width, count);
+        },
+        .boxed_source => |kind| inline for (equal.flat_leaf_kinds) |typed| if (typed == kind)
+            return support.Kernel(WindowMatchKernel(.{ .boxed_source = typed })).run(fiber, owners, width, count),
+        .boxed_constant => |kind| inline for (equal.flat_leaf_kinds) |typed| if (typed == kind)
+            return support.Kernel(WindowMatchKernel(.{ .boxed_constant = typed })).run(fiber, owners, width, count),
+    }
+    unreachable;
+}
+
+const WindowMatchForm = union(enum) {
+    typed: [2]value.HeapKind,
+    boxed_source: value.HeapKind,
+    boxed_constant: value.HeapKind,
+};
+
+fn WindowMatchKernel(comptime form: WindowMatchForm) type {
+    return struct {
+        pub const arity = 2;
+        /// The window width, which is the constant's length.
+        pub const Params = usize;
+        pub const Output = support.LeafResult(.leaf_u8);
+        pub const result: ?support.ResultShape = .{ .kind = .leaf_u8, .overwritable = &.{} };
+
+        pub fn chunk(width: usize, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
+            const source = operands[0].list;
+            const constant = operands[1].list;
+            const slots = output.range(range.start, range.len());
+            switch (form) {
+                .typed => |kinds| {
+                    const items = heap.leafElements(kinds[0], source);
+                    const needle = heap.leafElements(kinds[1], constant);
+                    for (slots, range.start..) |*slot, start|
+                        slot.* = @intFromBool(equal.leafElementsMatch(kinds[0], kinds[1], items[start..][0..width], needle));
+                },
+                .boxed_source => |kind| {
+                    const items = heap.valuesConst(source);
+                    const needle = heap.leafElements(kind, constant);
+                    for (slots, range.start..) |*slot, start|
+                        slot.* = @intFromBool(equal.valuesMatchLeafElements(kind, items[start..][0..width], needle));
+                },
+                .boxed_constant => |kind| {
+                    const items = heap.leafElements(kind, source);
+                    const needle = heap.valuesConst(constant)[0..width];
+                    for (slots, range.start..) |*slot, start|
+                        slot.* = @intFromBool(equal.valuesMatchLeafElements(kind, needle, items[start..][0..width]));
+                },
+            }
+        }
+
+        pub const finish = Output.finish;
+    };
+}
+
+/// The mask when the constant is not a list of the window width: no window
+/// matches it.
+const NoWindowMatchKernel = struct {
+    pub const arity = 0;
+    pub const Params = void;
+    pub const Output = support.LeafResult(.leaf_u8);
+    pub const result: ?support.ResultShape = .{ .kind = .leaf_u8, .overwritable = &.{} };
+
+    pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
+        @memset(output.range(range.start, range.len()), 0);
+    }
+
+    pub const finish = Output.finish;
+};
+
 /// Where each piece of a `CutDriver` lies in its collection.
 const PieceRanges = union(enum) {
     /// `cut`: piece `i` runs from `starts[i]` up to the next start, and the

@@ -1356,6 +1356,12 @@ one byte per position and a program's result has the representation its words
 would have produced one at a time. A register that does not vary is an int or
 a real.
 
+A `(constant match?)` quotation offered to `stencil` writes the mask of
+windows that match the constant without building the windows. It applies
+only where every window can be decided flat, element against element with no
+structure to walk, and where `stencil` would apply the quotation at least
+once; any other list, width, or constant keeps the generic route.
+
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.
