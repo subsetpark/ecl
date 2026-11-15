@@ -647,6 +647,10 @@ into those keys.
 
 ## Numbers
 
+- A char is its codepoint to every numeric word, and no numeric word returns a
+  char: `\a 1 +` is `98`, `\a \b -` is `-1`, `\a \b <` is `1`, and `"ab" sum`
+  is `195`. A string enters arithmetic and comparison as the int vector of its
+  codepoints; `char` converts back.
 - Arithmetic on int64 that overflows is an `` `overflow `` error — no wrapping, no
   promotion to float or bignum. Scalar and array arithmetic behave identically.
 - `/` is float division. `div` is checked integer division; its division by
@@ -663,17 +667,15 @@ into those keys.
 - `str` output for numbers round-trips (see Printing); float equality is
   numeric everywhere (see Equality).
 - The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` read an int
-  as its 64-bit two's-complement pattern and a char as its codepoint; they are
-  otherwise int-only, so a float is `` `type `` rather than a coercion. They
-  never overflow — `bsl` truncates bits off the top where `*` would raise.
-  Their `count` operand is the one place they can fail on a value: a shift
+  as its 64-bit two's-complement pattern; they are otherwise int-only, so a
+  float is `` `type `` rather than a coercion. They never overflow — `bsl`
+  truncates bits off the top where `*` would raise. Their `count` operand is the one place they can fail on a value: a shift
   outside `0..63` is `` `domain ``. They pervade and align dicts like every
   other pervasive word.
 - The wrapping words `+%`, `-%`, and `*%` are the integer sum, difference, and
   product modulo 2^64 in two's complement: where `+`, `-`, and `*` raise
   `` `overflow ``, they wrap. They are
-  int-only like the bitwise words (a char is its codepoint, a float is
-  `` `type ``), and with
+  int-only like the bitwise words (a float is `` `type ``), and with
   `band` they give arithmetic modulo any power of two up to 2^64.
 
 ## Randomness

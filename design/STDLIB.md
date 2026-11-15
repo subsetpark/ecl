@@ -8,7 +8,7 @@
 `( x y -- z )` — Multiply. Integer overflow is `` `overflow ``.
 
 ### \*%
-`( x y -- z )` — Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two.
+`( x y -- z )` — Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float is `` `type ``. With `band`, arithmetic modulo any power of two.
 
 #### Examples
 
@@ -26,7 +26,7 @@
 `( -- module-name )` — Return the name of the module whose code is running: the name `@defm` published it under, which a call through an alias reports too. A construction body reports the name it is being built under. `` `domain `` at top level, or for a quotation that escaped its module.
 
 ### +
-`( x y -- z )` — Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Add. A char is its codepoint: `\a 1 +` is `98`. Integer overflow is `` `overflow ``.
 
 #### Examples
 
@@ -36,7 +36,7 @@
 ```
 
 ### +%
-`( x y -- z )` — Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
+`( x y -- z )` — Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float is `` `type ``.
 
 #### Examples
 
@@ -46,10 +46,10 @@
 ```
 
 ### -
-`( x y -- z )` — Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Subtract. A char is its codepoint: `\b \a -` is `1`. Integer overflow is `` `overflow ``.
 
 ### -%
-`( x y -- z )` — Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
+`( x y -- z )` — Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float is `` `type ``.
 
 ### /
 `( x y -- z )` — Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
