@@ -1216,7 +1216,9 @@ into those keys.
 - A char is its codepoint to every numeric word, and no numeric word returns a
   char: `\a 1 +` is `98`, `\a \b -` is `-1`, `\a \b <` is `1`, and `"ab" sum`
   is `195`. A string enters arithmetic and comparison as the int vector of its
-  codepoints; `char` converts back.
+  codepoints; `char` converts back. The one exception is a total that performs
+  no arithmetic step: `"a" sum` and `"a" product` return the sole element
+  unchanged, so the result is `\a`.
 - Arithmetic on int64 that overflows is an `` `overflow `` error — no wrapping, no
   promotion to float or bignum. Scalar and array arithmetic behave identically.
 - `/` is float division. `div` is checked integer division; its division by
