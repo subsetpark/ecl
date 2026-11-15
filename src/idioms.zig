@@ -709,10 +709,13 @@ pub const Names = struct {
 };
 
 /// What `form` is to a scalar program where it runs, or null when no program
-/// can hold it: a numeric constant, a stack word, or a numeric operation, each
-/// word bound as the program expects.
+/// can hold it: a numeric or char constant, a stack word, or a numeric
+/// operation, each word bound as the program expects.
 fn programForm(fiber: *Fiber, form: Value) ?ProgramForm {
-    if (form != .symbol) return if (form == .int or form == .float) .{ .constant = form } else null;
+    if (form != .symbol) return switch (form) {
+        .int, .float, .char => .{ .constant = form },
+        else => null,
+    };
     const word = form.symbol;
     // A quoted occurrence pushes a symbol, which no program register holds.
     if (env.isQuoted(word.slot)) return null;

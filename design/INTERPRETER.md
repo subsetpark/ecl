@@ -1340,9 +1340,11 @@ cannot take runs the words as written. A fault inside the phrase is reported
 as the last following word's own.
 
 Numeric arithmetic has one compiled form, the scalar program: a run of numeric
-constants, stack words, and core numeric operations compiled to a
+or char constants, stack words, and core numeric operations compiled to a
 straight-line function over registers, executed a block at a time through the
-typed kernels. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or
+typed kernels. Every numeric word reads a char as its codepoint, so a char
+input or constant is an int to the program; a char the program passes through
+unread remains a char. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or
 `scan` compiles whole, over the inputs the combinator seeds, and is observed as
 the quotation applied per element: an element's first fault is met before the
 next element starts. Only an offered quotation compiles. Arithmetic written

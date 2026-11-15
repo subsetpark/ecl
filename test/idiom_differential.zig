@@ -635,6 +635,17 @@ test "idioms: scalar programs preserve generic behavior" {
         "10 [1 2 3] (- neg) zip-with",
         "[12 13 11] 10 (- 2 *) each-prior",
         "[1 2 3 4 5 6] (3 mod 0 =) filter",
+        // A char is its codepoint to every numeric word.
+        "\"a{b}c\" (dup \\} = swap \\{ = or not) each",
+        "\"aλ😀\" (\\a -) each",
+        "\"abc\" (1 + 2 *) each",
+        "\"abc\" \"abd\" (= not) zip-with",
+        "\"abc\" \\b (< not) zip-with",
+        "\\b \"abc\" (- neg) zip-with",
+        // A char the program passes through unchanged stays a char.
+        "\"abc\" (1 + pop \\z) each",
+        "\"abc\" (dup \\a = pop) each",
+        "[1 2] (1 + pop \\z) each",
         // Faults: the first in element order, by the word that meets it.
         "[1 9223372036854775807] (2 * 1 +) each",
         "[1 9223372036854775807] (1 + 2 *) each",
@@ -642,11 +653,12 @@ test "idioms: scalar programs preserve generic behavior" {
         "[2 0 4] (10 swap div 1 +) each",
         "[1 9223372036854775807] (dup * pop 1) each",
         "[1 9223372036854775807] [1 1] (+ 2 *) zip-with",
+        "\"abc\" (1 + not) each",
+        "\"abc\" (\\b - 1 swap div) each",
         // Shapes a program declines still agree with the generic path.
         "[1 2] (`a + 1 +) each",
         "[1 2] ([1 2] + 1 +) each",
         "(1 2 3) (1 + 2 *) each",
-        "\"abc\" (1 + 2 *) each",
         "[[1 2] [3]] (1 + 2 *) each",
         "[1 2 3] [4 5] (+ 2 *) zip-with",
         "[1 2] (dup) each",
@@ -663,6 +675,8 @@ test "idioms: scalar programs preserve generic behavior" {
     try expectHits("[1 2 3] (3 mod 0 =) each", 1);
     try expectHits("[1 2 3] (dup *) each", 1);
     try expectHits("[1 2 3] [4 5 6] (+ 2 *) zip-with", 1);
+    try expectHits("\"a{b}c\" (dup \\} = swap \\{ = or not) each", 1);
+    try expectHits("\"abc\" (1 + pop \\z) each", 1);
     // A shadowed stack word declines.
     try expectHits("(pop 9) `dup def [1 2] (dup *) each", 0);
 }
@@ -690,11 +704,15 @@ test "idioms: reductions run two-input programs in order" {
         "[1 2 0 4] (1 + div) fold1",
         "[1 2 0 4] (mod) fold1",
         "[9223372036854775807 1] 0 (+ 1 +) fold",
+        "\"abc\" 0 (2 * +) fold",
+        "\"abc\" \\a (swap pop) scan",
+        "\"\" \\a (swap pop) fold",
+        "\"abc\" (max 1 +) fold1",
+        "\"abc\" \\a (- 1 swap div) scan",
         // Shapes a program declines.
         "[1 2 3] `a (2 * +) fold",
         "[1 b 3] 0 (2 * +) fold",
         "[1 2 3] [0] (2 * +) fold",
-        "\"abc\" 0 (2 * +) fold",
         "(pop 1) `neg def [1 2 3] 0 (neg +) scan",
     };
     for (sources) |source| {
@@ -706,6 +724,7 @@ test "idioms: reductions run two-input programs in order" {
     try expectHits("[1 2 3] 0 (dup * +) fold", 1);
     try expectHits("[1 2 3] 0 (2 * -) scan", 1);
     try expectHits("[1 2 3] (-) fold1", 1);
+    try expectHits("\"abc\" 0 (2 * +) fold", 1);
     try expectHits("(pop 1) `neg def [1 2 3] 0 (neg +) scan", 0);
 }
 
@@ -728,12 +747,17 @@ test "idioms: scalar programs run a block at a time and fault as per element" {
         "1000 range 2 mod (not) each",
         "1000 range 0.5 * 1000 range (max) zip-with",
         "1000 range (3 mod 0 =) filter",
+        "1000 range 97 + char (\\z - 2 *) each",
+        "1000 range 900 + char (\\a -) each",
+        "1000 range 97 + char dup (= not) zip-with",
+        "1000 range 97 + char (dup \\} = swap \\{ = or not) each",
         // Faults, in later blocks and in both orders within one block.
         "1000 range 600 9223372036854775807 put (1 + 2 *) each",
         "1000 range 600 4611686018427387904 put 601 9223372036854775807 put (2 * 1 +) each",
         "1000 range 601 4611686018427387904 put 600 9223372036854775807 put (2 * 1 +) each",
         "1000 range 300 0 put (10 swap div 1 +) each",
         "1000 range 1.0 * 500 -1.0 put (sqrt 1 +) each",
+        "1000 range 200 + char 600 \\a put (\\a - 1 swap div) each",
     };
     for (sources) |source| {
         compareModesExactly(source) catch |err| {

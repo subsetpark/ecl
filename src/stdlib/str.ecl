@@ -35,22 +35,18 @@
 
  ### defp checked-pair
  (first second message -- first second : "Validate and return two strings.")
- (type-error (|a b failure| a failure checked-error pop b failure checked-error pop a b) call)
- `checked-pair defp
+ (|a b message| a message checked pop b message checked pop a b) `checked-pair defp
 
  ### defp checked-triple
  (first second third message -- first second third : "Validate and return three strings.")
- (type-error
-  (|a b c failure|
-   a failure checked-error pop b failure checked-error pop c failure checked-error pop a b c)
-  call) `checked-triple defp
+ (|a b c message|
+  a message checked pop b message checked pop c message checked pop a b c) `checked-triple defp
 
  ### defp checked-string-int
  (text integer message -- text integer : "Validate and return a string and an integer.")
- (type-error
-  (|text integer failure|
-   text failure checked-error pop integer failure checked-int pop text integer)
-  call) `checked-string-int defp
+ (|text integer message|
+  text message checked pop integer message type-error checked-int pop text integer)
+ `checked-string-int defp
 
  ### def upper
  (string -- string : "Uppercase ASCII letters, leaving every other scalar unchanged.")
@@ -96,67 +92,77 @@
  (string suffix -- bool : "Compare a validated string with a suffix no longer than the string.")
  (|s p| s p len neg take p match?) `closes-with? defp
 
+ ### defp starts-valid?
+ (string prefix -- bool : "Return 1 when a validated string starts with a validated prefix.")
+ (|s p| s p s len p len >= (opens-with?) (pop pop 0) if) `starts-valid? defp
+
  ### def starts?
  (string prefix -- bool : "Return 1 when the string starts with the prefix.")
- ("str.starts? expects a string and a string prefix" checked-pair
-  (|s p| s len p len >= s p pair (opens-with?) cat (0) if) call) `starts? def
+ ("str.starts? expects a string and a string prefix" checked-pair starts-valid?) `starts? def
+
+ ### defp ends-valid?
+ (string suffix -- bool : "Return 1 when a validated string ends with a validated suffix.")
+ (|s p| s p s len p len >= (closes-with?) (pop pop 0) if) `ends-valid? defp
 
  ### def ends?
  (string suffix -- bool : "Return 1 when the string ends with the suffix.")
- ("str.ends? expects a string and a string suffix" checked-pair
-  (|s p| s len p len >= s p pair (closes-with?) cat (0) if) call) `ends? def
+ ("str.ends? expects a string and a string suffix" checked-pair ends-valid?) `ends? def
+
+ ### defp contains-valid?
+ (string needle -- bool : "Return 1 when a validated needle occurs in a validated string.")
+ (|s n| n len 0 = s n split len 1 > or) `contains-valid? defp
 
  ### def contains?
  (string needle -- bool :
   "Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.")
- ("str.contains? expects a string and a string needle" checked-pair
-  (|s n| n len 0 = s n split len 1 > or) call) `contains? def
+ ("str.contains? expects a string and a string needle" checked-pair contains-valid?)
+ `contains? def
 
  ### def index-of
  (string needle -- index :
   "Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and
    raise `` `domain `` when a nonempty needle is absent.")
  ("str.index-of expects a string and a string needle" checked-pair
-  (|s n| n len 0 =
-   (0)
-   s n pair
-   (split dup len 1 >
-    `domain error.new "str.index-of found no occurrence of the needle" error.with-message assert
-    first len)
-   cat
-   if)
-  call) `index-of def
+  dup len 0 =
+  (pop pop 0)
+  (split dup len 1 >
+   `domain error.new "str.index-of found no occurrence of the needle" error.with-message assert
+   first len)
+  if) `index-of def
+
+ ### defp replace-valid
+ (string needle replacement -- string : "Replace occurrences in validated strings.")
+ (|s n r| s n split r join) `replace-valid defp
 
  ### def replace
  (string needle replacement -- string :
   "Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent
    scalars only, with no boundary insertion.")
- ("str.replace expects string, needle, and replacement strings" checked-triple
-  (|s n r| s n split r join) call) `replace def
+ ("str.replace expects string, needle, and replacement strings" checked-triple replace-valid)
+ `replace def
 
  ### def repeat
  (string count -- string : "Concatenate `count` copies of a string; `count` must be nonnegative.")
  ("str.repeat expects a string and an integer count" checked-string-int
-  (|s n| n 0 >=
-   `domain error.new "str.repeat requires a nonnegative count" error.with-message assert
-   n 0 > s len 0 > and
-   s s len n * pair (take) cat
-   ("")
-   if)
-  call) `repeat def
+  dup 0 >=
+  `domain error.new "str.repeat requires a nonnegative count" error.with-message assert
+  over len 0 > over 0 > and
+  (over len * take)
+  (pop pop "")
+  if) `repeat def
 
  ### def pad-left
  (string width -- string :
   "Add leading spaces until the string reaches the requested width; return a longer string
    unchanged.")
  ("str.pad-left expects a string and an integer width" checked-string-int
-  (|s w| " " w s len - 0 max take s pair raze) call) `pad-left def
+  over len - 0 max " " swap take swap pair raze) `pad-left def
 
  ### def pad-right
  (string width -- string :
   "Add trailing spaces until the string reaches the requested width; return a longer string
    unchanged.")
  ("str.pad-right expects a string and an integer width" checked-string-int
-  (|s w| s " " w s len - 0 max take pair raze) call) `pad-right def
+  over len - 0 max " " swap take pair raze) `pad-right def
 
 ) `str @defm

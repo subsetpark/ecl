@@ -8,7 +8,7 @@
 `( x y -- z )` — Multiply. Integer overflow is `` `overflow ``.
 
 ### \*%
-`( x y -- z )` — Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two.
+`( x y -- z )` — Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float is `` `type ``. With `band`, arithmetic modulo any power of two.
 
 #### Examples
 
@@ -26,7 +26,7 @@
 `( -- module-name )` — Return the name of the module whose code is running: the name `@defm` published it under, which a call through an alias reports too. A construction body reports the name it is being built under. `` `domain `` at top level, or for a quotation that escaped its module.
 
 ### +
-`( x y -- z )` — Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Add. A char is its codepoint: `\a 1 +` is `98`. Integer overflow is `` `overflow ``.
 
 #### Examples
 
@@ -36,7 +36,7 @@
 ```
 
 ### +%
-`( x y -- z )` — Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
+`( x y -- z )` — Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float is `` `type ``.
 
 #### Examples
 
@@ -46,10 +46,10 @@
 ```
 
 ### -
-`( x y -- z )` — Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Subtract. A char is its codepoint: `\b \a -` is `1`. Integer overflow is `` `overflow ``.
 
 ### -%
-`( x y -- z )` — Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
+`( x y -- z )` — Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float is `` `type ``.
 
 ### /
 `( x y -- z )` — Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
@@ -2173,46 +2173,8 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ### str?
 `( value -- bool )` — Return 1 when a value is a string, a list whose every element is a char, and 0 for every other value. The empty string answers 1, and so does the empty list: they are one value. Never raises.
 
-### contains?
-`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.
-
-#### Examples
-
-```ecl
-"hello" "ell" str.contains?
-# => 1
-```
-
-### ends?
-`( string suffix -- bool )` — Return 1 when the string ends with the suffix.
-
-### index-of
-`( string needle -- index )` — Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and raise `` `domain `` when a nonempty needle is absent.
-
 ### lower
 `( string -- string )` — Lowercase ASCII letters, leaving every other scalar unchanged.
-
-### pad-left
-`( string width -- string )` — Add leading spaces until the string reaches the requested width; return a longer string unchanged.
-
-### pad-right
-`( string width -- string )` — Add trailing spaces until the string reaches the requested width; return a longer string unchanged.
-
-### repeat
-`( string count -- string )` — Concatenate `count` copies of a string; `count` must be nonnegative.
-
-### replace
-`( string needle replacement -- string )` — Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent scalars only, with no boundary insertion.
-
-#### Examples
-
-```ecl
-"a-b-c" "-" "+" str.replace
-# => "a+b+c"
-```
-
-### starts?
-`( string prefix -- bool )` — Return 1 when the string starts with the prefix.
 
 ### trim
 `( string -- string )` — Remove ASCII whitespace from both ends of a string.
@@ -2239,6 +2201,44 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 "Hello, wörld!" str.upper
 # => "HELLO, WöRLD!"
 ```
+
+### contains?
+`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.
+
+#### Examples
+
+```ecl
+"hello" "ell" str.contains?
+# => 1
+```
+
+### ends?
+`( string suffix -- bool )` — Return 1 when the string ends with the suffix.
+
+### index-of
+`( string needle -- index )` — Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and raise `` `domain `` when a nonempty needle is absent.
+
+### pad-left
+`( string width -- string )` — Add leading spaces until the string reaches the requested width; return a longer string unchanged.
+
+### pad-right
+`( string width -- string )` — Add trailing spaces until the string reaches the requested width; return a longer string unchanged.
+
+### repeat
+`( string count -- string )` — Concatenate `count` copies of a string; `count` must be nonnegative.
+
+### replace
+`( string needle replacement -- string )` — Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent scalars only, with no boundary insertion.
+
+#### Examples
+
+```ecl
+"a-b-c" "-" "+" str.replace
+# => "a+b+c"
+```
+
+### starts?
+`( string prefix -- bool )` — Return 1 when the string starts with the prefix.
 
 ## table
 
