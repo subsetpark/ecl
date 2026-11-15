@@ -343,6 +343,20 @@ test "sequence: windows yields every overlapping piece" {
     });
 }
 
+test "sequence: match? compares flat leaves by value across representations and lengths" {
+    // Strings across character widths, numbers across int and float leaves,
+    // signed zero, a string against its codepoints, and leaves on either side
+    // of one comparison grain.
+    try helper.expectStack(
+        "\"aλ\" 1 take \"a\" match? \"aλb\" 2 windows (\"λb\" match?) each [1 2] [1.0 2.0] match? " ++
+            "[0.0] [-0.0] match? [1 2] [1 2.5] match? [97 98] \"ab\" match? [] \"\" match? " ++
+            "[9007199254740993] [9007199254740992.0] match? " ++
+            "[1] [256] reshape [1.0] [256] reshape match? [1] [257] reshape [1.0] [257] reshape match? " ++
+            "[1] [256] reshape [1] [255] reshape [2] cat match?",
+        "1 [0 1] 1 1 0 0 1 0 1 1 0",
+    );
+}
+
 test "sequence: first rest take drop reverse and range preserve representation" {
     try helper.expectStack(
         "\"abc\" first \"abc\" rest [1 2 3] -2 take [1 2 3] -1 drop \"abc\" reverse 4 range",

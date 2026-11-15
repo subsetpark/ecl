@@ -507,6 +507,12 @@ test "typed differential: sequence order text and random operation parity across
         "1 windows",
         "2 windows",
         "dup len windows",
+        // Whole-leaf match: the typed route compares flat leaves directly,
+        // the boxed route walks the structural cursor.
+        "dup reverse reverse match?",
+        "dup 1.0 * match?",
+        "dup 1 + match?",
+        "2 windows (dup first 2 take match?) each",
         // Same-kind list put. `dup` forces the allocating copy path and keeps
         // the original live so copy-on-write is observable.
         "dup 0 9 put swap pop",
