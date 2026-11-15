@@ -2704,13 +2704,14 @@ pub const ScalarProgram = struct {
     }
 };
 
-/// Whether `operand` can feed a scalar program: a numeric atom, or a nonempty
-/// numeric leaf.
+/// Whether `operand` can feed a scalar program: a numeric or char atom, or a
+/// nonempty numeric or char leaf. Every numeric word reads a char as its
+/// codepoint, so a char is an int to every instruction.
 fn programOperand(operand: Value) bool {
     return switch (operand) {
-        .int, .float => true,
+        .int, .float, .char => true,
         .list => |header| header.length() != 0 and switch (header.kind()) {
-            .leaf_u8, .leaf_i64, .leaf_f64 => true,
+            .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,
             else => false,
         },
         else => false,
@@ -2718,7 +2719,7 @@ fn programOperand(operand: Value) bool {
 }
 
 /// Whether a program over these operands runs as one kernel: every operand a
-/// numeric atom or nonempty numeric leaf, at least one a leaf, and the leaves
+/// `programOperand`, at least one a leaf, and the leaves
 /// of one length. Anything else takes the generic path.
 pub fn programCandidate(operands: []const Value) bool {
     var length: ?usize = null;
@@ -2780,7 +2781,7 @@ fn startProgram(
         .integer => support.Kernel(ProgramLeafKernel(inputs, .leaf_i64)).run(fiber, owners, program, length),
         .real => support.Kernel(ProgramLeafKernel(inputs, .leaf_f64)).run(fiber, owners, program, length),
         .byte => support.Kernel(ProgramLeafKernel(inputs, .leaf_u8)).run(fiber, owners, program, length),
-        .char1, .char2, .char4 => unreachable, // A program reads numeric leaves only.
+        .char1, .char2, .char4 => unreachable, // `programClasses` reads char inputs as ints.
     };
 }
 
@@ -2804,12 +2805,19 @@ fn programScalars(program: *const ScalarProgram, operands: []const Value) [Scala
 
 /// The one class each register holds for a whole run, from the inputs'
 /// representations and each operation's result class, or null when a result
-/// class depends on the values (mixed `min` or `max`).
+/// class depends on the values (mixed `min` or `max`) or the result is a char
+/// no instruction computed. A char input is read as ints (`BlockPlan`); no
+/// instruction produces a char, so only an input or constant passed through
+/// unchanged can leave one.
 fn programClasses(program: *const ScalarProgram, operands: []const Value) ?[ScalarProgram.max_registers]Number {
+    if (programPassesChar(program, operands)) return null;
     const scalar = programScalars(program, operands);
     // SAFETY: as in `programScalars`.
     var classes: [ScalarProgram.max_registers]Number = undefined;
-    for (operands, 0..) |operand, input| classes[input] = blockNumber(operand);
+    for (operands, 0..) |operand, input| classes[input] = switch (blockNumber(operand)) {
+        .char1, .char2, .char4 => .integer,
+        else => |class| class,
+    };
     for (program.constants[0..program.constant_count]) |constant| classes[constant.register] = blockNumber(constant.value);
     for (program.instructions[0..program.len]) |instruction| {
         const class = switch (instruction.operation) {
@@ -2821,13 +2829,32 @@ fn programClasses(program: *const ScalarProgram, operands: []const Value) ?[Scal
     return classes;
 }
 
+/// Whether the program's result is a char input or constant no instruction
+/// read into an int.
+fn programPassesChar(program: *const ScalarProgram, operands: []const Value) bool {
+    if (program.result < operands.len) {
+        const operand = operands[program.result];
+        return operand == .char or (operand == .list and switch (operand.list.kind()) {
+            .leaf_char1, .leaf_char2, .leaf_char4 => true,
+            else => false,
+        });
+    }
+    for (program.constants[0..program.constant_count]) |constant| {
+        if (constant.register == program.result) return constant.value == .char;
+    }
+    return false;
+}
+
 fn programElement(operand: Value, index: usize) Value {
     if (operand != .list) return operand;
     return switch (operand.list.kind()) {
         .leaf_f64 => .{ .float = heap.leafElements(.leaf_f64, operand.list)[index] },
         .leaf_i64 => .{ .int = heap.leafElements(.leaf_i64, operand.list)[index] },
         .leaf_u8 => .{ .int = heap.leafElements(.leaf_u8, operand.list)[index] },
-        else => unreachable, // `programCandidate` admits numeric leaves only.
+        .leaf_char1 => .{ .char = heap.chars8(operand.list)[index] },
+        .leaf_char2 => .{ .char = heap.chars16(operand.list)[index] },
+        .leaf_char4 => .{ .char = @intCast(heap.chars32(operand.list)[index]) },
+        else => unreachable, // `programCandidate` admits numeric and char leaves only.
     };
 }
 
@@ -2844,7 +2871,8 @@ const BlockValue = union(enum) {
         return switch (item) {
             .int => |integer| .{ .int_scalar = integer },
             .float => |number| .{ .real_scalar = number },
-            else => unreachable, // A planned program holds numeric atoms only.
+            .char => |codepoint| .{ .int_scalar = codepoint },
+            else => unreachable, // A planned program holds numeric and char atoms only.
         };
     }
 
@@ -3023,6 +3051,12 @@ const BlockPlan = struct {
         return self.bytes[register * self.block ..][0..length];
     }
 
+    fn widenedInput(self: *const BlockPlan, input: usize, items: anytype) BlockValue {
+        const run = self.runInts(input, items.len);
+        for (run, items) |*slot, item| slot.* = item;
+        return .{ .ints = run };
+    }
+
     /// Register `register` as an instruction with result class `result`
     /// reads it: a byte run as it is for a byte result, and widened into the
     /// register's int slot, once a block, for any other.
@@ -3051,7 +3085,12 @@ const BlockPlan = struct {
                 .leaf_i64 => .{ .ints = heap.leafElements(.leaf_i64, operand.list)[start..][0..length] },
                 .leaf_f64 => .{ .reals = heap.leafElements(.leaf_f64, operand.list)[start..][0..length] },
                 .leaf_u8 => .{ .bytes = heap.leafElements(.leaf_u8, operand.list)[start..][0..length] },
-                else => unreachable, // `programCandidate` admits numeric leaves only.
+                // A char run is read as its codepoints, widened once a block
+                // into the input's int slot.
+                .leaf_char1 => self.widenedInput(input, heap.chars8(operand.list)[start..][0..length]),
+                .leaf_char2 => self.widenedInput(input, heap.chars16(operand.list)[start..][0..length]),
+                .leaf_char4 => self.widenedInput(input, heap.chars32(operand.list)[start..][0..length]),
+                else => unreachable, // `programCandidate` admits numeric and char leaves only.
             };
         }
         for (program.constants[0..program.constant_count]) |constant| views[constant.register] = BlockValue.of(constant.value);
@@ -3284,12 +3323,12 @@ fn ProgramValuesKernel(comptime inputs: usize) type {
 }
 
 /// Whether a two-input program can reduce `input` from `initial`, or from the
-/// list's own first element when `initial` is null: a numeric leaf and a
-/// numeric seed.
+/// list's own first element when `initial` is null: a numeric or char leaf
+/// and a numeric or char seed.
 pub fn programReduceCandidate(input: Value, initial: ?Value) bool {
     if (!programOperand(input) or input != .list) return false;
     const seed = initial orelse return true;
-    return seed == .int or seed == .float;
+    return seed == .int or seed == .float or seed == .char;
 }
 
 /// Runs a two-input program as `fold`, `fold1`, or `scan` runs its
