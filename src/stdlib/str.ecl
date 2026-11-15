@@ -118,20 +118,17 @@
  ("str.contains? expects a string and a string needle" checked-pair contains-valid?)
  `contains? def
 
- ### defp index-of-valid
- (string needle -- index : "Find a validated needle's first occurrence in a validated string.")
- (|s n| s n n len 0 =
-  (pop pop 0)
-  (split dup len 1 >
-   `domain error.new "str.index-of found no occurrence of the needle" error.with-message assert
-   first len)
-  if) `index-of-valid defp
-
  ### def index-of
  (string needle -- index :
   "Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and
    raise `` `domain `` when a nonempty needle is absent.")
- ("str.index-of expects a string and a string needle" checked-pair index-of-valid) `index-of def
+ ("str.index-of expects a string and a string needle" checked-pair
+  dup len 0 =
+  (pop pop 0)
+  (split dup len 1 >
+   `domain error.new "str.index-of found no occurrence of the needle" error.with-message assert
+   first len)
+  if) `index-of def
 
  ### defp replace-valid
  (string needle replacement -- string : "Replace occurrences in validated strings.")
@@ -144,18 +141,15 @@
  ("str.replace expects string, needle, and replacement strings" checked-triple replace-valid)
  `replace def
 
- ### defp repeat-valid
- (string count -- string : "Repeat a validated string a validated number of times.")
- (|s n| n 0 >=
-  `domain error.new "str.repeat requires a nonnegative count" error.with-message assert
-  s n n 0 > s len 0 > and
-  (over len * take)
-  (pop pop "")
-  if) `repeat-valid defp
-
  ### def repeat
  (string count -- string : "Concatenate `count` copies of a string; `count` must be nonnegative.")
- ("str.repeat expects a string and an integer count" checked-string-int repeat-valid) `repeat def
+ ("str.repeat expects a string and an integer count" checked-string-int
+  dup 0 >=
+  `domain error.new "str.repeat requires a nonnegative count" error.with-message assert
+  over len 0 > over 0 > and
+  (over len * take)
+  (pop pop "")
+  if) `repeat def
 
  ### def pad-left
  (string width -- string :
