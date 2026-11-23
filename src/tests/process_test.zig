@@ -105,7 +105,7 @@ test "process: common factories preserve byte streams and repeatable termination
     defer allocator.free(fixture_path);
     const program = try source(
         "proc.core.process {{executable \"{s}\" args (\"echo\")}} port.open `p set " ++
-            "p [0 1 255] proc.write p proc.close-input " ++
+            "p [0 1 255] proc.write p proc.stdin port.finish " ++
             "p 1 proc.read-stdout p 1 proc.read-stdout p 1 proc.read-stdout " ++
             "p proc.wait `code at p proc.wait `code at p port.close p port.close p type",
         .{fixture_path},
@@ -123,10 +123,10 @@ test "process: stdin stdout and stderr are byte endpoints and the old words comp
     const program = try source(
         "proc.core.process {{executable \"{s}\" args (\"echo\")}} port.open `p set " ++
             "p proc.stdin `w set p proc.stdout `r set " ++
-            "w [97 10 98 99 10 100] fd.write w fd.finish " ++
-            "r fd.read-line r fd.read-line r io.read-line r fd.read-line r fd.read-line " ++
-            "p proc.stderr 1 fd.read " ++
-            "p proc.wait `code at w (fd.close) cons @attempt `err at `kind at p port.close p type",
+            "w [97 10 98 99 10 100] stream.write w port.finish " ++
+            "r stream.read-line r stream.read-line r io.read-line r stream.read-line r stream.read-line " ++
+            "p proc.stderr 1 stream.read " ++
+            "p proc.wait `code at w (port.close) cons @attempt `err at `kind at p port.close p type",
         .{fixture_path},
     );
     defer allocator.free(program);
@@ -142,8 +142,8 @@ test "process: common factories preserve unicode arguments environment and worki
     const expected = "cwd=/\nprobe=é🌍\narg[0]=\narg[1]=λ\n";
     const program = try source(
         "proc.core.process {{executable \"{s}\" args (\"inspect\" \"\" \"λ\") cwd \"/\" env {{\"ECL_PROCESS_PROBE\" \"é🌍\"}}}} port.open `p set " ++
-            "p proc.core.stdout port.endpoint `r set [] (dup len {d} <) (r 8 fd.read cat) while chars " ++
-            "\"cwd=/\\nprobe=é🌍\\narg[0]=\\narg[1]=λ\\n\" match? r 8 fd.read p proc.wait `code at p port.close",
+            "p proc.core.stdout port.endpoint `r set [] (dup len {d} <) (r 8 stream.read cat) while chars " ++
+            "\"cwd=/\\nprobe=é🌍\\narg[0]=\\narg[1]=λ\\n\" match? r 8 stream.read p proc.wait `code at p port.close",
         .{ fixture_path, expected.len },
     );
     defer allocator.free(program);
@@ -188,10 +188,10 @@ test "process: common endpoints stream concurrently through one-byte buffers" {
     const program = try source(
         "proc.core.process {{executable \"{s}\" args (\"echo\")}} port.open `p set " ++
             "p proc.core.stdin port.endpoint `s set p proc.core.stdout port.endpoint `r set " ++
-            "p proc.core.stderr port.endpoint `d set s (|w| w [0 1 255] 30 take fd.write w port.finish) cons @spawn `writer set " ++
-            "[] (dup len 30 <) (r 8 fd.read cat) while [0 1 255] 30 take match? " ++
-            "writer task.await `ok at len s port.finish r 8 fd.read len r 8 fd.read len d 8 fd.read len " ++
-            "p proc.wait `code at p port.close s ([] fd.write) cons @attempt `err at `kind at",
+            "p proc.core.stderr port.endpoint `d set s (|w| w [0 1 255] 30 take stream.write w port.finish) cons @spawn `writer set " ++
+            "[] (dup len 30 <) (r 8 stream.read cat) while [0 1 255] 30 take match? " ++
+            "writer task.await `ok at len s port.finish r 8 stream.read len r 8 stream.read len d 8 stream.read len " ++
+            "p proc.wait `code at p port.close s ([] stream.write) cons @attempt `err at `kind at",
         .{fixture_path},
     );
     defer allocator.free(program);
@@ -207,8 +207,8 @@ test "process: common selectors borrow process resources and separate output fro
     defer allocator.free(fixture_path);
     const program = try source(
         "{{executable \"{s}\" args (\"split\" \"abcd\" \"wxyz\")}} proc.spawn `p set " ++
-            "p proc.core.stdout port.endpoint (|r| [] (dup len 4 <) r (8 fd.read cat) cons while chars) cons @spawn `out set " ++
-            "p proc.core.stderr port.endpoint (|r| [] (dup len 4 <) r (8 fd.read cat) cons while chars) cons @spawn `err set " ++
+            "p proc.core.stdout port.endpoint (|r| [] (dup len 4 <) r (8 stream.read cat) cons while chars) cons @spawn `out set " ++
+            "p proc.core.stderr port.endpoint (|r| [] (dup len 4 <) r (8 stream.read cat) cons while chars) cons @spawn `err set " ++
             "out task.await `ok at first err task.await `ok at first p proc.wait `code at p port.close",
         .{fixture_path},
     );
@@ -225,14 +225,14 @@ test "process: common and domain readers share exclusion and cancellation restor
     const program = try source(
         "proc.core.process {{executable \"{s}\" args (\"echo\")}} port.open `p set " ++
             "p proc.core.stdin port.endpoint `s set p proc.core.stdout port.endpoint `r set " ++
-            "(r 1 fd.read) @spawn `a set (p 1 proc.read-stdout) @spawn `b set " ++
+            "(r 1 stream.read) @spawn `a set (p 1 proc.read-stdout) @spawn `b set " ++
             "a b pair task.await-any `err at `kind at swap pop a task.cancel b task.cancel " ++
-            "a task.await pop b task.await pop s [9] fd.write r (1 fd.read) cons @spawn `readback set " ++
+            "a task.await pop b task.await pop s [9] stream.write r (1 stream.read) cons @spawn `readback set " ++
             "p wrap (|q| s port.finish readback task.await `ok at first q proc.wait pop q port.close) @give task.await `ok at first " ++
-            "r ([] fd.write) cons @attempt `err at `kind at s (1 fd.read) cons @attempt `err at `kind at " ++
+            "r ([] stream.write) cons @attempt `err at `kind at s (1 stream.read) cons @attempt `err at `kind at " ++
             "r (port.finish) cons @attempt `err at `kind at " ++
             "r wrap (pop) pair (@give) cat @attempt `err at `kind at " ++
-            "r 1 fd.read len r type",
+            "r 1 stream.read len r type",
         .{fixture_path},
     );
     defer allocator.free(program);
@@ -251,9 +251,9 @@ test "process: shared port operations linearize and converge" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);
     const program = try source(
-        "`proc (spawn write close-input read-stdout wait) import " ++
+        "`proc (spawn stdin write read-stdout wait) import " ++
             "{{executable \"{s}\" args (\"echo\")}} spawn " ++
-            "dup [0 1 255] write dup [2 3] write dup close-input " ++
+            "dup [0 1 255] write dup [2 3] write dup stdin port.finish " ++
             "dup 16 read-stdout swap wait",
         .{fixture_path},
     );
@@ -327,7 +327,7 @@ test "process: registered operations recover the wait lane and preserve result c
     defer allocator.free(fixture_path);
     const program = try source(
         "proc.core.process {{executable \"{s}\" args (\"ready\")}} port.open `p set " ++
-            "p proc.core.stdout port.endpoint 1 fd.read pop " ++
+            "p proc.core.stdout port.endpoint 1 stream.read pop " ++
             "p proc.core.wait [] port.begin `first set first port.cancel " ++
             "first (port.await) cons @attempt `err at `kind at first port.close " ++
             "p proc.core.wait [] port.begin `second set " ++
@@ -352,8 +352,8 @@ test "process: registered operations reject requests before affecting the proces
     const program = try source(
         "proc.core.process {{executable \"{s}\" args (\"echo\")}} port.open `p set " ++
             "p (proc.core.kill [1] port.call) cons @attempt `err at `kind at " ++
-            "p proc.core.stdin port.endpoint dup [97] fd.write port.finish " ++
-            "p proc.core.stdout port.endpoint 1 fd.read " ++
+            "p proc.core.stdin port.endpoint dup [97] stream.write port.finish " ++
+            "p proc.core.stdout port.endpoint 1 stream.read " ++
             "p proc.core.wait [] port.call `code at p port.close " ++
             "p (proc.core.wait [] port.call) cons @attempt `err at `kind at",
         .{fixture_path},
@@ -388,7 +388,7 @@ test "process: wait observes broken input after the final accepted write" {
     defer allocator.free(fixture_path);
     const program = try source(
         "{{executable \"{s}\" args (\"close-stdin\")}} proc.spawn `p set " ++
-            "p 1 proc.read-stdout p [1] proc.write p proc.close-input " ++
+            "p 1 proc.read-stdout p [1] proc.write p proc.stdin port.finish " ++
             "(p proc.wait) @attempt `err at `kind at p port.close",
         .{fixture_path},
     );
@@ -454,7 +454,7 @@ test "process: natural exit preserves backpressured output until readers drain" 
         "(({{executable \"{s}\" args (\"large\" \"16\" \"0\")}} proc.spawn dup proc.wait `kind at `exited match? {{kind user msg \"leader termination\"}} assert " ++
             "[] over 16 proc.read-stdout (dup len 0 >) (|p bytes chunk| p bytes chunk cat p 16 proc.read-stdout) while pop swap port.close " ++
             "[111] 16 take match? {{kind user msg \"natural-exit output preserved\"}} assert) " ++
-            "`delayed-drain test) `process.acceptance @defm tests first @test dup `ok dict.has? (pop) (`err at raise) if",
+            "`delayed-drain test) `process.acceptance @defm tests first @test dup `ok has? (pop) (`err at raise) if",
         .{fixture_path},
     );
     defer allocator.free(program);

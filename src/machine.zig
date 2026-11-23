@@ -211,9 +211,9 @@ const ErrorDataKey = enum {
     observed,
     expected,
     index,
+    key,
     left,
     right,
-    @"destination-exists",
     scope,
     operation,
     root,
@@ -392,7 +392,7 @@ const EnteredWord = struct {
 /// only `entered` and `borrowed` set them, which the accessors below read.
 const Activation = struct {
     word: intern.TraceWord,
-    /// The address `hold` names: a `*Header` for `borrowed` and `owned`, a
+    /// The address `hold` refers to: a `*Header` for `borrowed` and `owned`, a
     /// `*const env.Executable` for `definition`, and zero for `none`.
     origin: usize = 0,
     /// The calling form's index in that code.
@@ -495,7 +495,7 @@ comptime {
 }
 /// A frame index, or none, in one word: three of these ride on every
 /// evaluation, where an optional would spend a second word on each flag.
-/// Frame counts stay below `max_frame_count`, so its value never names a
+/// Frame counts stay below `max_frame_count`, so its value never denotes a
 /// frame.
 fn MaybeIndex(comptime Index: type) type {
     return enum(u32) {
@@ -563,7 +563,7 @@ const Eval = struct {
     /// Iterative continuations mint a fresh boundary per element; explicitly
     /// tail-transparent control quotations inherit the enclosing boundary.
     application_tail: MaybeIndex(ApplicationFrameIndex) = .none,
-    /// This Eval was entered through a dynamic `call` while in the named
+    /// This Eval was entered through a dynamic `apply` while in the named
     /// application. If it completes or transfers tail control, its existing
     /// code-header ownership becomes the application's selected quotation.
     application_selection: MaybeIndex(ApplicationFrameIndex) = .none,
@@ -646,7 +646,7 @@ const Eval = struct {
         return self.site.scope;
     }
 };
-/// A module construction boundary. The body builds the image `@defm` named
+/// A module construction boundary. The body builds the image `@defm` declared
 /// before it ran; completion seals and publishes that image.
 const ModuleBoundary = struct {
     image: modules.OwnedImage,
@@ -876,7 +876,7 @@ pub const ExecutionSite = struct {
     }
 
     /// The site of a quotation this activation applies as a value: a dynamic
-    /// `call`, a combinator's quotation, an `@attempt` body, or a resumed
+    /// `apply`, a combinator's quotation, an `@attempt` body, or a resumed
     /// qualified load. It runs in the same root with the same right to
     /// define. The value may have come from any caller, so it does not
     /// inherit embedded registration trust; a resumed load sets the
@@ -965,7 +965,7 @@ const ApplicationMode = union(enum) {
     in_place: StackWindow,
     /// The floor the application's hard floor was set over.
     isolated: paging_api.Beneath,
-    /// The floor lives in the combinator state the frame's context names,
+    /// The floor lives in the combinator state the frame's context points to,
     /// which stays in place until the application resumes.
     paging: *PagingFloor,
 };
@@ -980,7 +980,7 @@ const ApplicationFrame = struct {
     activation: Activation,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
-    /// Borrowed from the combinator state `context` names.
+    /// Borrowed from the combinator state `context` points to.
     plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         self.activation.release(releases);
@@ -1128,7 +1128,7 @@ pub const TlsTrust = struct {
 pub const Environ = @import("startup_environment.zig").View;
 
 /// Where standard input stands at session start: data a program may read
-/// through `fd.in`, or the program source itself, which `fd.in` refuses.
+/// through `stream.in`, or the program source itself, which `stream.in` refuses.
 pub const StandardInput = struct {
     pub const Availability = standard_streams.Availability;
 };
@@ -1141,7 +1141,7 @@ pub const ParkResume = park_api.ParkResume;
 /// fiber destroys the driver before committing that value to the stack,
 /// so stack-growth failure always has exactly one resumable owner.
 ///
-/// `stepped` and `yielded` separate progress from surrender, and a yield names
+/// `stepped` and `yielded` separate progress from surrender, and a yield states
 /// why the driver ends its turn; `turn_core` decides what the fiber does
 /// with either.
 pub const WorkProgress = union(enum) {
@@ -1473,7 +1473,7 @@ pub const Loading = opaque {
         return self.fiber().inherited.libraries().find(name);
     }
 
-    /// Names the module whose deferred import the pending failure is about.
+    /// Records the module whose deferred import the pending failure is about.
     pub fn addErrorImporter(self: *Loading, importer: intern.ModuleName) void {
         self.fiber().pendingFailure().addData(.importer, .{ .symbol = .{ .name = intern.moduleId(importer) } });
     }
@@ -2525,9 +2525,16 @@ pub const Fiber = struct {
         return .init(self.inherited.registry, self.inherited.module_snapshot, self.inherited.libraries(), self.current.?.site.registration_provenance, name);
     }
 
-    pub fn publicationRegistry(self: *const Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) *modules.Registry {
-        if (provenance == .source and !provenance.source.exports(name)) return provenance.source.registry();
-        return self.inherited.registry;
+    /// A mapped source file registers only the modules its artifact exports;
+    /// code with no source identity registers any name.
+    pub fn refuseUnexportedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
+        const source = provenance.sourceScope() orelse return;
+        if (source.exports(name)) return;
+        return self.failFmt(
+            .domain,
+            "module `{s}` is not exported by its source file `{s}`",
+            .{ intern.get(intern.moduleId(name)), source.location().relative_path },
+        );
     }
     /// Consumes `source` on success and failure.
     pub fn parseSourceOwned(self: *Fiber, source: []u8) MachineError!void {
@@ -2542,11 +2549,6 @@ pub const Fiber = struct {
     /// while letting a builtin module attach the one datum it owns.
     pub fn addErrorPath(self: *Fiber, path: Value) void {
         self.pendingFailure().addData(.path, path);
-    }
-    /// Tags the one absent-only publication conflict that an immutable
-    /// caller may recover after independently confirming the winner.
-    pub fn addErrorDestinationExists(self: *Fiber) void {
-        self.pendingFailure().addData(.@"destination-exists", .{ .int = 1 });
     }
     /// The stable data dictionary every capability-gated filesystem failure
     /// carries: the public operation, the named root and path (or both ends of
@@ -2590,11 +2592,6 @@ pub const Fiber = struct {
             self.inherited.runtime().environ.entries;
         return .{ .entries = entries, .name = name };
     }
-    pub fn undefinedModule(self: *Fiber, name: u32) MachineError {
-        const failure = self.failFmt(.undefined_word, "undefined module `{s}`", .{intern.get(name)});
-        self.pendingFailure().addData(.name, .{ .symbol = .{ .name = name } });
-        return failure;
-    }
     /// A resolution miss, reported as the reference the program actually
     /// wrote, including a dotted one whose module never loaded, with the
     /// lookup chain that was searched.
@@ -2632,7 +2629,7 @@ pub const Fiber = struct {
         return self.failUnderflowOf(self.activeWordName(), count);
     }
     /// A locals binder that cannot take its values. The reader lowered it into
-    /// the reserved `_ll`, which names nothing a program wrote. Opening a
+    /// the reserved `_ll`, which refers to nothing a program wrote. Opening a
     /// word's body, the binder is that word's arity check, so the word fails
     /// as a primitive would: it is the failing word, and its body activation,
     /// which never got past entry, is not repeated in the trace. Opening any
@@ -2967,6 +2964,13 @@ pub const Fiber = struct {
         self.pendingFailure().addData(.index, .{ .int = @intCast(index) });
         return failure;
     }
+    /// Raises a `` `domain `` failure for a dict lookup that missed, carrying
+    /// the key that was not found.
+    pub fn failMissingKey(self: *Fiber, message: []const u8, key: Value) MachineError {
+        const failure = self.fail(.domain, message);
+        self.pendingFailure().addData(.key, key);
+        return failure;
+    }
     /// Reports the two leading-axis lengths that failed to conform.
     pub fn conformError(self: *Fiber, left: usize, right: usize) MachineError {
         const failure = self.failFmt(
@@ -3130,7 +3134,7 @@ pub const Fiber = struct {
 
     /// Propagates one application's authority through ordinary tail word
     /// dispatch without changing its selected quotation. Only a dynamic
-    /// `call` marks code for ownership transfer into the candidate.
+    /// `apply` marks code for ownership transfer into the candidate.
     fn tailApplicationIndex(self: *Fiber) MaybeIndex(ApplicationFrameIndex) {
         const current = if (self.current) |*running| running else return .none;
         if (current.application_tail == .none) return .none;
@@ -4280,7 +4284,7 @@ const LookupDispatchDriver = struct {
     }
 };
 
-/// One explicit lookup of a supplied symbol, in the root its link names and
+/// One explicit lookup of a supplied symbol, in the root its link identifies and
 /// against the current view: what reflection and `execute` resolve.
 pub const ExplicitLookup = struct {
     context: binder.Context,
@@ -4325,20 +4329,6 @@ pub const Reflected = struct {
         if (self.definition.lifetime == .counted) self.definition.release(self.releases);
         self.* = undefined;
     }
-
-    /// The core definition this one shadows, if any: what `which` reports.
-    pub fn shadows(self: *const Reflected, environment: *env.Env, name: u32) ?intern.TraceWord {
-        if (self.definition.root == .core) return null;
-        var cursor = environment.coreLookup(@fromBackingInt(name));
-        const entry = poll_api.drive(?env.Entry, &cursor, .{}) orelse return null;
-        return switch (entry) {
-            .definition => |definition| if (definition != self.definition and definition.visibility == .public)
-                .plain(name)
-            else
-                null,
-            .alias => null,
-        };
-    }
 };
 
 /// What one definition is, as dispatch and recognition see it.
@@ -4358,7 +4348,7 @@ fn definitionOrigin(definition: *const env.Definition, home: ?*const modules.Mod
     };
 }
 
-/// How a call names a definition: a module-local one by its home's spelling,
+/// How a trace identifies a called definition: a module-local one by its home's spelling,
 /// anything else by the name the call used.
 fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.ModuleHome, name: u32) intern.TraceWord {
     if (home) |owner| if (definition.traceWord()) |local| return homeTraceWord(owner, local);
@@ -4390,7 +4380,7 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
         .source => |executable| try scheduleWord(self, executable, .{ .word = trace_word, .attribution = definition.attribution }, home, cross_home_effect),
         .builtin => |primitive| {
             // A declared effect is the called word's contract, so its check
-            // names that word; a failure inside the builtin names it too.
+            // reports that word; a failure inside the builtin reports it too.
             if (cross_home_effect) |effect| try self.beginInvocation(effect, trace_word);
             try invokeBuiltin(self, trace_word, primitive);
         },
@@ -4619,7 +4609,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         return self.fail(.domain, "application suspension has no installed work");
                     };
                     // A frame resumed over a paging floor suspends in place:
-                    // the floor beneath is active again, and the frame names
+                    // the floor beneath is active again, and the frame determines
                     // the launch of whatever it applies next.
                     if (launch == .isolated or
                         @intFromPtr(suspension) != @intFromPtr(installed.context))

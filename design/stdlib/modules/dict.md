@@ -9,12 +9,12 @@
 # => {args ["inspect" "alpha"]}
 ```
 
-### from-lists
+### zip
 
 #### Examples
 
 ```ecl
-[a b] [1 2] dict.from-lists
+[a b] [1 2] dict.zip
 # => {a 1 b 2}
 ```
 

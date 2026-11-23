@@ -5,10 +5,10 @@
 ## Prelude and core
 
 ### \*
-`( x y -- z )` — Multiply. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Evaluate `x` * `y`
 
 ### \*%
-`( x y -- z )` — Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float is `` `type ``. With `band`, arithmetic modulo any power of two.
+`( x y -- z )` — Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``.
 
 #### Examples
 
@@ -20,13 +20,13 @@
 ```
 
 ### \*file\*
-`( -- string )` — Return the source name attached to the currently executing reader-authored occurrence. A definition reports the file that authored its body even when another file calls it. `` `domain `` in runtime-assembled code with no source provenance; there is no fallback to the caller's file.
+`( -- string )` — Return the source name attached to the currently executing reader-authored occurrence.
 
 ### \*module\*
-`( -- module-name )` — Return the name of the module whose code is running: the name `@defm` published it under, which a call through an alias reports too. A construction body reports the name it is being built under. `` `domain `` at top level, or for a quotation that escaped its module.
+`( -- module-name )` — Return the name of the module whose code is running.
 
 ### +
-`( x y -- z )` — Add. A char is its codepoint: `\a 1 +` is `98`. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Evaluate `x` + `y`
 
 #### Examples
 
@@ -36,7 +36,7 @@
 ```
 
 ### +%
-`( x y -- z )` — Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float is `` `type ``.
+`( x y -- z )` — Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``.
 
 #### Examples
 
@@ -46,34 +46,31 @@
 ```
 
 ### -
-`( x y -- z )` — Subtract. A char is its codepoint: `\b \a -` is `1`. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Evaluate `x` - `y`
 
 ### -%
-`( x y -- z )` — Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float is `` `type ``.
+`( x y -- z )` — Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``.
 
 ### /
-`( x y -- z )` — Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
+`( x y -- z )` — Evaluate `x` / `y`. Any nonzero number / 0 is signed inf; 0 / 0 is `` `domain ``
 
 ### <
-`( x y -- bool )` — Ascending comparison, producing 0/1 masks.
+`( x y -- bool )` — Evaluate `x` < `y`.
 
 ### <=
-`( x y -- bool )` — Compare conforming values for less-than-or-equal order.
-
-### <>
-`( x y -- bool )` — Compare conforming values for inequality.
+`( x y -- bool )` — Evaluate `x` <= `y`.
 
 ### =
-`( x y -- bool )` — Equality; numbers compare numerically across int and float, symbols by name, and a symbol equals no number. Whole-value equality is `match?`.
+`( x y -- bool )` — Pervasively evaluate `x` = `y`.
 
 ### >
-`( x y -- bool )` — Descending comparison, producing 0/1 masks.
+`( x y -- bool )` — Evaluate `x` > `y`.
 
 ### >=
-`( x y -- bool )` — Compare conforming values for greater-than-or-equal order.
+`( x y -- bool )` — Evaluate `x` >= `y`.
 
 ### @attempt
-`( quotation -- result )` — Run the quotation as a new unit on an empty, isolated stack. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`. To start the unit on values, build them into the quotation: `values (q) cat @attempt`.
+`( quotation -- result )` — Run the quotation as a new unit on an empty, isolated stack. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`.
 
 #### Examples
 
@@ -83,16 +80,10 @@
 ```
 
 ### @defm
-`( body module-name -- )` — The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on an empty stack and a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.
-
-The name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``(body) `name @defm``. See Modules.
+`( body module-name -- )` — Construct a module image and register it under `module-name`. The body is run in a new unit.
 
 ### @give
-`( ports quotation -- task )` — Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The child stack starts with the ports, in list order.
-
-Including a port in `ports` which isn't owned by the calling unit is `` `domain ``, as is giving a closed port or the same port twice. At most 16 ports may be given at once; more is `` `domain ``. The transfer is all-or-nothing: on any refusal, no port changes owner.
-
-Ownership doesn't determine what unit(s) a port is accessible from, but which unit controls its lifetime. See [Concurrency](SPEC.md#concurrency).
+`( ports quotation -- task )` — Create a new task and evaluate `quotation`. The tasks's stack will be seeded with the contents of `ports`. Every port in `ports` additionally has its ownership transferred to the new task; the port's lifetime is determined by the lifetime of the task that owns it.
 
 #### Examples
 
@@ -103,10 +94,10 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### @load
-`( path -- )` — Read a source file and run it as one stack-isolated unit on an empty stack. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
+`( path -- )` — Evaluate the source file at `path`. The file is run in a new unit.
 
 ### @spawn
-`( quotation -- task )` — Run the quotation concurrently on an empty child stack. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
+`( quotation -- task )` — Create a new task and evaluate `quotation`.
 
 #### Examples
 
@@ -116,19 +107,19 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### @test
-`( descriptor -- result )` — Test-Session-only protected invocation. Validate a pure descriptor returned by `tests`, late-bind its module/name and optional source identifier to the current catalog, and run the body as a fresh isolated Unit under that registration's private home and durable state. Return exactly `{ok (values)}` or `{err error}`; a missing current test is a reified error. Ordinary Sessions receive `` `domain ``.
+`( descriptor -- result )` — When in a test session, execute the test described by `descriptor` in a new unit. Returns `{ok (values)}` or `{err error}`.
 
 ### above
-`( ... (q: ... -- ...) -- ... )` — Run a quotation, then restore the values it consumed above its results, in their original order. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) above` is `3 1 2`, and `1 (dup) above` is `1 1 1`. A `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual. `(q) above` leaves the quotation's results beneath the restored values; `below` leaves them on top.
+`( ... (q: ... -- ...) -- ... )` — Evaluate `q`, then restore the values it consumed above its results, in their original order.
 
 ### abs
-`( x -- y )` — Return the absolute value of `x`.
+`( x -- y )` — Evaluate the absolute value of `x`.
 
 ### alias
-`( short name -- )` — Register an unqualified short registry name for a module name, possibly dotted; aliasing an alias targets its module. Aliases and module names may not collide in either direction.
+`( name short -- )` — Bind `short` in the current scope as an alias of the module name `name`: a qualified word written in this scope whose module part is exactly `short` denotes `name` instead, resolved at each call. The alias is private to the scope and never exported. Inside a module it is legal only during construction.
 
 ### all?
-`( list (a -- bool) -- bool )` — Return 1 when the predicate returns 1 for every element; otherwise return 0.
+`( list (p: a -- bool) -- bool )` — Return 1 when `p` returns 1 for every element of `list`; otherwise return 0.
 
 #### Examples
 
@@ -138,19 +129,22 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### and
-`( x y -- bool )` — Compute boolean and over 0 and 1 values.
+`( x y -- bool )` — Evaluate boolean `x` and `y`.
 
 ### any?
-`( list (a -- bool) -- bool )` — Return 1 when the predicate returns 1 for at least one element; otherwise return 0.
+`( list (p: a -- bool) -- bool )` — Return 1 when `q` returns 1 for at least one element of `list`; otherwise return 0.
+
+### apply
+`( quotation -- ... )` — Run `quotation` on the current stack.
 
 ### args
 `( -- arguments )` — The process arguments following the script or source, as a list of strings.
 
 ### assert
-`( bool error -- )` — Raise an error dict unless the condition is 1. A helper: the failure is reported where `assert` was called.
+`( bool error -- )` — Raise `error` unless `bool` is 1.
 
 ### at
-`( collection key -- value )` — Index a list or look up a dict key. Pervades over nested list selectors, preserving their shape, so an index vector selects: `[10 20 30] [2 0] at` is `[30 10]`. A dictionary key is always one whole value, including when that value is a list. A missing dict key is an error.
+`( collection key -- value )` — Index a list or look up a dict key. A list pervades over the selector; a dict takes it as one whole key.
 
 #### Examples
 
@@ -160,40 +154,40 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### at-path
-`( ds l -- x )` — Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty path returns `ds` unchanged.
+`( ds path -- x )` — Follow `path` through `ds` via `at`; an empty path returns `ds` unchanged.
 
 ### atan2
-`( y x -- z )` — Two-argument arctangent; returns float.
+`( y x -- z )` — Two-argument arctangent.
 
 ### band
-`( x y -- z )` — Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``.
+`( x y -- z )` — Bitwise and.
 
 ### below
-`( ... (q: ... -- ...) -- ... )` — Run a quotation, then restore the values it consumed below its results, in their original order: the stack is as it was, with the results on top. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) below` is `1 2 3`, and `1 2 3 ((+) dip) below` is `1 2 3 3`, since a `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual.
+`( ... (q: ... -- ...) -- ... )` — Evaluate `q`, then restore the values it consumed below its results, in their original order.
 
 ### bi
-`( ... p q -- ... )` — Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s: a two-quotation `cleave`, with the same consumption rule.
+`( ... p q -- ... )` — Apply `p` and `q` to the same view of the stack. Push `p`'s results, followed by `q`'s results.
 
 ### bnot
-`( x -- y )` — Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`.
+`( x -- y )` — Bitwise not.
 
 ### bor
-`( x y -- z )` — Bitwise or. See `band`.
+`( x y -- z )` — Bitwise or.
 
 ### both
-`( x y q -- ... )` — Apply one quotation to each of two operands.
+`( x y q -- ... )` — Apply `q` to `x` and `y`.
 
 ### bsl
-`( x count -- y )` — Shift the bit pattern left by `count` places, truncating bits shifted off the top rather than raising `` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is `` `domain ``.
+`( x count -- y )` — Shift the bit pattern left by `count` places, truncating bits shifted off the top.
 
 ### bsr
-`( x count -- y )` — Shift the bit pattern right by `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr` produce `maxint`. A `count` outside `0..63` is `` `domain ``.
+`( x count -- y )` — Shift the bit pattern right by `count` places, filling zeros from the top.
 
 ### bxor
-`( x y -- z )` — Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns.
+`( x y -- z )` — Bitwise exclusive or.
 
 ### bytes
-`( value -- bytes )` — Encode a UTF-8 string as a byte list: an integer list whose elements are 0 through 255. A byte list is returned unchanged. Any other value is `` `type ``. Inverse of `chars`; see [Conversions](SPEC.md#conversions).
+`( value -- bytes )` — Encode a UTF-8 string as a byte list: an integer list whose elements are 0 through 255.
 
 #### Examples
 
@@ -202,17 +196,17 @@ wrap (net.local-address `port at 0 >) @give task.await
 # => [104 195 169]
 ```
 
-### call
-`( quotation -- ... )` — Run a quotation on the current stack. A data list pushes its elements.
+### bytes?
+`( value -- bool )` — Return 1 when the value is a byte list, a list of integers in `0...255` such as `bytes` returns and `stream.write` accepts as one piece, and 0 for anything else, including a string.
 
 ### cat
-`( left right -- list )` — Concatenate two lists.
+`( left right -- list )` — Concatenate `left` and `right`.
 
 ### ceil
-`( x -- integer )` — Round up; the result is int64, `` `overflow `` outside its range.
+`( x -- integer )` — Round up to the nearest integer.
 
 ### char
-`( value -- chars )` — Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, whatever its length, and a list of chars or codepoints becomes the string of those chars. An int outside the Unicode scalar range, or a list element outside it, is `` `domain ``; any other value is `` `type ``.
+`( value -- chars )` — Convert a value to a char. Pervades, so its behaviour when applied to a list is equivalent to `chars`.
 
 #### Examples
 
@@ -222,7 +216,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### chars
-`( value -- string )` — Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. See [Conversions](SPEC.md#conversions).
+`( value -- string )` — Return a value's text content as a string.
 
 #### Examples
 
@@ -232,13 +226,13 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### clamp
-`( value lower upper -- bounded )` — Constrain a value to the inclusive interval between `lower` and `upper`.
+`( value lower upper -- bounded )` — Constrain `value` to the inclusive interval between `lower` and `upper`.
 
 ### cleave
-`( ... quotations -- ... )` — Apply each quotation in `quotations`, in order, to the stack as it was when the list was consumed. Each quotation consumes exactly what its words require, and its results are held aside, so every quotation starts from the same inputs and sees the stack beneath them rather than earlier results. Afterwards the inputs any quotation consumed are dropped and all the results are pushed in order. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list leaves the stack unchanged.
+`( ... quotations -- ... )` — Apply each quotation in `quotations` to the same view of the stack. Push each quotation's results to the stack in order.
 
 ### cmp
-`( left right -- ordering )` — Three-way whole-value ordering, −1/0/1; **not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain: numbers (exact across int/float), chars by codepoint, and lists, which compare lexicographically: corresponding elements by `cmp` until the first nonzero result, then by length. Strings are char lists, so they order by codepoint. Anything else, including cross-kind pairs, is `` `type ``; elements after the first difference are never compared. Equivalent on two lists to `(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe for ordering: `-` errors on int64 overflow where an ordering must be total.
+`( left right -- ordering )` — Return -1 if `left` < `right`, 0 if `left` = `right`, and 1 if `left` > `right`.
 
 #### Examples
 
@@ -248,7 +242,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### collect
-`( quotation -- list )` — Run a quotation on an empty isolated stack and return the results as a list.
+`( quotation -- list )` — Run `quotation` on an empty stack and return the results as a list.
 
 #### Examples
 
@@ -258,7 +252,9 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### cond
-`( clauses -- ... )` — The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Each test runs over a paging floor against the stack as it was when the clause list was consumed: it takes from the stack only what its words require. Only its top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded and what the test took is restored. The first true test selects its action; otherwise the final else runs, in either case from the original stack. Stack rollback does not roll back definitions, IO, or other non-stack effects performed by tests; definition permission follows the invoking unit.
+`( clauses -- ... )` — Conditionally evaluate the first action in `clauses` whose predicate is true.
+
+`clauses` consists of an odd number of quotations; every odd quotation (except the last) is a predicate, and is directly followed by its associated action. If no predicate evaluates to true, then evaluate the last quotation (`else`). Each quotation runs against the same view of the stack.
 
 #### Examples
 
@@ -268,33 +264,25 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### cons
-`( value list -- list )` — Prepend `value` to the left end of `list` as data: when the list runs, it pushes `value`. A symbol therefore enters as a quoted occurrence rather than a word; `execute` runs a symbol a quotation pushes.
-
-```
-Ex:
-  3 (+) cons
-(3 +)
-  `w () cons
-(`w)
-```
+`( value list -- result )` — Prepend `value` to the left end of `list`.
 
 #### Examples
 
 ```ecl
-4 3 (+) cons call
+4 3 (+) cons apply
 # => 7
 ```
 
 ```ecl
-`w (dup) cons call
+`w (dup) cons apply
 # => w w
 ```
 
 ### cos
-`( x -- y )` — Cosine; float transcendental.
+`( x -- y )` — Evaluate the cosine of `x`.
 
 ### cut
-`( list starts -- pieces )` — Split a list into one piece per start index. Each piece runs from its start up to the next start, and the last runs to the end of the list; elements before the first start belong to no piece. Starts must be integers from zero through the length, in nondecreasing order, so equal starts give empty pieces. A start out of range or below its predecessor fails with `` `domain `` at that start's position. Strings cut into strings.
+`( list indices -- pieces )` — Split `list` into sublists starting at every element of `indices`.
 
 #### Examples
 
@@ -306,34 +294,34 @@ Ex:
 ```
 
 ### def
-`( ... body name -- )` — An optional annotation may sit beneath the body. Bind a quotation to a public word, with optional effect and documentation metadata. See [Definition annotations](SPEC.md#definition-annotations) for the annotation forms and validation; see [Modules](SPEC.md#modules) for module-context requirements.
+`( ... body name -- )` — Bind `name` to `body` in the current scope. Optionally, consume an annotation quotation below the body as binding metadata.
 
 ### defp
-`( ... body name -- )` — An optional annotation may sit beneath the body. Bind a private module word, with optional effect and documentation metadata. A top-level `defp` is an error.
+`( ... body name -- )` — Bind `name` to `body` in the current scope. This is only valid in a module body, and prevents the binding from being accessed outside of the module image. Optionally, consume an annotation quotation below the body as binding metadata.
 
 ### del
-`( collection selector -- collection )` — Functionally remove list positions through a pervasive selector, or one whole-value dictionary key. List selector leaves are nonnegative in-bounds integer positions in the original list; duplicates remove a position once, and the relative order of retained elements is unchanged. An empty selector returns the list unchanged. A missing dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a list of whole dictionary keys.
+`( collection selector -- collection )` — Remove the element at `selector` inside of `collection`. When `collection` is a list, selector behaviour is pervasive; when `collection` is a dict, `selector` is treated as a whole-value key.
 
 ### dip
-`( x (q: ... -- ...) -- ... x )` — Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results. Inside `above` or `below`, a protected value taken from beneath their floor returns as the original it was, so protecting a value is not consuming it.
+`( x (q: ... -- ...) -- ... x )` — Run a quotation beneath a protected top stack value: evaluate `q` with `x` removed, then push `x` on top of its results.
 
 ### dip-n
-`( ... (q: ... -- ...) n -- ... )` — Run a quotation beneath the top `n` stack values: `q` runs with them removed, then they are pushed back in their original order after its results. `n` must be a nonnegative int, or the word fails with `` `type `` or `` `domain `` before anything is removed. `0 dip-n` is `call`, and `1 dip-n` is `dip`.
+`( ... (q: ... -- ...) n -- ... )` — Run a quotation beneath the top `n` stack values: evaluate `q` with them removed, then they push them back in their original order after its results.
 
 ### dip2
-`( x y (... -- ...) -- ... x y )` — Run a quotation beneath the top two stack values, then push them back in their original order after its results: `2 dip-n`.
+`( x y (q: ... -- ...) -- ... x y )` — Run `q` beneath `x y`, then push `x y` back in their original order after its results.
 
 ### distinct
-`( list -- list )` — First occurrence of each distinct value, in input order. Equivalent to `group dict.keys`.
+`( list -- list )` — Return a list with the first occurrence of each distinct element of `list`, in order.
 
 ### div
-`( x y -- z )` — Checked integer division. Division by zero is `` `domain ``.
+`( x y -- z )` — Evaluate `x` / `y`, with a floored integer result.
 
 ### doc
-`( name -- string )` — Return the canonical documentation string of a resolved binding. Missing documentation is `` `domain ``.
+`( name -- string )` — Return the canonical documentation string of `name`.
 
 ### drop
-`( list count -- list )` — Remove `count` elements from the front, or from the end when negative. (The stack word is `pop`.)
+`( list count -- result )` — Remove the first `count` elements of `list`, or the last `count` if `count` is negative.
 
 ### dup
 `( x -- x x )` — Duplicate the top stack value.
@@ -342,7 +330,7 @@ Ex:
 `( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
 
 ### each
-`( collection (a -- b) -- collection )` — For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``.
+`( collection (q: a -- b) -- collection )` — Evaluate `q` against every element in `collection`, collecting the results of each application in order in a collection of the same type. When `collection` is a dict, then `a` is a value in `collection`, and it's mapped back to the same key in the result.
 
 #### Examples
 
@@ -355,16 +343,16 @@ Ex:
 ```
 
 ### each-prior
-`( list seed (current prior -- result) -- list )` — Apply the quotation to each element and its predecessor, left to right, using the explicit seed as the predecessor of the first element.
+`( list seed (q: prior current -- result) -- list )` — Apply `q` to each successive pair of elements in `list`, using `seed` as the predecessor of the first element.
 
 ```
-Ex:
-  [12 13 11] 10 (-) each-prior
-[2 1 -2]
+ Ex:
+   [12 13 11] 10 (-) each-prior
+ [-2 -1 2]
 ```
 
 ### effect
-`( name -- annotation )` — Return the declared stack effect of a resolved binding as an annotation such as `(x y -- z)`, or `()` when it declares none.
+`( name -- annotation )` — Return the stack effect of `name`, or `()`.
 
 #### Examples
 
@@ -374,29 +362,29 @@ Ex:
 ```
 
 ### empty?
-`( list -- bool )` — Return 1 when a list has no elements and 0 otherwise.
+`( list -- bool )` — Return 1 when `list` has no elements and 0 otherwise.
 
 ### execute
-`( word -- ... )` — Evaluate a symbol's binding and dispatch. Non-symbols are `` `type ``; missing words are `` `undefined-word ``.
+`( word -- ... )` — Evaluate a symbol's binding and dispatch.
 
 ### exit
-`( status -- )` — Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status.
+`( status -- )` — Called from the root unit, cancel and quiesce all descendants, then terminate the process with the given status.
 
 ### exp
-`( x -- y )` — Natural exponential; float transcendental.
+`( x -- y )` — Evaluate e ^ `x`.
 
 ### exports
-`( module-name -- names )` — Return the public words of a module as a list of symbols in codepoint order, loading an embedded or mapped module on first mention. `` `core exports `` lists core's builtins and prelude words. An invalid module name is `` `domain ``; an unknown one is `` `undefined-word ``.
+`( module-name -- names )` — Return the public words of a module as a list of symbols in codepoint order.
 
 #### Examples
 
 ```ecl
-`archive exports
-# => (next-member open-tgz read-member sha256 unpack-tgz)
+`tar exports
+# => (read unpack)
 ```
 
 ### filter
-`( list (a -- count) -- matches )` — Apply the predicate to every element, retaining each element as many times as its returned nonnegative int.
+`( list (p: a -- count) -- matches )` — Apply `p` to every element of `list`, retaining each element as many times as its returned int.
 
 #### Examples
 
@@ -406,10 +394,10 @@ Ex:
 ```
 
 ### find
-`( list needle -- index )` — Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches.
+`( haystack needle -- index )` — Return the index of the first element of `haystack` for which `needle match?` returns 1, or the list length when no element matches.
 
 ### first
-`( list -- value )` — Return the first element of a nonempty list; an empty list is `` `domain ``.
+`( list -- value )` — Return the first element of `list`.
 
 #### Examples
 
@@ -419,12 +407,10 @@ Ex:
 ```
 
 ### first-where
-`( counts -- index )` — Return the first index with a positive count, or the count-list length when none exists; counts after the first hit are not inspected.
+`( counts -- index )` — For each element `e` at index `i` of `counts`: return the first `i` where `e 0 >`. Return the length of `counts` otherwise.
 
 ### flip
-`( list -- list )` — Exchange the first two axes of a list of equally wide rows. Cells are preserved whole: strings, nested lists, dictionaries, and mixed values need not share a type or shape. Only the immediate row lengths must agree. Strings used as rows transpose their characters.
-
-An empty list or a list containing no list items is unchanged. Rows that are all empty transpose to the empty list; it cannot retain the other axis. Mixing list rows with non-list items or unequal row lengths raises `` `shape ``. A non-list argument raises `` `type ``.
+`( vec -- flipped )` — Transpose rectangular vector `vec` along the diagonal.
 
 #### Examples
 
@@ -436,7 +422,7 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### float
-`( value -- float )` — Return a float unchanged, an int as a float, or the value of a string in the numeric-literal grammar. A string outside that grammar is `` `parse ``; any other value is `` `type ``.
+`( value -- float )` — Convert a value to a float, or parse a string representation of a float.
 
 #### Examples
 
@@ -446,7 +432,7 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### floor
-`( x -- integer )` — Round down; the result is int64, `` `overflow `` outside its range.
+`( x -- integer )` — Round down to the nearest integer.
 
 ### fold
 `( list accumulator (acc a -- acc) -- accumulator )` — Reduce left-to-right from the supplied accumulator.
@@ -459,16 +445,16 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### fold1
-`( list (acc a -- acc) -- value )` — Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`.
+`( list (acc a -- acc) -- value )` — Reduce a nonempty list left to right from its first element.
 
 ### for
-`( collection (a --) -- )` — Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing.
+`( collection (a --) -- )` — Evaluate `q` against every element in `collection` and discard any results.
 
 ### getenv
-`( name -- string )` — The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error. Absent host IO is `` `io ``.
+`( name -- value )` — Return the value of the variable `name` in the process environment.
 
 ### grade
-`( list -- indices )` — The stable ascending sort permutation. Orders by `cmp`, so every element pair must be mutually comparable; the error's index names the later element of a pair that is not.
+`( list -- indices )` — Return the indices of `list` permuted such that their associated elements are sorted in ascending order.
 
 #### Examples
 
@@ -477,8 +463,13 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 # => [1 2 0]
 ```
 
+```ecl
+[3 1 2] dup grade at
+# => [1 2 3]
+```
+
 ### group
-`( list -- dict )` — Dict from each distinct value to the list of its 0-based indices, keyed in first-occurrence order.
+`( list -- dict )` — Return a dict from each distinct element of `list` to the ascending list of indices of its occurrences.
 
 #### Examples
 
@@ -488,22 +479,25 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### group-columns
-`( columns -- groups )` — Group rows from a nonempty list of equal-length columns. Keys are whole composite lists, in first-occurrence order; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``.
+`( columns -- groups )` — Group rows from a nonempty list of equal-length columns. Keys are whole composite lists; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``.
+
+### has?
+`( haystack needle -- bool )` — `in?` with its operands reversed: return 1 if `haystack` contains `needle`. A list haystack pervades over `needle`; a dict haystack takes `needle` as one whole key.
 
 ### helper
-`( quotation -- quotation )` — Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`. The mark belongs to that quotation, not to an equal one; a list built at run time is `` `domain ``, and any other value is `` `type ``.
+`( quotation -- quotation )` — Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`.
 
 ### if
-`( bool then else -- ... )` — Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``.
+`( bool then else -- ... )` — Run `then` when the condition is 1, `else` when it is 0.
 
 ### import
-`( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported name is an alias for the attribute: every dispatch and explicit lookup follows it to whatever the module's attribute names then, and reflection shows that definition. At top level an import may replace an existing name; in a module body a name is introduced once.
+`( module-name bindings -- )` — For each value in `bindings`, create a public alias in the current scope from <value> to <module-name>.<value>.
 
 ### importp
-`( module-name q -- )` — `import`, publishing each alias as a private module word: the importing module's words use it, but it is not part of that module's public surface. Legal only inside a module body under construction; elsewhere it is `` `domain ``.
+`( module-name q -- )` — For each value in `bindings`, create a private alias in the current scope from <value> to <module-name>.<value>.
 
 ### in?
-`( value list -- bool )` — Membership. Pervades over the sought value — the left operand, never the list — down to its atoms; each atom is then tested by whole-value `match?` against the list's top-level elements, so the result takes the sought value's shape: `[2 5] [1 2 3] in?` is `[1 0]`. The list is only ever read one level deep, and a list operand is decomposed before any comparison, so `in?` cannot ask whether a sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, the results of two atom searches. Use `([1 1] match?) any?` for that.
+`( needle haystack -- bool )` — Return 1 if `needle` is in `haystack`. A list haystack pervades over `needle`; a dict haystack takes `needle` as one whole key.
 
 #### Examples
 
@@ -513,7 +507,7 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### infra
-`( list (... -- ...) -- list )` — Run the quotation with the list's elements as the entire substack; the substack that remains is the result list.
+`( list (q: ... -- ...) -- list )` — Evaluate `q` with `list`'s elements as stack, and push the resulting stack as a list.
 
 #### Examples
 
@@ -523,7 +517,7 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### int
-`( value -- int )` — Return an int unchanged, a char's codepoint, or the value of a string in the integer-literal grammar. A string outside that grammar is `` `parse ``. A float is `` `type ``: choose `floor`, `round`, or `ceil` instead. Any other value is also `` `type ``.
+`( value -- int )` — Convert a value to an int, or parse a string representation of an int.
 
 #### Examples
 
@@ -533,7 +527,7 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### intern
-`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A new valid spelling is added to the intern table; a string that is not a valid symbol spelling is `` `domain ``. Interned symbols live for the whole process and are never reclaimed, and the table's capacity is fixed, so interning unbounded external input can exhaust it and fail with out-of-memory. See [Conversions](SPEC.md#conversions).
+`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A new valid spelling is added to the intern table. Interned symbols live for the whole process and are never reclaimed, and the table's capacity is fixed, so interning unbounded external input can exhaust it and fail with out-of-memory.
 
 #### Examples
 
@@ -543,32 +537,22 @@ An empty list or a list containing no list items is unchanged. Rows that are all
 ```
 
 ### last
-`( list -- value )` — Return the final element of a nonempty list.
+`( list -- value )` — Return the final element of `list`.
 
 ### len
-`( list -- count )` — Top-level list element count. Lists may be ragged. Dictionary entry count is provided by `dict.size`.
+`( list -- count )` — Return the length of `list`.
 
 ### lex-cmp-with
 `( left right (left-element right-element -- order) -- order )` — Compare two lists lexicographically with a comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length.
 
 ### linrec
-`( predicate base pre post -- ... )` — Explicit linear recursion. At each descent, run `predicate` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `base`. On 0, run `pre`, recurse from `pre`'s resulting stack, then run `post`. Definitions, IO, and other non-stack effects from the predicate survive restoration; definition permission follows the invoking unit. All four quotations run in the invoking application context and communicate through ambient stack state. The recursion runs in constant space: every level applies the same quotations, so the descents whose `post` is pending are a count.
+`( predicate base pre post -- ... )` — Linear recursion. Evaluate `predicate` and then restore any consumed elements. If `predicate` pushes 1, consume the boolean and evaluate `base`. If `predicate` pushes 0, consume the boolean, evaluate `pre`, recurse from `pre`'s resulting stack, then evaluate `post`.
 
 ### log
-`( x -- y )` — Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).
+`( x -- y )` — Evaluate the natural logarithm of `x`.
 
 ### match?
-`( left right -- bool )` — Whole-value structural equality.
-
-```
-Ex.:
-```
-  [1 2] [1 2] =
-[1 1]
-  [1 2] [1 2] match?
-1
-```
-```
+`( left right -- bool )` — Compare two whole values for equality.
 
 #### Examples
 
@@ -578,31 +562,37 @@ Ex.:
 ```
 
 ### max
-`( x y -- z )` — The greater of two comparable atoms.
+`( x y -- z )` — Evaluate the numeric maximum of `x` and `y`.
 
 ### mean
-`( list -- mean )` — Return the arithmetic mean of a nonempty numeric list.
+`( list -- mean )` — Return the arithmetic mean of `list`.
 
 ### min
-`( x y -- z )` — The lesser of two comparable atoms.
+`( x y -- z )` — Evaluate the numeric minimum of `x` and `y`.
 
 ### mod
 `( x y -- z )` — Compute remainder of `x` / `y`.
 
 ### module-doc
-`( module-name -- string )` — Return the canonical documentation string of a module's current generation, loading an embedded or mapped module on first mention. A source module states it with a documentation-only annotation before its `@defm` operands; a native module, in its descriptor. An alias reports its target's documentation. An invalid module name, `` `core ``, or a module without documentation is `` `domain ``; an unknown one is `` `undefined-word ``.
+`( module-name -- string )` — Return the docstring of `module-name`'s current image.
 
 ### neg
-`( x -- y )` — Negate a numeric value.
+`( x -- y )` — Evaluate -`x`.
 
 ### nip
 `( x y -- y )` — Discard the second value on the stack.
 
 ### not
-`( bool -- bool )` — Invert 0/1 values.
+`( bool -- bool )` — Invert boolean `x`.
+
+### not=
+`( x y -- bool )` — Evaluate `x` != `y`.
+
+### of
+`( key collection -- value )` — `at` with its operands reversed: index a list or look up a dict key. A list pervades over the selector; a dict takes it as one whole key.
 
 ### or
-`( x y -- bool )` — Compute boolean or over 0 and 1 values.
+`( x y -- bool )` — Evaluate boolean `x` or `y`.
 
 ### over
 `( x y -- x y x )` — Copy the value beneath the top of the stack onto the top.
@@ -618,7 +608,7 @@ Ex.:
 ```
 
 ### pair
-`( first second -- list )` — Collect two stack values into a two-element list.
+`( x y -- list )` — Collect `x y` into a two-element list.
 
 ### parse
 `( string -- quotation )` — Parse source text into an unevaluated quotation. Reading interns every symbol and word in the string.
@@ -631,7 +621,7 @@ Ex.:
 ```
 
 ### partition
-`( list (a -- bool) -- matches rejects )` — Split a list into the elements whose predicate returned 1 and those that returned 0.
+`( list (p: a -- bool) -- matches rejects )` — Split `list` into the elements for which `p` returned 1 and those that returned 0.
 
 #### Examples
 
@@ -644,13 +634,13 @@ Ex.:
 `( x -- )` — Discard the top stack value.
 
 ### pow
-`( x y -- z )` — Exponentiation; returns float.
+`( x y -- z )` — Exponentiation.
 
 ### product
 `( list -- product )` — Multiply every element of a numeric list; 1 when the list is empty. A nonempty list's product starts from its first element, so a list of rows multiplies to a row.
 
 ### put
-`( collection selector value -- collection )` — Functional replacement. For a list collection, a nested list selector is pervasive and replacement lists conform recursively to its shape; an atomic replacement extends across every selected position. Selector leaves are integer indices. Repeated indices are processed left to right, so the last replacement wins. For a dictionary, the selector is always one whole-value key, including a list key.
+`( collection selector value -- collection )` — Set the element at `selector` to `value` inside of `collection`. When `collection` is a list, selector behaviour is pervasive; when `collection` is a dict, `selector` is treated as a whole-value key.
 
 #### Examples
 
@@ -660,13 +650,13 @@ Ex.:
 ```
 
 ### qualify
-`( module-name binding-name -- qualified-word )` — Validate a module path, or the reserved qualifier `` `core ``, and one unqualified, non-reserved binding segment, then construct their qualified executable word directly from the interned components. It does not parse source, intern anything new, or grant lifecycle authority; use `execute` to invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even where `dup` is shadowed.
+`( module-name binding-name -- qualified-word )` — Create a symbol value containing the qualified name `module-name`.`binding-name`.
 
 ### raise
 `( error -- )` — Raise an error from an error dict.
 
 ### range
-`( bound -- list )` — The ints `[0 1 … bound-1]`; the bound must be a nonnegative int.
+`( bound -- list )` — Return the integer range from 0 to `bound`, exclusive.
 
 #### Examples
 
@@ -676,10 +666,10 @@ Ex.:
 ```
 
 ### raze
-`( list -- list )` — Flatten one level. Flat-map is `each raze`.
+`( list -- list )` — Flatten `list` one level.
 
 ### reshape
-`( list shape -- list )` — Cycle the data into the nested-list shape; a zero axis yields empty lists and drops the axes after it.
+`( list new-shape -- vec )` — Flatten `list` and reflow it such that `vec shape new-shape match?`
 
 #### Examples
 
@@ -689,10 +679,10 @@ Ex.:
 ```
 
 ### rest
-`( list -- list )` — Return all but the first element of a nonempty list.
+`( list -- result )` — Return all but the first element of `list`.
 
 ### reverse
-`( list -- list )` — Return a list with its top-level element order reversed.
+`( list -- result )` — Return `list` with its elements in reverse order.
 
 ### rolldown
 `( x y z -- y z x )` — Rotate the top three stack values downward.
@@ -701,7 +691,7 @@ Ex.:
 `( x y z -- z x y )` — Rotate the top three stack values upward.
 
 ### rotate
-`( list count -- rotated )` — Rotate top-level element order left by a count, wrapping cyclically; a negative count rotates right, counts beyond the length wrap, and the empty list is returned unchanged. Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K composes it from an index permutation). The count must be an int.
+`( list count -- rotated )` — Shift the elements of `list` to the left by `count` places, wrapping the first `count` elements to the end.
 
 #### Examples
 
@@ -711,10 +701,10 @@ Ex.:
 ```
 
 ### round
-`( x -- integer )` — Round to nearest; the result is int64, `` `overflow `` outside its range.
+`( x -- integer )` — Round to the nearest integer.
 
 ### scan
-`( list accumulator (acc a -- acc) -- list )` — Like `fold` but returns every intermediate accumulator; same length as the input.
+`( list accumulator (acc a -- acc) -- list )` — Reduce left-to-right from the supplied accumulator. Return a list of the state of the accumulator after each reduction.
 
 #### Examples
 
@@ -724,38 +714,25 @@ Ex.:
 ```
 
 ### see
-`( name -- )` — Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and captured body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of the source they were read from, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors.
+`( name -- )` — Print `name`'s combined annotation, when present, followed by its body.
 
 ### shape
-`( list -- shape )` — The dimensions of rectangular data; `` `shape `` error on ragged data (`len` is the word that works on anything).
+`( vec -- shape )` — Given a rectangular n-dimensional vector `vec`, return a list of `n` elements, where each element is the length of `vec` along the associated dimension.
 
 ### signum
-`( number -- sign )` — Return the int −1, 0, or 1 according to the sign of a number.
+`( number -- sign )` — Return −1, 0, or 1 according to the sign of `number`.
 
 ### sin
-`( x -- y )` — Sine; float transcendental.
-
-### sort
-`( list -- sorted )` — Return a stable ascending sort of a list by `cmp`.
-
-#### Examples
-
-```ecl
-[3 1 2] sort
-# => [1 2 3]
-```
+`( x -- y )` — Evaluate the sine of `x`.
 
 ### sqrt
-`( x -- y )` — Square root. `` `domain `` on negative inputs (the result would be NaN).
+`( x -- y )` — Square root.
 
 ### stack
 Copy the operand stack into a bottom-to-top list while leaving every original value in place.
 
-### stdlib
-`( -- names )` — Return the names of the embedded standard-library modules as a list of symbols in codepoint order.
-
 ### stencil
-`( list width (window -- result) -- list )` — Apply to each overlapping window of a positive int width, left-to-right. A width larger than the input returns `()` without applying the quotation; zero and negative widths are `` `domain ``. The result has `max(len-width+1, 0)` elements.
+`( list width (q: window -- result) -- list )` — Apply `q` to each overlapping window of a positive int width, left-to-right.
 
 #### Examples
 
@@ -765,7 +742,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### str
-`( value -- string )` — The canonical printed representation; carries the round-trip guarantee (see [Readable representations and display](SPEC.md#readable-representations-and-display)): reading it back yields a structurally matching value for every recursively readable value.
+`( value -- string )` — Render `value` as a string.
 
 #### Examples
 
@@ -792,7 +769,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 `( x y -- y x )` — Exchange the top two stack values.
 
 ### symbol
-`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A spelling that is not yet interned is `` `domain ``, as is a string that is not a valid symbol spelling; any other value is `` `type ``. Every symbol written in loaded source is interned, so this succeeds for any key a program compares against and never grows the interned name space; use `intern` to create one. See [Conversions](SPEC.md#conversions).
+`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged.
 
 #### Examples
 
@@ -802,7 +779,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### take
-`( list count -- list )` — The first `count` elements; a negative count takes from the end. When the magnitude exceeds the length, the data cycles.
+`( list count -- result )` — Return a list containing the first `count` elements of `list`, or the last `count` elements if `count` is negative. If `list len 0 >`, cycle the elements of `list`.
 
 #### Examples
 
@@ -812,16 +789,16 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### test
-`( ... body name -- )` — An optional annotation may sit beneath the body. Declare a first-class test in the separate catalog of the exact direct module construction body. Accepts the same optional effect and documentation annotation forms as `def`. Tests may share names with words and are absent from application lookup, exports, imports, reflection, and module invocation. Top-level, nested-quotation, and child-Unit use is `` `domain ``. Application Sessions validate and discard declarations without retaining bodies or checking duplicate test names; Test Sessions retain them and reject duplicate names.
+`( ... body name -- )` — Create a test binding of `name` to `body` in module scope. The binding is only visible when run in a test session. A test descriptor for the program will be returned when `tests` is run inside the test session.
 
 ### tests
-`( -- descriptors )` — Test-Session-only discovery of the tests of every current module, including root sources' private tests, sorted by module then test name and source identifier. Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``. File-private tests also include an integer `` `source `` identifier local to the test Session, distinguishing equal names in different files. Descriptors never contain executable bodies or authority handles. Aliases do not duplicate entries. Ordinary Sessions receive `` `domain ``.
+`( -- descriptors )` — When in a test session, return a list of test descriptors for every test defined by all currently-registered modules, sorted by (module, test name). Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``.
 
 ### times
-`( n quotation -- ... )` — Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized.
+`( n quotation -- ... )` — Evaluate `quotation` `n` times.
 
 ### tri
-`( ... p q r -- ... )` — Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`, with the same consumption rule.
+`( ... p q r -- ... )` — Apply `p`, `q`, `r` to the same view of the stack. Push `p`'s results, followed by `q`'s results, followed by `r`'s.
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `int`, `float`, `char`, `symbol`, `list`, `dict`, `task`, `port`, or `address`.
@@ -834,10 +811,10 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### uncons
-`( list -- first rest )` — Split a nonempty list into its first element and remaining elements.
+`( list -- first rest )` — Split a nonempty `list` into its first element and remaining elements.
 
 ### unfold
-`( state (predicate: state -- bool) (step: state -- state item) -- state list )` — Before every step, apply the predicate. When it returns 0, return the current state and all generated items. When it returns 1, apply the step, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`.
+`( state (predicate: state -- bool) (step: state -- state item) -- state list )` — Evaluate `predicate`; when it returns 0, return the current state and all generated items. When it returns 1, evaluate `step`, pushing `item` to `list`, and continue from the returned state.
 
 #### Examples
 
@@ -847,10 +824,10 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### unless
-`( bool else -- ... )` — Call `else` when the condition is 0; otherwise do nothing.
+`( bool else -- ... )` — Call `else` when the condition is 0.
 
 ### update
-`( collection selector (value -- value) -- collection )` — Apply an isolated quotation at the selected positions. A list collection's selector pervades with the same nested shape as `at` and is processed left to right, so repeated indices observe earlier updates. A dictionary selector is one whole-value key. The entire selector is validated before the quotation is first applied; an empty selector returns the list unchanged without applying it.
+`( collection selector (q: value -- value) -- collection )` — Apply `q` at the selected positions. A list collection's selector pervades with the same nested shape as `at` and is processed left to right, so repeated indices observe earlier updates. A dictionary selector is one whole-value key.
 
 #### Examples
 
@@ -860,10 +837,10 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### when
-`( bool then -- ... )` — Call `then` when the condition is 1; otherwise do nothing.
+`( bool then -- ... )` — Call `then` when the condition is 1.
 
 ### where
-`( counts -- indices )` — Expand a list of nonnegative ints into each index replicated its count times. A 0/1 mask is the common case, yielding the positions of 1s: `[0 1 1 0] where` is `[1 2]`.
+`( counts -- indices )` — For each element `e` at index `i` of `counts`: collect `e` copies of `i` into a list.
 
 #### Examples
 
@@ -872,14 +849,11 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 # => [1 1 2]
 ```
 
-### which
-`( name -- )` — Print where a name resolves (module, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition.
-
 ### while
-`( cond body -- ... )` — At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. Definitions, IO, and other non-stack effects from the condition survive; definition permission follows the invoking unit. Tail-call optimized.
+`( cond body -- ... )` — Evaluate `cond` and then restore any consumed elements. If `cond` pushes 1, consume the boolean, evaluate `body` in place and loop. If `cond` pushes 0, consume the boolean and exit.
 
 ### while-values
-`( value (predicate: state -- bool) (step: state -- state) -- list )` — Return `value` and successive states through the first state for which the predicate is false.
+`( value (p: state -- bool) (step: state -- state) -- list )` — Construct a list containing `value` and successive states through the first state for which `p` is false.
 
 #### Examples
 
@@ -889,7 +863,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### windows
-`( list width -- windows )` — Return every overlapping window of a positive int width, left-to-right: `"abcd" 2 windows` is `("ab" "bc" "cd")`. The result has `max(len-width+1, 0)` elements, so a width larger than the list gives `()`; zero and negative widths are `` `domain ``. Strings window into strings.
+`( list width -- sublists )` — Generate every contiguous subsequence of `list` of width `width`.
 
 #### Examples
 
@@ -899,13 +873,13 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### words
-`( -- )` — Print the visible dictionary in sorted order.
+`( -- )` — Print all visible words in sorted order.
 
 ### wrap
 `( value -- list )` — Wrap `value` in a list.
 
 ### zip-with
-`( left right (a b -- c) -- list )` — Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `cons` compositions.
+`( left right (q: a b -- c) -- list )` — Conform `left` and `right`, and apply `q` to an element from each side, collecting the results in a list.
 
 #### Examples
 
@@ -915,7 +889,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### @each
-`( list (quotation: a -- b) -- results )` — Concurrent `each`: apply `quotation` to each element of `list`, each application in a fresh unit.
+`( list (q: a -- b) -- results )` — Concurrently apply `q` to each element of `list`, each application in a fresh unit.
 
 #### Examples
 
@@ -928,7 +902,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 `( list value -- list )` — Push `value` to the end of `list`.
 
 ### chunk
-`( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length.
+`( list size -- pieces )` — Split `list` into consecutive `size`-width pieces, possibly including fewer than `size` elements in the last piece.
 
 #### Examples
 
@@ -938,13 +912,17 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### converges
-`( value (a -- a) -- list )` — Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended.
+`( value (q: a -- a) -- list )` — ```
+Construct a list containing `value` and the results of successive
+applications of `q`, until the result matches
+ either `value` or the immediately preceding result.
+```
 
 ### fail
-`( msg -- )` — Raise a user-kind error whose message is `msg`: `{kind user msg msg}`. A helper: the failure is reported where `fail` was called.
+`( msg -- )` — Raise an error with the shape `{kind user msg msg}`.
 
 ### iterations
-`( value count (a -- a) -- list )` — Return `value` followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list.
+`( value count (q: a -- a) -- list )` — Construct a list containing `value` and the results of `count` successive applications of `q`.
 
 #### Examples
 
@@ -954,19 +932,19 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### parse-one
-`( string -- x )` — Parse source text holding exactly one form and return that form unevaluated. No form or several forms is `` `shape ``.
+`( string -- x )` — Parse source text describing exactly one form.
 
 ### scan1
-`( list (acc a -- acc) -- list )` — Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements.
+`( list (q: acc a -- acc) -- list )` — Fold `q` over `list`, using the first element of `list` as the accumulator and returning a list of each successive accumulator value.
 
 ### set
-`( ... value name -- )` — (annotation value name -- ) *or* (value name -- ). Bind `value` as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. `annotation` is published as the constant's metadata.
+`( ... value name -- )` — Bind `name` to `value` in the current scope. Accepts an optional annotation below `value` as metadata on the binding.
 
 ### setp
-`( ... value name -- )` — `set` as a private module name. A top-level `setp` is an error.
+`( ... value name -- )` — Inside of a module, bind `name` to `value` only within that module.
 
 ### to-digits
-`( value radices -- digits )` — Split a value into one digit per radix, most significant first, by floor division, so every digit lies from zero below its radix even for negative values. A value beyond the radices' capacity keeps only its low digits. Values pervade: a list of values gives one digit list per radix. Radices must be positive integers, or the word fails with `` `domain ``; `[2] 8 take` builds eight binary radices.
+`( value radices -- digits )` — Split a value into one digit per radix, most significant first, by floor division, so every digit lies from zero below its radix even for negative values. A value beyond the radices' capacity keeps only its low digits. Values pervade.
 
 #### Examples
 
@@ -980,19 +958,21 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### unappend
-`( list -- initial last )` — Split a nonempty list into its initial elements and last element.
+`( list -- initial last )` — Split `list` into its initial elements and last element.
 
 ### zip
-`( left right -- pairs )` — Pair corresponding elements of two conforming lists.
+`( left right -- pairs )` — Pair corresponding elements of conforming `left` and `right`.
 
 ### case
-`( x clauses -- ... )` — Select and call the first action whose key matches the subject. The clause list should be shaped:
+`( x clauses -- ... )` — Given a flat list of `case q` clauses, apply the first `q` whose `case` matches `x`.
+
+`clause` should be shaped:
 
 ```
-  [case1 q1
-   case2 q2
-   ...
-   else]
+   [case1 q1
+    case2 q2
+    ...
+    else]
 ```
 
 Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is the quotation to apply for the first case that matches. A matching action is called with `x` consumed.
@@ -1014,10 +994,10 @@ The else quotation receives the unmatched subject:
 ```
 
 ### converge
-`( x (a -- a) -- y )` — Return the last value before repeated application reaches a fixed point or returns to the initial value.
+`( x (q: a -- a) -- y )` — Return the last value before repeated application of `q` to `x` reaches a fixed point or matches `x`.
 
 ### from-digits
-`( digits base -- value )` — Combine digits, most significant first, into a value. The base is one integer for every position, or a list of radices with one per digit, as in mixed-radix time; the first radix has no effect. Digits pervade: a list of equal-length digit lists, one per position, gives one value per column. A radix list of the wrong length fails with `` `shape ``. Inverse of `to-digits` for values in range.
+`( digits base -- value )` — Combine digits, most significant first, into a value. The base is one integer for every position, or a list of radices with one per digit, as in mixed-radix time; the first radix has no effect. Digits pervade: a list of equal-length digit lists, one per position, gives one value per column.
 
 #### Examples
 
@@ -1031,13 +1011,13 @@ The else quotation receives the unmatched subject:
 ```
 
 ### case-with
-`( x clauses (key: x -- k) -- ... )` — Like `case`, but match the clause keys against the result of applying `key` to `x`, and call the selected action with `x` itself on the stack. `x [ ... ] (k) case-with` is `x dup k [ ... ] case`, so the else quotation receives `x` and the unmatched key.
+`( x clauses (key: x -- k) -- ... )` — Like `case`, but match the clause keys against the result of applying `key` to `x`, and apply the selected action with `x` itself on the stack.
 
 ## agent
 
-An agent is a task whose stack is its state. Quotations sent to it run in arrival order, each as an isolated unit over that stack, so a failing quotation leaves the state exactly as it was. A `call` quotation is `( state... -- state... result )`: the top of its result stack is the reply and the rest is the new state. A `send` quotation is `( state... -- state... )` and keeps its whole result stack. This is how a program keeps state that outlives a word.
+An agent is a stateful task that evaluates quotations it receives and responds with the top operand on its stack.
 
-A call to an agent that has ended raises `` `io ``. A call whose request was accepted waits forever if the agent ends before replying, unless it bounds the call with `call-for`. An agent ends when it is cancelled, or when it receives a message that is not a quotation request, such as a bare value sent to its address with `task.send`; that message fails the agent.
+To spawn a new agent, apply `agent.start` to some initial value. Quotations sent to the resulting address via `agent.send` will be applied to the state. Sending a quotation via `call` or `call-for` will apply the quotation, wait for a response, and then push the response onto the calling stack.
 
 #### Examples
 
@@ -1050,10 +1030,10 @@ rng (5 rand.int) agent.call
 ```
 
 ### send
-`( address quotation -- )` — Apply a quotation to the agent's stack without waiting for a reply. The whole result stack becomes the new state; a failing quotation changes nothing and reports nothing.
+`( address quotation -- )` — Apply `quotation` to the agent's stack in a unit.
 
 ### call
-`( address quotation -- result )` — Apply a quotation to the agent's stack and return the top of the result stack; the agent keeps the rest. The quotation's own error is re-raised here and leaves the agent unchanged. A result stack with nothing on it is `` `domain ``. Replies travel through a helper task. A call to an agent that has ended raises `` `io ``; a call whose request was accepted never returns if the agent ends before replying.
+`( address quotation -- result )` — Apply `quotation` to the agent's stack in a unit and return the top value. Errors are re-raised.
 
 #### Examples
 
@@ -1067,39 +1047,13 @@ g (100 rand.int) agent.call g (100 rand.int) agent.call pair
 ```
 
 ### call-for
-`( address quotation milliseconds -- result )` — `agent.call` with a nonnegative int deadline in milliseconds, checked before anything is sent: a negative duration is `` `domain `` and a non-int is `` `type ``. When no reply arrives in time the call raises `` `timeout ``, whether the deadline passed while waiting for room in a full mailbox or for the reply; the quotation, if it was sent, still runs on the agent when its turn comes, and its reply is discarded.
+`( address quotation milliseconds -- result )` — Apply `quotation` to the agent's stack in a unit and wait up to `milliseconds` for the response. Errors are re-raised.
 
 ### serve
-Stack-polymorphic. Turn the current task into an agent whose state is the stack it has now, then serve until cancelled: receive a message, apply its quotation to the state as a unit, and reply when the message asks. Spawn it directly to keep the handle: `[[7 0]] (agent.serve) @spawn` serves `[7 0]`, and `task.cancel` on the handle ends it with `` `cancelled ``.
+Turn the current task into an agent whose state is the current stack, then serve until cancelled: receive a message, apply its quotation to the state as a unit, and optionally reply.
 
 ### start
-`( state -- address )` — Spawn a server whose stack holds the one value `state` and return its address. The server is owned by the spawning task scope, as any `@spawn` is.
-
-## archive
-
-Exact hashing, archive inspection, and hostile-input-safe extraction. Binary payloads are ordinary lists of integers in `0...255`.
-
-### next-member
-`( archive -- metadata )` — Select the next archive member and return `{path string kind symbol size int}` in archive order. Kinds are `` `file `` and `` `directory ``; size is the content length in bytes. `{}` denotes stable end. Advancing skips unread contents of the previous member. Metadata owns its path independently of later cursor operations or closure.
-
-### open-tgz
-`( bytes -- archive )` — Validate a gzip tar with the same hostile-input parser and limits as `unpack-tgz`, then return a scope-owned archive resource without filesystem writes. No manifest or package identity is required. The resource retains the validated uncompressed document until `port.close` or scope exit; cleanup is joined and advances incrementally through member storage. The limits apply per document. Scope ownership governs lifetime and joined cleanup; it does not impose an aggregate heap budget on retained archives.
-
-### read-member
-`( archive maximum -- bytes )` — Read up to `maximum` bytes from the selected member, advancing its content position. The maximum must be an integer from 1 through 65,536. `[]` denotes end of that member, a directory, or no selected member. Reads copy bounded chunks into independently owned values; concurrent reads consume distinct chunks, with unspecified completion order. Coordinate member advancement with reads when using the archive across tasks. Operations on a closed archive raise `` `io ``.
-
-### sha256
-`( bytes -- lowercase-hex )` — Return the SHA-256 digest of an integer byte list. Every item must be an integer in `0..255`; strings are not byte vectors and are not coerced.
-
-#### Examples
-
-```ecl
-[1 2 3 4] archive.sha256
-# => "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"
-```
-
-### unpack-tgz
-`( root destination bytes -- regular-file-paths )` — Validate and atomically unpack a gzip-compressed tar byte list beneath a previously absent `destination`, a canonical relative path under a named Session filesystem root or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its directory lease until publication or rollback completes. The destination must name a child entry, not `.`. Return normalized regular-file paths in archive order. Unsafe, linked, special, duplicate, malformed, or over-limit members are `` `domain ``; invalid byte items are `` `domain ``; wrong container kinds are `` `type ``; an unknown root or a non-canonical destination is `` `domain `` carrying the `fs` failure data; an exhausted operation quota is `` `overflow ``; filesystem and destination conflicts are `` `io ``. Failure never publishes a partial destination. See the environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives) for the complete format, limit, containment, and publication contract.
+`( state -- address )` — Spawn a task initialized with `state` and return its address.
 
 ## clock
 
@@ -1128,12 +1082,10 @@ clock.now `start set 250 clock.sleep start clock.elapsed 250 >=
 
 ## csv
 
-RFC 4180 comma-separated values. `parse` splits text into rows of string fields and `emit` renders rows back; neither converts a field. A typed column is a `table.cast` over parsed rows.
+RFC 4180 comma-separated values. `parse` splits text into rows of string fields and `emit` renders rows back; neither converts a field. Convert a column with `dict.evolve` over parsed rows.
 
 ### parse
-`( input -- rows )` — Split RFC 4180 comma-separated content into rows of string fields. Input is a string or a list of UTF-8 bytes. Every record is data and every field is text: nothing is converted, so a typed column is a `table.cast` away. Accept CRLF or LF records, quoted commas and newlines, doubled-quote escapes, and a final record with no terminator. Preserve blank records and empty fields. Empty input is no rows.
-
-Records of unequal width are `` `shape ``. A quote inside an unquoted field, text after a closing quote, a carriage return outside quotes that no newline follows, and an unclosed quote are `` `parse ``, naming the record and field. Input that is neither text nor UTF-8 bytes fails as `chars` does.
+`( input -- rows )` — Split RFC 4180 comma-separated content into rows of string fields. Input is a string or a list of UTF-8 bytes. Accept CRLF or LF records, quoted commas and newlines, doubled-quote escapes, and a final record with no terminator. Preserve blank records and empty fields.
 
 #### Examples
 
@@ -1141,12 +1093,12 @@ Records of unequal width are `` `shape ``. A quote inside an unquoted field, tex
 "1,a\n2,\"b,c\"" csv.parse
 # => (("1" "a") ("2" "b,c"))
 
-"id,name\n1,Ada\n2,Bob" csv.parse table.from-header-rows {"id" (int)} table.cast
+"id,name\n1,Ada\n2,Bob" csv.parse table.from-header-rows {"id" ((int) each)} dict.evolve
 # => {"id" [1 2] "name" ("Ada" "Bob")}
 ```
 
 ### emit
-`( rows -- text )` — Render rows of string fields as canonical, CRLF-terminated RFC 4180 text, quoting exactly the fields that hold a comma, a quote, a carriage return, or a newline, and doubling their quotes. No rows is the empty string. Non-list rows and non-string fields are `` `type ``; a row with no fields is `` `shape ``.
+`( rows -- text )` — Render rows of string fields as canonical, CRLF-terminated RFC 4180 text, quoting any fields with commas, quotes, carriage returns, or newlines.
 
 #### Examples
 
@@ -1157,7 +1109,7 @@ Records of unequal width are `` `shape ``. A quote inside an unquoted field, tex
 
 ## dict
 
-These operations preserve the language's immutable, insertion-ordered dictionary semantics. The constructor family accepts one key/value association, flat adjacent entries, parallel key/value lists, association lists, or one shared value for a key list. All constructors reject duplicate keys instead of silently choosing a winner. Core `at`, `put`, `update`, and `del` treat a dictionary selector as one whole-value key. `dict.put` also assigns one whole key and value. Batch operations `dict.at`, `dict.at-or`, `dict.update`, `dict.take`, `dict.del`, and `dict.split` consume a list of whole keys: strings and composite keys remain atomic. The public `dict` module is ECL over the host kernels exported by `dict.core`, so a failure inside a kernel reports its `dict.core` name.
+Operations on the primitive dict type.
 
 ### associate
 `( key value -- dict )` — Build a one-entry dictionary associating `key` with `value`.
@@ -1170,47 +1122,37 @@ These operations preserve the language's immutable, insertion-ordered dictionary
 ```
 
 ### at
-`( dict keys -- values )` — Look up each top-level key in request order, preserving duplicates. An absent key is `` `domain ``. Strings and composite keys are whole values; the result has one element per requested key.
+`( dict keys -- values )` — Return a list indexing into `dict` for each element of `keys`.
 
 ### at-or
-`( dict keys default -- values )` — Like `dict.at`, using `default` as a whole value for each missing key.
+`( dict keys default -- values )` — Return a list indexing into `dict` for each element of `keys`, replacing any missing keys with `default`.
 
 ### del
-`( dict keys -- dict )` — Remove entries named by whole top-level keys, ignoring absent and duplicate keys and preserving retained dictionary order.
-
-### from-flat
-`( entries -- dict )` — Build a dictionary from one flat, even-length list by pairing adjacent entries without executing them. This is the runtime counterpart of the `{…}` literal: `` `total 3 4 + pair dict.from-flat `` is `{total 7}`. An odd entry count is `` `contract ``; duplicate keys are `` `domain ``.
+`( dict keys -- dict )` — Return a dictionary containing the entries in `dict`, less those corresponding to `keys`.
 
 ### from-keys
-`( keys value -- dict )` — Build a dictionary assigning one value to every distinct key. Duplicate keys are `` `domain ``.
+`( keys value -- dict )` — Construct a dictionary mapping each element of `keys` to `value`.
 
-### from-lists
-`( keys values -- dict )` — Build a dictionary from parallel conforming key and value lists. Unequal lengths are `` `shape ``; duplicate keys are `` `domain ``.
-
-#### Examples
-
-```ecl
-[a b] [1 2] dict.from-lists
-# => {a 1 b 2}
-```
+### from-kvs
+`( kvs -- dict )` — Build a dictionary from a list of key-values arranged like `[k v k v ...]`.
 
 ### from-pairs
-`( pairs -- dict )` — Build a dictionary from a list of exact `[key value]` pairs in list order. A malformed pair is `` `shape ``; duplicate keys are `` `domain ``.
+`( pairs -- dict )` — Construct a dictionary from a list of `[key value]` pairs.
 
 ### get
-`( dict key default -- value )` — The value of one whole-value key, or `default` when the dictionary has no such key. A non-dictionary is `` `type ``.
+`( dict key default -- value )` — Return the value in `dict` at `key`, or `default` if `key` isn't present.
 
 ### has?
-`( dict key -- bool )` — Whole-value key membership. Keys are inert and only absence is false: lookup machinery failures are errors, never converted to 0.
+`( dict keys -- bools )` — Test each element of `keys` for membership in `dict`.
 
 ### keys
-`( dict -- keys )` — Return keys in insertion order.
+`( dict -- keys )` — Return a list of the keys in `dict`.
 
 ### keys-exactly?
-`( candidate declared -- bool )` — Return 1 when a dictionary has exactly the declared keys in any order. A duplicate declaration returns 0.
+`( candidate declared -- bool )` — Return 1 when a dictionary has exactly the declared keys in any order, 0 otherwise.
 
 ### merge
-`( left right -- dict )` — Merge two dictionaries; right-hand values win. Existing left keys retain their positions and right-only keys append in right order. Key-aligned arithmetic remains pervasive `+` on dicts.
+`( left right -- dict )` — Merge `left` and `right`. For any key present in both `left` and `right`, `dict` will contain the value in `right`.
 
 #### Examples
 
@@ -1220,19 +1162,25 @@ These operations preserve the language's immutable, insertion-ordered dictionary
 ```
 
 ### merge-with
-`( left right (key left-value right-value -- value) -- dict )` — Merge two dictionaries, resolving each shared key with the quotation. Existing left keys keep their positions; right-only keys append in right order.
+`( left right (q: key left-value right-value -- value) -- dict )` — Merge `left` and `right`, resolving key collisions with `q`.
+
+### of
+`( keys dict -- values )` — Return a list indexing into `dict` for each element of `keys`.
 
 ### pairs
-`( dict -- pairs )` — Return insertion-ordered `[key value]` pairs. This is the bridge to generic entry iteration when keys are needed. Value-only `each` operates on a dictionary directly; reductions and predicates can consume `dict.vals`, so they need no dictionary-specific duplicates.
+`( dict -- pairs )` — Return the entries of `dict` as a list of `[key value]` pairs, in `dict.keys` order.
 
 ### put
-`( dict key value -- dict )` — Assign one whole key and value. An existing key retains its position; a new key appends at the end.
+`( dict key value -- dict )` — Assign `key` to `value` in `dict`.
+
+### reject
+`( dict (p: key value -- bool) -- dict )` — Apply `p` to every entry of `dict` and discard the entries for which it returns 1.
 
 ### size
-`( dict -- count )` — Return the dictionary's entry count.
+`( dict -- count )` — Return the number of keys in `dict`.
 
 ### split
-`( dict keys -- selected rejected )` — Partition a dictionary by a key list, returning selected then rejected entries; ignore absent keys and preserve dictionary order in both results.
+`( dict keys -- selected rejected )` — Partition `dict` by `keys`, returning dictionary with every selected key followed by the remainder dictionary.
 
 #### Examples
 
@@ -1242,22 +1190,38 @@ These operations preserve the language's immutable, insertion-ordered dictionary
 ```
 
 ### take
-`( dict keys -- dict )` — Keep entries named by a key list, ignoring absent keys. Output follows dictionary order independently of the requested key-list order.
+`( dict keys -- dict )` — Return a dictionary containing only the entries in `dict` corresponding to `keys`.
 
 ### update
-`( dict keys (value -- value) -- dict )` — Apply an isolated quotation to each whole top-level key without moving entries. Keys are processed in request order, so duplicates observe earlier updates. All keys are validated before the quotation is first applied; an absent key is `` `domain ``, and an empty key list returns the dictionary unchanged.
+`( dict keys (q: value -- value) -- updated )` — Return `dict` where `q` has been applied to the values corresponding to each key in `keys`.
 
 ### update-or
-`( dict key default quotation -- dict )` — Update an existing value as `update` does, or append the absent key with the default unchanged. The default does not pass through the quotation.
+`( dict key default quotation -- dict )` — If `key` is in `dict`, apply `quotation` to its value. Otherwise, map `key` to `default`.
 
 ### vals
-`( dict -- values )` — Return values in insertion order.
+`( dict -- values )` — Return a list of the `values` in `dict`.
+
+### zip
+`( keys values -- dict )` — Build a dictionary from key and value lists of equal length.
+
+#### Examples
+
+```ecl
+[a b] [1 2] dict.zip
+# => {a 1 b 2}
+```
+
+### evolve
+`( dict spec -- dict )` — Apply each `( value -- value )` quotation in `spec` to the value under the same key in `dict`. A key of `spec` missing from `dict` is `` `domain ``.
 
 ### filter
-`( dict (key value -- bool) -- dict )` — Call the predicate in insertion order and retain the entries for which it returns 1.
+`( dict (p: key value -- bool) -- dict )` — Apply `p` to every entry of `dict` and retain the entries for which it returns 1.
+
+### in?
+`( keys dict -- bools )` — Test each element of `keys` for membership in `dict`.
 
 ### map
-`( dict (key value -- value) -- dict )` — Call the quotation for every entry, replacing values while preserving keys and insertion order.
+`( dict (q: key value -- value) -- dict )` — Construct a dict from `dict`, applying `q` to each `key value` entry and assigning the result to `key`.
 
 #### Examples
 
@@ -1266,30 +1230,27 @@ These operations preserve the language's immutable, insertion-ordered dictionary
 # => {a 10 b 20}
 ```
 
-### reject
-`( dict (key value -- bool) -- dict )` — Call the predicate in insertion order and discard the entries for which it returns 1.
-
 ## error
 
-Errors are ordinary dictionaries with a required symbol at `` `kind `` and optional, typed diagnostic fields. Construction and inspection do not raise unless an operation's own input violates its contract; control effects remain core words.
+Words for manipulating the conventional `error` dict.
 
 ### new
 `( kind -- error )` — Build the error dictionary `{kind kind}` from a kind symbol.
 
 ### valid?
-`( value -- bool )` — Return 1 when a value satisfies the error dictionary schema: a required symbol `` `kind `` and well-typed optional `` `msg ``, `` `word ``, `` `trace ``, and `` `data `` fields. Extra fields are allowed.
+`( value -- bool )` — Return 1 when a value satisfies the error dictionary schema `raise` enforces: a required symbol `` `kind `` and well-typed optional `` `msg ``, `` `word ``, `` `trace ``, and `` `data `` fields. Extra fields are allowed.
 
 ### kind-in?
-`( error kinds -- bool )` — Validate an error and a list of kind symbols, then return 1 when the error's kind occurs in the list.
+`( error kinds -- bool )` — Return 1 when `error`'s kind occurs in `kinds`.
 
 ### kind?
-`( error kind -- bool )` — Validate both inputs and return 1 when the error has the given kind symbol.
+`( error kind -- bool )` — Set the `` ` ``kind field on `error` to `kind`.
 
 ### with-data
 `( error data -- error )` — Validate both dictionaries and return the error with `` `data `` set to `data`.
 
 ### with-message
-`( error message -- error )` — Validate the error and string message and return the error with `` `msg `` set to `message`.
+`( error message -- error )` — Set the `` ` ``message field on `error` to `message`.
 
 #### Examples
 
@@ -1298,51 +1259,17 @@ Errors are ordinary dictionaries with a required symbol at `` `kind `` and optio
 # => {kind io msg "unavailable"}
 ```
 
-## fd
-
-Byte streams. An fd is a byte endpoint: the standard devices, a file opened with `fs.open-reader`, a process pipe from `proc.stdin`, `proc.stdout`, or `proc.stderr`, and a connection's endpoints are all one kind to the words here, which name the operations every byte endpoint shares. Nothing in `fd` decodes or encodes text: that is `io`. A read of either kind may leave bytes read ahead with the endpoint value, so a program that reads lines keeps the value it reads them through. The host primitives are published as `fd.core`.
-
-### bytes?
-`( value -- bool )` — Return 1 when the value is a list of integers in `0...255`, what `write` accepts as one piece, and 0 for anything else, including a string.
-
-### close
-`( fd -- )` — Close an endpoint that is its own resource, such as `fs.open-reader`'s, and join its cleanup; idempotent. A resource closes as `port.close` closes it. An endpoint borrowed from a resource (a process pipe, a connection) closes with that resource, and the standard devices never close: both are `` `type ``.
-
-### err
-`( -- fd )` — The diagnostics device: a writable byte endpoint on standard error, shared by every unit of the session and the same value on every call.
-
-### finish
-`( fd -- )` — Finish an endpoint's write direction after accepted writes drain. Idempotent; later writes are `` `io ``.
-
-### in
-`( -- fd )` — The standard input device: a readable byte endpoint shared by every unit of the session, the same value on every call. Reads return what the host has, `[]` at stable EOF, and keep returning `[]` afterwards; one read may be pending at a time. `` `io `` when standard input is the program source (`ecl -`, and non-terminal invocation with no arguments).
-
-### out
-`( -- fd )` — The standard output device: a writable byte endpoint shared by every unit of the session, the same value on every call. Writes from different units are served in the order they began and each call's bytes stay contiguous.
-
-### read
-`( fd max -- bytes )` — Read at most positive integer `max` bytes, parking until data or EOF. Return exact integer bytes in `0...255`; `[]` means stable EOF, including on later reads. Reads may be shorter than `max`. A wrong resource or non-integer `max` is `` `type ``; `max <= 0` is `` `domain ``; overlapping reads are `` `contract ``; a transport failure is `` `io ``. No text decoding is performed; use `chars`.
-
-### read-all
-`( fd -- bytes )` — Read to EOF and return every byte as one list. A later `read-all` on the same endpoint returns `[]`. Errors are `read`'s.
-
-### read-line
-`( fd -- bytes )` — Read through the next newline and return those bytes, newline included, so `[]` is unambiguously EOF. At EOF the rest of the stream is the line, and `[]` follows on every later read. Bytes after the newline stay with the endpoint value for its next read of either kind, so read lines through one value. Errors are `read`'s.
-
-### write
-`( fd data -- )` — Write bytes. `data` is a list of integer bytes in `0...255`, or a list of such lists, written contiguously in order, so a program assembling output from pieces need not join them first. A string is `` `type ``: encode text with `io.write`. Invalid byte elements are `` `domain ``; a finished endpoint or transport failure is `` `io ``.
-
 ## fs
 
 Filesystem words accept a named `root` symbol or a directory resource and a `path` string. The command line uses `` `cwd `` for the startup working directory. Applications may explicitly open other host directories. All filesystem operations are available on each root, subject to operating-system permissions and runtime limits.
 
-A path is a UTF-8 slash path in the canonical grammar: `.` names the root itself, and every other path is one or more nonempty components separated by exactly one `/`, with no `.`, `..`, or NUL component and no leading, trailing, or repeated separator. Backslash is an ordinary filename character. Paths are never normalized here; normalize with `path.normalize` and accept the result with `path.valid-relative?` first. Words that act on a child entry (`create-*`, `replace-*`, `mkdir`, `rename`, `remove-file`, `remove-dir`) reject `.`.
+A path is a UTF-8 slash path in the canonical grammar: `.` denotes the root itself, and every other path is one or more nonempty components separated by exactly one `/`, with no `.`, `..`, or NUL component and no leading, trailing, or repeated separator. Backslash is an ordinary filename character. Paths are never normalized here; normalize with `path.normalize` and accept the result with `path.valid-relative?` first. Words that act on a child entry (`create-*`, `replace-*`, `mkdir`, `rename`, `remove-file`, `remove-dir`) reject `.`.
 
 Resolution is descriptor-relative beneath the root's retained handle. An intermediate symlink is followed only while its target stays within the root; an absolute target, a relative target that would pop above the root, more than 40 followed links, or more than 64 KiB of expanded resolver input is refused. `child-dir`, `open-list`, `open-reader`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy` follow a final link under the same rule; every other word acts on the final entry itself. Containment is never a lexical prefix check.
 
 Path-taking failures carry a data dictionary with `` `operation `` (the word's own symbol), `` `root `` and `` `path `` (or `` `source-root ``, `` `source-path ``, `` `destination-root ``, and `` `destination-path `` for `copy`), and a closed `` `reason `` symbol: `` `invalid-path ``, `` `unknown-root ``, `` `not-found ``, `` `already-exists ``, `` `not-directory ``, `` `is-directory ``, `` `not-regular ``, `` `not-empty ``, `` `symlink-loop ``, `` `symlink-escape ``, `` `invalid-utf8 ``, `` `limit ``, `` `access-denied ``, `` `read-only ``, `` `no-space ``, `` `busy ``, `` `cross-device ``, `` `unsupported ``, `` `changed ``, or `` `io ``. The kind is `` `type `` for wrong value kinds or byte-list members outside `0..255`, `` `domain `` for malformed paths and unknown roots, `` `overflow `` for a configured limit, `` `cancelled `` for cancellation, and `` `io `` for filesystem state and host failures. Host error names never appear as data.
 
-Reads, writes, and copies are bounded by the transfer limit (1 GiB by default) and advance in 64 KiB quanta; listings are bounded by an entry count (100,000) and aggregate name bytes (64 MiB); a Session runs at most 64 filesystem operations at once. Mutation stages complete contents in a private sibling entry and publishes with one atomic namespace operation, so failure or cancellation before the commit leaves the destination unchanged. Staged contents are flushed to the device before publication, so a crash after the commit cannot leave an empty file under the final name; directory entry durability, ownership, timestamps, and extended attributes are not promised. Created files use the host's ordinary creation mode under the process umask, a replaced file keeps its permission bits, and a copy carries the source's permission bits under the umask.
+Reads, writes, and copies are bounded by the transfer limit (1 GiB by default) and advance in 64 KiB quanta; listings are bounded by an entry count (100,000) and aggregate name bytes (64 MiB). A Session runs at most 64 path operations at once; further ones wait, cancellably, in arrival order. Operations on an open writer, cursor, or stage, and a lock's contention, hold no such slot. Mutation stages complete contents in a private sibling entry and publishes with one atomic namespace operation, so failure or cancellation before the commit leaves the destination unchanged. Staged contents are flushed to the device before publication, so a crash after the commit cannot leave an empty file under the final name; directory entry durability, ownership, timestamps, and extended attributes are not promised. Created files use the host's ordinary creation mode under the process umask, a replaced file keeps its permission bits, and a copy carries the source's permission bits under the umask.
 
 ### child-dir
 `( root path -- directory )` — Acquire an independent directory resource beneath an existing root. Resolution, including final symlinks, is confined to that root. The acquired directory becomes the new containment boundary; closing its ordinary parent resource does not close it. Children of a staging resource, including further descendants, close when staging is sealed or closed even after task ownership transfer. `.` acquires the root itself.
@@ -1390,10 +1317,10 @@ Reads, writes, and copies are bounded by the transfer limit (1 GiB by default) a
 `( root path -- cursor )` — Open a scope-owned incremental enumeration of a confined directory. The cursor is a port resource, distinct from a directory root. It owns its descriptor until `port.close` or scope exit. An enumeration opened through staging or its descendants also closes when staging seals.
 
 ### open-reader
-`( root path -- fd )` — Open a regular file, following a final link within the root, as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all` and the `io` readers, with no size limit: the stream is read a chunk at a time. The calling scope owns the file; `fd.close` closes it earlier and joins cleanup, and a read after either is `` `io ``. A directory is `` `is-directory ``; a non-regular object is `` `not-regular ``.
+`( root path -- stream )` — Open a regular file, following a final link within the root, as a readable byte endpoint for `stream.read`, `stream.read-line`, `stream.read-all` and the `io` readers, with no size limit: the stream is read a chunk at a time. The calling scope owns the file; `port.close` closes it earlier and joins cleanup, and a read after either is `` `io ``. A directory is `` `is-directory ``; a non-regular object is `` `not-regular ``.
 
 ### open-writer
-`( root path -- writer )` — Open private storage for an absent regular file. The parent must exist and `.` is rejected. A writer is distinct from a directory. It retains root lifetime and operation admission until joined cleanup. Staging dependencies survive task transfer. Closing an uncommitted writer removes its private contents and publishes no destination.
+`( root path -- writer )` — Open private storage for an absent regular file. The parent must exist and `.` is rejected. A writer is distinct from a directory. It retains root lifetime until joined cleanup. Staging dependencies survive task transfer. Closing an uncommitted writer removes its private contents and publishes no destination.
 
 ### publish-bytes
 `( root path bytes -- )` — Atomically publish complete file contents, creating an absent destination or replacing one that exists. An entry observed before staging must be a regular file; a symlink, directory, or other entry is `` `not-regular ``. Use the observed file's permissions, or host defaults on first creation. Publication replaces the final directory entry without following it; concurrent publications each succeed and the last commit wins. An intervening directory causes failure. A failed operation preserves its destination, and cancellation before commit removes staging. Cancellation after commit does not roll back publication. Visibility is atomic; directory-entry durability across a crash is not promised.
@@ -1425,9 +1352,6 @@ Reads, writes, and copies are bounded by the transfer limit (1 GiB by default) a
 ### replace-text
 `( root path string -- )` — Replace an existing regular file with UTF-8 text under the `replace-bytes` contract.
 
-### reserve
-`( root -- reservation )` — Retain a selected directory root and one filesystem operation slot until joined closure. A reservation can be passed as a root; its derived operations share that slot and reject overlapping work with `` `overflow `` and reason `` `limit ``. Closure waits for admitted work. This supports compositions that must retain admission across inspection and publication.
-
 ### stage-dir
 `( root destination -- stage )` — Create a private sibling of the destination and return a scope-owned directory resource. The destination parent must exist. Filesystem operations accept the stage as a root. `port.close` or scope exit joins descendant closure and recursive rollback; no destination is published. The staging directory uses mode `0700` under the process umask.
 
@@ -1437,15 +1361,43 @@ Reads, writes, and copies are bounded by the transfer limit (1 GiB by default) a
 ### write-chunk
 `( writer bytes -- )` — Append at most 65536 integer bytes. The streaming transfer limit (1 GiB by default) covers the complete stream, including previous chunks. A failed or cancelled append after writer admission prevents later publication of partial contents; a validation failure before admission does not.
 
+## gzip
+
+Hostile-input-safe gzip decompression. Binary payloads are ordinary lists of integers in `0...255`.
+
+### decompress
+`( bytes -- bytes )` — Decompress one gzip member and return its payload. The payload is limited to 1,073,741,824 bytes. Malformed gzip data, trailing input, a size or checksum that disagrees with the footer, an over-limit payload, and invalid byte items are `` `domain ``; a non-list input is `` `type ``.
+
+#### Examples
+
+```ecl
+[31 139 8 0 0 0 0 0 0 255 75 76 74 6 0 194 65 36 53 3 0 0 0] gzip.decompress
+# => [97 98 99]
+```
+
+## hash
+
+Exact content digests. Binary payloads are ordinary lists of integers in `0...255`.
+
+### sha256
+`( bytes -- lowercase-hex )` — Return the SHA-256 digest of an integer byte list. Every item must be an integer in `0..255`; strings are not byte vectors and are not coerced.
+
+#### Examples
+
+```ecl
+[1 2 3 4] hash.sha256
+# => "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"
+```
+
 ## host
 
 Read-only metadata about the host process: its startup directory and the path of the running executable.
 
 ### cwd
-`( -- path )` — Return the absolute startup directory captured by the Session host as UTF-8 text. This does not consult `PWD` or change the working directory.
+`( -- path )` — Return the absolute startup directory captured by the Session host.
 
 ### executable
-`( -- path )` — Ask the operating system for the current executable's absolute path and return UTF-8 text. This does not consult `PATH` or trust the executable name supplied in the argument vector. Raise `` `io `` when the host cannot provide the path or it is not UTF-8. This is an observation, not an open-file identity: subsequent deletion or replacement can make the path unavailable or stale. Neither metadata operation grants authority beyond the existing filesystem and process facilities. Text construction is cancellable.
+`( -- path )` — Return the absolute path to the currently executing ecl binary.
 
 ## http
 
@@ -1453,21 +1405,19 @@ Requests yield while awaiting network I/O, including under cooperative schedulin
 
 Internal Session configuration defaults to 16 live requests, a 16 KiB target, 16 MiB outbound body, 64 MiB encoded and 64 MiB decoded inbound bodies, and 64 KiB / 256 occurrences of supplied request headers and received response headers. Header byte counts include field-line framing; received whitespace counts before normalization and repeated fields count before deduplication. Redirect responses share cumulative inbound budgets; body limits also apply to chunked and compressed transfers. The response transport holds at most 64 KiB and backend scratch at most 16 MiB per request. Admission remains reserved until response construction and cleanup finish. Exceeding a limit is `` `overflow `` with the target URL in error data; allocation failure remains `OutOfMemory`. Configuration is internal: there are no new request fields or CLI options.
 
-### get
-`( request -- response )` — Fetch a partial or complete `http.request` value, using GET and redirect following as defaults. The request must carry a string `` `target `` URL. An optional `` `method `` overrides GET, optional `` `headers `` are sent once per value in list order, and an optional byte-list `` `body `` is sent exactly for POST, PUT, or PATCH. A nonempty body with another method is `` `domain ``. Return `{status int, headers dict, body string}`. A transport or protocol failure is `` `io `` carrying the URL in `` `path ``; a non-2xx status is an ordinary response.
-
-### get-bytes
-`( request -- response )` — Perform the same request as `get`, including redirects and content decoding, but return `` `body `` as the exact ordered octets in an ordinary integer byte list. Status and headers retain the same types. This is the binary ingress used for archives; no byte is decoded to or encoded from a Unicode character before hashing.
-
-### post
-`( request -- response )` — Fetch the same request value as `get`, using POST, an empty body, and no redirect following as defaults. An optional `` `method `` or `` `body `` overrides those request defaults. Return the same response shape and errors as `get`.
-
 ### send
-`( request -- response )` — Send a complete `http.request` value. Unlike `get` and `post`, this word supplies no method default: both string `` `method `` and `` `target `` fields are required. Redirects are not followed. Return the same response shape and errors as `get`.
+`( request -- response )` — Send a complete `http.request` value: string `` `method `` and `` `target `` URL fields are required. Optional fields:
+
+-- `` `headers `` are sent once per value in list order -- `` `body `` is sent exactly for POST, PUT, or PATCH. -- `` `follow-redirects `` (default 1), when 1, will follow the `Location` of a 3xx response up to three times; otherwise the 3xx is returned.
+
+Return `{status int, headers dict, body bytes}`
 
 ## http.request
 
-Words over partial or complete request dictionaries. Recognized optional fields are `` `method ``, `` `target ``, `` `path ``, `` `query ``, `` `headers ``, `` `body ``, `` `peer ``, and `` `params ``. `http.server` handlers receive every field except `` `params ``, which `http.server.route` may add; outbound `http.get` and `http.post` accept partial values and apply their documented defaults, while `http.send` consumes a complete value. The words here build a complete request, read absent headers/query/body using empty defaults, and return updated copies; the original is never changed. A word given a malformed request dictionary, or a name that is not a string, is `` `type ``.
+Words over partial or complete request dictionaries. Recognized optional fields are `` `method ``, `` `target ``, `` `path ``, `` `query ``, `` `headers ``, `` `body ``, `` `peer ``, `` `params ``, and `` `follow-redirects ``. `http.server` handlers receive every field except `` `params ``, which `http.server.route` may add, and `` `follow-redirects ``, which only `http.send` reads. The words here build an outbound request, read absent headers/query/body using empty defaults, and return updated copies; the original is never changed. A word given a malformed request dictionary, or a name that is not a string, is `` `type ``.
+
+### new
+`( method target -- request )` — Return an outbound request with the method, the target URL, `{}` headers, and `[]` body, ready for `http.send`. The `` `path ``, `` `query ``, and `` `peer `` fields describe a received request, so only `http.server` sets them. A non-string method or target is `` `type ``.
 
 ### query
 `( request -- params )` — Parse the request's `` `query `` string, such as `"a=1&b=%2Fx&c"`, into a dictionary from string keys to string values, such as `{"a" "1" "b" "/x" "c" ""}`: `&`-separated pairs, each split at its first `=`, a pair without `=` mapping its key to `""`, empty pieces ignored, and a later duplicate key replacing an earlier one. `%XX` escapes are decoded in keys and values and the decoded text must be valid UTF-8; `+` is left as it is. An empty query is `{}`. A `%` not followed by two hexadecimal digits, or a decoded key or value that is not valid UTF-8, is `` `domain ``; a non-request is `` `type ``.
@@ -1475,18 +1425,15 @@ Words over partial or complete request dictionaries. Recognized optional fields 
 #### Examples
 
 ```ecl
-"GET" "/?a=1&b=%2Fx&c" http.request.new http.request.query
+{query "a=1&b=%2Fx&c"} http.request.query
 # => {"a" "1" "b" "/x" "c" ""}
 ```
 
 ### valid?
-`( value -- bool )` — Return 1 for a partial or complete request dictionary containing only recognized fields: string `` `method ``, `` `target ``, `` `path ``, `` `query ``, and `` `peer ``; a `` `headers `` dictionary from ASCII-lowercased string names to lists of strings; a byte-list `` `body ``; and a `` `params `` dictionary from string names to string values. Every field is optional. Never raises.
+`( value -- bool )` — Return 1 for a partial or complete request dictionary containing only recognized fields: string `` `method ``, `` `target ``, `` `path ``, `` `query ``, and `` `peer ``; a `` `headers `` dictionary from ASCII-lowercased string names to lists of strings; a byte-list `` `body ``; a `` `params `` dictionary from string names to string values; and a 0 or 1 `` `follow-redirects ``. Every field is optional. Never raises.
 
 ### header
 `( request name -- values )` — Return the list of values of a header, matching the name regardless of letter case, or `()` when it is absent. A non-request or non-string name is `` `type ``.
-
-### new
-`( method target -- request )` — Return a request with the method and target, `` `path `` and `` `query `` split from the target at its first `?` (`` `query `` `""` when absent), `{}` headers, `[]` body, and `""` peer. A non-string method or target is `` `type ``.
 
 ### param
 `( request name -- value )` — Return the route parameter bound under the name by `http.server.route`. A request without that parameter is `` `domain ``; a non-request or non-string name is `` `type ``.
@@ -1511,7 +1458,7 @@ Words over partial or complete request dictionaries. Recognized optional fields 
 
 ## http.response
 
-Words over the response dictionary `{status headers body}`: the value `http.get`, `http.post`, and `http.send` return and the value an `http.server` handler leaves. They build a response, read its headers by name regardless of letter case, classify its status, and return updated copies. `valid?` accepts every well-shaped value; the wire rules a server enforces (no 1xx, reserved header names, no CR or LF) belong to `http.server.render-response`. A word given a value that is not a response dictionary, a status outside `100...599`, or a name that is not a string is `` `type ``.
+Words over the response dictionary `{status headers body}`: the value `http.send` returns and the value an `http.server` handler leaves. They build a response, read its headers by name regardless of letter case, classify its status, and return updated copies. `valid?` accepts every well-shaped value; the wire rules a server enforces (no 1xx, reserved header names, no CR or LF) belong to `http.server.render-response`. A word given a value that is not a response dictionary, a status outside `100...599`, or a name that is not a string is `` `type ``.
 
 ### redirect
 `( location -- response )` — Return a 302 response with `{"location" (location)}` as its headers and an empty body. A non-string location is `` `type ``.
@@ -1535,7 +1482,7 @@ Words over the response dictionary `{status headers body}`: the value `http.get`
 `( response -- class )` — Return the status class: 2 for 200...299, 4 for 400...499, and so on.
 
 ### header
-`( response name -- values )` — Return every value of a header as a list, matching the name regardless of letter case and in dictionary order; a string value counts as one. `()` when the header is absent. A non-response or non-string name is `` `type ``.
+`( response name -- values )` — Return every value of a header as a list, matching the name regardless of letter case; a string value counts as one. `()` when the header is absent. A non-response or non-string name is `` `type ``.
 
 ### with-body
 `( response body -- response )` — Return the response with a new string or byte-list body; another kind is `type.
@@ -1564,10 +1511,10 @@ A request is the dictionary `{method target path query headers body peer}`:
 - `` `method `` and `` `target `` are the first two tokens of the request line, as strings;
 - `` `path `` and `` `query `` are the target split at the first `?`, undecoded; `` `query `` is `""` when the target has no `?`;
 - `` `headers `` is a dictionary from ASCII-lowercased header name to the list of its trimmed values in arrival order, so a repeated header keeps every value;
-- `` `body `` is the exact byte list named by `Content-Length`, `[]` when the request has none; and
+- `` `body `` is the exact byte list `Content-Length` specifies, `[]` when the request has none; and
 - `` `peer `` is the peer's `address:port` formatted from `net.peer-address`, with an IPv6 address in brackets.
 
-A response is the dictionary `{status headers body}` with exactly those keys: an integer status in `200...599`, since interim 1xx responses are not served, with an empty body when the status is 204, 205, or 304; a headers dictionary whose keys are strings and whose values are a string or a list of strings, written once per value in the given order and with the name as given; and a body that is a string, written as UTF-8, or a byte list. The names `content-length`, `connection`, and `transfer-encoding` are reserved in any letter case: the server writes `Content-Length` and `Connection: close` itself, and a response naming one of them is `` `domain ``. Header names must be nonempty HTTP tokens and values may not contain CR, LF, NUL, or a control character other than tab, so a value built from request data cannot split the response.
+A response is the dictionary `{status headers body}` with exactly those keys: an integer status in `200...599`, since interim 1xx responses are not served, with an empty body when the status is 204, 205, or 304; a headers dictionary whose keys are strings and whose values are a string or a list of strings, written once per value in the given order and with the name as given; and a body that is a string, written as UTF-8, or a byte list. The names `content-length`, `connection`, and `transfer-encoding` are reserved in any letter case: the server writes `Content-Length` and `Connection: close` itself, and a response carrying one of them is `` `domain ``. Header names must be nonempty HTTP tokens and values may not contain CR, LF, NUL, or a control character other than tab, so a value built from request data cannot split the response.
 
 Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is answered the same way, and only HTTP/1.1 requests must carry one `Host` header. A HEAD request is answered with the handler's status and headers and no body. Any `Transfer-Encoding` header is answered 411 and a version other than `HTTP/1.1` or `HTTP/1.0` is answered 505. There is no keep-alive: every response carries `Connection: close`, and the connection is closed once the response is written. TLS, chunked bodies, pipelining, and upgrades belong to a proxy in front of the server.
 
@@ -1591,11 +1538,11 @@ The server answers a request it cannot serve with a minimal `text/plain` respons
 
 A peer that connects and closes without sending a byte, or that resets or otherwise fails during the read or the write, is closed silently: nothing is written and `` `on-failure `` is not applied.
 
-The handler is a quotation with the contract `( request -- response )`. Each request applies it as `[request] handler @attempt` in a fresh unit, so a handler's failure is data to the server and the ambient stack never crosses the boundary. A successful handler leaves exactly one value, and that value must satisfy `render-response`. Any other outcome — a raised error, an empty or multi-valued result, a malformed response — answers 500 and applies the `` `on-failure `` quotation to the error dictionary (for a wrong result count, a `` `contract `` error naming the observed count); the serving unit and every other in-flight request are unaffected. Every response the server writes, whether the handler's or its own, is validated in full before any byte is written.
+The handler is a quotation with the contract `( request -- response )`. Each request applies it as `[request] handler @attempt` in a fresh unit, so a handler's failure is data to the server and the ambient stack never crosses the boundary. A successful handler leaves exactly one value, and that value must satisfy `render-response`. Any other outcome — a raised error, an empty or multi-valued result, a malformed response — answers 500 and applies the `` `on-failure `` quotation to the error dictionary (for a wrong result count, a `` `contract `` error reporting the observed count); the serving unit and every other in-flight request are unaffected. Every response the server writes, whether the handler's or its own, is validated in full before any byte is written.
 
 `@serve` serves up to `` `max-in-flight `` connections at a time, each in a child unit that owns its connection, so a connection is closed on every path. Beyond that bound, and at the host's live-connection maximum, further connections wait in the kernel backlog.
 
-`@serve` does not return. The serving unit ends only when it is cancelled, failing `` `cancelled ``, or when an acceptor's `net.accept` fails, in which case that error is raised from `@serve`. Abortive listener closure cancels an admitted accept; graceful shutdown may instead report backend closure as `` `io ``. Admission after closure raises `` `io ``. Either ending cancels and quiesces every acceptor, reader, and handler child by the ordinary scope rules and closes every connection those children own. The listener itself is untouched: `@serve` never calls `net.close` on the listener it was given, which stays the caller's to close explicitly or through its own scope and may be served again.
+`@serve` does not return. The serving unit ends only when it is cancelled, failing `` `cancelled ``, or when an acceptor's `net.accept` fails, in which case that error is raised from `@serve`. Abortive listener closure cancels an admitted accept; graceful shutdown may instead report backend closure as `` `io ``. Admission after closure raises `` `io ``. Either ending cancels and quiesces every acceptor, reader, and handler child by the ordinary scope rules and closes every connection those children own. The listener itself is untouched: `@serve` never calls `port.shutdown` on the listener it was given, which stays the caller's to close explicitly or through its own scope and may be served again.
 
 #### Examples
 
@@ -1611,7 +1558,7 @@ l {read-timeout-ms 5000} (handler) http.server.@serve
 ```
 
 ### content-length
-`( headers -- length )` — Return the request body length named by a headers dictionary as `parse-headers` builds it: `0` when `content-length` is absent, otherwise the integer every occurrence spells, leading zeros allowed, so `{"content-length" ("5")}` is 5. A value that is not a nonempty string of decimal digits, or repeated values that differ, is `` `domain `` with `` `data {status 400} ``; a value too large for a 64-bit integer exceeds every body limit and is `` `domain `` with `` `data {status 413} ``. A non-dictionary is `` `type ``.
+`( headers -- length )` — Return the request body length specified by a headers dictionary as `parse-headers` builds it: `0` when `content-length` is absent, otherwise the integer every occurrence spells, leading zeros allowed, so `{"content-length" ("5")}` is 5. A value that is not a nonempty string of decimal digits, or repeated values that differ, is `` `domain `` with `` `data {status 400} ``; a value too large for a 64-bit integer exceeds every body limit and is `` `domain `` with `` `data {status 413} ``. A non-dictionary is `` `type ``.
 
 ### parse-headers
 `( lines -- headers )` — Fold a list of header-line strings into a dictionary from ASCII-lowercased name to the list of its values in arrival order, so `("Host: a" "host: b")` yields `{"host" ("a" "b")}`. The name is the text before the first `:`, and the value is the rest with surrounding ASCII whitespace removed. `()` is `{}`. A line that has no `:`, has an empty name or a name containing whitespace, or begins with a space or tab (obsolete line folding) is `` `domain `` with `` `data {status 400} ``. A non-list or a non-string line is `` `type ``.
@@ -1662,46 +1609,46 @@ Validation of the arguments completes before any request is accepted. A non-port
 
 ## io
 
-Text over byte streams. Every word here that touches a stream encodes or decodes UTF-8 at that boundary, through `bytes` and `chars`; the console conveniences are the same words applied to `fd.out` and `fd.err`. The host primitives are published as `io.core`.
+Text over byte streams. Every word here that touches a stream encodes or decodes UTF-8 at that boundary, through `bytes` and `chars`; the console conveniences are the same words applied to `stream.out` and `stream.err`.
 
 ### debug
-`( value label -- value )` — Write the string label, `": "`, and the value's pretty-printed representation plus newline, leaving the value on the stack. Semantically `io.prin ": " io.prin io.inspect`; a non-string label is the same `` `type `` failure as `io.prin`.
+`( value label -- value )` — Print `label`, `": "`, and the value's pretty-printed representation plus newline, leaving the value on the stack.
 
 ### eprint
-`( string -- )` — Write a string followed by a newline to the Session's diagnostics stream: standard error under the command line, the host's diagnostics writer when embedded, and never standard output. When the host supplies no diagnostics writer the string is dropped and the word succeeds. Non-string is `` `type ``; a failed write is `` `io ``.
+`( string -- )` — Write a string followed by a newline to standard error.
 
 ### inspect
-`( value -- value )` — Pretty-print a value while leaving it on the stack; the pipeline probe. Semantically `dup io.pp`.
+`( value -- value )` — Pretty-print a value while leaving it on the stack.
 
 ### pp
-`( value -- )` — Pretty-print any value plus newline in the display layout of Printing. Best-effort: huge leaves may be elided, so there is no round-trip guarantee. Use core `str` for canonical rendering.
+`( value -- )` — Print any value plus newline as a diagnostic display: strings and lists longer than 256 elements print as an elision marker with their length, and matrices print one row per line.
 
 ### prin
-`( string -- )` — Write a string's characters as UTF-8 to standard output without adding a newline. Non-string is `` `type ``.
+`( string -- )` — Write a string to standard output without adding a newline.
 
 ### print
-`( string -- )` — Write a string followed by a newline to standard output. Semantically `io.prin "\n" io.prin`.
+`( string -- )` — Write a string followed by a newline to standard output.
 
 ### read
-`( fd -- string )` — Read a byte endpoint to EOF and decode it as UTF-8: `fd.read-all chars`. Invalid UTF-8 is `` `domain `` with `reason invalid-utf8`; read the bytes with `fd.read-all` instead. A later `read` returns `""`.
+`( stream -- string )` — Read a byte endpoint to EOF and decode it as UTF-8.
 
 ### read-line
-`( fd -- string )` — Read one line of UTF-8 text through its newline, newline included, so `""` is unambiguously EOF: `fd.read-line chars`. At EOF the rest of the stream is the line. Invalid UTF-8 is `` `domain ``. Bytes past the newline stay with the endpoint value, so read lines through one value.
+`( stream -- string )` — Read one line of UTF-8 text through its newline, newline included.
 
 ### stack
-`( -- )` — Stack-polymorphic; leaves the operand stack unchanged. Print each value in the currently visible operand window as a bottom-up indexed display block. `[0]` is the bottom and the largest index is the top; continuation lines align after the prefix. An isolated quotation sees only values above its isolation floor. An empty visible window writes nothing. Rendering is best-effort and may use the same multiline dictionary, array, and elision layout as `io.pp`.
+`( -- )` — Print each value in the currently visible operand window as a bottom-up indexed display block.
 
 ### write
-`( fd chardata -- )` — Encode text as UTF-8 and write it to a byte endpoint. `chardata` is a string, or a list of strings written contiguously in order. No newline is added. A non-string element is `` `type ``.
+`( stream chardata -- )` — Encode string or list of strings `chardata` as UTF-8 and write it to a byte endpoint.
 
 ### lines
-`( fd -- strings )` — Read a byte endpoint to EOF and split the decoded text at every newline, without the newlines; a final newline ends the last line rather than starting an empty one. Invalid UTF-8 is `` `domain ``.
+`( stream -- strings )` — Read a byte endpoint to EOF and split the decoded text at every newline.
 
 ### stdin
-`( -- string )` — Read the whole of standard input as text: `fd.in read`. A later call returns `""`; `` `io `` when standard input is the program source. Prefer `fd.in` with `fd.read-all` or `io.read`.
+`( -- string )` — Read all of stdin as text.
 
 ### write-line
-`( fd string -- )` — Encode a string as UTF-8 and write it followed by a newline: `io.write`'s contract.
+`( stream string -- )` — Encode `string` as UTF-8 and write it followed by a newline.
 
 ## json
 
@@ -1724,30 +1671,30 @@ RFC 8259 JSON. `parse` reads JSON text into ECL values and `emit` renders a valu
 
 TCP listeners and connections. Any local IP literal and port can be requested, subject to operating-system restrictions and runtime resource limits. Port zero requests an ephemeral bind. Names are never resolved. IPv4-mapped IPv6 literals normalize to IPv4. Binding uses address reuse, so a closed connection's `TIME_WAIT` does not prevent rebinding; two live listeners cannot hold the same address and port.
 
-The public words are ECL compositions over `net.core.listener`, the registered operations `net.core.accept`, `net.core.local-address`, and `net.core.peer-address`, and the endpoint selectors `net.core.input` and `net.core.output`. Each operation requires `[]`. Accept occupies its FIFO lane until completion or cancellation. Address operations use an independent control lane. Factories and selectors are opaque identities for their resource kinds.
+An accept occupies its FIFO lane until completion or cancellation; address queries use an independent control lane.
 
 Listeners and connections belong to task scopes. Retaining or sending a port shares use; `@give` transfers ownership. A newly accepted connection remains provisionally owned by its exchange until `port.result` publishes it into the receiving scope. Failed publication retains that provisional ownership, and closing an unclaimed exchange closes the connection. Accepted connections are independent of their listener, including after listener closure. Scope closure aborts its resources and joins socket cleanup even while identities remain retained elsewhere.
 
 A listener takes a connection from the kernel backlog only for an active accept with connection capacity available. At capacity, accept parks until a connection closes. A waiting accept holds no connection slot. Admission itself is bounded by the resource's operation capacity; additional callers park. Competing accepts consume distinct connections and do not broadcast. A peer that aborts before acceptance is skipped. The runtime does not retry a failed operation or reopen a failed resource.
 
-Byte endpoints preserve exact integer bytes in `0...255`; they perform no text decoding. Reads have a single-pending-reader rule. Writes execute FIFO and each call stays contiguous under bounded pressure. `fd.finish` on the output endpoint rejects new writers and sends EOF after admitted writers and queued bytes drain, while the input direction remains readable. Framing, TLS, encoding, and protocol limits belong to libraries. Deadlines compose tasks with `task.await-for`, cancellation, and joining.
+Byte endpoints preserve exact integer bytes in `0...255`; they perform no text decoding. Reads have a single-pending-reader rule. Writes execute FIFO and each call stays contiguous under bounded pressure. `port.finish` on `net.output` rejects new writers and sends EOF after admitted writers and queued bytes drain, while the input direction remains readable. Framing, TLS, encoding, and protocol limits belong to libraries. Deadlines compose tasks with `task.await-for`, cancellation, and joining.
 
 ### accept
 `( listener -- connection )` — Wait for a peer and claim the accepted connection port into the calling task scope. Accepted connections remain usable after their listener closes. At host connection capacity, wait until a slot is free; competing accepts receive distinct connections. A non-listener is `` `type ``. Abortive listener closure cancels admitted accepts; graceful shutdown may instead report backend closure as `` `io ``. A new call after closure is `` `io ``. Socket or buffer exhaustion and host failures are `` `io ``. Cancelling an accept closes any connection still provisionally owned by that exchange, so none is lost before delivery. Completed exchanges retain their own result and cleanup lifetime independently of the listener.
 
-### close
-`( resource -- )` — Gracefully shut down a resource and join cleanup through `port.shutdown`. A listener closes its socket and stops accepting; its admitted accepts end with `` `io `` or `` `cancelled ``. A connection delivers accepted writes to the kernel before closing its socket; this does not establish peer receipt or an external acknowledgement. Cancelling shutdown may discard remaining queued bytes. Repeated graceful shutdown observes the same outcome; graceful shutdown after abortive closure raises `` `io ``. Use `port.close` for idempotent abortive cleanup. This composition also accepts other resources with registered graceful shutdown.
+### input
+`( connection -- stream )` — The connection's receiving direction as a readable byte stream for `stream.read`, `stream.read-line`, `stream.read-all`, and the `io` readers. Each call borrows a new endpoint value over the same socket, and a line reader's read-ahead belongs to the value, so read lines through one value. The stream closes with the connection.
 
 ### listen
-`( config -- listener )` — Bind a TCP listener by opening `net.core.listener` with a configuration of exactly these two symbol-keyed fields; neither has a default:
+`( config -- listener )` — Bind a TCP listener with a configuration of exactly these two symbol-keyed fields; neither has a default:
 - `` `address ``: an IPv4 or IPv6 literal string without IPv6 brackets, such as `"127.0.0.1"`, `"::1"`, `"0.0.0.0"`, or `"::"`.
 - `` `port ``: an integer in `0...65535`, such as `8080`; `0` requests an ephemeral port.
 
 Loopback addresses accept local connections; wildcard addresses `"0.0.0.0"` and `"::"` bind available interfaces of their address family, subject to operating-system restrictions. Hostnames are not resolved: do not use a hostname such as `"localhost"`, a URL, or an address with an embedded port. Backlog and buffer capacities are runtime limits, not configuration fields. Inspect the assigned port with `net.local-address` after a port-zero bind.
 
-The returned listener port is already listening and belongs to the calling task scope. Use `net.accept` for connections and `net.close` for graceful shutdown. CLI sessions grant listening; embeddings deny it by default. A non-dictionary or wrongly typed field is `` `type ``; missing or unknown fields, invalid literals or ports, denied host authority, or exhausted listener capacity is `` `domain ``. Common structured-value limits also apply. Host bind and listen failures are `` `io ``. Configuration failures include the requested address, port, and reason where available; controller and lifecycle failures report the common error kind and message.
+The returned listener port is already listening and belongs to the calling task scope. Use `net.accept` for connections. `port.shutdown` on a listener closes its socket and stops accepting; its admitted accepts end with `` `io `` or `` `cancelled ``. On a connection it delivers accepted writes to the kernel before closing the socket, which does not establish peer receipt. `port.close` is the abortive, idempotent alternative. A non-dictionary or wrongly typed field is `` `type ``; missing or unknown fields, invalid literals or ports, or exhausted listener capacity is `` `domain ``. Common structured-value limits also apply. Host bind and listen failures are `` `io ``. Configuration failures include the requested address, port, and reason where available; controller and lifecycle failures report the common error kind and message.
 
-This module provides listeners and accepted TCP connections, with no outbound-connect word. TCP is a byte stream: a read can return less than requested or combine data from multiple peer writes. Supply framing in the application, and assemble complete UTF-8 sequences before calling `chars`. For a write-side half-close that keeps the connection readable, use `dup net.core.output port.endpoint port.finish`.
+This module provides listeners and accepted TCP connections, with no outbound-connect word. TCP is a byte stream: a read can return less than requested or combine data from multiple peer writes. Supply framing in the application, and assemble complete UTF-8 sequences before calling `chars`. For a write-side half-close that keeps the connection readable, use `dup net.output port.finish`.
 
 #### Examples
 
@@ -1756,7 +1703,7 @@ Bind an ephemeral port and read back the assigned address:
 ```ecl
 {address "127.0.0.1" port 0} net.listen
 dup net.local-address
-swap net.close
+swap port.shutdown
 # Leaves {address "127.0.0.1" port n}, where n is the assigned port.
 ```
 
@@ -1767,12 +1714,15 @@ first close drains and closes the connection; the second closes the listener.
 {address "127.0.0.1" port 8080} net.listen
 dup net.accept
 dup "hello\n" bytes net.write
-net.close
-net.close
+port.shutdown
+port.shutdown
 ```
 
 ### local-address
 `( resource -- address )` — Return `{address string port int}` for an open listener or connection. IPv4 uses dotted-quad text; IPv6 uses RFC 5952 text without brackets. A listener bound to port 0 reports its assigned port; a connection accepted through a wildcard listener reports its actual local endpoint. A wrong resource kind is `` `type ``; closure or backend failure is `` `io ``.
+
+### output
+`( connection -- stream )` — The connection's sending direction as a writable byte stream for `stream.write` and `port.finish`. Finishing it sends EOF after admitted writes drain while the input direction stays readable. Each call borrows a new endpoint value over the same socket; the stream closes with the connection.
 
 ### peer-address
 `( connection -- address )` — Return the remote endpoint of an open connection in the same `{address string port int}` shape and canonical text as `net.local-address`; a listener has no peer. A non-connection is `` `type ``; closure or backend failure is `` `io ``.
@@ -1781,7 +1731,7 @@ net.close
 `( connection max -- bytes )` — Read at most positive integer `max` bytes, also bounded by the host receive capacity. Park when no data is ready; short reads are normal and do not mark message boundaries. Return exact integer bytes in `0...255`, or `[]` only at stable EOF; later reads also return `[]`. A wrong capability or non-integer maximum is `` `type ``; a nonpositive maximum is `` `domain ``; an overlapping read is `` `contract ``. Buffered bytes precede a transport failure, which raises `` `io ``. Abortive closure may discard buffered bytes. No text decoding is performed; use `chars` only on complete UTF-8 sequences.
 
 ### write
-`( connection bytes -- )` — Accept a complete list of integer bytes in `0...255` in FIFO order, parking under bounded pressure. Each call stays contiguous, but TCP does not preserve message boundaries. Convert strings explicitly with `bytes`. A non-list or a string is `` `type ``; an element outside `0...255` is `` `domain ``; finished output, closure, peer reset, or other transport failure is `` `io ``. Acceptance is distinct from delivery, output EOF, and resource cleanup, and does not establish peer receipt. To send EOF while retaining input, use `net.core.output port.endpoint fd.finish`.
+`( connection bytes -- )` — Accept a complete list of integer bytes in `0...255` in FIFO order, parking under bounded pressure. Each call stays contiguous, but TCP does not preserve message boundaries. Convert strings explicitly with `bytes`. A non-list or a string is `` `type ``; an element outside `0...255` is `` `domain ``; finished output, closure, peer reset, or other transport failure is `` `io ``. Acceptance is distinct from delivery, output EOF, and resource cleanup, and does not establish peer receipt. To send EOF while retaining input, use `net.output port.finish`.
 
 ## path
 
@@ -1828,7 +1778,7 @@ A cancelled exchange raises `` `cancelled `` from `port.await` and `port.result`
 
 Endpoints may belong to a resource or to one exchange. Resource endpoints retain their direction and buffered data across exchange completion; finishing a resource endpoint or closing its resource ends that direction. A message may carry a sender through which its recipient replies to a backend request. Such a sender retains only its permitted direction; request identifiers, notifications, and response ordering follow the issuing library's protocol. Endpoint capabilities preserve the source identity and cannot be transferred independently with `@give`. A selector from another issuing kind, or a read or write through the wrong direction, raises `` `type ``; an endpoint not permitted by its source raises `` `domain ``. Buffered output remains readable before a terminal failure is raised. Once observed, EOF remains stable through later exchange failure or resource cleanup. An early input consumer exit wakes blocked writers with `` `io ``. Streaming callers must drain independent outputs concurrently when necessary for progress; waiting for completion does not drain them.
 
-`port.call` is an ECL composition. It closes the exchange before returning its result or re-raising its terminal error. It leaves the resource with its owner. The public `port` module composes the host operations exported by `port.core`.
+`port.call` is an ECL composition. It closes the exchange before returning its result or re-raising its terminal error. It leaves the resource with its owner.
 
 Configuration and initial requests may contain integers, floats, characters, symbols, lists, dictionaries, and port capabilities. Executable words, tasks, and modules are rejected recursively with `` `type ``. Each value is bounded by 64 KiB of scalar/text bytes, 4,096 nodes, and 16 capability occurrences; exceeding a bound raises `` `overflow `` before initialization or admission. Retaining an existing resource in a request shares use and does not transfer its scope.
 
@@ -1841,10 +1791,10 @@ Messages and terminal results use the same structured-value bounds. Default mess
 | `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |
 | `port.begin` | `( resource operation request -- exchange )` | Admit a registered operation on its declared FIFO lane, parking while admission capacity is full. |
 | `port.call` | `( resource operation request -- value )` | Begin, claim the result, and close the exchange. Requires no additional streaming input or output. |
-| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint supported by its resource or permitted by its exchange's operation. Supports registered byte and message endpoints; a byte endpoint is an fd for the `fd` words. |
+| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint supported by its resource or permitted by its exchange's operation. Supports registered byte and message endpoints; a byte endpoint is a stream for the `stream` words. |
 | `port.send` | `( sender message -- )` | Enqueue one complete structured message atomically, parking under pressure. Empty values are valid messages. |
 | `port.receive` | `( receiver -- event )` | Return `{kind message value value}` or `{kind eof}`. Overlapping receivers raise `` `contract ``. |
-| `port.finish` | `( sender -- )` | Finish a message sender after accepted sends, so its receiver sees `{kind eof}`. Idempotent; later sends raise `` `io ``. Byte endpoints finish with `fd.finish`. |
+| `port.finish` | `( endpoint -- )` | Finish a writable byte endpoint or message sender after accepted writes or sends drain, so its reader sees EOF or `{kind eof}`. Idempotent; later writes or sends raise `` `io ``. |
 | `port.await` | `( exchange -- )` | Wait for successful completion or raise the terminal error. Repeatable; does not drain output. |
 | `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `` `contract ``. |
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
@@ -1870,7 +1820,7 @@ Messages and terminal results use the same structured-value bounds. Default mess
 `( source selector -- endpoint )` — Borrow an attenuated endpoint supported by its source.
 
 ### finish
-`( sender -- )` — Finish a message sender after admitted sends, so its receiver sees {kind eof}. Idempotent. Byte endpoints finish with fd.finish.
+`( endpoint -- )` — Finish a writable endpoint after admitted writes or sends drain: a byte reader sees EOF, a message receiver {kind eof}. Idempotent; later writes or sends raise `io.
 
 ### open
 `( factory config -- resource )` — Initialize a registered resource in the calling scope.
@@ -1891,19 +1841,17 @@ Messages and terminal results use the same structured-value bounds. Default mess
 
 Subprocess ports with bounded live counts, queues, and capture sizes. Process creation is available as an ordinary standard-library operation. Executable access is determined by the operating system.
 
-The public words are ECL compositions over registered process capabilities, common port transport, and task primitives.
+`proc.spawn` creates a process resource subject to the common structured-value and process limits. The resource supports the process words and the common `port` lifecycle words.
 
-`proc.core.process` is the registered process factory. Applying `port.open` to it and a spawn specification creates a process resource subject to the common structured-value and process limits as `proc.spawn`. The returned resource supports the process words and common lifecycle words; the factory is an opaque identity for the process resource kind.
+`proc.wait` has its own FIFO lane; `proc.terminate` and `proc.kill` share an independent control lane and do not wait for exit. Cancelling a wait leaves the process running. Process exit leaves the resource open for further operations; closing the resource prevents new operations and joins backend cleanup.
 
-The registered operations `proc.core.wait`, `proc.core.terminate`, `proc.core.kill`, and `proc.core.capture-limits` require an empty request list. Wait returns the termination dictionary described below. Terminate and kill request the corresponding process action and return `[]`; they do not wait for process exit. Capture-limits returns a dictionary with `` `stdout `` and `` `stderr `` capture limits. Wait has its own FIFO lane; the other operations share an independent control lane. Cancelling a wait leaves the process running and makes its lane reusable after cancellation settles. Each exchange result is claimable once, while completion observation is repeatable. Process exit leaves the resource open for further operations; closing the resource prevents new admission and joins backend cleanup.
-
-`proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint selectors for process resources, and `proc.stdin`, `proc.stdout`, and `proc.stderr` are the endpoints they select. `port.endpoint` with stdin grants writing and finishing, so `fd.write` and `fd.finish` apply; stdout and stderr grant reading, so `fd.read`, `fd.read-line`, `fd.read-all`, and the `io` readers apply. An endpoint is borrowed, so `fd.close` on it is `` `type ``; close the resource with `port.close`. Their byte, EOF, and single-reader contracts are shared with the corresponding process words. Finishing stdin delivers accepted bytes before closing that direction, is idempotent, and rejects subsequent writes, including empty writes. Endpoints share permitted use without owning the resource; they cannot be transferred with `@give`.
+`proc.stdin`, `proc.stdout`, and `proc.stderr` borrow the process's byte streams. Stdin grants writing and finishing, so `stream.write` and `port.finish` apply; stdout and stderr grant reading, so `stream.read`, `stream.read-line`, `stream.read-all`, and the `io` readers apply. An endpoint is borrowed, so `port.close` on it is `` `type ``; close the resource instead. Their byte, EOF, and single-reader contracts are shared with the corresponding process words. Finishing stdin delivers accepted bytes before closing that direction, is idempotent, and rejects subsequent writes, including empty writes. Endpoints share permitted use without owning the resource; they cannot be transferred with `@give`.
 
 A spawn specification is a dictionary whose keys are symbols, with only the fields `` `executable `` (required), `` `args ``, `` `cwd ``, and `` `env ``. The nested environment dictionary uses **string** keys.
 
 Paths, arguments, and environment strings cannot contain NUL. Environment names must be nonempty and contain no `=`. The child inherits nothing from the interpreter's environment: `` `env `` is exactly what it sees, and omitting it starts the child with an empty environment. Forward a host variable explicitly with `getenv`, for example `{} "HOME" dup getenv put`. There is no shell-command form, expansion, or `PATH` search: spaces and shell metacharacters in an argument are passed literally. Unknown fields and missing `` `executable `` are `` `domain ``; non-symbol keys and wrongly typed fields are `` `type ``; invalid field values are `` `domain ``. Validation precedes process creation.
 
-Prefer `proc.run` when the output fits a known bound. With `proc.spawn`, feed stdin and drain **both** output pipes concurrently when they can fill. A child may wait for stdin EOF before exiting, so call `proc.close-input` when feeding is complete. `proc.wait` does not drain output: waiting first can deadlock on a full pipe. Reads may split text characters or application messages across chunks. Close the resource with `port.close` when finished; waiting for exit does not close it.
+Prefer `proc.run` when the output fits a known bound. With `proc.spawn`, feed stdin and drain **both** output pipes concurrently when they can fill. A child may wait for stdin EOF before exiting, so finish it with `proc.stdin port.finish` when feeding is complete. `proc.wait` does not drain output: waiting first can deadlock on a full pipe. Reads may split text characters or application messages across chunks. Close the resource with `port.close` when finished; waiting for exit does not close it.
 
 Bytes are ordinary integer lists whose elements are all in `0...255`. Process streams do not decode Unicode. A port is an opaque identity capability that prints `<port:N>` and has type `` `port ``; it exposes no PID and cannot be passed through JSON. Native words can view and forward its opaque identity.
 
@@ -1939,7 +1887,7 @@ A fuller specification adds arguments, a working directory, and environment:
 # "hello world\n"
 ```
 
-These examples require the named executables and directory to exist, and the
+These examples require the executables and directory they use to exist, and the
 host to permit the requested paths and capture bounds. Use `bytes` to encode
 text for stdin and `chars` to decode complete UTF-8 output. Arbitrary process
 output may not be valid UTF-8.
@@ -1948,7 +1896,7 @@ output may not be valid UTF-8.
 `( resource -- )` — Request force termination of the process group and arrange direct-child reap. Idempotent and safe after natural exit while the resource remains open. This does not wait for exit; use `proc.wait` to observe termination and `port.close` to join cleanup.
 
 ### spawn
-`( spec -- resource )` — Start the directly named, authorized executable with stdin, stdout, and stderr pipes. `spec` is a symbol-keyed dictionary:
+`( spec -- resource )` — Start the directly specified, authorized executable with stdin, stdout, and stderr pipes. `spec` is a symbol-keyed dictionary:
 - `` `executable ``, required: an absolute path string.
 - `` `args ``: a list of argument strings, default `[]`; it excludes the executable name.
 - `` `cwd ``: an absolute path string without `.` or `..` components, default the host-configured starting directory.
@@ -1959,13 +1907,13 @@ Strings must not contain NUL, and environment names must be nonempty and contain
 The child and its process group, pipe tasks, and spawning task-scope membership commit before the port becomes visible. The calling task scope owns the live child: scope closure cancels the process group and waits for reap even if a port value remains stored elsewhere. Returning or storing the port does not detach it; `@give` is the one way to change owner, and the unit it is given to kills the group when it ends. Use `proc.run` for bounded capture, or drain both output streams concurrently.
 
 ### stderr
-`( resource -- fd )` — The process's stderr as a readable byte endpoint, with `stdout`'s contract.
+`( resource -- stream )` — The process's stderr as a readable byte endpoint, with `stdout`'s contract.
 
 ### stdin
-`( resource -- fd )` — The process's stdin as a writable byte endpoint for `fd.write` and `fd.finish`. Each call borrows a new endpoint value over the same pipe; the pipe closes with the process resource, so the value is `` `type `` to `fd.close`.
+`( resource -- stream )` — The process's stdin as a writable byte endpoint for `stream.write` and `port.finish`. Each call borrows a new endpoint value over the same pipe; the pipe closes with the process resource, so the value is `` `type `` to `port.close`.
 
 ### stdout
-`( resource -- fd )` — The process's stdout as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all`, and the `io` readers. Each call borrows a new endpoint value over the same pipe, and a line reader's read-ahead belongs to the value, so read lines through one value. Drain stderr concurrently when it can fill, or use `proc.run` to capture both streams.
+`( resource -- stream )` — The process's stdout as a readable byte endpoint for `stream.read`, `stream.read-line`, `stream.read-all`, and the `io` readers. Each call borrows a new endpoint value over the same pipe, and a line reader's read-ahead belongs to the value, so read lines through one value. Drain stderr concurrently when it can fill, or use `proc.run` to capture both streams.
 
 ### terminate
 `( resource -- )` — Request ordinary termination of the process group without waiting for exit, escalating to force termination during cleanup when needed. Idempotent and safe after natural exit while the resource remains open. Use `proc.wait` to observe termination and `port.close` to join cleanup.
@@ -1978,9 +1926,6 @@ The child and its process group, pipe tasks, and spawning task-scope membership 
 - `{kind unknown status n}`.
 
 Any number of waiters and later calls receive the same dictionary. A nonzero exit code is ordinary termination data, not an ECL error. A pipe failure raises `` `io ``. Output pipes can fill and prevent exit, so drain both concurrently or use `proc.run`. Waiting requires an open resource; after closure, observe a previously completed exchange instead of admitting another wait. This leaves the resource open; use `port.close` to join cleanup.
-
-### close-input
-`( resource -- )` — Finish stdin after queued bytes have been written, sending EOF to the child. Idempotent. A concurrent or later write, including an empty write, is `` `io ``. Output remains readable; this does not wait for process exit or close the process resource.
 
 ### read-stderr
 `( resource max -- bytes )` — Read at most positive integer `max` bytes from stderr, parking when no data is ready. Return exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads may be shorter than `max`. A non-integer maximum is `` `type ``; a nonpositive maximum is `` `domain ``; at most one stderr read may be pending, so overlap is `` `contract ``; pipe failure is `` `io ``. Drain stdout concurrently when it can fill, or use `proc.run` to capture both streams.
@@ -2007,7 +1952,7 @@ Capture overflow kills and cleans the process before raising `` `overflow ``. De
 Explicit-state pseudorandom draws are pure except for `entropy`; see [Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw returns the advanced state alongside its result. An ambient generator is an agent holding that state: ``[0 0] agent.start `rng set`` then `rng (5 rand.int) agent.call`.
 
 ### deal
-`( state count pool -- state results )` — Draw `count` distinct ints in `[0, pool)` without replacement, advancing the state by `count`. Work and memory follow `count`, never `pool`. A negative count or pool, or a count above the pool, is `` `domain ``; a non-int count or pool is `` `type ``.
+`( state count pool -- state results )` — Draw `count` distinct ints in `[0, pool)` without replacement.
 
 #### Examples
 
@@ -2017,13 +1962,13 @@ Explicit-state pseudorandom draws are pure except for `entropy`; see [Randomness
 ```
 
 ### entropy
-`( -- key )` — Read one int from the host CSPRNG. This is the language's only nondeterministic word, requires host IO, and is `` `io `` without it.
+`( -- key )` — Read one int from the host CSPRNG.
 
 ### float
 `( state -- state result )` — Draw one uniform float in `[0, 1)`.
 
 ### int
-`( state bound -- state result )` — Draw one unbiased uniform int in `[0, bound)`. A bound below 1 is `` `domain ``.
+`( state bound -- state result )` — Draw one unbiased uniform int in `[0, bound)`.
 
 #### Examples
 
@@ -2033,7 +1978,7 @@ Explicit-state pseudorandom draws are pure except for `entropy`; see [Randomness
 ```
 
 ### ints
-`( state count bound -- state results )` — Draw `count` uniform ints in `[0, bound)`, advancing the state by `count`. Each element is addressed by its own counter position, so materialization order cannot change the list.
+`( state count bound -- state results )` — Draw `count` uniform ints in `[0, bound)`, advancing the state by `count`.
 
 #### Examples
 
@@ -2043,7 +1988,7 @@ Explicit-state pseudorandom draws are pure except for `entropy`; see [Randomness
 ```
 
 ### shuffle
-`( state values -- state values )` — Return a uniformly selected permutation of a list, advancing the state by the list's length. Any element kind is permuted and the list keeps its representation. A non-list is `` `type ``.
+`( state values -- state values )` — Return a uniformly selected permutation of `values`.
 
 #### Examples
 
@@ -2054,29 +1999,16 @@ Explicit-state pseudorandom draws are pure except for `entropy`; see [Randomness
 
 ## result
 
-Results have the `{ok values}` or `{err error}` form produced by `@attempt` and `task.await`. Every entry validates its result envelope before invoking a caller quotation. A success payload is always a list representing a stack.
-
-Each word has one role. Transformers return a result and run their quotation isolated under `@attempt`, so a quotation that fails yields a failed result. Eliminators leave plain values and run their quotations inline, so they can reach the stack beneath the result.
-
-- Construct: `ok`, `err`.
-- Test: `ok?`, `err?`.
-- Transform the success: `map`.
-- Transform the failure: `recover`, `recover-kinds`, `map-err`.
-- Eliminate: `either`, `or-raise`, `or-default`.
-- Combine: `all`, `partition`.
-
-`map` replaces the success stack with what its quotation leaves, and a raising quotation turns the success into a failure. `recover` may likewise turn a failure into a success; `map-err` always keeps a failure and replaces only the error dict. `or-default` returns the success list or, on failure, the fallback value as given.
-
-`raise`, `fail`, and `assert` operate on errors directly and remain core words.
+Operations on the conventional `result` dict.
 
 ### err
-`( error -- result )` — Tag an error dict as a failed result.
+`( error -- result )` — Wrap `error` in an unsuccessful result dict.
 
 ### ok
-`( values -- result )` — Build an ok result from a list of successful stack values, representing the stack a successful computation left.
+`( values -- result )` — Wrap `values` in a successful result dict.
 
 ### either
-`( result on-ok on-err -- ... )` — Eliminate a result exhaustively: call `on-ok` with the success list or `on-err` with the error dict. Neither branch is isolated; each runs inline and may leave any number of values.
+`( result on-ok on-err -- ... )` — If `result` is successful, apply `on-ok` to its values. Otherwise, apply `on-err` to its error.
 
 #### Examples
 
@@ -2086,10 +2018,10 @@ Each word has one role. Transformers return a result and run their quotation iso
 ```
 
 ### err?
-`( result -- bool )` — Return 1 when a well-formed result is a failure.
+`( result -- bool )` — Return 1 when a result is unsuccessful.
 
 ### map
-`( result quotation -- result )` — For a success, use its payload as the explicit values list for `@attempt`, running the quotation on an isolated stack seeded with the success values. Return a failure unchanged.
+`( result quotation -- result )` — If `result` is successful, then apply `quotation` to its values in a new unit and return a new result. Otherwise return `result` unchanged.
 
 #### Examples
 
@@ -2099,28 +2031,28 @@ Each word has one role. Transformers return a result and run their quotation iso
 ```
 
 ### map-err
-`( result (error -- error) -- result )` — Replace a failure's error dict with the one its isolated quotation returns. Return a success unchanged.
+`( result (q: error -- error) -- result )` — If `result` is successful, return it unchanged. Otherwise apply `q` to its error and return a new unsuccessful result.
 
 ### ok?
-`( result -- bool )` — Return 1 when a well-formed result is a success.
+`( result -- bool )` — Return 1 when a result is successful.
 
 ### or-default
-`( result fallback -- value )` — Return a success list, or the fallback value for a failure.
+`( result default -- value )` — If `result` is successful, extract the success values; otherwise return `default`.
 
 ### or-raise
-`( result -- values )` — Return a success list, or re-raise the stored error dict unchanged.
+`( result -- values )` — If `result` is successful, extract the success values; otherwise raise its error.
 
 ### recover
-`( result quotation -- result )` — For a failure, run the recovery quotation under `@attempt` with the stored error dict as its only input. Return a success unchanged.
+`( result quotation -- result )` — If `result` is successful, return it unchanged. Otherwise apply `quotation` to its error and return a new result.
 
 ### all
-`( results -- result )` — Return the leftmost failure unchanged, or one success whose value is the list of success stacks in input order.
+`( results -- result )` — Return the leftmost unsuccessful element of `results`, or a successful result containing the success values of all of `results`.
 
 ### partition
-`( results -- successes errors )` — Split results into success lists and error dicts, both in input order, without re-raising.
+`( results -- successes errors )` — Partition results into success lists and error dicts, both in input order, without re-raising.
 
 ### recover-kinds
-`( result kinds quotation -- result )` — Recover a failure only when its kind is one of the listed symbols. Return every other result unchanged.
+`( result kinds quotation -- result )` — Recover an unsuccessful result only when its kind is in `kinds`. Return every other result unchanged.
 
 #### Examples
 
@@ -2134,7 +2066,7 @@ Each word has one role. Transformers return a result and run their quotation iso
 Inert inspection of ECL source: what a source declares, found by the reader's discovery rule without evaluating it.
 
 ### declarations
-`( quotation -- list )` — Inspect parsed source without executing it. Return the symbols immediately preceding top-level `@defm` words, in source order. Preserve duplicate names and report literal spellings without validating namespace or export policy. Ignore computed names and declarations inside quotations, lists, dictionaries, strings, or comments. This reports syntactic declarations, not proof that executing the source would register a module. Like other quotation operations, this accepts a list (`` `type `` otherwise). Use `parse` to inspect text, with its ordinary parse failures. Inspection is cancellable.
+`( quotation -- list )` — Inspect parsed source without executing it. Return the symbols immediately preceding top-level `@defm` words, in source order. Preserve duplicate names and report literal spellings without validating namespace or export policy. Ignore computed names and declarations inside quotations, lists, dictionaries, strings, or comments.
 
 #### Examples
 
@@ -2145,10 +2077,10 @@ Inert inspection of ECL source: what a source declares, found by the reader's di
 
 ## str
 
-All case and whitespace operations use the ASCII character classes; every non-ASCII scalar passes through unchanged.
+Operations on strings.
 
 ### format
-`( values template -- string )` — Interpolate positional `{}` placeholders. Strings contribute their contents; other values contribute canonical `str`. `{{` and `}}` emit literal braces.
+`( values template -- string )` — Interpolate positional `{}` placeholders. Strings are rendered verbatim; other values are rendered with `str`. User `{{` and `}}` to emit literal braces.
 
 #### Examples
 
@@ -2158,10 +2090,10 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ```
 
 ### join
-`( strings separator -- string )` — Join a list of strings with a separator string.
+`( strings separator -- string )` — Join `strings` with `separator`.
 
 ### split
-`( string separator -- parts )` — Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list.
+`( string separator -- parts )` — Split `string` at every occurrence of `separator`. When `separator` is "", then `parts` will be a list of single-grapheme strings.
 
 #### Examples
 
@@ -2171,10 +2103,10 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ```
 
 ### str?
-`( value -- bool )` — Return 1 when a value is a string, a list whose every element is a char, and 0 for every other value. The empty string answers 1, and so does the empty list: they are one value. Never raises.
+`( value -- bool )` — Return 1 when `value` is a list of chars.
 
 ### lower
-`( string -- string )` — Lowercase ASCII letters, leaving every other scalar unchanged.
+`( string -- string )` — Lowercase the ASCII codepoints in `string`.
 
 ### trim
 `( string -- string )` — Remove ASCII whitespace from both ends of a string.
@@ -2193,7 +2125,7 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 `( string -- string )` — Remove trailing ASCII whitespace.
 
 ### upper
-`( string -- string )` — Uppercase ASCII letters, leaving every other scalar unchanged.
+`( string -- string )` — Uppercase the ASCII codepoints in `string`.
 
 #### Examples
 
@@ -2203,7 +2135,7 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ```
 
 ### contains?
-`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.
+`( string needle -- bool )` — Return 1 when `needle` occurs anywhere in `string`. Return 1 if `needle` is "".
 
 #### Examples
 
@@ -2213,22 +2145,16 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ```
 
 ### ends?
-`( string suffix -- bool )` — Return 1 when the string ends with the suffix.
+`( string suffix -- bool )` — Return 1 when `string` ends with `suffix`.
 
 ### index-of
-`( string needle -- index )` — Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and raise `` `domain `` when a nonempty needle is absent.
-
-### pad-left
-`( string width -- string )` — Add leading spaces until the string reaches the requested width; return a longer string unchanged.
-
-### pad-right
-`( string width -- string )` — Add trailing spaces until the string reaches the requested width; return a longer string unchanged.
+`( string needle -- index )` — Return the index of `needle`'s first occurrence in `string`, or the length of `string` when `needle` does not occur. Return 0 when `needle` is "".
 
 ### repeat
-`( string count -- string )` — Concatenate `count` copies of a string; `count` must be nonnegative.
+`( string count -- string )` — Concatenate `count` copies of `string`.
 
 ### replace
-`( string needle replacement -- string )` — Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent scalars only, with no boundary insertion.
+`( string needle replacement -- string )` — Replace every occurrence of `needle` in `string`. An empty needle inserts the replacement between adjacent codepoints.
 
 #### Examples
 
@@ -2238,73 +2164,50 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ```
 
 ### starts?
-`( string prefix -- bool )` — Return 1 when the string starts with the prefix.
+`( string prefix -- bool )` — Return 1 when `string` starts with `prefix`.
+
+### pad-left
+`( string width pad -- string )` — Add leading copies of the char `pad` until `string` reaches `width`; return a longer string unchanged.
+
+### pad-right
+`( string width pad -- string )` — Add trailing copies of the char `pad` until `string` reaches `width`; return a longer string unchanged.
+
+## stream
+
+Byte streams. A stream is a byte endpoint: the standard devices, a file opened with `fs.open-reader`, a process pipe from `proc.stdin`, `proc.stdout`, or `proc.stderr`, and a connection's endpoints are all one kind to the words here, which provide the operations every byte endpoint shares. Nothing in `stream` decodes or encodes text: that is `io`. A read of either kind may leave bytes read ahead with the endpoint value, so a program that reads lines keeps the value it reads them through.
+
+### err
+`( -- stream )` — Return a handle to stderr.
+
+### in
+`( -- stream )` — Return a handle to stdin.
+
+### out
+`( -- stream )` — Return a handle to stdout.
+
+### read
+`( stream max -- bytes )` — Read at most `max` bytes from `stream`, parking until data or EOF.
+
+### read-all
+`( stream -- bytes )` — Read to EOF and return every byte as one list. A later `read-all` on the same endpoint returns `[]`. Errors are `read`'s.
+
+### read-line
+`( stream -- bytes )` — Read through the next newline and return those bytes, including \n.
+
+### write
+`( stream data -- )` — Write bytes. `data` is a list of integer bytes in `0...255`, or a list of such lists, written contiguously in order, so a program assembling output from pieces need not join them first. A string is `` `type ``: encode text with `io.write`. Invalid byte elements are `` `domain ``; a finished endpoint or transport failure is `` `io ``.
 
 ## table
 
-Tables are column dictionaries. Column names are nonempty strings, column values are lists, and every column has the same length. A table has at least one column and may have zero rows. Column order is dictionary insertion order. Tables remain ordinary dictionaries: `type`, `keys`, `at`, and `put` keep their normal behavior.
+A table is any dict whose values are lists of equal length.
 
-Every operation except `valid?` first validates the ordinary column dict as a table. See the environment's [table contract](ENVIRONMENT.md#tables) for the table convention and frozen error kinds.
-
-### from-records
-`( records -- table )` — Build a table from a nonempty list of dicts sharing one key set. The first record fixes the schema order; later records may use a different key order.
-
-#### Examples
-
-```ecl
-[{"name" "Ada" "score" 10} {"name" "Lin" "score" 20}] table.from-records
-# => {"name" ("Ada" "Lin") "score" [10 20]}
-```
-
-### from-rows
-`( names rows -- table )` — Build a table from explicit column names and rows of exactly that width. An empty row list preserves the named zero-row schema.
-
-#### Examples
-
-```ecl
-["name" "score"] [("Ada" 10) ("Lin" 20)] table.from-rows
-# => {"name" ("Ada" "Lin") "score" [10 20]}
-```
-
-### cast
-`( table spec -- table )` — Coerce named columns with isolated `( cell -- value )` quotations. The specification must be a dictionary from existing column names to quotations. Validate the complete specification before running any quotation, and replace the table only after every cast succeeds.
-
-### column
-`( table name -- column )` — Return one existing column by name.
-
-### from-columns
-`( columns -- table )` — Validate a column dictionary and return it as a table, raising when it does not satisfy the convention.
-
-### from-header-rows
-`( rows -- table )` — Build a table from rows whose first row contains the column names and whose remaining rows are data.
-
-### header-rows
-`( table -- rows )` — Return the column-name row followed by the data rows, the schema-preserving row form.
-
-### height
-`( table -- count )` — Return the number of rows.
-
-### names
-`( table -- names )` — Return the column names in schema order.
-
-### records
-`( table -- records )` — Return one dict per row, with keys in schema order. A zero-row table returns an empty list, which necessarily loses its schema.
-
-#### Examples
-
-```ecl
-{"name" ("Ada" "Lin") "score" [10 20]} table.records
-# => ({"name" "Ada" "score" 10} {"name" "Lin" "score" 20})
-```
+The `table.` words model such a value as a table where the column names are the keys, the values are the columns, and a row is an indexing into each column for some index.
 
 ### rename
-`( table mapping -- table )` — Rename columns through an ordered old-to-new mapping without changing column order; collisions are `` `domain ``.
-
-### rows
-`( table -- rows )` — Return the data rows in row and column order.
+`( table mapping -- table )` — Rename columns in `table` mapping names to their replacements in `mapping`.
 
 ### select
-`( table names -- table )` — Return the named columns in the order given.
+`( table names -- table )` — Select the columns `names`.
 
 #### Examples
 
@@ -2313,11 +2216,21 @@ Every operation except `valid?` first validates the ordinary column dict as a ta
 # => {"score" [10 20]}
 ```
 
-### valid?
-`( candidate -- bool )` — Return 1 when a candidate satisfies the table convention and 0 for a convention mismatch. Cancellation, allocation failure, and other runtime errors still propagate.
+### table?
+`( candidate -- bool )` — Return 1 when `candidate` is a table, and 0 otherwise.
+
+### from-rows
+`( names rows -- table )` — Construct a table with columns `names` and rows `rows`.
+
+#### Examples
+
+```ecl
+["name" "score"] [("Ada" 10) ("Lin" 20)] table.from-rows
+# => {"name" ("Ada" "Lin") "score" [10 20]}
+```
 
 ### where
-`( table mask -- table )` — Return the rows selected by a 0/1 mask whose length equals the row count.
+`( table mask -- table )` — Given `mask` over the rows of `table`, take each row as many times as is reflected by its index in the mask.
 
 #### Examples
 
@@ -2327,23 +2240,87 @@ Every operation except `valid?` first validates the ordinary column dict as a ta
 ```
 
 ### with-column
-`( table name column -- table )` — Replace an existing column or append a new one. The column length must equal the row count.
+`( table name column -- table )` — Update table with the column name `name` and data `column`. If `name` is already present, it will be replaced.
 
-### inner-join
-`( left right pairs -- table )` — Return the stable inner equijoin for `[left-name right-name]` key pairs. Duplicate keys expand to the full many-to-many product in left-row then right-row order. The result contains every left column followed by the right non-key columns; colliding non-key names are `` `domain ``.
+### from-header-rows
+`( rows -- table )` — Construct a table from `rows`, where the first row contains the column names and the remaining rows are data.
 
-### left-join-with
-`( left right pairs fill -- table )` — Return the stable left equijoin, using fill values for unmatched rows. `fill` must name exactly every appended right column.
+### from-records
+`( records -- table )` — Construct a table from a list of dicts. The keys of the first element of `records` are used as the columns.
+
+#### Examples
+
+```ecl
+[{"name" "Ada" "score" 10} {"name" "Lin" "score" 20}] table.from-records
+# => {"name" ("Ada" "Lin") "score" [10 20]}
+```
 
 ### group-by
-`( table names -- groups )` — Group row indices by the named columns. Groups follow first-occurrence order and indices within each group are ascending; an empty name list yields one global group keyed by the empty list.
+`( table names -- groups )` — Group row indices in `table` by `names`.
+
+### header-rows
+`( table -- rows )` — Return `table`'s rows in order, prepended by a row of column names.
+
+### records
+`( table -- records )` — Return one dict per row.
+
+#### Examples
+
+```ecl
+{"name" ("Ada" "Lin") "score" [10 20]} table.records
+# => ({"name" "Ada" "score" 10} {"name" "Lin" "score" 20})
+```
+
+### rows
+`( table -- rows )` — Return `table`'s rows in order.
 
 ### aggregate
-`( table names specs -- table )` — Group by `names` and aggregate each group with `[output-name input-name reducer]` specifications. A reducer is a `( slice -- value )` quotation applied to each group's slice of the input column, such as `(sum)`, `(len)`, or `((min) fold1)`; it resolves and shadows as ordinary code. All names and specifications are validated before a reducer runs. The result contains the key columns first, followed by the aggregate columns in specification order, with one row per group.
+`( table names (q: grouped -- columns) -- table )` — Group `table` by `names` and apply `q` once to the grouped table, in which each non-key column holds one slice per group. `q` returns a dict of output columns with one value per group, typically by reducing each slice, as in `g "v" at (sum) each`. The result holds the key columns, then the output columns, with one row per group.
+
+#### Examples
+
+Given this table, grouped by `"region"`:
+
+```ecl
+{"region" ["east" "west" "east"] "amount" [10 20 30]}
+```
+
+the quotation receives the non-key columns, each holding one slice per group,
+in first-seen group order (`"east"`, then `"west"`):
+
+```ecl
+{"amount" ([10 30] [20])}
+```
+
+It reduces each slice and returns the output columns, which follow the key
+columns in the result:
+
+```ecl
+{"region" ["east" "west" "east"] "amount" [10 20 30]} ["region"]
+(|g| {} "total" g "amount" at (sum) each put "n" g "amount" at (len) each put)
+table.aggregate
+# => {"region" ("east" "west") "total" [40 20] "n" [2 1]}
+```
+
+### inner-join
+`( left right pairs -- table )` — Return the stable inner equijoin for `[left-name right-name]` key pairs. Duplicate keys expand to the full many-to-many product in left-row then right-row order, and no key pairs give the cross product. The result contains every left column and the right non-key columns; colliding non-key names are `` `domain ``.
+
+### left-join-with
+`( left right pairs fill -- table )` — Return the stable left equijoin, using fill values for unmatched rows. `fill` must hold a value for every appended right column.
+
+## tar
+
+Hostile-input-safe tar reading and extraction. Binary payloads are ordinary lists of integers in `0...255`; compressed archives pass through [`gzip`](#gzip) first. `unpack` validates the whole archive before touching the filesystem, then publishes through the [`fs`](#fs) staging words.
+
+### read
+`( bytes -- members )` — Validate a tar byte list with the hostile-input parser and limits that `unpack` relies on, without filesystem writes, and return its members in archive order as `{path string kind symbol bytes list}`. Kinds are `` `file `` and `` `directory ``; a directory's bytes are `[]`. Unsafe, linked, special, duplicate, malformed, or over-limit members and invalid byte items are `` `domain ``; a non-list input is `` `type ``.
+
+### unpack
+`( root destination bytes -- regular-file-paths )` — Validate and atomically unpack a tar byte list beneath a previously absent `destination`, a canonical relative path under a filesystem root or directory resource. Return normalized regular-file paths in archive order.
 
 ## task
 
-Task handles are created by the core unit constructors `@spawn` and `@give`. A handle observes a task's lifetime and result. `task.address` derives the task's address, which names only its mailbox, and `task.self` is the executing task's own. Use `(task.await) each` to collect results in input order without cancelling siblings or re-raising task errors.
+Task handles are created by the core unit constructors `@spawn` and `@give`. A handle observes a task's lifetime and result. `task.address` derives the task's address, which reaches only its mailbox, and `task.self` is the executing task's own. Use `(task.await) each` to collect results in input order without cancelling siblings or re-raising task errors.
 
 Request and reply is a composition over `send` and `receive`: spawn a helper task, send its address with the request, and await the helper, whose result is the reply. `task.await-for` bounds the exchange.
 
@@ -2358,37 +2335,37 @@ Request and reply:
 ```
 
 ### address
-`( task -- address )` — The address of a task's mailbox. Two addresses of one task match. An address outlives its task; after the task ends it names a closed mailbox.
+`( task -- address )` — The address of `task`'s mailbox.
 
 ### await
-`( task -- result )` — Park until the task completes; return its cached `{ok …}`/`{err …}` result. Idempotent. See [Concurrency](SPEC.md#concurrency).
+`( task -- result )` — Park until `task` completes; return a result value containing the completed task's stack.
 
 ### await-any
-`( tasks -- index result )` — Race a nonempty all-task list; among tasks already terminal at entry the lowest index wins, otherwise the first completion.
+`( tasks -- index result )` — Park until the first task in `tasks` completes and return its result.
 
 ### await-for
-`( task milliseconds -- result )` — `task.await` with a nonnegative int deadline; expiry returns `{err {kind timeout}}` without cancelling the task. A terminal task beats even a zero deadline. A deadline beyond any instant the scheduler clock can report is `` `overflow `` before the wait registers.
+`( task milliseconds -- result )` — Await a task with a nonnegative int deadline; expiry returns `{err {kind timeout}}` without cancelling the task.
 
 ### cancel
-`( task -- )` — Request cancellation; the task's result becomes `{err {kind cancelled …}}`. No-op when already terminal.
+`( task -- )` — Request cancellation of `task`; its result becomes `{err {kind cancelled …}}`.
 
 ### cancel-self
 `( -- )` — Request cancellation of the current task.
 
 ### pending
-`( -- tasks )` — Pending descendant tasks in deterministic spawn preorder.
+`( -- tasks )` — Push all pending descendant tasks.
 
 ### receive
-`( -- value )` — Take the oldest message from the executing task's mailbox, parking until one arrives. `` `domain `` outside a task.
+`( -- value )` — Pop the oldest message from the current task's mailbox, parking if the mailbox is empty.
 
 ### receive-for
-`( milliseconds -- result )` — `task.receive` with a nonnegative int deadline: `{ok value}`, or `{err {kind timeout}}` when nothing arrives in time. A deadline beyond any instant the scheduler clock can report is `` `overflow ``. `` `domain `` outside a task.
+`( milliseconds -- result )` — `task.receive` with a nonnegative int deadline: `{ok value}`, or `{err {kind timeout}}`.
 
 ### self
-`( -- address )` — The executing task's own address. `` `domain `` outside a task: the session root owns tasks but has no mailbox.
+`( -- address )` — The address of the current task's mailbox.
 
 ### send
-`( address value -- )` — Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified.
+`( address value -- )` — Push a value to the mailbox at `address`. Any value may be sent except one containing a task handle, which is `` `type ``. If the mailbox is full, park until a message is received from it.
 
 #### Examples
 
@@ -2402,11 +2379,11 @@ Request and reply:
 The bundled runner is ordinary ECL policy over the closed `tests` / `@test` substrate. Projects may replace it with any public qualified runner word. The host supplies only catalog discovery, protected invocation, and root dispatch.
 
 ### run
-`( -- )` — Discover every module's tests and invoke them sequentially in deterministic module and name order, printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures and request process status 1 if any failed.
+`( -- )` — Discover every module's tests and invoke them sequentially, printing one `ok` or `FAIL` line to stderr for every result. Exit with status code 1 if any test failed.
 
 ## time
 
-Pure UTC time over the millisecond timestamps `clock.unix` produces. Every word accepts and returns whole milliseconds; a timestamp is `{unix ms}` and nothing else — a `{monotonic ms}` instant, an untagged int, a float payload, or a dictionary with any other key is `` `type ``. Arithmetic is checked: leaving the int millisecond range is `` `overflow ``. Calendar words use the proleptic Gregorian calendar with no leap seconds, so Unix time here is the POSIX count in which every day has exactly 86,400,000 milliseconds. The representable range runs from `-292275055-05-16T16:47:04.192` through `292278994-08-17T07:12:55.807`. Nothing in this module reads a clock. Every failure is raised against the public word the program called, so an overflow inside the arithmetic is reported as that word's own `` `overflow ``.
+Pure UTC time over the millisecond timestamps `clock.unix` produces. Every word accepts and returns whole milliseconds; a timestamp is `{unix ms}` and nothing else — a `{monotonic ms}` instant, an untagged int, a float payload, or a dictionary with any other key is `` `type ``. Arithmetic is checked: leaving the int millisecond range is `` `overflow ``. Calendar words use the proleptic Gregorian calendar with no leap seconds, so Unix time here is the POSIX count in which every day has exactly 86,400,000 milliseconds. The representable range runs from `-292275055-05-16T16:47:04.192` through `292278994-08-17T07:12:55.807`.
 
 ### add
 `( timestamp milliseconds -- timestamp )` — Shift a timestamp by a signed integer millisecond duration.
@@ -2431,7 +2408,7 @@ Pure UTC time over the millisecond timestamps `clock.unix` produces. Every word 
 ```
 
 ### from-unix
-`( milliseconds -- timestamp )` — Tag an integer Unix millisecond count as `{unix milliseconds}`. Negative counts name instants before 1970.
+`( milliseconds -- timestamp )` — Tag an integer Unix millisecond count as `{unix milliseconds}`. Negative counts denote instants before 1970.
 
 ### from-utc
 `( fields -- timestamp )` — Build a timestamp from a dictionary of int UTC calendar fields. `` `year ``, `` `month ``, and `` `day `` are required; `` `hour ``, `` `minute ``, `` `second ``, and `` `millisecond `` default to 0; `` `weekday `` is optional and must agree with the date. Any other key is `` `domain ``; a non-symbol key or non-int value is `` `type ``. Month is 1 through 12, day is 1 through the month's length in that year, hour 0 through 23, minute and second 0 through 59, and millisecond 0 through 999; anything else is `` `domain ``. `to-utc` output round-trips exactly.

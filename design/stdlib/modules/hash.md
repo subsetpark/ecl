@@ -1,10 +1,10 @@
-## archive
+## hash
 
 ### sha256
 
 #### Examples
 
 ```ecl
-[1 2 3 4] archive.sha256
+[1 2 3 4] hash.sha256
 # => "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"
 ```

@@ -10,7 +10,6 @@ const modules = @import("modules.zig");
 const definition_prims = @import("definition_prims.zig");
 const poll_api = @import("poll.zig");
 const reflection = @import("reflection.zig");
-const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const map_state = @import("module_snapshot.zig");
 const Value = value.Value;
@@ -22,18 +21,17 @@ const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "@defm", .primitive = defmWord, .effect = "body module-name --", .doc = "The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on an empty stack and a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.\n\nThe name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``(body) `name @defm``. See Modules." },
-        .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name attached to the currently executing reader-authored occurrence. A definition reports the file that authored its body even when another file calls it. `` `domain `` in runtime-assembled code with no source provenance; there is no fallback to the caller's file." },
-        .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the name of the module whose code is running: the name `@defm` published it under, which a call through an alias reports too. A construction body reports the name it is being built under. `` `domain `` at top level, or for a quotation that escaped its module." },
-        .{ .name = "import", .primitive = importAs(.public), .effect = "module-name q --", .doc = "Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported name is an alias for the attribute: every dispatch and explicit lookup follows it to whatever the module's attribute names then, and reflection shows that definition. At top level an import may replace an existing name; in a module body a name is introduced once." },
-        .{ .name = "importp", .primitive = importAs(.private), .effect = "module-name q --", .doc = "`import`, publishing each alias as a private module word: the importing module's words use it, but it is not part of that module's public surface. Legal only inside a module body under construction; elsewhere it is `` `domain ``." },
-        .{ .name = "alias", .primitive = aliasModule, .effect = "short name --", .doc = "Register an unqualified short registry name for a module name, possibly dotted; aliasing an alias targets its module. Aliases and module names may not collide in either direction." },
-        .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Validate a module path, or the reserved qualifier `` `core ``, and one unqualified, non-reserved binding segment, then construct their qualified executable word directly from the interned components. It does not parse source, intern anything new, or grant lifecycle authority; use `execute` to invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even where `dup` is shadowed." },
-        .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print the visible dictionary in sorted order." },
-        .{ .name = "exports", .primitive = exportsWord, .effect = "module-name -- names", .doc = "Return the public words of a module as a list of symbols in codepoint order, loading an embedded or mapped module on first mention. `` `core exports `` lists core's builtins and prelude words. An invalid module name is `` `domain ``; an unknown one is `` `undefined-word ``." },
-        .{ .name = "module-doc", .primitive = moduleDocWord, .effect = "module-name -- string", .doc = "Return the canonical documentation string of a module's current generation, loading an embedded or mapped module on first mention. A source module states it with a documentation-only annotation before its `@defm` operands; a native module, in its descriptor. An alias reports its target's documentation. An invalid module name, `` `core ``, or a module without documentation is `` `domain ``; an unknown one is `` `undefined-word ``." },
-        .{ .name = "stdlib", .primitive = stdlibWord, .effect = "-- names", .doc = "Return the names of the embedded standard-library modules as a list of symbols in codepoint order." },
-        .{ .name = "@load", .primitive = load, .effect = "path --", .doc = "Read a source file and run it as one stack-isolated unit on an empty stack. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive." },
+        .{ .name = "@defm", .primitive = defmWord, .effect = "body module-name --", .doc = "Construct a module image and register it under `module-name`. The body is run in a new unit." },
+        .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name attached to the currently executing reader-authored occurrence." },
+        .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the name of the module whose code is running." },
+        .{ .name = "import", .primitive = importAs(.public), .effect = "module-name bindings --", .doc = "For each value in `bindings`, create a public alias in the current scope from <value> to <module-name>.<value>." },
+        .{ .name = "importp", .primitive = importAs(.private), .effect = "module-name q --", .doc = "For each value in `bindings`, create a private alias in the current scope from <value> to <module-name>.<value>." },
+        .{ .name = "alias", .primitive = aliasModule, .effect = "name short --", .doc = "Bind `short` in the current scope as an alias of the module name `name`: a qualified word written in this scope whose module part is exactly `short` denotes `name` instead, resolved at each call. The alias is private to the scope and never exported. Inside a module it is legal only during construction." },
+        .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Create a symbol value containing the qualified name `module-name`.`binding-name`." },
+        .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print all visible words in sorted order." },
+        .{ .name = "exports", .primitive = exportsWord, .effect = "module-name -- names", .doc = "Return the public words of a module as a list of symbols in codepoint order." },
+        .{ .name = "module-doc", .primitive = moduleDocWord, .effect = "module-name -- string", .doc = "Return the docstring of `module-name`'s current image." },
+        .{ .name = "@load", .primitive = load, .effect = "path --", .doc = "Evaluate the source file at `path`. The file is run in a new unit." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -100,7 +98,9 @@ const DefmDriver = struct {
                 // name that can never publish must fail before the body runs.
                 if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                     return fiber.fail(.domain, "module name `core` is reserved for the core qualifier");
-                try fiber.refuseReservedModule(name, fiber.current.?.site.registration_provenance);
+                const provenance = fiber.current.?.site.registration_provenance;
+                try fiber.refuseReservedModule(name, provenance);
+                try fiber.refuseUnexportedModule(name, provenance);
                 const body = self.body.take();
                 var doc = self.doc;
                 self.doc = .none;
@@ -182,9 +182,11 @@ fn importWord(fiber: *Fiber, visibility: env.Visibility) MachineError!void {
 }
 fn aliasModule(fiber: *Fiber) MachineError!void {
     try fiber.require(2);
-    const target = try fiber.popSymbol();
+    const scope = try fiber.definitionScope();
     const short = try fiber.popSymbol();
+    const target = try fiber.popSymbol();
     try fiber.startDriver(AliasDriver{
+        .scope = scope,
         .short_validation = .init(short),
         .target_validation = .init(target),
     });
@@ -477,13 +479,18 @@ const ImportDriver = struct {
     }
 };
 
+/// `alias` binds a module alias in the scope it runs in, as `def` binds a word:
+/// a module root stages it with the image under construction, and the session
+/// publishes it to its own directory. It refers to its target by name, so it
+/// follows reload, and it is never a word or an export.
 const AliasDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    scope: *env.Scope,
     short_validation: intern.NamespaceCursor,
     target_validation: intern.ModuleNameCursor,
     short: ?intern.BindingName = null,
     target: ?intern.ModuleName = null,
-    cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
+    publisher: ?heap.Owned(modules.Registry.DefineCursor) = null,
     pub fn advance(fiber: *Fiber, self: *AliasDriver) MachineError!machine.WorkProgress {
         const work = fiber.workBudget();
         while (work.spend()) {
@@ -494,6 +501,8 @@ const AliasDriver = struct {
                         .domain,
                         "alias target requires a valid module name",
                     );
+                    if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(self.target.?))))
+                        return fiber.fail(.domain, "alias target `core` is the core qualifier, not a module");
                     continue;
                 },
             };
@@ -504,25 +513,28 @@ const AliasDriver = struct {
                         .domain,
                         "alias name requires an unqualified, non-reserved name",
                     );
+                    if (intern.isReservedRegistryBytes(intern.get(intern.bindingId(self.short.?))))
+                        return fiber.fail(.domain, "alias name `core` is reserved for the core qualifier");
+                    // A standard-library name means the same module in every
+                    // scope, so no alias may claim one.
+                    if (intern.moduleName(intern.bindingId(self.short.?)) catch null) |short|
+                        try fiber.refuseReservedModule(short, fiber.current.?.site.registration_provenance);
                     continue;
                 },
             };
-            if (self.cursor == null) {
-                // An alias of an embedded module could remove it, and an
-                // alias under an embedded name would claim one.
-                const provenance = fiber.current.?.site.registration_provenance;
-                try fiber.refuseReservedModule(self.target.?, provenance);
-                if (intern.moduleName(intern.bindingId(self.short.?)) catch null) |short|
-                    try fiber.refuseReservedModule(short, provenance);
-                const registry = fiber.publicationRegistry(self.target.?, fiber.current.?.site.registration_provenance);
-                self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
-            }
-            switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.NameConflict => return fiber.fail(.domain, "alias collides with a module name"),
-                error.ReservedName => return fiber.fail(.domain, "alias name `core` is reserved for the core qualifier"),
-                error.MissingModule => return fiber.undefinedModule(intern.moduleId(self.target.?)),
-            }) {
+            if (self.publisher == null) switch (self.scope.storage) {
+                .module_root => {
+                    const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
+                        .domain,
+                        "a module alias is legal only while its module is under construction",
+                    );
+                    try image.stageModuleAlias(self.short.?, self.target.?);
+                    return .completed;
+                },
+                .core_build => return fiber.fail(.domain, "core does not alias"),
+                .session => self.publisher = .init(fiber.inherited.registry.defineCursor(self.short.?, .{ .module = self.target.? })),
+            };
+            switch (try self.publisher.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => return .completed,
             }
@@ -798,13 +810,6 @@ const ModuleDocDriver = struct {
         return .stepped;
     }
 };
-
-fn stdlibWord(fiber: *Fiber) MachineError!void {
-    const names = comptime stdlib.sortedNames();
-    var values: [names.len]Value = undefined;
-    for (names, &values) |name, *slot| slot.* = value.datum(.{ .symbol = .{ .name = try intern.intern(name) } });
-    return fiber.pushOwned(try list.fromValues(fiber.allocator, &values));
-}
 
 const WordsDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;

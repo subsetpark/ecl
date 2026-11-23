@@ -39,10 +39,6 @@ pub fn moduleId(name: ModuleName) u32 {
     return @backingInt(name) & ~dotted_module_mask;
 }
 
-pub fn moduleNameFromBinding(name: BindingName) ModuleName {
-    return @fromBackingInt(@intCast(bindingId(name)));
-}
-
 pub fn moduleBindingName(name: ModuleName) ?BindingName {
     if (@backingInt(name) & dotted_module_mask != 0) return null;
     return @fromBackingInt(@intCast(moduleId(name)));
@@ -60,7 +56,7 @@ pub fn qualifiedBinding(name: QualifiedName) BindingName {
     return @fromBackingInt(@intCast(@as(u32, @truncate(@backingInt(name)))));
 }
 
-/// A word as a diagnostic names it.
+/// A word as a diagnostic reports it.
 ///
 /// A plain atom is its own spelling. A module-local binding is the pair of its
 /// image's module name and its own local name; the qualified spelling is never
@@ -112,7 +108,7 @@ pub const TraceWord = enum(u64) {
     ///
     /// A name too long for the caller's scratch is elided from the left rather
     /// than replaced by its unqualified atom: substituting the atom would make
-    /// a diagnostic message name a *different* word than the same failure's
+    /// a diagnostic message cite a *different* word than the same failure's
     /// `word` field reports, and two modules may define the same local name.
     pub fn render(self: TraceWord, buffer: []u8) []const u8 {
         std.debug.assert(self != .none);

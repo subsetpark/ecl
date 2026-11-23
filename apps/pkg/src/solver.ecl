@@ -15,7 +15,7 @@
 
  ### defp malformed-version
  (package required-package version -- :
-  "Raise a malformed-version error naming the requirer, target, and spelling.")
+  "Raise a malformed-version error reporting the requirer, target, and spelling.")
  (|package required version|
   `domain error.new "a reachable package version is malformed" error.with-message
   package required version 3 pack
@@ -24,7 +24,7 @@
    `required-package required
    `version version)
   infra
-  dict.from-flat
+  dict.from-kvs
   error.with-data
   raise) `malformed-version defp
 
@@ -33,7 +33,7 @@
   "Validate a reachable version or raise with requirement provenance.")
  (|package required version|
   version (pkg.version.validate) cons @attempt
-  dup `ok dict.has?
+  dup `ok has?
   (`ok at first)
   package required version 3 pack
   (|attempt-result package required version| package required version malformed-version)
@@ -54,7 +54,7 @@
  (requirement pair package -- : "Validate a requirement version when the field is present.")
  (|requirement pair package|
   requirement type `dict match?
-  requirement `version dict.has?
+  requirement `version has?
   and
   requirement pair package 3 pack (precheck-requirement-value) cat
   when) `precheck-present-requirement defp
@@ -96,17 +96,17 @@
  (candidate package -- manifest :
   "Attach provenance to version failures, then validate a manifest.")
  (|candidate package|
-  candidate `version dict.has?
+  candidate `version has?
   candidate package pair (precheck-own-version) cat
   when
-  candidate `requires dict.has?
+  candidate `requires has?
   candidate package pair (precheck-manifest-requirements) cat
   when
   candidate pkg.manifest.validate) `precheck-and-validate-manifest defp
 
  ### defp missing-manifest
  (package required-package version -- :
-  "Raise a missing-manifest error naming the requirer and exact target.")
+  "Raise a missing-manifest error reporting the requirer and exact target.")
  (|package required version|
   `domain error.new "pkg.solver.resolve is missing a declared manifest" error.with-message
   package required version 3 pack
@@ -115,7 +115,7 @@
    `required-package required
    `version version)
   infra
-  dict.from-flat
+  dict.from-kvs
   error.with-data
   raise) `missing-manifest defp
 
@@ -150,7 +150,7 @@
    `right-package declarations [1 0] at-path
    `right-hash declarations [1 1] at-path)
   infra
-  dict.from-flat
+  dict.from-kvs
   error.with-data
   raise) `raise-hash-conflict defp
 
@@ -161,14 +161,14 @@
   node append
   (first) each
   distinct
-  sort
+  dup grade at
   raise-cycle-packages) `requirement-cycle defp
 
  ### defp raise-cycle-packages
  (packages -- : "Raise a requirement-cycle error from sorted package names.")
  (|packages|
   `domain error.new "the package requirement graph has a cycle" error.with-message
-  `packages packages pair dict.from-flat
+  `packages packages pair dict.from-kvs
   error.with-data
   raise) `raise-cycle-packages defp
 
@@ -180,7 +180,7 @@
   2 windows
   (dup first swap 1 at colliding-names?) filter
   first
-  sort
+  dup grade at
   raise-prefix-collision) `prefix-collision defp
 
  ### defp raise-prefix-collision
@@ -192,7 +192,7 @@
    `left-package pair first
    `right-package pair 1 at)
   infra
-  dict.from-flat
+  dict.from-kvs
   error.with-data
   raise) `raise-prefix-collision defp
 
@@ -255,7 +255,7 @@
  (sources node name requirement package -- record :
   "Return the canonical source record after one declaration.")
  (|sources node name requirement package|
-  sources node dict.has?
+  sources node has?
   sources node name requirement package 5 pack (existing-source) cat
   requirement package pair (source-record) cat
   if) `source-for defp
@@ -281,7 +281,7 @@
 
  ### defp manifest-for
  (state package version requirer -- manifest :
-  "Return and validate the exact manifest named by a reached requirement.")
+  "Return and validate the exact manifest specified by a reached requirement.")
  (|state package version requirer|
   package version pair
   state `root at manifest-node
@@ -302,12 +302,12 @@
 
  ### defp catalog-manifest
  (state package version requirer -- manifest :
-  "Return an exact catalog manifest, or raise an error naming the requiring package.")
+  "Return an exact catalog manifest, or raise an error reporting the requiring package.")
  (|state package version requirer|
-  state `catalog at package dict.has?
+  state `catalog at package has?
   state `catalog at package {} dict.get type `dict match?
   and
-  state `catalog at package {} dict.get version dict.has?
+  state `catalog at package {} dict.get version has?
   and
   state package version 3 pack (catalog-value) cat
   requirer package version 3 pack (missing-manifest) cat
@@ -394,7 +394,7 @@
 
  ### defp selected-names
  (state -- names : "Return reached package names in canonical order.")
- (`sources at dict.keys (first) each distinct sort) `selected-names defp
+ (`sources at dict.keys (first) each distinct dup grade at) `selected-names defp
 
  ### defp selected-node
  (name state -- node : "Return the highest reached exact node for a package name.")
@@ -420,7 +420,7 @@
 
  ### defp selected-packages
  (state -- packages : "Build the selected package map from reached artifact sources.")
- (|state| state selected-names state (selection-pair) cons each raze dict.from-flat)
+ (|state| state selected-names state (selection-pair) cons each raze dict.from-kvs)
  `selected-packages defp
 
  ### defp minimum-map
@@ -430,9 +430,9 @@
    requirement wrap
    (|requirement| `package requirement `package at `version requirement `version at)
    infra
-   dict.from-flat)
+   dict.from-kvs)
   each
-  dict.from-lists) `minimum-map defp
+  dict.zip) `minimum-map defp
 
  ### defp requires-pair
  (name state -- pair : "Return one selected package's per-requirer minimum map.")
@@ -445,7 +445,7 @@
  (|state|
   state ([root name] at-path) (`root at minimum-map) bi pair wrap
   state selected-names state (requires-pair) cons each
-  cat raze dict.from-flat) `resolved-requires defp
+  cat raze dict.from-kvs) `resolved-requires defp
 
  ### defp resolved-lock
  (state -- lock : "Build and validate the portable lock for a completed graph traversal.")
@@ -460,7 +460,7 @@
    `packages state selected-packages
    `requires state resolved-requires)
   infra
-  dict.from-flat
+  dict.from-kvs
   prune pkg.resolution.validate) `resolved-lock defp
 
  ### defp reach-step
@@ -468,7 +468,7 @@
  (dup `pending at first
   (|state name|
    state `pending state `pending at 1 drop put
-   name reach-name) call) `reach-step defp
+   name reach-name) apply) `reach-step defp
 
  ### defp reach-name
  (state name -- state : "Skip already reached names before adding selected dependency edges.")
@@ -488,7 +488,7 @@
  (|lock|
   {seen []} `pending lock `root at wrap put `requires lock `requires at put
   (dup `pending at empty? not) (reach-step) while `seen at
-  lock (prune-names) cons call) `prune defp
+  lock (prune-names) cons apply) `prune defp
 
  ### defp prune-names
  (names lock -- lock : "Keep the selected graph portable and entirely root-reachable.")
@@ -520,6 +520,249 @@
    `sources {}
    `manifests {})
   infra
-  dict.from-flat
+  dict.from-kvs
   root walk-manifest resolved-lock) `resolve-validated defp
+
+ `pkg.test.support `t alias
+
+ ### defp pinned-requirement
+ (name version -- requirement : "Construct an exact inert fixture pin without network access.")
+ (|name version|
+  {hash "sha256-0000000000000000000000000000000000000000000000000000000000000000"}
+  `package name put `version version put
+  `source {kind archive} `url "https://fixture.invalid/" name cat "/" cat version cat put put)
+ `pinned-requirement defp
+
+ ### defp edge-manifest
+ (name version requirements -- manifest :
+  "Build a source-free fixture manifest with explicit edges.")
+ (|name version requirements|
+  {format 2 sources []} `name name put `version version put `requires requirements put)
+ `edge-manifest defp
+
+ ### defp superseding-catalog
+ (-- catalog : "A higher selected version removes a dependency of its superseded minimum.")
+ ({} "alpha" {} "1.0.0" "alpha" "1.0.0" {} "charlie" "charlie" "1.0.0" pinned-requirement put
+  edge-manifest put
+  "2.0.0" "alpha" "2.0.0" {} edge-manifest put put
+  "bravo" {} "1.0.0" "bravo" "1.0.0" {} "alpha" "alpha" "2.0.0" pinned-requirement put edge-manifest
+  put put
+  "charlie" {} "1.0.0" "charlie" "1.0.0" {} edge-manifest put put) `superseding-catalog defp
+
+ ### test selected-reachability
+ (-- : "A superseded minimum does not retain an unreachable package in the portable lock.")
+ ("project" "1.0.0" {} "alpha" "alpha" "1.0.0" pinned-requirement put
+  "bravo" "bravo" "1.0.0" pinned-requirement put edge-manifest
+  superseding-catalog pkg.solver.resolve
+  dup `format at 3 t.equal
+  dup `packages at dict.keys dup grade at ["alpha" "bravo"] t.equal
+  dup `packages at "alpha" at `version at "2.0.0" t.equal
+  dup `requires at dict.keys dup grade at ["alpha" "bravo" "project"] t.equal
+  dup pkg.resolution.write pkg.resolution.read t.equal) `selected-reachability test
+
+ ### defp requirement
+ (package version url hash -- requirement : "Construct requirement fixture data.")
+ (|package version url hash|
+  {} `package package put `version version put `source {} `kind `archive put `url url put put `hash
+  hash put) `requirement defp
+
+ ### defp manifest
+ (name version requires -- manifest : "Construct manifest fixture data.")
+ (|name version requires|
+  {} `format 2 put
+  `name name put
+  `version version put
+  `sources ["**/*"] put
+  `requires requires put)
+ `manifest defp
+
+ ### defp hash-a
+ (-- hash : "Return the first valid fixture hash.")
+ ("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") `hash-a defp
+
+ ### defp hash-b
+ (-- hash : "Return the second valid fixture hash.")
+ ("sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789") `hash-b defp
+
+ ### defp req-b
+ (-- requirement : "Require b 1.0.0.")
+ ("b" "1.0.0" "https://e.com/b.tgz" hash-a requirement) `req-b defp
+
+ ### defp req-c-12
+ (-- requirement : "Require c 1.2.0.")
+ ("c" "1.2.0" "https://e.com/c12.tgz" hash-a requirement) `req-c-12 defp
+
+ ### defp req-c-15
+ (-- requirement : "Require c 1.5.0.")
+ ("c" "1.5.0" "https://e.com/c15.tgz" hash-b requirement) `req-c-15 defp
+
+ ### defp manifest-b
+ (-- manifest : "Return b's transitive fixture manifest.")
+ ("b" "1.0.0" {} "c" req-c-15 put manifest) `manifest-b defp
+
+ ### defp manifest-c-12
+ (-- manifest : "Return c 1.2.0's fixture manifest.")
+ ("c" "1.2.0" {} manifest) `manifest-c-12 defp
+
+ ### defp manifest-c-15
+ (-- manifest : "Return c 1.5.0's fixture manifest.")
+ ("c" "1.5.0" {} manifest) `manifest-c-15 defp
+
+ ### defp root
+ (-- manifest : "Return the root MVS fixture.")
+ ("app" "0.1.0" {} "b" req-b put "c" req-c-12 put manifest) `root defp
+
+ ### defp root-without-c
+ (-- manifest : "Return the root fixture without its direct c requirement.")
+ ("app" "0.1.0" {} "b" req-b put manifest) `root-without-c defp
+
+ ### defp catalog
+ (-- catalog : "Return the reachable MVS fixture catalog.")
+ ({}
+  "b" {} "1.0.0" manifest-b put put
+  "c" {} "1.2.0" manifest-c-12 put "1.5.0" manifest-c-15 put put) `catalog defp
+
+ ### defp git-requirement
+ (commit -- requirement : "Require c 1.2.0 from one pinned Git source.")
+ (|commit|
+  req-c-12 `source {kind git url "https://e.com/c.git"} `commit commit put put)
+ `git-requirement defp
+
+ ### defp git-graph
+ (left right -- root catalog : "Build two declarations of one Git package identity.")
+ (|left right|
+  root `requires root `requires at "c" left git-requirement put put
+  catalog "b" {} "1.0.0"
+  "b" "1.0.0" {} "c" right git-requirement put manifest put put)
+ `git-graph defp
+
+ ### test pinned-git
+ (-- : "Preserve pinned sources and reject differing commits despite equal artifact hashes.")
+ ("0123456789abcdef0123456789abcdef01234567"
+  dup git-graph pkg.solver.resolve
+  [packages "c" source commit] at-path
+  "0123456789abcdef0123456789abcdef01234567" t.equal
+  ("0123456789abcdef0123456789abcdef01234567"
+   "1123456789abcdef0123456789abcdef01234567"
+   git-graph pkg.solver.resolve)
+  `domain "conflicting Git commits" t.raises-containing)
+ `pinned-git test
+
+ ### test resolution
+ (-- : "Select every reachable maximum and record all declared minimums.")
+ (root catalog pkg.solver.resolve
+  dup `packages at dup dict.size 2 t.equal
+  ["c" version] at-path "1.5.0" t.equal
+  root catalog pkg.solver.resolve
+  dup `requires at dict.vals (dict.pairs) each raze
+  swap `packages at
+  (|entry packages|
+   packages entry 1 at `package at `version pair at-path
+   entry 1 at `version at pkg.version.less? not)
+  cons
+  all?
+  1 t.equal)
+ `resolution test
+
+ ### test deterministic-input-order
+ (-- : "Ignore graph insertion order and unreachable catalog versions.")
+ (root catalog pkg.solver.resolve pkg.resolution.write
+  "app" "0.1.0" {} "c" req-c-12 put "b" req-b put manifest
+  {}
+  "c"
+  {}
+  "9.0.0" "c" "9.0.0" {} manifest put
+  "1.5.0" manifest-c-15 put
+  "1.2.0" manifest-c-12 put
+  put
+  "b" {} "1.0.0" manifest-b put put
+  pkg.solver.resolve pkg.resolution.write
+  match?
+  1 t.equal
+  root-without-c catalog pkg.solver.resolve `packages at
+  root catalog pkg.solver.resolve
+  (|packages lock|
+   packages lock `packages at match? 1 t.equal
+   lock [requires "app" "c"] at-path
+   {package "c" version "1.2.0"} t.equal)
+  apply)
+ `deterministic-input-order test
+
+ ### test conflicts
+ (-- : "Report hash, prefix, and cycle conflicts with responsible packages.")
+ (("app" "0.1.0"
+   {}
+   "b" req-b put
+   "c" "c" "1.5.0" "https://mirror.example/c.tgz" hash-a requirement put
+   manifest
+   catalog
+   pkg.solver.resolve)
+  `domain
+  "conflicting hashes"
+  t.raises-containing
+  ("app" "0.1.0"
+   {}
+   "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
+   "b" "b" "1.0.0" "https://e.com/b.tgz" hash-b requirement put
+   manifest
+   {}
+   "a"
+   {} "1.0.0"
+   "a" "1.0.0"
+   {} "foo" "foo" "1.0.0" "https://e.com/foo.tgz" hash-a requirement put
+   manifest
+   put put
+   "b"
+   {} "1.0.0"
+   "b" "1.0.0"
+   {} "foo.bar"
+   "foo.bar" "1.0.0" "https://e.com/foo-bar.tgz" hash-b requirement put
+   manifest
+   put put
+   "foo" {} "1.0.0" "foo" "1.0.0" {} manifest put put
+   "foo.bar" {} "1.0.0" "foo.bar" "1.0.0" {} manifest put put
+   pkg.solver.resolve)
+  `domain
+  "overlapping prefixes"
+  t.raises-containing
+  "app" "0.1.0"
+  {} "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
+  manifest
+  {}
+  "a" {} "1.0.0"
+  "a" "1.0.0"
+  {} "b" "b" "1.0.0" "https://e.com/b.tgz" hash-b requirement put
+  manifest put put
+  "b" {} "1.0.0"
+  "b" "1.0.0"
+  {} "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
+  manifest put put
+  pair (pkg.solver.resolve) cat @attempt
+  `err at
+  dup `kind at `domain t.equal
+  `data at `packages at ("a" "b") t.equal)
+ `conflicts test
+
+ ### test malformed-and-missing
+ (-- : "Identify malformed requirements and absent exact manifests.")
+ (("app" "0.1.0"
+   {} "b" "b" "not-a-version" "https://e.com/b.tgz" hash-a requirement put
+   manifest
+   {}
+   pkg.solver.resolve)
+  `domain
+  `version
+  "not-a-version"
+  t.raises-data
+  (root-without-c {} pkg.solver.resolve)
+  `domain
+  `version
+  "1.0.0"
+  t.raises-data)
+ `malformed-and-missing test
+
+ ### test documentation
+ (-- : "Require documentation for package resolution.")
+ ((pkg.solver.resolve) t.documented)
+ `documentation test
 ) `pkg.solver @defm

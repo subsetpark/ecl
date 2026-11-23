@@ -103,7 +103,7 @@ const Case = struct {
     workload: []const u8,
 };
 
-/// One case per operation class the workstream names, each paired with a ragged
+/// One case per operation class the workstream lists, each paired with a ragged
 /// or boxed case in the same class as the comparison floor.
 const cases = [_]Case{
     .{ .class = "explicit SIMD", .name = "checked i64 add", .setup = "1000000 range", .workload = "1 + len" },

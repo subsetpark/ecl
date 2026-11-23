@@ -10,7 +10,7 @@ short rules in [`AGENTS.md`](../AGENTS.md) always apply as well.
   missing from the next one, and a postcondition restated in ten operations
   will be forgotten by one of them.
 - Enforce a repository rule in the type system, then the audit, then nowhere. A
-  source denylist naming one forbidden identifier is the weakest form: pass a
+  source denylist listing one forbidden identifier is the weakest form: pass a
   capability whose surface lacks the operation instead. Reserve audit checks
   for what the compiler cannot see, and make them fail closed—parse strictly
   into a typed value first, because a check that skips fields it cannot read

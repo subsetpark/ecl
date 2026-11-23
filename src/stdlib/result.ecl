@@ -1,25 +1,5 @@
 ### module result
-(: "Results have the `{ok values}` or `{err error}` form produced by `@attempt` and `task.await`.
-    Every entry validates its result envelope before invoking a caller quotation. A success payload
-    is always a list representing a stack.
-
-    Each word has one role. Transformers return a result and run their quotation isolated under
-    `@attempt`, so a quotation that fails yields a failed result. Eliminators leave plain values and
-    run their quotations inline, so they can reach the stack beneath the result.
-
-    - Construct: `ok`, `err`.
-    - Test: `ok?`, `err?`.
-    - Transform the success: `map`.
-    - Transform the failure: `recover`, `recover-kinds`, `map-err`.
-    - Eliminate: `either`, `or-raise`, `or-default`.
-    - Combine: `all`, `partition`.
-
-    `map` replaces the success stack with what its quotation leaves, and a raising quotation turns
-    the success into a failure. `recover` may likewise turn a failure into a success; `map-err`
-    always keeps a failure and replaces only the error dict. `or-default` returns the success list
-    or, on failure, the fallback value as given.
-
-    `raise`, `fail`, and `assert` operate on errors directly and remain core words.")
+(: "Operations on the conventional `result` dict.")
 (
  ### defp checked
  (result -- result : "Validate and return a result.")
@@ -28,10 +8,10 @@
   assert
   dup dict.size 1 =
   `type error.new "a result must carry exactly one of `ok or `err" error.with-message assert
-  dup `ok dict.has?
+  dup `ok has?
   (dup `ok at type `list match?
    `type error.new "an ok result must carry a list of success values" error.with-message assert)
-  (dup `err dict.has?
+  (dup `err has?
    `type error.new "a result must carry exactly one of `ok or `err" error.with-message assert
    dup `err at error.valid?
    `type error.new "an err result must carry an error dict" error.with-message assert)
@@ -44,72 +24,72 @@
   dup (checked pop) for) `checked-all defp
 
  ### def ok
- (values -- result :
-  "Build an ok result from a list of successful stack values, representing the stack a successful
-   computation left.")
+ (values -- result : "Wrap `values` in a successful result dict.")
  (dup type `list match?
   `type error.new "result.ok expects a list of success values" error.with-message assert
-  `ok swap pair dict.from-flat) `ok def
+  `ok swap pair dict.from-kvs) `ok def
 
  ### def err
- (error -- result : "Tag an error dict as a failed result.")
+ (error -- result : "Wrap `error` in an unsuccessful result dict.")
  (dup error.valid?
   `type error.new "result.err expects an error dict" error.with-message assert
-  `err swap pair dict.from-flat) `err def
+  `err swap pair dict.from-kvs) `err def
 
  ### def ok?
- (result -- bool : "Return 1 when a well-formed result is a success.")
- (checked `ok dict.has?) `ok? def
+ (result -- bool : "Return 1 when a result is successful.")
+ (checked `ok has?) `ok? def
 
  ### def err?
- (result -- bool : "Return 1 when a well-formed result is a failure.")
- (checked `err dict.has?) `err? def
+ (result -- bool : "Return 1 when a result is unsuccessful.")
+ (checked `err has?) `err? def
 
  ### def or-raise
- (result -- values : "Return a success list, or re-raise the stored error dict unchanged.")
- (checked dup `ok dict.has? (`ok at) (`err at raise) if) `or-raise def
+ (result -- values :
+  "If `result` is successful, extract the success values; otherwise raise its error.")
+ (checked dup `ok has? (`ok at) (`err at raise) if) `or-raise def
 
  ### def or-default
- (result fallback -- value : "Return a success list, or the fallback value for a failure.")
- (swap checked swap over `ok dict.has? (pop `ok at) (nip) if) `or-default def
+ (result default -- value :
+  "If `result` is successful, extract the success values; otherwise return `default`.")
+ (swap checked swap over `ok has? (pop `ok at) (nip) if) `or-default def
 
  ### def map
  (result quotation -- result :
-  "For a success, use its payload as the explicit values list for `@attempt`, running the quotation
-   on an isolated stack seeded with the success values. Return a failure unchanged.")
- (swap checked swap over `ok dict.has?
+  "If `result` is successful, then apply `quotation` to its values in a new unit and return a new
+   result. Otherwise return `result` unchanged.")
+ (swap checked swap over `ok has?
   (swap `ok at swap cat @attempt)
   (pop)
   if) `map def
 
  ### def map-err
- (result (error -- error) -- result :
-  "Replace a failure's error dict with the one its isolated quotation returns. Return a success
-   unchanged.")
- (swap checked swap over `err dict.has?
+ (result (q: error -- error) -- result :
+  "If `result` is successful, return it unchanged. Otherwise apply `q` to its error and return a new
+   unsuccessful result.")
+ (swap checked swap over `err has?
   (swap `err at swap cons @attempt
-   dup `ok dict.has?
+   dup `ok has?
    (`ok at dup len 1 =
     `contract error.new "result.map-err expects ( error -- error )" error.with-message assert
     first dup error.valid?
     `type error.new "result.map-err must produce an error dict" error.with-message assert
-    err)
+    `err swap pair dict.from-kvs)
    when)
   (pop)
   if) `map-err def
 
  ### def recover
  (result quotation -- result :
-  "For a failure, run the recovery quotation under `@attempt` with the stored error dict as its only
-   input. Return a success unchanged.")
- (swap checked swap over `err dict.has?
+  "If `result` is successful, return it unchanged. Otherwise apply `quotation` to its error and
+   return a new result.")
+ (swap checked swap over `err has?
   (swap `err at swap cons @attempt)
   (pop)
   if) `recover def
 
  ### def recover-kinds
  (result kinds quotation -- result :
-  "Recover a failure only when its kind is one of the listed symbols. Return every other result
+  "Recover an unsuccessful result only when its kind is in `kinds`. Return every other result
    unchanged.")
  (|result kinds handler|
   result checked pop
@@ -119,33 +99,27 @@
   (type `symbol match?
    `type error.new "result.recover-kinds expects a list of kind symbols" error.with-message assert)
   for
-  result `err {} dict.get
-  dup error.valid?
-  kinds (error.kind-in?) cons
-  (pop 0)
-  if
-  result `err dict.has? and
+  result kinds over `err has? (swap `err at swap error.kind-in?) (pop pop 0) if
   result handler pair (recover) cat
   result wrap
   if) `recover-kinds def
 
  ### def either
  (result on-ok on-err -- ... :
-  "Eliminate a result exhaustively: call `on-ok` with the success list or `on-err` with the error
-   dict. Neither branch is isolated; each runs inline and may leave any number of values.")
+  "If `result` is successful, apply `on-ok` to its values. Otherwise, apply `on-err` to its error.")
  (|result on-ok on-err|
   result checked pop
-  result `ok dict.has?
+  result `ok has?
   result (`ok at) cons on-ok cat
   result (`err at) cons on-err cat
   if) `either def
 
  ### def all
  (results -- result :
-  "Return the leftmost failure unchanged, or one success whose value is the list of success stacks
-   in input order.")
+  "Return the leftmost unsuccessful element of `results`, or a successful result containing the
+   success values of all of `results`.")
  (checked-all
-  dup (`err dict.has?) each where
+  dup (`err has?) each where
   dup len 0 >
   (first at)
   (pop (`ok at) each ok)
@@ -153,8 +127,8 @@
 
  ### def partition
  (results -- successes errors :
-  "Split results into success lists and error dicts, both in input order, without re-raising.")
- (checked-all (`ok dict.has?) core.partition
+  "Partition results into success lists and error dicts, both in input order, without re-raising.")
+ (checked-all (`ok has?) core.partition
   ((`ok at) each) dip (`err at) each) `partition def
 
 ) `result @defm

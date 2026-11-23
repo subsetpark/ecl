@@ -16,7 +16,7 @@ ECL has three distinct fields of conformance:
   modules, and tasks specified here.
 - An **ECL standard environment** is a conforming language implementation
   that also provides the vocabulary specified by [`STDLIB.md`](STDLIB.md).
-  When a named word is a semantic primitive of the language, this document is
+  When a word in that vocabulary is a semantic primitive of the language, this document is
   the authority for its spelling and behavior and `STDLIB.md` indexes that
   definition rather than restating it.
 - An **ECL distribution or toolchain** may additionally provide a command,
@@ -110,7 +110,7 @@ characters. An atom is classified whole-token, in this order:
      literal; NaN values do not exist (see Numbers).
 2. **Char** — `\` followed by one character (\a), one of the
    names `\space`, `\tab`, `\newline`, or `\u{...}` with one to six hex
-   digits naming a Unicode scalar value (surrogate halves and values above
+   digits denoting a Unicode scalar value (surrogate halves and values above
    U+10FFFF are parse errors).
 3. **Quote** — `` ` `` followed by a symbol. It reads as one quoted occurrence
    of that symbol, which run pushes the symbol: `` `foo `` and `(foo) first`
@@ -147,7 +147,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
   enclosed forms. Symbols inside of list literals are *never evaluated*;  the
   forms `(foo)`, `` (`foo) ``, `[foo]` and `` [`foo] `` all produce
   values that evaluate as equal: one-element lists containing the symbol `foo`. 
-  (Critically, however, the semantics of `call` on the resulting lists are
+  (Critically, however, the semantics of `apply` on the resulting lists are
   different: unquoting `` (`foo) `` merely pushes the symbol to the stack,
   while unquoting `(foo)` executes the symbol.) 
   The pair choice is free per pair, and **pairs must match**:
@@ -159,7 +159,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 - Locals create temporary, quotation-internal bindings. Any word bound in the
   locals declaration can be used any number of times within the quotation.
   The first name receives the deepest consumed stack value and the last name
-  the top value, so `1 2 (|x y| x y -) call` is `-1`.
+  the top value, so `1 2 (|x y| x y -) apply` is `-1`.
   Locals do **not** exhibit lexical scoping: a local is not visible inside a
   nested quotation within the declaring body. 
 
@@ -343,7 +343,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type** → (**matches?** *left* *right* ↔ *left* = *right*).
 
-> An address names the mailbox of one task capability.
+> An address denotes the mailbox of one task capability.
 
 **value-type** (**address-mailbox** *value*) = **task-type**.
 
@@ -439,6 +439,10 @@ produces a scalar boolean or boolean mask (see Pervasion). For example,
   and then by length; strings are lists of chars. Anything else, including
   cross-kind pairs, is a `` `type `` error, but two lists compare only through
   their first unequal element pair. `grade` orders by this ordering.
+- A dictionary has no entry order. Every enumeration of one dictionary value
+  (`dict.keys`, `dict.vals`, `dict.pairs`, `each`, printing) visits its
+  entries in the same unspecified order, so its keys and values correspond by
+  position.
 - Words that require a boolean reject every value outside the formally defined
   Boolean role, including other ints.
 
@@ -465,7 +469,7 @@ Reflection operations inspect binding metadata through separate mechanisms.
 Every word is resolved when it is reached, in the scope that occurrence was
 written in (see [Where a word resolves](#where-a-word-resolves)), against the current definitions and module
 registrations. This holds alike for top-level source, for definition bodies,
-and for every quotation applied at run time, by `call`, a combinator,
+and for every quotation applied at run time, by `apply`, a combinator,
 `@attempt`, or as a task's body. A quotation applied at run time is not checked
 before it runs: an unresolved word fails at that word, after the forms before
 it have run. Nested quotations and quoted words are data and resolve only when
@@ -493,8 +497,8 @@ before its module is sealed.
 A body running when a word it calls is replaced may run the old definition for
 earlier calls and the new one for later ones. There is no historical view: a
 unit, a task, and an `@attempt` see the definitions current as each word is
-reached. Explicit operations on names — `execute`, `doc`, `effect`, `which`,
-and `see` — resolve the supplied symbol in its own scope against the current
+reached. Explicit operations on names — `execute`, `doc`, `effect`, and
+`see` — resolve the supplied symbol in its own scope against the current
 definitions each time they run. 
 
 A word written in a module image resolves in that image, so code written in an
@@ -943,7 +947,7 @@ execution contexts:
 Three quotation-application behaviors exist:
 
 - **Inline**: the quotation runs on the current stack. The inline words
-  are `call`, `dip`, `dip2`, `dip-n`, `both`, `if`, `when`, `unless`,
+  are `apply`, `dip`, `dip2`, `dip-n`, `both`, `if`, `when`, `unless`,
   `case`, and `times`, and the action quotations of `cond`, `while`, and
   `linrec`.
 - **Paging**: the quotation runs on a substack that starts empty and takes
@@ -1051,7 +1055,7 @@ stdlib definition.
 Shadowing a core name is allowed but reported. When a `def`, `set`, or `import`
 at top level introduces a session name that is also a public core name, a
 warning is written to the diagnostic stream. Sealing a module whose definitions
-or imports include a public core name writes one warning per such name, naming
+or imports include a public core name writes one warning per such name, each identifying
 the module. Standard-library modules shadow core names deliberately and are not
 reported. The binding takes effect either way, and `core.` still reaches the
 core word.
@@ -1060,7 +1064,7 @@ Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
 first use. `@defm` with a standard-library module name is `` `domain ``, as is
-`alias` with one as either the alias or its target. A dotted name below one,
+`alias` with one as the alias name. A dotted name below one,
 such as `dict.extra`, is an ordinary module name.
 
 Every activation has a **current scope**. A word belonging to a module runs with
@@ -1288,7 +1292,7 @@ new. Both reject a string that is not a valid symbol spelling as `` `domain ``.
 The interned name space grows only through reading source, `parse`, `intern`,
 and the module loaders; words that materialize values from external data
 produce strings, never symbols. A symbol built from a string is the same value
-as the symbol read from source, so `"dup" symbol wrap call` executes `dup`.
+as the symbol read from source, so `"dup" symbol wrap apply` executes `dup`.
 
 ## Modules
 
@@ -1325,13 +1329,13 @@ registrations. Modules are not values.
 
 ##### Action
 
-> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call selects a registry name's current image and a public binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. Explicit lookup performs the same fresh selection each time it runs.
+> This model is normative for registry names, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, including module aliases, which are lexical: a scope's alias rewrites a qualified word's module part before the call, so the registry holds no alias names. It also abstracts over construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call selects a registry name's current image and a public binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. Explicit lookup performs the same fresh selection each time it runs.
 
 **`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
 
 ---
 
-**module?** *module-name* ∨ **alias?** *module-name*.
+**module?** *module-name*.
 
 ∃ *call*: `Call`, *image*: `Image`, *definition*: `Definition`, ¬**call-created?** *call*, *image* = **image-of** *module-name*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, **public?** *definition* · **call-created?**′ *call* ∧ **call-active?**′ *call* ∧ **call-image**′ *call* = *image* ∧ **call-definition**′ *call* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *call* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
@@ -1339,7 +1343,7 @@ registrations. Modules are not values.
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under one module name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live module name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so unqualified words whose occurrences retain it as their scope keep their meaning; qualified words select the current registration, and aliases follow it on later lookup.
+> The model has one kind of module object: an immutable image, published under one module name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so unqualified words whose occurrences retain it as their scope keep their meaning; qualified words select the current registration.
 
 `Call`.
 
@@ -1373,8 +1377,6 @@ registrations. Modules are not values.
 
 {**`Registry`**} **module?** *name*: `RegistryName` ⇒ `Bool`.
 
-{**`Registry`**} **alias?** *name*: `RegistryName` ⇒ `Bool`.
-
 {**`Registry`**} **image-of** *name*: `RegistryName` ⇒ `Image`.
 
 {**`Registry`**} **image-published?** *image*: `Image` ⇒ `Bool`.
@@ -1403,17 +1405,11 @@ initially ∀ *image*: `Image`, *name*: `BindingName`, **binding-present?** *ima
 
 initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** *left* = **definition-image** *right*, **definition-name** *left* = **definition-name** *right* · *left* = *right*.
 
-∀ *registry-name*: `RegistryName` · ¬(**module?** *registry-name* ∧ **alias?** *registry-name*).
-
 > A live name maps to its current generation.
 
-∀ *registry-name*: `RegistryName`, (**module?** *registry-name* ∨ **alias?** *registry-name*) · **image-published?** (**image-of** *registry-name*) ∧ ¬**image-retired?** (**image-of** *registry-name*).
+∀ *registry-name*: `RegistryName`, **module?** *registry-name* · **image-published?** (**image-of** *registry-name*) ∧ ¬**image-retired?** (**image-of** *registry-name*).
 
 ∀ *registry-name*: `RegistryName`, **module?** *registry-name* · **image-name** (**image-of** *registry-name*) = *registry-name*.
-
-> An alias resolves to the current image of a live module name.
-
-∀ *registry-name*: `RegistryName`, **alias?** *registry-name* · **module?** (**image-name** (**image-of** *registry-name*)) ∧ **image-of** (**image-name** (**image-of** *registry-name*)) = **image-of** *registry-name*.
 
 **image-published?** *image* → **constructed?** *image*.
 
@@ -1433,7 +1429,7 @@ initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** 
 
 initially ∀ *image*: `Image` · ¬**constructed?** *image* ∧ ¬**image-published?** *image* ∧ ¬**image-retired?** *image*.
 
-initially ∀ *registry-name*: `RegistryName` · ¬**module?** *registry-name* ∧ ¬**alias?** *registry-name*.
+initially ∀ *registry-name*: `RegistryName` · ¬**module?** *registry-name*.
 
 initially ∀ *call*: `Call` · ¬**call-created?** *call* ∧ ¬**call-active?** *call*.
 
@@ -1445,27 +1441,15 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ##### Action
 
-> `Register` is `@defm`'s publication: it constructs a fresh image and publishes it in one step, because no program can observe an image between the two. It is an ordered upsert. Publishing under a missing module name creates the registration; publishing under an existing module name retires that name's current image, and every alias of the name resolves to the new image from then on. Nothing else carries over. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+> `Register` is `@defm`'s publication: it constructs a fresh image and publishes it in one step, because no program can observe an image between the two. It is an ordered upsert. Publishing under a missing module name creates the registration; publishing under an existing module name retires that name's current image. Nothing else carries over. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
-**`Registry`**, **`Construction`** ↝ Register *invoker*: `InvocationContext`, *image*: `Image`, *module-name*: `RegistryName`, ¬**constructed?** *image*, ¬**alias?** *module-name*.
+**`Registry`**, **`Construction`** ↝ Register *invoker*: `InvocationContext`, *image*: `Image`, *module-name*: `RegistryName`, ¬**constructed?** *image*.
 
 ---
 
-**module?**′ *module-name* ∧ ¬**alias?**′ *module-name* ∧ **image-of**′ *module-name* = *image* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **module?**′ *other-name* = **module?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ (**module?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name* → **image-of**′ *other-name* = *image*) ∧ (¬(**module?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name*) → **image-of**′ *other-name* = **image-of** *other-name*)) ∧ **image-published?**′ *image* ∧ ¬**image-retired?**′ *image* ∧ **image-name**′ *image* = *module-name* ∧ **constructed?**′ *image* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **constructed?**′ *other-image* = **constructed?** *other-image* ∧ **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ **module?** *module-name* ∧ *other-image* = **image-of** *module-name*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
+**module?**′ *module-name* ∧ **image-of**′ *module-name* = *image* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **module?**′ *other-name* = **module?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ **image-published?**′ *image* ∧ ¬**image-retired?**′ *image* ∧ **image-name**′ *image* = *module-name* ∧ **constructed?**′ *image* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **constructed?**′ *other-image* = **constructed?** *other-image* ∧ **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ **module?** *module-name* ∧ *other-image* = **image-of** *module-name*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
 
 #### Chapter 4
-
-##### Action
-
-> `Add alias` resolves either kind of occupied target name and stores a direct reference to its current image; semantic alias chains do not exist. The alias follows the module name through reload. Module and alias names form one disjoint namespace, and an occupied name cannot be repointed. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
-
-**`Registry`** ↝ Add alias *invoker*: `InvocationContext`, *alias-name*: `RegistryName`, *target-name*: `RegistryName`, ¬**module?** *alias-name*, ¬**alias?** *alias-name*, (**module?** *target-name* ∨ **alias?** *target-name*).
-
----
-
-¬**module?**′ *alias-name* ∧ **alias?**′ *alias-name* ∧ **image-of**′ *alias-name* = **image-of** *target-name* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *alias-name* · **module?**′ *other-name* = **module?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ (∀ *image*: `Image` · **image-published?**′ *image* = **image-published?** *image* ∧ **image-retired?**′ *image* = **image-retired?** *image* ∧ **image-name**′ *image* = **image-name** *image*).
-
-#### Chapter 5
 
 ##### Action
 
@@ -1478,7 +1462,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 ∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, **image-published?** *image*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image*
 *binding-name*, (**public?** *definition* ∨ **call-image** *caller* = **definition-image** *definition*), ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
-#### Chapter 6
+#### Chapter 5
 
 ##### Action
 
@@ -1553,8 +1537,12 @@ reference to any core word that's been shadowed in the current scope.
 
 Qualified names can be resolved and executed with `execute`.
 
-`alias` registers a short registry name; aliases and module names may not
-collide in either direction. `which` shows any name's resolution.
+``name `short alias`` binds `short` in the current scope as an alias of the
+module name `name`, as `def` binds a word: a module's alias belongs to its image
+and is legal only during construction, and a top-level alias belongs to the
+session. A qualified word written in that scope whose module part is exactly
+`short` refers to `name` instead, resolved at each call, so the alias follows
+reload. An alias is never a word or an export, and no other scope sees it.
 
 ### Tests
 
@@ -1589,7 +1577,7 @@ if `ecl test` is called without a `--runner` argument.
 
 ##### Domains
 
-> This model is normative for structured task identity, attachment to the general unit lifecycle, task ownership, cached terminal results, observation by `task.await`, deadline expiry, cancellation, the requirement that a task quiesce the tasks it owns before its attached unit becomes terminal, and the lifecycle of the messages a task's mailbox holds.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  Task scopes exist at two places: the session root and each spawned task. A spawn is owned by the task whose attached unit is executing it, or by the session root when no task is executing. Nested units, such as `@attempt`, `@load`, and module construction, are stack transactions and never owners: a task spawned inside one belongs to the enclosing scope and is unaffected by that unit's success or failure. The session root closes only at `exit` or session end, which this model leaves outside its actions.  A created task permanently names one attached unit and is owned either by the session root or by one other task. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value. `task-owner` is meaningful only for a task that is not root-owned; every proposition that reads it is guarded accordingly.
+> This model is normative for structured task identity, attachment to the general unit lifecycle, task ownership, cached terminal results, observation by `task.await`, deadline expiry, cancellation, the requirement that a task quiesce the tasks it owns before its attached unit becomes terminal, and the lifecycle of the messages a task's mailbox holds.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  Task scopes exist at two places: the session root and each spawned task. A spawn is owned by the task whose attached unit is executing it, or by the session root when no task is executing. Nested units, such as `@attempt`, `@load`, and module construction, are stack transactions and never owners: a task spawned inside one belongs to the enclosing scope and is unaffected by that unit's success or failure. The session root closes only at `exit` or session end, which this model leaves outside its actions.  A created task permanently refers to one attached unit and is owned either by the session root or by one other task. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value. `task-owner` is meaningful only for a task that is not root-owned; every proposition that reads it is guarded accordingly.
 
 `Task`.
 
@@ -1703,7 +1691,7 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 
 ##### Action
 
-> `Send` is the formal `task.send`: it creates one message addressed to an active task. Sending to a task whose attached unit is terminal fails and creates nothing; the surrounding specification names that failure. Parking under pressure is outside the model.
+> `Send` is the formal `task.send`: it creates one message addressed to an active task. Sending to a task whose attached unit is terminal fails and creates nothing; the surrounding specification specifies that failure. Parking under pressure is outside the model.
 
 **`Mailboxes`** ↝ Send *target*: `Task`, **task-created?** *target*, **unit-active?** (**task-unit** *target*).
 
@@ -1977,14 +1965,14 @@ later read. One read may be pending per endpoint, and a read may leave bytes
 read ahead with the endpoint value. Writes from different tasks are served in
 the order they began, and each call's bytes stay contiguous.
 
-`fd.close` closes an endpoint that is its own resource, such as an open file.
+`port.close` closes an endpoint that is its own resource, such as an open file.
 Such an endpoint is owned as a port is. An endpoint borrowed from a port
 closes with that port.
 
-The standard streams `fd.in`, `fd.out`, and `fd.err` belong to the session
+The standard streams `stream.in`, `stream.out`, and `stream.err` belong to the session
 rather than to a task. Every task and the root share the same three values,
 nothing closes them, and `@give` does not move them. When standard input is
-the program source there is no input device, and `fd.in` raises `` `io ``.
+the program source there is no input device, and `stream.in` raises `` `io ``.
 
 #### Filesystem
 
@@ -1998,7 +1986,7 @@ atomically or leaves its destination unchanged.
 #### Processes
 
 The shipped `proc` module provides subprocess words. A process specification
-names an absolute executable path, an argument vector, an optional absolute
+carries an absolute executable path, an argument vector, an optional absolute
 working directory, and the child's complete environment. It never denotes a
 shell command and never searches `PATH`, and the child inherits no host
 environment variable the program did not pass.

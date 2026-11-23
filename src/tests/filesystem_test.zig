@@ -1,7 +1,7 @@
 //! Public behavior of the pure `path` module and the `fs`
 //! module.
 //!
-//! Every filesystem case runs against a fresh temporary directory named as a
+//! Every filesystem case runs against a fresh temporary directory declared as a
 //! Session root through `Host.filesystem`; effects are observed through
 //! the public runtime and the real directory, never through implementation
 //! state. Sessions run only source text, so the traceless session heap is the
@@ -18,7 +18,7 @@ const io = std.testing.io;
 
 const Config = filesystem_module.Configuration;
 
-/// A temporary directory plus the absolute path that names it as a root.
+/// A temporary directory plus the absolute path that designates it as a root.
 const Scratch = struct {
     directory: std.testing.TmpDir,
     path: [:0]u8,
@@ -151,7 +151,7 @@ fn expectFsFailure(
     word: []const u8,
     reason: []const u8,
 ) !void {
-    // A copy names both ends of the transfer instead of one root.
+    // A copy reports both ends of the transfer instead of one root.
     const root_field = if (std.mem.eql(u8, word, "fs.copy")) "source-root" else "root";
     const fields = [_]support.DataField{
         .{ .name = "operation", .expected = .{ .symbol = word[3..] } },
@@ -442,16 +442,16 @@ test "filesystem: open-reader is a scope-owned readable endpoint" {
 
     // Line reads, chunk reads, and the whole rest of the stream, through one
     // value; after EOF every read is empty.
-    try expectStack(options, "`root \"text\" fs.open-reader dup fd.read-line chars swap dup 2 fd.read swap dup io.read-line swap dup fd.read-all swap dup fd.read-all swap fd.read-line", "\"héllo\\n\" [119 111] \"rld\\n\" () () []");
+    try expectStack(options, "`root \"text\" fs.open-reader dup stream.read-line chars swap dup 2 stream.read swap dup io.read-line swap dup stream.read-all swap dup stream.read-all swap stream.read-line", "\"héllo\\n\" [119 111] \"rld\\n\" () () []");
     // The rest of the stream is the last line; the empty file is EOF at once.
-    try expectStack(options, "`root \"tail\" fs.open-reader dup fd.read-line swap fd.read-line `root \"empty\" fs.open-reader fd.read-line", "[97 10] [98] []");
+    try expectStack(options, "`root \"tail\" fs.open-reader dup stream.read-line swap stream.read-line `root \"empty\" fs.open-reader stream.read-line", "[97 10] [98] []");
     try expectStack(options, "`root \"text\" fs.open-reader io.lines `root \"text\" fs.open-reader io.read", "(\"héllo\" \"world\") \"héllo\\nworld\\n\"");
     // Two readers over one file are independent.
-    try expectStack(options, "`root \"text\" fs.open-reader `root \"text\" fs.open-reader fd.read-line swap fd.read-line match?", "1");
-    // fd.close closes the file and is idempotent; a read afterwards is 'io,
+    try expectStack(options, "`root \"text\" fs.open-reader `root \"text\" fs.open-reader stream.read-line swap stream.read-line match?", "1");
+    // port.close closes the file and is idempotent; a read afterwards is 'io,
     // as is a read through a value whose opening scope has ended.
-    try expectStack(options, "`root \"text\" fs.open-reader dup fd.close dup fd.close (1 fd.read) cons @attempt `err at `kind at", "io");
-    try expectStack(options, "(`root \"text\" fs.open-reader) @spawn task.await `ok at first (1 fd.read) cons @attempt `err at `kind at", "io");
+    try expectStack(options, "`root \"text\" fs.open-reader dup port.close dup port.close (1 stream.read) cons @attempt `err at `kind at", "io");
+    try expectStack(options, "(`root \"text\" fs.open-reader) @spawn task.await `ok at first (1 stream.read) cons @attempt `err at `kind at", "io");
     try expectFsFailure(options, "`root \"absent\" fs.open-reader", "io", "fs.open-reader", "not-found");
     try expectFsFailure(options, "`root \"dir\" fs.open-reader", "io", "fs.open-reader", "is-directory");
 }
@@ -536,7 +536,7 @@ test "fs: incremental enumeration owns its cursor and joins staging closure" {
     try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "`root \".\" fs.open-list `cursor set " ++
         "(cursor fs.next-entry `name at) @spawn `a set " ++
         "(cursor fs.next-entry `name at) @spawn `b set " ++
-        "a task.await `ok at first b task.await `ok at first pair sort " ++
+        "a task.await `ok at first b task.await `ok at first pair dup grade at " ++
         "cursor fs.next-entry cursor fs.next-entry cursor port.close " ++
         "(cursor fs.next-entry) @attempt `err at `kind at", .{ .stack = "(\"a\" \"b\") {} {} io" });
     try expectStack(scratch.filesystem(), "`root \"published\" fs.stage-dir `s set s \"file\" \"x\" fs.publish-text " ++
@@ -544,7 +544,7 @@ test "fs: incremental enumeration owns its cursor and joins staging closure" {
         "s fs.commit-dir (cursor fs.next-entry) @attempt `err at `kind at", "{name \"file\" kind file} io");
     try scratch.directory.dir.symLink(io, "../outside", "link", .{});
     try expectStack(scratch.filesystem(), "`root \".\" fs.open-list `cursor set " ++
-        "4 (cursor fs.next-entry `kind at) times 4 pack (str) each sort cursor port.close", "(\"directory\" \"file\" \"file\" \"symlink\")");
+        "4 (cursor fs.next-entry `kind at) times 4 pack (str) each dup grade at cursor port.close", "(\"directory\" \"file\" \"file\" \"symlink\")");
 }
 
 test "fs: staging closure joins concurrent and reused child groups" {
@@ -888,18 +888,17 @@ test "fs: the live-operation quota is released after each operation" {
     };
     // Sequential operations each take and release the single slot.
     try expectStack(options, "`root \"file\" fs.read-text `root \"file\" fs.read-text `root \"file\" fs.exists?", "\"x\" \"x\" 1");
-    // Concurrent tasks contend for one slot. Whether they overlap is a
-    // scheduling fact, so the assertion is the invariant: every outcome is
-    // success or the limit reason, at least one succeeds, and the slot is
-    // free again afterwards. Explicit reservations prove exhaustion separately.
+    // Concurrent tasks contend for one slot. A contender waits for it rather
+    // than failing, so every outcome is success and the slot is free again
+    // afterwards.
     const big = try allocator.alloc(u8, 512 * 1024);
     defer allocator.free(big);
     @memset(big, 'y');
     try scratch.write("big", big);
     try runCase(options, .{ .worker_pool = 2 },
         \\(`root "big" fs.read-bytes len) @spawn (`root "big" fs.read-bytes len) @spawn
-        \\pair (task.await) each (dup `ok dict.has? (pop `ok) (`err at `data at `reason at) if) each
-        \\dup (`ok match?) filter len 1 >= swap (dup `ok match? swap `limit match? or) all? and
+        \\pair (task.await) each (dup `ok has? (pop `ok) (`err at `data at `reason at) if) each
+        \\(`ok match?) all?
         \\`root "file" fs.read-text
     , .{ .stack = "1 \"x\"" });
 }
@@ -979,7 +978,7 @@ test "fs: words cold-load through the builtin manifest and are documented" {
     try support.expectStack("`fs (exists?) import `path (join) import (\"a\" \"b\") join", "\"a/b\"");
 }
 
-test "fs: streaming publication and reservations enforce total limits and rollback" {
+test "fs: streaming publication enforces total limits and rollback" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{
@@ -987,15 +986,13 @@ test "fs: streaming publication and reservations enforce total limits and rollba
         .max_transfer_bytes = 1,
         .max_stream_transfer_bytes = 4,
     } };
-    try expectStack(options, "`root fs.reserve `reservation set " ++
-        "(`root \".\" fs.stat) @attempt `err at `data at `reason at " ++
-        "reservation \"published\" fs.open-writer `writer set writer [65 66] fs.write-chunk writer [67 68] fs.write-chunk writer fs.commit-file " ++
-        "reservation \"aborted\" fs.open-writer `writer set writer [65 66 67] fs.write-chunk " ++
+    try expectStack(options, "`root \"published\" fs.open-writer `writer set writer [65 66] fs.write-chunk writer [67 68] fs.write-chunk writer fs.commit-file " ++
+        "`root \"aborted\" fs.open-writer `writer set writer [65 66 67] fs.write-chunk " ++
         "(writer [68 69] fs.write-chunk) @attempt `err at `data at `reason at " ++
         "(writer fs.commit-file) @attempt `err at `kind at writer port.close " ++
-        "reservation \"aborted\" fs.exists? reservation port.close " ++
+        "`root \"aborted\" fs.exists? " ++
         "(`root \"published\" fs.read-bytes) @attempt `err at `data at `reason at " ++
-        "`root \"published\" fs.stat `size at", "limit limit overflow 0 limit 4");
+        "`root \"published\" fs.stat `size at", "limit overflow 0 limit 4");
     const published = try scratch.read("published");
     defer allocator.free(published);
     try std.testing.expectEqualStrings("ABCD", published);
@@ -1003,20 +1000,29 @@ test "fs: streaming publication and reservations enforce total limits and rollba
     try scratch.expectNoStaging(".");
 }
 
-test "fs: direct reservations follow derived roots and pair admission" {
+test "fs: open writers and lock waiters hold no live-operation slot" {
     for ([_]session.Config{ .cooperative, .{ .worker_pool = 1 }, .{ .worker_pool = 4 } }) |config| {
         var scratch = try Scratch.init();
         defer scratch.deinit();
-        try scratch.write("source", "data");
-        const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{ .max_live_operations = 2 } };
-        try runCase(options, config, "`root fs.reserve `a set `root fs.reserve `b set " ++
-            "a \"source\" b \"copy\" fs.copy b \"copy\" fs.read-text " ++
-            "(a \"source\" b \"copy\" fs.copy) @attempt `err at `data at `reason at " ++
-            "a \"source\" a \"same\" fs.copy a \"same\" fs.read-text " ++
-            "a \".\" fs.child-dir `child set a port.close " ++
-            "(`root \".\" fs.stat) @attempt `err at `data at `reason at " ++
-            "child port.close b port.close `root \"copy\" fs.stat `size at", .{ .stack = "\"data\" already-exists \"data\" limit 4" });
+        const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{ .max_live_operations = 1 } };
+        // Two writers stay open across path operations under a one-slot limit.
+        try runCase(options, config, "`root \"first\" fs.open-writer `first set `root \"second\" fs.open-writer `second set " ++
+            "`root \"other\" \"x\" fs.publish-text first [65] fs.write-chunk second [66] fs.write-chunk " ++
+            "first fs.commit-file second fs.commit-file " ++
+            "`root \"first\" fs.read-text `root \"second\" fs.read-text `root \"other\" fs.read-text", .{ .stack = "\"A\" \"B\" \"x\"" });
     }
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options: Config = .{ .roots = scratch.root_storage[0..], .limits = .{ .max_live_operations = 1 } };
+    // The waiter parks on contention before the holder's next path operation;
+    // if it kept its slot, that operation could never be admitted.
+    try runCase(options, .{ .worker_pool = 2 },
+        \\`root "mutex" fs.lock `holder set
+        \\(`root "mutex" fs.lock port.close) @spawn `waiter set
+        \\waiter 20 task.await-for `err at `kind at
+        \\`root "other" "x" fs.publish-text holder port.close
+        \\waiter task.await `ok has? `root "other" fs.read-text
+    , .{ .stack = "timeout 1 \"x\"" });
 }
 
 test "fs: completed operations release admission before the next call" {
@@ -1051,7 +1057,7 @@ test "fs: direct writer finalization joins admitted chunks" {
         try runCase(scratch.filesystem(), config, "`root \"raced\" fs.open-writer `writer set writer [65] fs.write-chunk " ++
             "32 range (pop (writer [66] fs.write-chunk 1) @spawn) each `tasks set " ++
             "writer fs.commit-file tasks " ++
-            "(task.await dup `ok dict.has? (`ok at first) " ++
+            "(task.await dup `ok has? (`ok at first) " ++
             "(`err at `kind at `io match? {kind user msg \"unadmitted write error\"} assert 0) if) each " ++
             "sum 1 + `root \"raced\" fs.read-bytes len =", .{ .stack = "1" });
         try scratch.expectNoStaging(".");
@@ -1098,6 +1104,6 @@ test "fs: concurrent symlink replacement cannot escape retained roots" {
         thread.join();
     }
     try expectStack(.{ .roots = &.{.{ .name = "root", .absolute_path = root_path }} }, "100 ((`root \"pointer/file\" fs.read-text) @attempt " ++
-        "dup `ok dict.has? (`ok at first \"inside\" match? {kind user msg \"confined content\"} assert) " ++
+        "dup `ok has? (`ok at first \"inside\" match? {kind user msg \"confined content\"} assert) " ++
         "(`err at `kind at `io match? {kind user msg \"portable race failure\"} assert) if) times", "");
 }

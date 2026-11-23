@@ -5,7 +5,7 @@
 //! Each family's operations are one enum in `kernel_support`, the same one its
 //! installer iterates. How an operation runs for an operand shape is the
 //! kernel's own code: a typed shape runs through `support.Kernel`, which the
-//! source audit enforces, and every other shape names its reason there.
+//! source audit enforces, and every other shape states its reason there.
 const std = @import("std");
 const env = @import("env.zig");
 pub const support = @import("kernel_support.zig");
@@ -13,7 +13,8 @@ pub const storage = @import("kernel_storage.zig");
 pub const numeric = @import("kernel_numeric.zig");
 const sequence = @import("kernel_sequence.zig");
 const order = @import("kernel_order.zig");
-const dict_text = @import("kernel_dict_text.zig");
+const dict_kernels = @import("kernel_dict.zig");
+const text = @import("kernel_text.zig");
 pub const random = @import("kernel_random.zig");
 pub const flat = @import("kernel_flat.zig");
 
@@ -30,6 +31,7 @@ comptime {
         support.UnaryOp,
         support.SequenceOp,
         support.OrderOp,
+        support.DictOp,
         support.TextOp,
         support.RandomOp,
     };
@@ -49,5 +51,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try numeric.install(core);
     try sequence.install(core);
     try order.install(core);
-    try dict_text.install(core);
+    try dict_kernels.install(core);
+    try text.install(core);
 }

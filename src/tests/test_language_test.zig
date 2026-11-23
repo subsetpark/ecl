@@ -51,7 +51,7 @@ test "testing: declaration is legal only at a module construction root" {
     defer runtime.deinit();
 
     try expectErr(&runtime, "(1) `outside test");
-    try expectErr(&runtime, "(((1) `nested test) call) `nested.module @defm");
+    try expectErr(&runtime, "(((1) `nested test) apply) `nested.module @defm");
     try expectOk(&runtime, "((1) `direct test) `direct.module @defm");
 }
 
@@ -83,7 +83,7 @@ test "testing: test mode discovers each module once, ignoring aliases" {
         &runtime,
         "((1) `z test (2) `a test) `suite.two @defm " ++
             "((3) `only test) `suite.one @defm ((3) `only test) `suite.copy @defm " ++
-            "`short `suite.one alias " ++
+            "`suite.one `short alias " ++
             "tests dup len 4 = {kind user} assert " ++
             "first dup `module at `suite.copy match? {kind user} assert " ++
             "`name at `only match? {kind user} assert",
@@ -140,7 +140,7 @@ test "testing: test execution reaches private definitions and reifies its isolat
         &runtime,
         "((42) `secret defp (stack len secret) `private test) `suite @defm " ++
             "99 tests first @test " ++
-            "dup `ok dict.has? {kind user} assert " ++
+            "dup `ok has? {kind user} assert " ++
             "`ok at [0 42] match? {kind user} assert " ++
             "99 = {kind user} assert",
     );
@@ -161,7 +161,7 @@ test "testing: reload and removal replace the discoverable test catalog coherent
             "((2) `new test) `changing @defm " ++
             "tests dup len 1 = {kind user} assert " ++
             "first `name at `new match? {kind user} assert " ++
-            "stale @test `err dict.has? {kind user} assert",
+            "stale @test `err has? {kind user} assert",
     );
 }
 
@@ -177,11 +177,11 @@ test "testing: test discovery exposes metadata but not executable bodies" {
         &runtime,
         "((x -- y : \"Documented test.\") (dup) `metadata test) `catalog @defm " ++
             "tests first " ++
-            "dup `module dict.has? {kind user} assert " ++
-            "dup `name dict.has? {kind user} assert " ++
-            "dup `effect dict.has? {kind user} assert " ++
-            "dup `doc dict.has? {kind user} assert " ++
-            "dup `body dict.has? not {kind user} assert " ++
+            "dup `module has? {kind user} assert " ++
+            "dup `name has? {kind user} assert " ++
+            "dup `effect has? {kind user} assert " ++
+            "dup `doc has? {kind user} assert " ++
+            "dup `body has? not {kind user} assert " ++
             "dict.size 4 = {kind user} assert",
     );
 }

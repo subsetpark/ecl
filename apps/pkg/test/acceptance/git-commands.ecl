@@ -25,7 +25,7 @@
  (args 4 at fs.open-dir "valid.tgz.hex" fs.read-text str.trim
   ("0123456789abcdef" swap find) each dup len 2 div 2 pair reshape
   (|pair| pair first 16 * pair 1 at +) each
-  (|bytes| pkg.project.cache-path bytes pkg.fetch.hash bytes pkg.cache.write) call) `seed-archive
+  (|bytes| pkg.project.cache-path bytes pkg.fetch.hash bytes pkg.cache.write) apply) `seed-archive
  defp
 
  ### defp locked
@@ -111,7 +111,7 @@
 
  ### def run
  (-- : "Select one fixture phase and run its assertions using ECL's built-in test interface.")
- (tests (`name at chars args first match?) filter
+ (tests (`module at `pkg.test.git-commands match?) filter (`name at chars args first match?) filter
   dup len 1 = {kind user msg "Git command phase was not registered"} assert
   first @test result.or-raise pop) `run def
 ) `pkg.test.git-commands @defm

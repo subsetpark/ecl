@@ -2,7 +2,7 @@
 # A disposable shared download cache. Project generations never depend on it.
 (
  ### def filename
- (hash -- filename : "Name one exact archive in the flat download cache.")
+ (hash -- filename : "Return the filename of one exact archive in the flat download cache.")
  (dup pkg.name.hash? `domain error.new "invalid archive cache hash" error.with-message assert
   7 drop ".tgz" cat) `filename def
 
@@ -51,11 +51,12 @@
   "Atomically publish valid cache bytes, allowing initial creation and replacement.")
  (|path hash bytes|
   path pkg.project.open-created hash bytes
-  (|directory hash bytes| directory hash bytes write-at directory port.close) call) `write-file defp
+  (|directory hash bytes| directory hash bytes write-at directory port.close) apply) `write-file
+ defp
 
  ### def write-at
  (directory hash bytes -- :
-  "Publish only the bytes named by this cache key through an explicit directory.")
+  "Publish only the bytes identified by this cache key through an explicit directory.")
  (|directory hash bytes|
   directory hash filename bytes hash pkg.fetch.checked fs.publish-bytes) `write-at def
 

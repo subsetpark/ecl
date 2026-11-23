@@ -1642,7 +1642,7 @@ const ParserCursor = struct {
             return error.Parse;
         }
         if (lexer.classify(token.bytes) != .symbol) {
-            self.diag.setFmt(token.span, "quote must name a symbol, not `{s}`", .{token.bytes});
+            self.diag.setFmt(token.span, "quote must precede a symbol, not `{s}`", .{token.bytes});
             return error.Parse;
         }
         try self.beginScalar(token);

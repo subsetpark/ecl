@@ -1,8 +1,7 @@
 # DoD-30: stable equijoins with explicit missingness, over a CSV order table
 # and a JSON customer table.
 `table
-(from-header-rows from-records rename inner-join left-join-with height
- column)
+(from-header-rows from-records rename inner-join left-join-with rows)
 import
 
 `cwd "test/acceptance/orders.csv" fs.read-text csv.parse from-header-rows
@@ -25,30 +24,22 @@ orders renamed [["customer" "customer"]] inner-join io.pp
 orders customers [["customer" "customer"] ["region" "region"]] inner-join io.pp
 
 # An unmatched left row contributes nothing to an inner join.
-orders customers [["customer" "customer"] ["region" "region"]] inner-join height io.pp
-orders height io.pp
+orders customers [["customer" "customer"] ["region" "region"]] inner-join rows len io.pp
+orders rows len io.pp
 
 # A left join emits one row per unmatched left row, completed only from the
 # caller's fill — the value is never invented.
 orders customers [["customer" "customer"] ["region" "region"]]
 {"tier" null} left-join-with io.pp
 orders customers [["customer" "customer"] ["region" "region"]]
-{"tier" "unknown"} left-join-with "tier" column io.pp
+{"tier" "unknown"} left-join-with "tier" at io.pp
 
-# The fill must name exactly the appended right columns: no fewer, no more.
+# The fill must cover every appended right column.
 (orders customers [["customer" "customer"] ["region" "region"]] {} left-join-with)
 @attempt `err at `kind at io.pp
-(orders customers [["customer" "customer"] ["region" "region"]] {"tier" null "extra" 1}
- left-join-with)
-@attempt
-`err
-at
-`kind
-at
-io.pp
 
 # A JSON null is ordinary data wherever it travels.
-customers "tier" column io.pp
-customers "tier" column 2 at type io.pp
+customers "tier" at io.pp
+customers "tier" at 2 at type io.pp
 orders customers [["customer" "customer"] ["region" "region"]]
-{"tier" null} left-join-with "tier" column 3 at io.pp
+{"tier" null} left-join-with "tier" at 3 at io.pp

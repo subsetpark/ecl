@@ -154,7 +154,8 @@ const Cell = struct {
         taken,
     } = .preparing,
     method: std.http.Method = .GET,
-    redirects: bool = false,
+    /// Replay a bodiless request at a 3xx `Location` within the hop limit.
+    follow_redirects: bool = true,
     io_finished: bool = false,
     fn scopeOwnership(self: *Cell) *external.Ownership {
         return &self.ownership;
@@ -286,7 +287,10 @@ const Cell = struct {
                 else => return err,
             };
             response.status = @backingInt(head.head.status);
-            const redirect = self.redirects and !method.requestHasBody() and head.head.status.class() == .redirect and head.head.status != .not_modified;
+            const status = head.head.status;
+            // A request with a body is never replayed; its 3xx is the response.
+            const redirect = self.follow_redirects and !method.requestHasBody() and
+                status.class() == .redirect and status != .not_modified;
             const status_end = std.mem.indexOf(u8, head.head.bytes, "\r\n") orelse return error.HttpHeadersInvalid;
             const field_bytes = head.head.bytes.len - status_end - 4;
             if (field_bytes > limits.header_bytes - header_bytes) return error.Overflow;
@@ -358,11 +362,11 @@ pub const Request = opaque {
         return @ptrCast(@alignCast(self));
     }
     /// Always consumes input, including startup failure; retirement owns rollback.
-    pub fn start(self: *Request, input: Input, method: std.http.Method, redirects: bool, scope: *scheduler.TaskScope) !void {
+    pub fn start(self: *Request, input: Input, method: std.http.Method, follow_redirects: bool, scope: *scheduler.TaskScope) !void {
         const cell = self.state();
         cell.phase = .{ .active = .{ .request = input } };
         cell.method = method;
-        cell.redirects = redirects;
+        cell.follow_redirects = follow_redirects;
         try cell.group.start(.{scope}, Cell.prepare, Cell.run, Cell.rollback);
     }
     pub fn target(self: *Request) []const u8 {

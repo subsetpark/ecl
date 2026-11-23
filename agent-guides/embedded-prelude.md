@@ -13,12 +13,12 @@ apply as well.
 - Give every prelude definition a meaningful, nonempty annotation docstring.
   Include an effect whenever the successful stack effect is expressible: when
   a word consumes or leaves a variable number of values, put one `...` in that
-  row where they sit, keeping every value whose position is known named. Use a
+  row where they sit, keeping a name for every value whose position is known. Use a
   documentation-only annotation only when no effect is expressible, and state
   the shape in the docstring. State the contract of an isolated quotation
   argument as that slot's nested effect, not in the docstring.
 - Treat the annotation—not the navigation comment—as the documentation
-  authority. `doc`, `which`, and `see` reflect it, and `design/STDLIB.md`
+  authority. `doc` and `see` reflect it, and `design/STDLIB.md`
   renders the word's entry from it.
 - A definition must follow every prelude word its body uses, because the
   prelude is evaluated one definition at a time against the core built so

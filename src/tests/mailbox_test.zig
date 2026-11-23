@@ -56,12 +56,12 @@ fn openPool(inputs: *runtime_fixture.Fixture, workers: usize) !session.Session {
     return session.Session.init(allocator, &.{}, inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
 }
 
-test "mailbox: addresses name a task mailbox and are opaque" {
+test "mailbox: addresses identify a task mailbox and are opaque" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try openSession(&inputs);
     defer runtime.deinit();
-    // Two addresses of one task name one mailbox; two tasks' addresses never do.
+    // Two addresses of one task identify one mailbox; two tasks' addresses never do.
     try expectStack(&runtime, "(1) @spawn dup task.address swap task.address match?", "1");
     try expectStack(&runtime, "(1) @spawn task.address (1) @spawn task.address match?", "0");
     try expectStack(&runtime, "(1) @spawn task.address type", "address");

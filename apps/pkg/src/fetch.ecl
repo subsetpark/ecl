@@ -5,7 +5,7 @@
 (
  ### def hash
  (bytes -- hash : "Compute the portable archive hash.")
- (archive.sha256 "sha256-" swap cat) `hash def
+ (hash.sha256 "sha256-" swap cat) `hash def
 
  ### def checked
  (bytes expected -- bytes : "Require the exact pinned archive bytes.")
@@ -24,7 +24,7 @@
  (dup pkg.name.url?
   `domain error.new "package archives require HTTPS URLs without credentials" error.with-message
   assert
-  `target swap pair dict.from-flat http.get-bytes success) `archive def
+  "GET" swap http.request.new http.send success) `archive def
 
  ### defp chunk
  (reader chunks size bytes -- reader chunks size bytes : "Consume one bounded Git output chunk.")
@@ -32,11 +32,11 @@
   reader chunks bytes append size bytes len +
   dup 67108864 <=
   `overflow error.new "Git package archive exceeds 64 MiB" error.with-message assert
-  reader 65536 fd.read) `chunk defp
+  reader 65536 stream.read) `chunk defp
 
  ### defp collect
  (reader -- bytes : "Drain a native byte endpoint before requesting its structured result.")
- (|reader| reader [] 0 reader 65536 fd.read
+ (|reader| reader [] 0 reader 65536 stream.read
   (dup empty? not) (chunk) while pop pop swap pop raze) `collect defp
 
  ### defp collect-exchange
@@ -56,7 +56,7 @@
   `scratch pkg.project.temporary put
   `export-bytes 67108864 put
   `git.snapshot execute [] port.open swap
-  (|resource request| resource resource git.fetch request port.begin collect-exchange) call) `git
+  (|resource request| resource resource git.fetch request port.begin collect-exchange) apply) `git
  def
 
  ### def requirement

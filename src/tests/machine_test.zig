@@ -285,7 +285,7 @@ test "errors: source effect contract preserves absence for runtime-built code" {
     const source =
         \\(
         \\ (-- )
-        \\ (1 wrap call)
+        \\ (1 wrap apply)
         \\ `run def)
         \\`runtime @defm
         \\runtime.run
@@ -368,13 +368,13 @@ test "errors: guard restoration preserves the enclosing application selection" {
             \\(
             \\(-- )
             \\([0] 0
-            \\ (dup [((1) call) (pop pop 1 2) ()] cond)
+            \\ (dup [((1) apply) (pop pop 1 2) ()] cond)
             \\ fold)
             \\`run def)
             \\`guardcond @defm
             \\guardcond.run
             ,
-            .column = 19,
+            .column = 20,
         },
         .{
             .source_name = "guard-while.ecl",
@@ -382,13 +382,13 @@ test "errors: guard restoration preserves the enclosing application selection" {
             \\(
             \\(-- )
             \\([0] 0
-            \\ (dup ((dup 0 =) call) (pop pop 1 2) while)
+            \\ (dup ((dup 0 =) apply) (pop pop 1 2) while)
             \\ fold)
             \\`run def)
             \\`guardwhile @defm
             \\guardwhile.run
             ,
-            .column = 24,
+            .column = 25,
         },
     };
     for (cases) |case| {
@@ -529,7 +529,7 @@ test "dynamic context: *file* follows authored source provenance" {
     // contents do not borrow a filename from either authored input or caller.
     const failure = (try runtime.runUnit(
         "runtime-built-caller.ecl",
-        "pop (*file*) (1 pop) cat call",
+        "pop (*file*) (1 pop) cat apply",
     )).err;
     defer runtime.release(failure);
     try std.testing.expectEqualStrings("domain", try errorKind(allocator, failure));
@@ -835,12 +835,12 @@ test "inline control and reader-lowered locals execute" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try std.testing.expect((try execute(&runtime, "1 (2 +) call")) == null);
+    try std.testing.expect((try execute(&runtime, "1 (2 +) apply")) == null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expect((try execute(&runtime, "pop 1 9 (2 +) dip")) == null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 9), runtime.stackItems()[1].int);
-    try std.testing.expect((try execute(&runtime, "pop pop 3 (|x| x x *) call")) == null);
+    try std.testing.expect((try execute(&runtime, "pop pop 3 (|x| x x *) apply")) == null);
     try std.testing.expectEqual(@as(i64, 9), runtime.stackItems()[0].int);
     try std.testing.expect((try execute(&runtime, "pop 3 (dup 0 >) (1 -) while pop")) == null);
     try std.testing.expectEqual(@as(usize, 0), runtime.stackItems().len);
@@ -862,7 +862,7 @@ test "public parse reifies forms without execution and retains provenance" {
     defer display.deinit();
     try std.testing.expectEqualStrings("(42 missing)", display.bytes());
 
-    const failure = (try execute(&runtime, "pop \"(missing)\" parse first call")).?;
+    const failure = (try execute(&runtime, "pop \"(missing)\" parse first apply")).?;
     defer runtime.release(failure);
     try std.testing.expectEqualStrings("undefined-word", try errorKind(allocator, failure));
     const data = try field(allocator, failure, "data");

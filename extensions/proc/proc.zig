@@ -362,7 +362,7 @@ fn lock(mutex: *std.Io.Mutex) void {
 fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
 }
-// Pipe writes must not depend on an embedding host's process-wide SIGPIPE
+// Pipe writes must not depend on the process-wide SIGPIPE
 // disposition. Where the descriptor can opt out (Darwin, FreeBSD), no SIGPIPE
 // is generated at all: there a broken-pipe signal may be delivered to any
 // thread, so a per-thread mask cannot contain it. Elsewhere the signal is

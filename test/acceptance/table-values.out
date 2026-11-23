@@ -8,7 +8,6 @@ dict
 {"id" [1 2] "city" ("Oslo" "Lima")}
 {"id" [1 2] "city" ("Oslo" "Lima")}
 {"id" [1 2] "city" ("Oslo" "Lima")}
-{"id" [1 2] "city" ("Oslo" "Lima")}
 {"id" () "city" ()}
 {"id" () "city" ()}
 0
@@ -20,9 +19,6 @@ dict
 1
 1
 0
-("id" "city")
-3
-("Oslo" "Lima" "Oslo")
 {"n" [1 2]}
 {"city" ("Oslo" "Lima" "Oslo") "id" [1 2 3]}
 {"id" [1 2 3] "town" ("Oslo" "Lima" "Oslo")}

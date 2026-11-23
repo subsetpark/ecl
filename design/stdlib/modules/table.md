@@ -1,5 +1,32 @@
 ## table
 
+### aggregate
+
+#### Examples
+
+Given this table, grouped by `"region"`:
+
+```ecl
+{"region" ["east" "west" "east"] "amount" [10 20 30]}
+```
+
+the quotation receives the non-key columns, each holding one slice per group,
+in first-seen group order (`"east"`, then `"west"`):
+
+```ecl
+{"amount" ([10 30] [20])}
+```
+
+It reduces each slice and returns the output columns, which follow the key
+columns in the result:
+
+```ecl
+{"region" ["east" "west" "east"] "amount" [10 20 30]} ["region"]
+(|g| {} "total" g "amount" at (sum) each put "n" g "amount" at (len) each put)
+table.aggregate
+# => {"region" ("east" "west") "total" [40 20] "n" [2 1]}
+```
+
 ### from-records
 
 #### Examples

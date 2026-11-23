@@ -86,7 +86,7 @@ const CountingAllocator = struct {
 };
 
 const Case = struct {
-    /// What the budget is about, named as the reader would describe it.
+    /// What the budget is about, in the words the reader would use.
     name: []const u8,
     /// Source producing the input list; `{d}` is the element count.
     setup: []const u8,
@@ -302,7 +302,7 @@ const dispatch_free = [_]Case{
     .{
         .name = "dict membership",
         .setup = "{} dict.keys pop {d} range",
-        .workload = "(pop {a 1} `a dict.has?) each len",
+        .workload = "(pop {a 1} `a has?) each len",
         .per_element = 0,
     },
     .{
@@ -482,9 +482,9 @@ const dispatch_free = [_]Case{
         .per_element = 0,
     },
     .{
-        .name = "quotation call",
+        .name = "quotation apply",
         .setup = "{d} range",
-        .workload = "(pop 5 (dup) call pop) each len",
+        .workload = "(pop 5 (dup) apply pop) each len",
         .per_element = 0,
     },
     .{
@@ -568,7 +568,7 @@ test "allocation: generic membership holds its recorded cost" {
 /// One of them has since been looked at, and the answer is worth keeping. `del`
 /// spending eight allocations to produce an empty dict read as the most
 /// suspicious number here; it is not `del`'s. Building an empty dict costs
-/// eight whatever produces it -- `[] [] dict.from-lists` spends the same eight, in the
+/// eight whatever produces it -- `[] [] dict.zip` spends the same eight, in the
 /// same sizes -- because a dict is several heap objects even when it holds
 /// nothing. Making that cheaper is a question about the representation, a
 /// shared empty dict or arrays allocated on first use, and not about any

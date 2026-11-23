@@ -12,14 +12,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
     try support.expectStacks(&.{
         // The prelude's source bodies were asserted here by extracting them
         // with `body`. Nothing extracts a published body now, and the claim was
-        // redundant: each definition is pinned behaviorally (`sort` against
-        // `dup grade at` in kernel_order_test) and `see` renders the stored
-        // body wherever a rendering is asserted.
+        // redundant: each definition is pinned behaviorally and `see` renders
+        // the stored body wherever a rendering is asserted.
         .{ .name = "pack", .source = "1 2 3 4 4 pack", .expected = "[1 2 3 4]" },
         .{ .name = "collect", .source = "9 (1 2 3 +) collect", .expected = "9 [1 5]" },
         .{
             .name = "migrated stack and quotation words",
-            .source = "1 2 over (1) (2) cat call 4 7 (1 +) dip 42 str",
+            .source = "1 2 over (1) (2) cat apply 4 7 (1 +) dip 42 str",
             .expected = "1 2 1 1 2 5 7 \"42\"",
         },
         .{
@@ -30,7 +29,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{ .name = "two-value stack copy", .source = "1 2 dup2", .expected = "1 2 1 2" },
         .{
             .name = "migrated numeric words",
-            .source = "7 3 mod -2 neg -2 abs 2 3 <> 2 2 <> 2 3 <= 3 2 <= " ++
+            .source = "7 3 mod -2 neg -2 abs 2 3 not= 2 2 not= 2 3 <= 3 2 <= " ++
                 "3 2 >= 2 3 >= 1 0 and 1 0 or",
             .expected = "1 2 2 1 0 1 0 1 0 0 1",
         },
@@ -62,7 +61,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "wrapped values are data",
-            .source = "(foo) first wrap call 42 wrap call [1 2] wrap call",
+            .source = "(foo) first wrap apply 42 wrap apply [1 2] wrap apply",
             .expected = "foo 42 [1 2]",
         },
         .{
@@ -72,12 +71,12 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "partial application",
-            .source = "3 (2 *) cons call (foo) first (type) cons call",
+            .source = "3 (2 *) cons apply (foo) first (type) cons apply",
             .expected = "6 symbol",
         },
         .{
             .name = "quotation with initial values",
-            .source = "[2 3] (+) cat call (type) first 7 pair (pop type) cat call",
+            .source = "[2 3] (+) cat apply (type) first 7 pair (pop type) cat apply",
             .expected = "5 symbol",
         },
         .{
@@ -100,7 +99,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "cleaves keep a quoted symbol input quoted",
-            .source = "(`m) first [()] cleave wrap call (`m) first [(type)] cleave",
+            .source = "(`m) first [()] cleave wrap apply (`m) first [(type)] cleave",
             .expected = "m symbol",
         },
         .{
@@ -121,7 +120,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .name = "sequence construction",
             .source = "[1 2 3] last 7 wrap 7 8 pair 1 2 3 3 pack [1 2] 3 append " ++
                 "[1 2 3] uncons [1 2 3] unappend [] empty? [1] empty? " ++
-                "[1 2] [3 4] zip [3 1 2] sort",
+                "[1 2] [3 4] zip [3 1 2] dup grade at",
             .expected = "                                                ([1 3]\n" ++
                 "3 [7] [7 8] [1 2 3] [1 2 3] 1 [2 3] [1 2] 3 1 0  [2 4]) [1 2 3]",
         },
@@ -165,7 +164,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "\"abcdef\" 3 windows [12 13 11 17 14] 10 (-) each-prior " ++
                 "[] 9 (+) each-prior [1 2 3] (+) fold1 [7] (+) fold1 " ++
                 "[1 2 3] (+) scan1 [7] (+) scan1 1 5 (2 *) iterations 1 0 (2 *) iterations",
-            .expected = "(\"abc\" \"bcd\" \"cde\" \"def\") [2 1 -2 6 -3] () 6 7 [1 3 6] [7] [1 2 4 8 16 32] [1]",
+            .expected = "(\"abc\" \"bcd\" \"cde\" \"def\") [-2 -1 2 -6 3] () 6 7 [1 3 6] [7] [1 2 4 8 16 32] [1]",
         },
         .{
             .name = "cut-derived chunks and digit conversion",
@@ -194,22 +193,22 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose nonempty documentation" {
     const names = [_][]const u8{
-        "first",        "wrap",       "dip",          "over",
-        "rollup",       "rolldown",   "mod",          "neg",
-        "abs",          "<>",         "<=",           ">=",
-        "and",          "or",         "nip",          "dip2",
-        "both",         "when",       "unless",       "case",
-        "signum",       "clamp",      "last",         "pair",
-        "pack",         "append",     "rest",         "reverse",
-        "uncons",       "unappend",   "empty?",       "zip",
-        "lex-cmp-with", "sort",       "distinct",     "at-path",
-        "filter",       "partition",  "any?",         "all?",
-        "sum",          "product",    "mean",         "fail",
-        "find",         "set",        "setp",         "assert",
-        "rotate",       "windows",    "each-prior",   "fold1",
-        "scan1",        "iterations", "while-values", "converges",
-        "converge",     "chunk",      "from-digits",  "to-digits",
-        "collect",      "dup2",       "case-with",
+        "first",        "wrap",         "dip",       "over",
+        "rollup",       "rolldown",     "mod",       "neg",
+        "abs",          "not=",         "<=",        ">=",
+        "and",          "or",           "nip",       "dip2",
+        "both",         "when",         "unless",    "case",
+        "signum",       "clamp",        "last",      "pair",
+        "pack",         "append",       "rest",      "reverse",
+        "uncons",       "unappend",     "empty?",    "zip",
+        "lex-cmp-with", "distinct",     "at-path",   "filter",
+        "partition",    "any?",         "all?",      "sum",
+        "product",      "mean",         "fail",      "find",
+        "set",          "setp",         "assert",    "rotate",
+        "windows",      "each-prior",   "fold1",     "scan1",
+        "iterations",   "while-values", "converges", "converge",
+        "chunk",        "from-digits",  "to-digits", "collect",
+        "dup2",         "case-with",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -294,7 +293,7 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         .{ .name = "result.or-raise identity", .source = "(missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
         .{
             .name = "execute runs a symbol a quotation pushes",
-            .source = "(foo) first (execute 7) cons call",
+            .source = "(foo) first (execute 7) cons apply",
             .kind = "undefined-word",
             .word = "foo",
         },

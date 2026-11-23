@@ -151,7 +151,7 @@ reason before selecting the matrix.
   suspected findings empirically; verify a finding reproduces before reporting
   it. The testing *layer* is in scope for review like any other code: whether the
   new tests assert the ruled contracts, whether coverage reaches the edges the
-  policy names, and whether a passing suite would actually catch the regression
+  policy specifies, and whether a passing suite would actually catch the regression
   in question.
 - Never report a performance observation from a Debug binary: the default
   `zig build` output runs the DebugAllocator, whose per-allocation machinery can
@@ -299,7 +299,7 @@ reason before selecting the matrix.
   retain a counting-allocator delayed-reader property covering Directory
   histories, alias churn, and distinct-module publication.
 - Keep gameplan proof traceability exact while executing an active gameplan: every
-  `testMap` row names exactly one existing test in its declared file and exactly one
+  `testMap` row identifies exactly one existing test in its declared file and exactly one
   introducing and implementing patch entry. Reject duplicate, stale, missing, or
   mismatched ledger entries. A gameplan remains a planning input and creates no
   implementation requirement to add or maintain a repository artifact.

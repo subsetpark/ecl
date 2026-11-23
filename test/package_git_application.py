@@ -28,7 +28,7 @@ def main():
         shutil.copy2(supplied_binary, binary)
         installed = root / 'distribution/share/ecl/apps/pkg'
         shutil.copytree(sources / 'src', installed / 'src')
-        for source, target in [('main.ecl', 'main.ecl'), ('application.json', 'application.json'), ('installed.modules', 'ecl.modules')]:
+        for source, target in [('main.ecl', 'main.ecl'), ('installed.modules', 'ecl.modules')]:
             shutil.copy2(sources / source, installed / target)
         shutil.copy2(extension, installed / 'git.eclmod')
         app_map = root / 'acceptance.modules'
@@ -47,7 +47,7 @@ def main():
         def commit(version, answer):
             (repo / 'ecl.pkg').write_text(
                 "{format 2 name \"alpha\" version " + json.dumps(version)
-                + " sources [\"src/*.ecl\"] exports [\"alpha\"] requires {\"sample\" "
+                + " sources [\"src/*.ecl\"] requires {\"sample\" "
                 + "{package \"sample\" version \"1.0.0\" source {kind archive url \"https://fixture.invalid/sample.tgz\"} hash "
                 + json.dumps(archive_hash) + "}}}"
             )

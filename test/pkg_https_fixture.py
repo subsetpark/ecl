@@ -67,8 +67,7 @@ def manifest(name: str, version: str, requires: Mapping[str, str], *, source: bo
         + name
         + "\" 'version \""
         + version
-        + ("\" 'sources [\"**/*\"] 'exports [\"" + name + "\"]" if source
-           else "\" 'sources [] 'exports []")
+        + ("\" 'sources [\"**/*\"]" if source else "\" 'sources []")
         + " `requires {"
         + entries
         + "}}\n"

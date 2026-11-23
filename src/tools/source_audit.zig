@@ -72,8 +72,8 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     embeddedGroup(true, &.{
-        "stdlib/dict.zig",  "stdlib/rand.zig",   "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
-        "stdlib/clock.zig", "stdlib/source.zig", "stdlib/host.zig", "stdlib/str.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig",   "stdlib/json.zig", "stdlib/http.zig", "stdlib/tar.zig",   "stdlib/gzip.zig", "stdlib/hash.zig", "stdlib/fs.zig",
+        "stdlib/clock.zig", "stdlib/source.zig", "stdlib/host.zig", "stdlib/str.zig",  "stdlib/error.zig",
     }),
     embeddedGroup(true, &.{
         "combinators.zig",
@@ -89,9 +89,9 @@ const source_groups = [_]SourceGroup{
     // Explicit continuation state is part of the kernel correctness boundary;
     // native-stack traversals could not yield.
     embeddedGroup(true, &.{
-        "kernel_support.zig",  "kernels.zig",      "kernel_storage.zig",    "kernel_numeric.zig",
-        "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig",  "idioms.zig",
-        "kernel_random.zig",   "kernel_flat.zig",  "driver_completion.zig",
+        "kernel_support.zig",  "kernels.zig",       "kernel_storage.zig", "kernel_numeric.zig",
+        "kernel_sequence.zig", "kernel_order.zig",  "kernel_dict.zig",    "kernel_text.zig",
+        "idioms.zig",          "kernel_random.zig", "kernel_flat.zig",    "driver_completion.zig",
     }),
     embeddedGroup(false, &.{
         "source_audit.zig",           "tools/source_audit.zig",
@@ -103,18 +103,19 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     embeddedGroup(true, &.{
-        "scheduler.zig",        "scheduler_core.zig",     "turn_core.zig",       "external.zig",          "console.zig",           "task_prims.zig",      "archive_document.zig",
-        "standard_streams.zig", "mailbox.zig",            "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",
-        "port_builder.zig",     "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "resource_issuer.zig", "port_endpoint.zig",
-        "port_result.zig",      "port_error_data.zig",    "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",
-        "filesystem_port.zig",  "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
+        "scheduler.zig",        "scheduler_core.zig",    "turn_core.zig",    "external.zig",        "console.zig",            "task_prims.zig",
+        "standard_streams.zig", "mailbox.zig",           "byte_ring.zig",    "port_transfer.zig",   "port_controller.zig",    "port_message.zig",
+        "port_failure.zig",     "port_builder.zig",      "port_bytes.zig",   "port_messages.zig",   "port_declarations.zig",  "port_resource.zig",
+        "resource_issuer.zig",  "port_endpoint.zig",     "port_result.zig",  "port_error_data.zig", "port_exchange.zig",      "port_operation.zig",
+        "port_service.zig",     "port_factory.zig",      "http_service.zig", "filesystem_port.zig", "directory_resource.zig", "directory_stage.zig",
+        "directory_order.zig",  "filesystem_stream.zig",
     }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
     embeddedGroup(true, &.{
         "native/ports.zig",        "native/abi.zig",        "native/capability.zig", "native/sdk.zig",
         "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_port.zig",
-        "native_call.zig",         "stdlib/io.zig",         "stdlib/port.zig",       "stdlib/fd.zig",
+        "native_call.zig",         "stdlib/io.zig",         "stdlib/port.zig",       "stdlib/stream.zig",
     }),
 };
 
@@ -129,7 +130,8 @@ const test_files = [_][]const u8{
     "tests/kernel_numeric_test.zig",
     "tests/kernel_sequence_test.zig",
     "tests/kernel_order_test.zig",
-    "tests/kernel_dict_text_test.zig",
+    "tests/kernel_dict_test.zig",
+    "tests/kernel_text_test.zig",
     "tests/combinator_test.zig",
     "tests/prelude_test.zig",
     "tests/definition_test.zig",
@@ -147,7 +149,7 @@ const test_files = [_][]const u8{
     "tests/stdlib_test.zig",
     "tests/hostio_test.zig",
 
-    "tests/archive_test.zig",
+    "tests/tar_test.zig",
     "tests/http_test.zig",
     "tests/random_test.zig",
     "tests/kernel_typed_test.zig",
@@ -623,7 +625,8 @@ fn auditSourceBodies() bool {
         .{ .name = "numeric kernels", .text = @embedFile("../kernel_numeric.zig") },
         .{ .name = "sequence kernels", .text = @embedFile("../kernel_sequence.zig") },
         .{ .name = "order kernels", .text = @embedFile("../kernel_order.zig") },
-        .{ .name = "dict/text kernels", .text = @embedFile("../kernel_dict_text.zig") },
+        .{ .name = "dict kernels", .text = @embedFile("../kernel_dict.zig") },
+        .{ .name = "text kernels", .text = @embedFile("../kernel_text.zig") },
         .{ .name = "kernel storage", .text = @embedFile("../kernel_storage.zig") },
         .{ .name = "module primitives", .text = @embedFile("../module_prims.zig") },
         .{ .name = "reflection", .text = @embedFile("../reflection.zig") },
@@ -714,8 +717,8 @@ fn auditSourceBodies() bool {
     }
     // A machine view is the authority to edit a fiber's continuation. The
     // machine alone mints one, but nothing in the type system stops another
-    // file from naming a view and casting a fiber to it, so each view may be
-    // named only by the subsystem it is minted for.
+    // file from mentioning a view and casting a fiber to it, so each view may be
+    // mentioned only by the subsystem it is minted for.
     const machine_views = [_]struct { view: []const u8, holder: []const u8 }{
         .{ .view = "Loading", .holder = "load.zig" },
         .{ .view = "Construction", .holder = "module_construction.zig" },
@@ -783,7 +786,7 @@ fn auditSourceBodies() bool {
 /// Caller-selected filesystem work must flow through a retained root or store
 /// handle, never through the process working directory. Types cannot state
 /// that: `std.Io.Dir.cwd()` is an ordinary function. Among the modules that implement
-/// evaluated filesystem words, none may name the working directory; the
+/// evaluated filesystem words, none may refer to the working directory; the
 /// owners that open trusted host paths once at Session construction
 /// (filesystem_port.zig, directory_resource.zig) and the CLI, map
 /// discovery, and module-loading host boundaries do so by design.
@@ -818,7 +821,7 @@ fn auditFilesystemAuthority() bool {
 /// A reservation and a sealed definition share storage, and the types keep
 /// them apart: only `Reservation` reads the reserved member of
 /// `Definition.body_state` and only `Definition` the sealed one. Zig fields
-/// cannot be private, so naming that field outside `env.zig` would bypass
+/// cannot be private, so accessing that field outside `env.zig` would bypass
 /// both handles; this confinement is the audit's.
 fn auditConstructionTypestate() bool {
     var failed = false;
@@ -940,8 +943,8 @@ const kernel_driver_exceptions = [_]KernelDriverException{
     .{ .file = "kernel_numeric.zig", .function = "binaryPrimitive" },
     .{ .file = "kernel_numeric.zig", .function = "unaryPrimitive" },
     .{ .file = "kernel_numeric.zig", .function = "startReduction" },
-    .{ .file = "kernel_sequence.zig", .function = "atPrimitive" },
-    .{ .file = "kernel_sequence.zig", .function = "inPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "indexInto" },
+    .{ .file = "kernel_sequence.zig", .function = "membership" },
     .{ .file = "kernel_sequence.zig", .function = "findPrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "razePrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "takePrimitive" },
@@ -959,14 +962,14 @@ const kernel_driver_exceptions = [_]KernelDriverException{
     .{ .file = "kernel_order.zig", .function = "distinctPrimitive" },
     .{ .file = "kernel_order.zig", .function = "groupPrimitive" },
     .{ .file = "kernel_order.zig", .function = "groupColumnsPrimitive" },
-    .{ .file = "kernel_dict_text.zig", .function = "strPrimitive" },
-    .{ .file = "kernel_dict_text.zig", .function = "hasPrimitive" },
-    .{ .file = "kernel_dict_text.zig", .function = "putImpl" },
-    .{ .file = "kernel_dict_text.zig", .function = "fromListsForModule" },
-    .{ .file = "kernel_dict_text.zig", .function = "delPrimitive" },
-    .{ .file = "kernel_dict_text.zig", .function = "mergePrimitive" },
-    .{ .file = "kernel_dict_text.zig", .function = "joinPrimitive" },
-    .{ .file = "kernel_dict_text.zig", .function = "formatPrimitive" },
+    .{ .file = "kernel_dict.zig", .function = "hasKey" },
+    .{ .file = "kernel_dict.zig", .function = "putImpl" },
+    .{ .file = "kernel_dict.zig", .function = "zipForModule" },
+    .{ .file = "kernel_dict.zig", .function = "delPrimitive" },
+    .{ .file = "kernel_dict.zig", .function = "mergePrimitive" },
+    .{ .file = "kernel_text.zig", .function = "strPrimitive" },
+    .{ .file = "kernel_text.zig", .function = "joinPrimitive" },
+    .{ .file = "kernel_text.zig", .function = "formatPrimitive" },
     .{ .file = "idioms.zig", .function = "install" },
     .{ .file = "idioms.zig", .function = "applyLengthEach" },
     .{ .file = "idioms.zig", .function = "applyMatchEach" },
@@ -1022,7 +1025,7 @@ fn auditKernelDriverStarts() bool {
 /// A result takes over an operand's buffer through one decision,
 /// `support.adopt`, which every producer that can write over its input asks
 /// (a `support.Kernel` declares its result shape and the executor asks for
-/// it). The capability that decision issues is the heap's; naming it anywhere
+/// it). The capability that decision issues is the heap's; referring to it anywhere
 /// else is a producer claiming a buffer for itself.
 const result_adoption_owners = [_][]const u8{ "heap.zig", "kernel_support.zig" };
 

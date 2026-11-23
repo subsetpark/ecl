@@ -26,12 +26,11 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 
 fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
-        .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Three-way whole-value ordering, −1/0/1; **not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain: numbers (exact across int/float), chars by codepoint, and lists, which compare lexicographically: corresponding elements by `cmp` until the first nonzero result, then by length. Strings are char lists, so they order by codepoint. Anything else, including cross-kind pairs, is `` `type ``; elements after the first difference are never compared. Equivalent on two lists to `(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe for ordering: `-` errors on int64 overflow where an ordering must be total." },
-        .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "The stable ascending sort permutation. Orders by `cmp`, so every element pair must be mutually comparable; the error's index names the later element of a pair that is not." },
-        .sort => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- sorted", .doc = "Return a stable ascending sort of a list by `cmp`." },
-        .distinct => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "First occurrence of each distinct value, in input order. Equivalent to `group dict.keys`." },
-        .group_columns => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "columns -- groups", .doc = "Group rows from a nonempty list of equal-length columns. Keys are whole composite lists, in first-occurrence order; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``." },
-        .group => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- dict", .doc = "Dict from each distinct value to the list of its 0-based indices, keyed in first-occurrence order." },
+        .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Return -1 if `left` < `right`, 0 if `left` = `right`, and 1 if `left` > `right`." },
+        .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "Return the indices of `list` permuted such that their associated elements are sorted in ascending order." },
+        .distinct => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return a list with the first occurrence of each distinct element of `list`, in order." },
+        .group_columns => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "columns -- groups", .doc = "Group rows from a nonempty list of equal-length columns. Keys are whole composite lists; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``." },
+        .group => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- dict", .doc = "Return a dict from each distinct element of `list` to the ascending list of indices of its occurrences." },
     };
 }
 
@@ -41,7 +40,6 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
             return switch (operation) {
                 .cmp => cmpPrimitive(fiber),
                 .grade => gradePrimitive(fiber),
-                .sort => sortPrimitive(fiber),
                 .distinct => distinctPrimitive(fiber),
                 .group => groupPrimitive(fiber),
                 .group_columns => groupColumnsPrimitive(fiber),
@@ -82,7 +80,7 @@ fn cmpPrimitive(fiber: *Fiber) MachineError!void {
 }
 
 const incomparable_pair = "two comparable numbers, chars, or lists";
-/// `grade` and `sort` share the walk, so the message names whichever ran.
+/// `grade` and `sort` share the walk, so the message reports whichever ran.
 fn failIncomparable(fiber: *Fiber, index: usize) MachineError {
     var buffer: [128]u8 = undefined;
     const message = std.fmt.bufPrint(&buffer, "{s} expected mutually comparable numbers, chars, or lists", .{
@@ -257,7 +255,7 @@ fn startGrade(fiber: *Fiber, sorted_values: bool) MachineError!void {
 /// passes follow. Each pass is a phase of one position per pair: keying, the
 /// runs, every merge pass, and the output. Leaf comparisons are a strict weak
 /// order (floats exclude NaN), so any stable sort yields the one permutation
-/// `grade` names.
+/// `grade` defines.
 fn GradeKernel(comptime kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     // Floats sort by an order-preserving unsigned image, so the merge
@@ -450,7 +448,10 @@ fn startTypedGrade(fiber: *Fiber, collection: *heap.OwnedValue, sorted_values: b
     unreachable;
 }
 
-fn sortPrimitive(fiber: *Fiber) MachineError!void {
+/// `list dup grade at` in one pass: the grade kernel writes the sorted
+/// values rather than the permutation `at` would gather through. Consumes
+/// the list on top of the stack.
+pub fn sortValues(fiber: *Fiber) MachineError!void {
     return startGrade(fiber, true);
 }
 
@@ -466,7 +467,7 @@ const CompareProgress = union(enum) { pending, complete: std.math.Order, not_com
 pub const CompareCursor = struct {
     frames: poll.ChunkStack(Frame),
     depth: usize = 0,
-    /// The pair named at `init`, until the first `advance` classifies it.
+    /// The pair given at `init`, until the first `advance` classifies it.
     root: ?Pair,
 
     const Pair = struct { left: Value, right: Value };
@@ -538,7 +539,7 @@ pub const CompareCursor = struct {
 };
 
 /// Orders two positions of the collection under `cmp`. A pair `cmp` cannot
-/// order ends the sort, naming the later of the two positions.
+/// order ends the sort, reporting the later of the two positions.
 const GradeComparator = struct {
     pub const Context = struct { collection: Value, allocator: std.mem.Allocator };
     pub const Error = error{ OutOfMemory, NotComparable };

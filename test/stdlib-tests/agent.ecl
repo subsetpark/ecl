@@ -7,10 +7,10 @@
  ### test roundtrip
  (-- : "Advance agent state exactly as explicit threading would and reply with the top.")
  ([0 0] agent.start
-  (|g| g (100 rand.int) agent.call g (100 rand.int) agent.call pair) call
+  (|g| g (100 rand.int) agent.call g (100 rand.int) agent.call pair) apply
   [0 0] 100 rand.int swap 100 rand.int nip pair equal
   [7 0] agent.start
-  (|h| h (dup) agent.call [7 0] equal h (dup) agent.call [7 0] equal) call)
+  (|h| h (dup) agent.call [7 0] equal h (dup) agent.call [7 0] equal) apply)
  `roundtrip test
 
  ### test state-isolation
@@ -22,7 +22,7 @@
    g ((pop) agent.call) cons `domain raises
    g (dup) agent.call [7 0] equal
    g ((pop pop) agent.call) cons `underflow raises
-   g (dup) agent.call [7 0] equal) call)
+   g (dup) agent.call [7 0] equal) apply)
  `state-isolation test
 
  ### test send
@@ -31,7 +31,7 @@
   (|g|
    g (pop 9) agent.send g (dup) agent.call 9 equal
    g (1 0 div) agent.send g (dup) agent.call 9 equal
-   g (2) agent.send g (+) agent.call 11 equal) call)
+   g (2) agent.send g (+) agent.call 11 equal) apply)
  `send test
 
  ### test call-for
@@ -42,7 +42,7 @@
    g ((100 clock.sleep 1) 20 agent.call-for) cons `timeout raises
    g ((1 +) -1 agent.call-for) cons `domain raises
    g ((1 +) `x agent.call-for) cons `type raises
-   g (dup) agent.call [7 0] equal) call)
+   g (dup) agent.call [7 0] equal) apply)
  `call-for test
 
  ### test dead-agent
@@ -53,7 +53,7 @@
    server task.address
    (|g|
     g ((dup) agent.call) cons `io raises
-    g ((dup) 100 agent.call-for) cons `io raises) call) call)
+    g ((dup) 100 agent.call-for) cons `io raises) apply) apply)
  `dead-agent test
 
  ### test call-for-full-mailbox
@@ -62,7 +62,7 @@
   (|g|
    g (200 clock.sleep) agent.send
    g 16 (dup (dup pop) agent.send) times pop
-   g ((1 +) 20 agent.call-for) cons `timeout raises) call)
+   g ((1 +) 20 agent.call-for) cons `timeout raises) apply)
  `call-for-full-mailbox test
 
  ### test direct-serve
@@ -70,9 +70,9 @@
  (([7 0] agent.serve) @spawn
   (|server|
    server task.address (dup) agent.call [7 0] equal
-   server task.cancel server task.await `err at `kind at `cancelled equal) call
+   server task.cancel server task.await `err at `kind at `cancelled equal) apply
   (1 2 3 agent.serve) @spawn task.address
-  (|sum| sum (+ + dup) agent.call 6 equal sum (dup) agent.call 6 equal) call)
+  (|sum| sum (+ + dup) agent.call 6 equal sum (dup) agent.call 6 equal) apply)
  `direct-serve test
 
  ### test documentation

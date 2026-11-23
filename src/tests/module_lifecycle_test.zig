@@ -173,13 +173,8 @@ test "definitions: set and setp publish exact captures without synthesized metad
         "42 `answer set 42 wrap `spelled def answer spelled match?",
         "1",
     );
-    try expectOk(&runtime, "`answer see `spelled see `answer which");
-    try std.testing.expectEqualStrings(
-        "[42]\n" ++
-            "[42]\n" ++
-            "answer -> answer def public\n",
-        output.written(),
-    );
+    try expectOk(&runtime, "`answer see `spelled see");
+    try std.testing.expectEqualStrings("[42]\n[42]\n", output.written());
     try expectErrorContains(&runtime, "`answer doc", &.{ "kind domain", "documentation" });
     // `setp` carries the same simplification into a module root, where the
     // published constant needs no effect declaration to register.
@@ -205,7 +200,7 @@ test "modules: *module* reports the running module's name" {
     );
     // An alias resolves to its module, so the call reports that module's
     // name rather than the spelling used at the call site.
-    try expectStack(&runtime, "`short `left alias short.name", "left");
+    try expectStack(&runtime, "`left `short alias short.name", "left");
 
     // A module's code runs as that module wherever it runs: under `@attempt`
     // and in a task the module spawns alike.
@@ -233,7 +228,7 @@ test "modules: *module* reports the running module's name" {
         "left 1 value",
     });
     try expectOk(&runtime, "((*module*) `name set) `escaped @defm");
-    try expectErrorContains(&runtime, "escaped.name call", &.{
+    try expectErrorContains(&runtime, "escaped.name apply", &.{
         "kind domain",
         "registered module",
     });
@@ -262,7 +257,7 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "base.utils base.utils.f", "1 41");
     try expectStack(&runtime, "`base.utils `f qualify dup type swap execute", "symbol 41");
     try expectStack(&runtime, "`base.utils 1 (`f) (`g) if qualify execute", "41");
-    try expectOk(&runtime, "`utils `base.utils alias");
+    try expectOk(&runtime, "`base.utils `utils alias");
     try expectStack(&runtime, "utils.g", "42");
     try expectOk(&runtime, "`base.utils (g) import");
     try expectStack(&runtime, "g", "42");
@@ -291,8 +286,8 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     // as a module or an alias, and it is not a module to
     // alias or import from.
     try expectErrorContains(&runtime, "() `core @defm", &.{ "kind domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "`core `shadow.host alias", &.{ "kind domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "`short `core alias", &.{ "kind undefined-word", "undefined module `core`" });
+    try expectErrorContains(&runtime, "`shadow.host `core alias", &.{ "kind domain", "alias name" });
+    try expectErrorContains(&runtime, "`core `short alias", &.{ "kind domain", "core qualifier, not a module" });
     try expectErrorContains(&runtime, "`core (dup) import", &.{ "kind undefined-word", "scope qualified" });
     // The reservation is the whole name, not a segment: a dotted name under it
     // registers, resolves, and qualifies like any other module.
@@ -391,17 +386,17 @@ test "concurrency: applying an escaped quotation races reload" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // A quotation that escaped `racer` names the image it was written in, and
+    // A quotation that escaped `racer` refers to the image it was written in, and
     // spawned tasks bind and apply it while a concurrent `@defm` replaces that
     // image. The Session keeps the replaced image, so each task resolves the
     // escaped words against it while the registry publishes the new one.
     //
-    // Named into the `concurrency:` tier so it runs under ThreadSanitizer and
+    // Its name places it in the `concurrency:` tier so it runs under ThreadSanitizer and
     // at eight workers. The assertions are deliberately weak: failures stay
     // inside the envelope and the runtime keeps progressing; TSan and the
     // allocator are what should speak here.
     try expectOk(&runtime, "((1) `k def ((k)) `q def) `racer @defm racer.q `held set");
-    try expectOk(&runtime, "[1] 24 take (pop ((held call) @attempt) @spawn) each " ++
+    try expectOk(&runtime, "[1] 24 take (pop ((held apply) @attempt) @spawn) each " ++
         "((2) `k def ((k)) `q def) `racer @defm " ++
         "(task.await) each pop");
 }
@@ -428,7 +423,7 @@ test "concurrency: escaped quotations keep running old code across a concurrent 
         );
         try expectStack(
             &runtime,
-            "[1] 64 take (pop ((gone call) @attempt) @spawn) each " ++
+            "[1] 64 take (pop ((gone apply) @attempt) @spawn) each " ++
                 "((2) `k def ((k)) `q def) `goner @defm (task.await) each pop",
             "",
         );
@@ -453,7 +448,7 @@ test "concurrency: a reload that drops a word leaves escaped quotations running 
         );
         try expectStack(
             &runtime,
-            "[1] 64 take (pop ((held call) @attempt) @spawn) each " ++
+            "[1] 64 take (pop ((held apply) @attempt) @spawn) each " ++
                 "((2) `k def) `reloaded @defm (task.await) each pop",
             "",
         );

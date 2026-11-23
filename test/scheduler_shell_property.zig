@@ -159,7 +159,7 @@ fn runShellScenario(encoded: u16) !void {
         },
         .result_fairness => {
             try source_buffer.writer.writeAll(
-                "(([1] 200000 take call) @spawn " ++
+                "(([1] 200000 take apply) @spawn " ++
                     "(7) @spawn pair task.await-any pop) @spawn task.await `ok at first",
             );
             try expected_buffer.writer.writeAll("1\n");
@@ -167,7 +167,7 @@ fn runShellScenario(encoded: u16) !void {
         .raise_fairness => {
             try source_buffer.writer.writeAll(
                 "[x] 200000 take `trace-value set " ++
-                    "(((`kind `custom `trace trace-value 4 pack dict.from-flat raise) @attempt) @spawn " ++
+                    "(((`kind `custom `trace trace-value 4 pack dict.from-kvs raise) @attempt) @spawn " ++
                     "(7) @spawn pair task.await-any pop) @spawn task.await `ok at first",
             );
             try expected_buffer.writer.writeAll("1\n");
@@ -175,7 +175,7 @@ fn runShellScenario(encoded: u16) !void {
         .attempt_materialization => {
             try source_buffer.writer.writeAll(
                 "[1] 200000 take `wide set " ++
-                    "((wide call) @attempt) @spawn task.await `ok at call `ok at len",
+                    "((wide apply) @attempt) @spawn task.await `ok at apply `ok at len",
             );
             try expected_buffer.writer.writeAll("200000\n");
         },

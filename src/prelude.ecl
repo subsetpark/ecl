@@ -1,70 +1,64 @@
 ### def all?
-(list (a -- bool) -- bool :
- "Return 1 when the predicate returns 1 for every element; otherwise return 0.")
+(list (p: a -- bool) -- bool :
+ "Return 1 when `p` returns 1 for every element of `list`; otherwise return 0.")
 (each 1 (and) fold) `all? def
 
 ### def any?
-(list (a -- bool) -- bool :
- "Return 1 when the predicate returns 1 for at least one element; otherwise return 0.")
+(list (p: a -- bool) -- bool :
+ "Return 1 when `q` returns 1 for at least one element of `list`; otherwise return 0.")
 (each 0 (or) fold) `any? def
 
 ### def assert
-(bool error -- :
- "Raise an error dict unless the condition is 1. A helper: the failure is reported where `assert`
-  was called.")
+(bool error -- : "Raise `error` unless `bool` is 1.")
 (swap (pop) (raise) if) helper `assert def
 
 ### def at-path
-(ds l -- x :
- "Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty
-  path returns `ds` unchanged.")
+(ds path -- x : "Follow `path` through `ds` via `at`; an empty path returns `ds` unchanged.")
 (swap (at) fold) `at-path def
 
 ### def both
-(x y q -- ... : "Apply one quotation to each of two operands.")
-(|x y q| x q call y q call) `both def
+(x y q -- ... : "Apply `q` to `x` and `y`.")
+(|x y q| x q apply y q apply) `both def
 
 ### def clamp
 (value lower upper -- bounded :
- "Constrain a value to the inclusive interval between `lower` and `upper`.")
+ "Constrain `value` to the inclusive interval between `lower` and `upper`.")
 ((max) dip min) `clamp def
 
 ### def collect
-(quotation -- list : "Run a quotation on an empty isolated stack and return the results as a list.")
+(quotation -- list : "Run `quotation` on an empty stack and return the results as a list.")
 ([] swap infra) `collect def
 
 ### def each-prior
-(list seed (current prior -- result) -- list :
- "Apply the quotation to each element and its predecessor, left to right, using the explicit seed as
-  the predecessor of the first element.
+(list seed (q: prior current -- result) -- list :
+ "Apply `q` to each successive pair of elements in `list`, using `seed` as the predecessor of the
+  first element.
 
-  Ex:
-    [12 13 11] 10 (-) each-prior
-  [2 1 -2]")
-(|xs seed quotation| xs seed xs cons -1 drop quotation zip-with) `each-prior def
+   Ex:
+     [12 13 11] 10 (-) each-prior
+   [-2 -1 2]")
+(|xs seed quotation| seed xs cons -1 drop xs quotation zip-with) `each-prior def
 
 ### def empty?
-(list -- bool : "Return 1 when a list has no elements and 0 otherwise.")
+(list -- bool : "Return 1 when `list` has no elements and 0 otherwise.")
 (len 0 =) `empty? def
 
 ### def filter
-(list (a -- count) -- matches :
- "Apply the predicate to every element, retaining each element as many times as its returned
-  nonnegative int.")
+(list (p: a -- count) -- matches :
+ "Apply `p` to every element of `list`, retaining each element as many times as its returned int.")
 (over swap each where at) `filter def
 
 ### def dip2
-(x y (... -- ...) -- ... x y :
- "Run a quotation beneath the top two stack values, then push them back in their original order
-  after its results: `2 dip-n`.")
+(x y (q: ... -- ...) -- ... x y :
+ "Run `q` beneath `x y`, then push `x y` back in their original order after its results.")
 (2 dip-n) `dip2 def
 
 ### def last
-(list -- value : "Return the final element of a nonempty list.")
+(list -- value : "Return the final element of `list`.")
 (dup len 1 - at) `last def
 
 ### def mean
-(list -- mean : "Return the arithmetic mean of a nonempty numeric list.")
+(list -- mean : "Return the arithmetic mean of `list`.")
 (dup sum swap len /) `mean def
 
 ### def pack
@@ -72,28 +66,28 @@
 (() swap (cons) times) `pack def
 
 ### def pair
-(first second -- list : "Collect two stack values into a two-element list.")
+(x y -- list : "Collect `x y` into a two-element list.")
 (() cons cons) `pair def
 
 ### def partition
-(list (a -- bool) -- matches rejects :
- "Split a list into the elements whose predicate returned 1 and those that returned 0.")
+(list (p: a -- bool) -- matches rejects :
+ "Split `list` into the elements for which `p` returned 1 and those that returned 0.")
 (|l q| l q each l over where at swap not l swap where at) `partition def
 
 ### def signum
-(number -- sign : "Return the int −1, 0, or 1 according to the sign of a number.")
+(number -- sign : "Return −1, 0, or 1 according to the sign of `number`.")
 (dup 0 > swap 0 < -) `signum def
 
 ### def uncons
-(list -- first rest : "Split a nonempty list into its first element and remaining elements.")
+(list -- first rest : "Split a nonempty `list` into its first element and remaining elements.")
 (dup first swap rest) `uncons def
 
 ### def unless
-(bool else -- ... : "Call `else` when the condition is 0; otherwise do nothing.")
+(bool else -- ... : "Call `else` when the condition is 0.")
 (() swap if) `unless def
 
 ### def when
-(bool then -- ... : "Call `then` when the condition is 1; otherwise do nothing.")
+(bool then -- ... : "Call `then` when the condition is 1.")
 (() if) `when def
 
 ### def wrap
@@ -101,42 +95,39 @@
 (() cons) `wrap def
 
 ### def @each
-(list (quotation: a -- b) -- results :
- "Concurrent `each`: apply `quotation` to each element of `list`, each application in a fresh
-  unit.")
+(list (q: a -- b) -- results :
+ "Concurrently apply `q` to each element of `list`, each application in a fresh unit.")
 (|list quotation|
- quotation type `list match? not
- ({kind type msg "@each expected a list for its quotation" word @each} raise) when
- list type `list match? not
- ({kind type msg "@each expected a list for its operand" word @each} raise) when
- list quotation
- (|element quotation| element quotation (call) cons cons @spawn)
- cons each
- dup
- (|failure entry tasks|
-  failure entry tasks failure len 0 >
-  (|failure entry tasks| entry 1 at task.await pop failure)
-  (|failure entry tasks|
-   tasks entry first 1 +
-   entry first entry 1 at task.await
-   dup `ok dict.has?
-   (|index outcome|
-    index outcome `ok at len 1 =
-    (pop [])
-    (|index|
-     `kind `contract `msg "@each child must leave exactly one result" `word `@each
-     `data `index index pair dict.from-flat 8 pack dict.from-flat wrap)
+ quotation type `list match?
+ ({kind type msg "@each expected a list for its quotation" word @each} raise) unless
+ list type `list match?
+ ({kind type msg "@each expected a list for its operand" word @each} raise) unless
+ list quotation (|element quotation| element quotation (apply) cons cons @spawn) cons each
+ # Await in program order. The first failure, or a child that leaves other
+ # than one value, stops the walk; every task is then cancelled and joined
+ # before that error is raised.
+ (|tasks|
+  tasks
+  tasks
+  (dup len range
+   (|task index|
+    index task task.await
+    dup `ok has? (`err at raise) unless
+    `ok at dup len 1 =
+    (nip first)
+    (pop
+     (|index|
+      {kind contract msg "@each child must leave exactly one result" word @each}
+      `data {} `index index put put raise)
+     apply)
     if)
-   (|index outcome| outcome `err at wrap)
-   if
-   dup len 0 >
-   (|tasks start failure| tasks start drop (task.cancel) for failure)
-   (|tasks start failure| failure)
-   if)
+   zip-with)
+  cons @attempt
+  dup `ok has?
+  (nip `ok at first)
+  (swap dup (task.cancel) for (task.await pop) for `err at raise)
   if)
- cons
- over dup len range swap (pair) zip-with [] rolldown fold
- dup len 0 > (nip first raise) (pop (task.await `ok at first) each) if) `@each def
+ apply) `@each def
 
 ### def append
 (list value -- list : "Push `value` to the end of `list`.")
@@ -144,16 +135,18 @@
 
 ### def chunk
 (list size -- pieces :
- "Split a list into consecutive pieces of a positive size; the last piece is shorter when the size
-  does not divide the length.")
+ "Split `list` into consecutive `size`-width pieces, possibly including fewer than `size` elements
+  in the last piece.")
 (|xs k|
  k 0 > {kind domain msg "chunk size must be positive"} assert
  xs xs len k div xs len k mod 0 > + range k * cut) `chunk def
 
 ### def converges
-(value (a -- a) -- list :
- "Return the initial value and successive applications until the next value is structurally equal to
-  either the initial or immediately preceding value; that repeated boundary value is not appended.")
+(value (q: a -- a) -- list :
+ "
+  Construct a list containing `value` and the results of successive
+  applications of `q`, until the result matches
+   either `value` or the immediately preceding result.")
 (|value quotation|
  value value value wrap quotation each first 3 pack
  (|state|
@@ -171,81 +164,76 @@
  unfold nip value swap cons) `converges def
 
 ### def fail
-(msg -- :
- "Raise a user-kind error whose message is `msg`: `{kind user msg msg}`. A helper: the failure is
-  reported where `fail` was called.")
-(wrap (kind user msg) swap cat dict.core.from-flat raise) helper `fail def
+(msg -- : "Raise an error with the shape `{kind user msg msg}`.")
+(wrap (kind user msg) swap cat dict.core.from-kvs raise) helper `fail def
 
 ### def iterations
-(value count (a -- a) -- list :
- "Return `value` followed by `count` successive quotation applications. `count` must be a
-  nonnegative int, and a zero count returns a singleton list.")
+(value count (q: a -- a) -- list :
+ "Construct a list containing `value` and the results of `count` successive applications of `q`.")
 (|value count quotation|
  value wrap count range value (pop) quotation cat scan cat) `iterations def
 
 ### def parse-one
-(string -- x :
- "Parse source text holding exactly one form and return that form unevaluated. No form or several
-  forms is `` `shape ``.")
+(string -- x : "Parse source text describing exactly one form.")
 (parse dup len 1 = {kind shape msg "parse-one requires exactly one form"} assert first) `parse-one
 def
 
 ### def scan1
-(list (acc a -- acc) -- list :
- "Return a nonempty list's first element followed by the successive accumulator values from reducing
-  its remaining elements.")
+(list (q: acc a -- acc) -- list :
+ "Fold `q` over `list`, using the first element of `list` as the accumulator and returning a list of
+  each successive accumulator value.")
 (|xs quotation| xs first wrap xs rest xs first quotation scan cat) `scan1 def
 
 ### def set
 (... value name -- :
- "(annotation value name -- ) *or* (value name -- ). Bind `value` as a constant word in the current
-  scope. Reference applies the constant's body and pushes the exact captured value, quotations
-  included. `annotation` is published as the constant's metadata.")
+ "Bind `name` to `value` in the current scope. Accepts an optional annotation below `value` as
+  metadata on the binding.")
 (swap wrap swap def) `set def
 
 ### def setp
-(... value name -- : "`set` as a private module name. A top-level `setp` is an error.")
+(... value name -- : "Inside of a module, bind `name` to `value` only within that module.")
 (swap wrap swap defp) `setp def
 
 ### def to-digits
 (value radices -- digits :
  "Split a value into one digit per radix, most significant first, by floor division, so every digit
   lies from zero below its radix even for negative values. A value beyond the radices' capacity
-  keeps only its low digits. Values pervade: a list of values gives one digit list per radix.
-  Radices must be positive integers, or the word fails with `` `domain ``; `[2] 8 take` builds eight
-  binary radices.")
+  keeps only its low digits. Values pervade.")
 (|x rs|
  rs (dup type `int match? (0 >) (pop 0) if) all?
  {kind domain msg "to-digits radices must be positive integers"} assert
  rs reverse x [] pair
  (|st r|
   st 0 at r mod 0 < st r
-  (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat pair) call)
+  (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat pair) apply)
  fold 1 at) `to-digits def
 
 ### def unappend
-(list -- initial last : "Split a nonempty list into its initial elements and last element.")
+(list -- initial last : "Split `list` into its initial elements and last element.")
 (reverse uncons reverse swap) `unappend def
 
 ### def while-values
-(value (predicate: state -- bool) (step: state -- state) -- list :
- "Return `value` and successive states through the first state for which the predicate is false.")
+(value (p: state -- bool) (step: state -- state) -- list :
+ "Construct a list containing `value` and successive states through the first state for which `p` is
+  false.")
 (|value predicate step|
  value predicate step (dup) cat unfold nip value swap cons) `while-values def
 
 ### def zip
-(left right -- pairs : "Pair corresponding elements of two conforming lists.")
+(left right -- pairs : "Pair corresponding elements of conforming `left` and `right`.")
 ((pair) zip-with) `zip def
 
 ### def case
 # Validate the clause container before inspecting any clause.
 (x clauses -- ... :
- "Select and call the first action whose key matches the subject. The clause list should be shaped:
+ "Given a flat list of `case q` clauses, apply the first `q` whose `case` matches `x`.
 
-    [case1 q1
-     case2 q2
-     ...
-     else]
+  `clause` should be shaped:
+
+     [case1 q1
+      case2 q2
+      ...
+      else]
 
   Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is the quotation to
   apply for the first case that matches. A matching action is called with `x` consumed.
@@ -274,8 +262,8 @@ def
     dup clauses len 2 div =
     rollup at
     swap (nip) unless
-    call)
-   call)
+    apply)
+   apply)
   (pop pop {kind shape msg "case requires a nonempty odd clause list ending in else"} raise)
   if)
  (pop pop {kind type msg "case expected a clause list"} raise)
@@ -283,24 +271,22 @@ def
 
 ### def case-with
 (x clauses (key: x -- k) -- ... :
- "Like `case`, but match the clause keys against the result of applying `key` to `x`, and call the
-  selected action with `x` itself on the stack. `x [ ... ] (k) case-with` is `x dup k [ ... ] case`,
-  so the else quotation receives `x` and the unmatched key.")
-(|x clauses key| x x key call clauses case) `case-with def
+ "Like `case`, but match the clause keys against the result of applying `key` to `x`, and apply the
+  selected action with `x` itself on the stack.")
+(|x clauses key| x x key apply clauses case) `case-with def
 
 ### def converge
-(x (a -- a) -- y :
- "Return the last value before repeated application reaches a fixed point or returns to the initial
-  value.")
+(x (q: a -- a) -- y :
+ "Return the last value before repeated application of `q` to `x` reaches a fixed point or matches
+  `x`.")
 (converges last) `converge def
 
 ### def from-digits
 (digits base -- value :
  "Combine digits, most significant first, into a value. The base is one integer for every position,
   or a list of radices with one per digit, as in mixed-radix time; the first radix has no effect.
-  Digits pervade: a list of equal-length digit lists, one per position, gives one value per column.
-  A radix list of the wrong length fails with `` `shape ``. Inverse of `to-digits` for values in
-  range.")
+  Digits pervade: a list of equal-length digit lists, one per position, gives one value per
+  column.")
 (|ds base|
  ds base ds len base type `list match?
  (|b n| b len n = {kind shape msg "from-digits needs one radix per digit"} assert b)

@@ -1,23 +1,15 @@
 ### module str
-(: "All case and whitespace operations use the ASCII character classes; every non-ASCII scalar
-    passes through unchanged.")
+(: "Operations on strings.")
 (
- `str.core [format split join] import
+ `str.core [str? format split join] import
 
  ### setp blanks
- (-- string : "Return the ASCII whitespace characters recognized by trimming operations.")
+ (-- string : "The ASCII whitespace characters recognized by trimming operations.")
  " \t\n\u{B}\u{C}\u{D}" `blanks setp
 
  ### defp type-error
  (message -- error : "Build a type error with the given message.")
  (`type error.new swap error.with-message) `type-error defp
-
- ### def str?
- (value -- bool :
-  "Return 1 when a value is a string, a list whose every element is a char, and 0 for every other
-   value. The empty string answers 1, and so does the empty list: they are one value. Never
-   raises.")
- (dup str.core.kind [string (pop 1) generic ((type `char match?) all?) (pop pop 0)] case) `str? def
 
  ### defp checked-error
  (candidate failure -- string :
@@ -49,12 +41,12 @@
  `checked-string-int defp
 
  ### def upper
- (string -- string : "Uppercase ASCII letters, leaving every other scalar unchanged.")
+ (string -- string : "Uppercase the ASCII codepoints in `string`.")
  ("str.upper expects a string" checked
   dup dup \a >= swap \z <= and 32 * - char) `upper def
 
  ### def lower
- (string -- string : "Lowercase ASCII letters, leaving every other scalar unchanged.")
+ (string -- string : "Lowercase the ASCII codepoints in `string`.")
  ("str.lower expects a string" checked
   dup dup \A >= swap \Z <= and 32 * + char) `lower def
 
@@ -97,7 +89,7 @@
  (|s p| s p s len p len >= (opens-with?) (pop pop 0) if) `starts-valid? defp
 
  ### def starts?
- (string prefix -- bool : "Return 1 when the string starts with the prefix.")
+ (string prefix -- bool : "Return 1 when `string` starts with `prefix`.")
  ("str.starts? expects a string and a string prefix" checked-pair starts-valid?) `starts? def
 
  ### defp ends-valid?
@@ -105,7 +97,7 @@
  (|s p| s p s len p len >= (closes-with?) (pop pop 0) if) `ends-valid? defp
 
  ### def ends?
- (string suffix -- bool : "Return 1 when the string ends with the suffix.")
+ (string suffix -- bool : "Return 1 when `string` ends with `suffix`.")
  ("str.ends? expects a string and a string suffix" checked-pair ends-valid?) `ends? def
 
  ### defp contains-valid?
@@ -114,21 +106,16 @@
 
  ### def contains?
  (string needle -- bool :
-  "Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.")
+  "Return 1 when `needle` occurs anywhere in `string`. Return 1 if `needle` is \"\".")
  ("str.contains? expects a string and a string needle" checked-pair contains-valid?)
  `contains? def
 
  ### def index-of
  (string needle -- index :
-  "Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and
-   raise `` `domain `` when a nonempty needle is absent.")
+  "Return the index of `needle`'s first occurrence in `string`, or the length of `string` when
+   `needle` does not occur. Return 0 when `needle` is \"\".")
  ("str.index-of expects a string and a string needle" checked-pair
-  dup len 0 =
-  (pop pop 0)
-  (split dup len 1 >
-   `domain error.new "str.index-of found no occurrence of the needle" error.with-message assert
-   first len)
-  if) `index-of def
+  dup len 0 = (pop pop 0) (split first len) if) `index-of def
 
  ### defp replace-valid
  (string needle replacement -- string : "Replace occurrences in validated strings.")
@@ -136,13 +123,13 @@
 
  ### def replace
  (string needle replacement -- string :
-  "Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent
-   scalars only, with no boundary insertion.")
+  "Replace every occurrence of `needle` in `string`. An empty needle inserts the replacement between
+   adjacent codepoints.")
  ("str.replace expects string, needle, and replacement strings" checked-triple replace-valid)
  `replace def
 
  ### def repeat
- (string count -- string : "Concatenate `count` copies of a string; `count` must be nonnegative.")
+ (string count -- string : "Concatenate `count` copies of `string`.")
  ("str.repeat expects a string and an integer count" checked-string-int
   dup 0 >=
   `domain error.new "str.repeat requires a nonnegative count" error.with-message assert
@@ -151,18 +138,33 @@
   (pop pop "")
   if) `repeat def
 
+ ### defp checked-pad
+ (text width pad message -- text width pad :
+  "Validate and return a string, an integer, and a char.")
+ (|text width pad message|
+  text width message checked-string-int pop pop
+  pad type `char match? message type-error assert
+  text width pad)
+ `checked-pad defp
+
+ ### defp padding
+ (string width pad -- string fill :
+  "Return `string` and the run of `pad` that brings it to `width`, empty when it is already that
+   wide.")
+ (|s w c| s c wrap w s len - 0 max take) `padding defp
+
  ### def pad-left
- (string width -- string :
-  "Add leading spaces until the string reaches the requested width; return a longer string
+ (string width pad -- string :
+  "Add leading copies of the char `pad` until `string` reaches `width`; return a longer string
    unchanged.")
- ("str.pad-left expects a string and an integer width" checked-string-int
-  over len - 0 max " " swap take swap pair raze) `pad-left def
+ ("str.pad-left expects a string, an integer width, and a char" checked-pad
+  padding swap pair raze) `pad-left def
 
  ### def pad-right
- (string width -- string :
-  "Add trailing spaces until the string reaches the requested width; return a longer string
+ (string width pad -- string :
+  "Add trailing copies of the char `pad` until `string` reaches `width`; return a longer string
    unchanged.")
- ("str.pad-right expects a string and an integer width" checked-string-int
-  over len - 0 max " " swap take pair raze) `pad-right def
+ ("str.pad-right expects a string, an integer width, and a char" checked-pad
+  padding pair raze) `pad-right def
 
 ) `str @defm

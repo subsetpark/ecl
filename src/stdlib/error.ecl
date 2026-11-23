@@ -1,40 +1,13 @@
 ### module error
 # This module's own contract failures use schema literals so constructor
 # validation cannot recursively call the constructor it is validating.
-(: "Errors are ordinary dictionaries with a required symbol at `` `kind `` and optional, typed
-    diagnostic fields. Construction and inspection do not raise unless an operation's own input
-    violates its contract; control effects remain core words.")
+(: "Words for manipulating the conventional `error` dict.")
 (
+ `error.core [valid?] import
+
  ### defp text?
  (value -- bool : "Return 1 when a value is a string without loading the str module.")
  (dup type `list match? ((type `char match?) all?) (pop 0) if) `text? defp
-
- ### def valid?
- (value -- bool :
-  "Return 1 when a value satisfies the error dictionary schema: a required symbol `` `kind `` and
-   well-typed optional `` `msg ``, `` `word ``, `` `trace ``, and `` `data `` fields. Extra fields
-   are allowed.")
- (dup type `dict match?
-  (dup `kind dict.has?
-   over `kind `missing dict.get type `symbol match?
-   and
-   over `msg dict.has? (over `msg at text?) (1) if
-   and
-   over `word dict.has? (over `word at type `symbol match?) (1) if
-   and
-   over `trace dict.has?
-   (over `trace at dup type `list match?
-    ((type `symbol match?) all?)
-    (pop 0)
-    if)
-   (1)
-   if
-   and
-   over `data dict.has? (over `data at type `dict match?) (1) if
-   and
-   nip)
-  (pop 0)
-  if) `valid? def
 
  ### defp checked
  (error -- error : "Validate and return an error dictionary.")
@@ -45,11 +18,10 @@
  (kind -- error : "Build the error dictionary `{kind kind}` from a kind symbol.")
  (dup type `symbol match?
   {kind type msg "error.new expects a kind symbol"} assert
-  `kind swap pair dict.from-flat) `new def
+  `kind swap pair dict.from-kvs) `new def
 
  ### def with-message
- (error message -- error :
-  "Validate the error and string message and return the error with `` `msg `` set to `message`.")
+ (error message -- error : "Set the `` ` ``message field on `error` to `message`.")
  (|failure message|
   failure checked pop
   message text?
@@ -66,8 +38,7 @@
   failure `data data put) `with-data def
 
  ### def kind?
- (error kind -- bool :
-  "Validate both inputs and return 1 when the error has the given kind symbol.")
+ (error kind -- bool : "Set the `` ` ``kind field on `error` to `kind`.")
  (|failure kind|
   failure checked pop
   kind type `symbol match?
@@ -75,9 +46,7 @@
   failure `kind at kind match?) `kind? def
 
  ### def kind-in?
- (error kinds -- bool :
-  "Validate an error and a list of kind symbols, then return 1 when the error's kind occurs in the
-   list.")
+ (error kinds -- bool : "Return 1 when `error`'s kind occurs in `kinds`.")
  (|failure kinds|
   failure checked pop
   kinds type `list match?

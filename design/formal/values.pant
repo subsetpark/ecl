@@ -210,7 +210,7 @@ value-type left = port-type and
 value-type right = port-type ->
   (matches? left right <-> left = right).
 
-> An address names the mailbox of one task capability.
+> An address denotes the mailbox of one task capability.
 value-type (address-mailbox value) = task-type.
 
 > Address values match when they correspond to the same task.

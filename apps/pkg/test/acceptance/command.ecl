@@ -7,7 +7,7 @@
  ### test command-workflow
  (-- :
   "Initialize, synchronize, verify, and vendor a project through the application command entry. The
-   host names `cache` as the download cache; an offline workflow must leave it empty.")
+   host designates `cache` as the download cache; an offline workflow must leave it empty.")
  (`cwd "cache" fs.mkdir
   ["init" "demo"] pkg.command.main
   `cwd "ecl.pkg" fs.read-text pkg.manifest.read `name at "demo" equal
@@ -23,7 +23,6 @@
   ["gc" "ecl.lock"] pkg.command.main) `command-workflow test
 
  ### def run
- (-- : "Require the command fixture registration and run it with ECL's built-in test interface.")
- (tests len 1 = {kind user msg "command acceptance test was not registered"} assert
-  test.default.run) `run def
+ (-- : "Run only the command acceptance test; package modules carry their own tests.")
+ (`pkg.test.command pkg.test.support.run-module) `run def
 ) `pkg.test.command @defm

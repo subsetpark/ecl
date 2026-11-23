@@ -43,7 +43,7 @@ pub const VisibleNameCursor = struct {
     environment: *env.Env,
     root: VisibleNameRoot,
     own: ?OwnNames,
-    core: ?env.NameMap.RawEntryCursor = null,
+    core: ?env.CoreMap.RawEntryCursor = null,
     complete: bool = false,
 
     /// A root's own names: the session's persistent directory, or an image's.
@@ -91,15 +91,18 @@ pub const VisibleNameCursor = struct {
 
     fn publicEntry(entry: anytype) VisibleNameProgress {
         return switch (entry.value) {
-            .definition => |definition| if (definition.visibility == .public)
-                .{ .item = intern.bindingId(entry.key) }
-            else
-                .pending,
+            .definition => |definition| publicDefinition(entry.key, definition),
             .alias => |alias| if (alias.visibility == .public)
                 .{ .item = intern.bindingId(entry.key) }
             else
                 .pending,
+            // A module alias is private to its scope and is not a word.
+            .module => .pending,
         };
+    }
+
+    fn publicDefinition(key: intern.BindingName, definition: *env.Definition) VisibleNameProgress {
+        return if (definition.visibility == .public) .{ .item = intern.bindingId(key) } else .pending;
     }
 
     pub fn advance(self: *VisibleNameCursor) VisibleNameProgress {
@@ -115,7 +118,7 @@ pub const VisibleNameCursor = struct {
         if (self.core == null) self.core = self.environment.coreEntries();
         return switch (self.core.?.advance()) {
             .pending => .pending,
-            .item => |entry| publicEntry(entry),
+            .item => |entry| publicDefinition(entry.key, entry.value),
             .complete => result: {
                 self.complete = true;
                 break :result .complete;

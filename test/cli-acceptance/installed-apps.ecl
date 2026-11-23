@@ -4,10 +4,6 @@
  `cli.test.support
  (expect expect-contains expect-absent absolute install invocation succeeds write) import
 
- ### defp descriptor
- (-- dict : "A valid installed application descriptor.")
- ({format 1 entry "main.ecl" module_map "ecl.modules"}) `descriptor defp
-
  ### defp app
  (prefix -- path : "The fixture application's directory beneath an installation prefix.")
  ("share/ecl/apps/fixture" pair path.join) `app defp
@@ -28,7 +24,6 @@
  (-- : "Resolve installed applications from the executable's own prefix, never the caller's.")
  ("installed-apps/distribution" install
   `cwd "installed-apps/distribution" app fs.mkdirs
-  descriptor json.emit "installed-apps/distribution" app "application.json" pair path.join write
   "{format 1 local \"app\" scopes {\"app\" {root \".\" visible [] sources [\"*.ecl\"] artifacts []}}}"
   "installed-apps/distribution" app "ecl.modules" pair path.join write
   "((42) `answer def) `appfixture @defm"
@@ -61,27 +56,21 @@
   # PATH candidate is a real executable, so running it would exit 0.
   `cwd "installed-apps/caller/ecl.modules" fs.remove-file
   `cwd "installed-apps/caller/share/ecl/apps/unregistered" fs.mkdirs
-  "installed-apps/moved" app "installed-apps/caller/share/ecl/apps/unregistered" "application.json"
+  "installed-apps/moved" app "installed-apps/caller/share/ecl/apps/unregistered" "main.ecl"
   copy-into
   `cwd "installed-apps/caller/path-bin" fs.mkdirs
   "installed-apps/moved/bin" "installed-apps/caller/path-bin" "ecl" copy-into
   `cwd "installed-apps/caller/path-bin/ecl" "installed-apps/caller/path-bin/unregistered" fs.rename
   dup ["unregistered"] in-caller `env {} "PATH" "installed-apps/caller/path-bin" absolute put put
   proc.run `term at `code at 0 match? not 1 "unregistered name is not dispatched" expect
-  # Every invalid descriptor is refused before the application runs.
-  dup [{format 2} {entry "../escape.ecl"} {module_map "/outside"} {extra 1}] swap
-  (swap descriptor swap dict.merge json.emit
-   "installed-apps/moved" app "application.json" pair path.join write
-   ["fixture"] in-caller proc.run dup `term at `code at 0 match? not 1
-   "invalid descriptor is refused" expect
-   `stderr at chars "invalid installed application descriptor" "invalid descriptor message"
-   expect-contains 0) cons each pop
   # Built-in commands retain precedence over installed application names.
   `cwd "installed-apps/moved/share/ecl/apps/test" fs.mkdirs
-  ["application.json" "ecl.modules" "library.ecl" "main.ecl"]
+  ["ecl.modules" "library.ecl"]
   ("installed-apps/moved" app "installed-apps/moved/share/ecl/apps/test" rolldown copy-into 0) each
   pop
-  ["test"] in-caller proc.run `stderr at chars "invalid installed application descriptor"
+  "\"installed test application ran\" io.prin"
+  "installed-apps/moved/share/ecl/apps/test/main.ecl" write
+  ["test"] in-caller proc.run `stdout at chars "installed test application ran"
   "builtin test precedence" expect-absent) `'installed applications dispatch from the installation'
  test
 ) `cli.test.installed-apps @defm

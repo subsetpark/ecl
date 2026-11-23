@@ -9,8 +9,7 @@ shipped word and its stack effect. This document covers behavior that depends
 on files, processes, networks, package data, or distribution policy.
 
 ECL is distributed as a CLI interpreter with a supported Zig extension SDK.
-ECL can call Zig extensions through `ecl-native`; embedding ECL in a Zig
-application is not a supported interface.
+ECL calls Zig extensions through `ecl-native`.
 
 ## Modules and host integration
 
@@ -33,7 +32,7 @@ those capabilities and `port.*`. Both backends
 compile against `std`, the public SDK, and native dependencies, including in
 builds without maintained applications. ABI v24 uses the same descriptors and
 instance lifecycle for static and dynamic registration.
-The `fs` and `archive` modules use direct runtime primitives with the shared
+The `fs` and `tar` modules use direct runtime primitives with the shared
 scope-owned port lifecycle, bounded work, and joined cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
@@ -82,9 +81,10 @@ components. Scope roots resolve relative to the document containing them.
 
 Source patterns use `/` separators, `*` and `?` within segments, and `**` as a
 whole segment. Selected regular `.ecl` files are parsed without execution at
-Session startup. Literal top-level module declarations become exports;
-computed and nested registrations remain file-private. Explicit artifacts
-name their exports directly and are read only on first use. Kinds are `ecl`
+Session startup, and their literal top-level module declarations become
+exports. Explicit artifacts list their exports directly and are read only on
+first use. A mapped file may register only the modules it exports; any other
+registration, such as a computed or nested one, is `` `domain ``. Kinds are `ecl`
 and `native`; a native artifact exports exactly one module and executes
 trusted native code through the ordinary extension boundary. Test discovery
 enumerates ECL artifacts from the designated `local` scope.
@@ -107,7 +107,7 @@ contain no control characters.
 `ecl check-map FILE` validates a document using the same parser, limits,
 reference resolution, and inert source discovery as Session startup. It exits
 zero with no output on success, one with a diagnostic for an invalid map or
-usage, and two on allocation failure. An invalid map's diagnostic names the
+usage, and two on allocation failure. An invalid map's diagnostic identifies the
 first rejected entry: the document, scope, path, or module at fault, and for a
 duplicate module both declaring files. The filename resolves against the
 caller's working directory; paths inside the document resolve against that
@@ -120,7 +120,7 @@ metadata; artifact content verification remains the publisher's responsibility.
 uses `FILE` as the containing document's path. Neither that file nor its parent
 directory needs to exist. Relative roots and a single map reference use the
 same rules as a file-backed map. This supports validation before publishing a
-staged document; validation never creates or replaces the named file. An input
+staged document; validation never creates or replaces the specified file. An input
 read or size failure exits one with a diagnostic. Plain `check-map -` is invalid
 because stdin alone does not identify a relative-path base.
 
@@ -435,7 +435,7 @@ cannot replace host configuration.
 
 Filesystem work goes through the `fs` module and the `path` module documented
 in `STDLIB.md`. `path` is pure string manipulation over `/`-separated Unicode
-paths and applies no host convention. Every `fs` word names one root by symbol
+paths and applies no host convention. Every `fs` word selects one root by symbol
 and one canonical relative path beneath it. All filesystem operations are
 available on every named root, subject to operating-system permissions and
 runtime limits. Modules within one Session share its roots.
@@ -446,12 +446,9 @@ Session construction opens the roots once; a relative, missing, non-directory,
 duplicate, or malformed root, a zero limit, or an unsupported target is a
 construction error distinct from allocation failure.
 
-Embedding uses `Session.Filesystem.Configuration` (also exported as
-`Filesystem` by the interpreter module), containing `Root` entries and `Limits`.
-Roots and immutable configuration belong to the Session's filesystem owner.
-Its resource budget is separate from native extensions. `max_transfer_bytes`
-limits whole-value reads, writes, and copies; `max_stream_transfer_bytes`
-limits the total bytes of an explicit writer stream. Both default to 1 GiB.
+Roots and immutable limits belong to the Session's filesystem owner, whose
+resource budget is separate from native extensions. Whole-value reads, writes,
+and copies are limited to 1 GiB, as is the total of one explicit writer stream.
 Filesystem operations use direct bounded runtime drivers and shared retirement
 without per-resource controller threads or native message marshalling.
 
@@ -562,44 +559,50 @@ integers in `0..255`. Strings represent Unicode text and are not byte
 containers. A packed byte representation may be used internally, while ECL
 operations continue to observe ordinary integer list elements.
 
-`archive.sha256` returns the SHA-256 digest of a byte list as 64 lowercase
+`hash.sha256` returns the SHA-256 digest of a byte list as 64 lowercase
 hexadecimal characters.
 
-`archive.unpack-tgz` validates a gzip-compressed tar byte list and extracts it
-beneath a previously absent destination, a canonical relative path under a
-named `fs` root. It accepts ustar regular files and
+`gzip.decompress` inflates one gzip member. Its payload is limited to
+1,073,741,824 bytes; malformed data, trailing input, an over-limit payload, and
+a size or CRC that disagrees with the footer raise `` `domain ``.
+
+`tar.unpack` validates a tar byte list and extracts it
+beneath a previously absent destination, a canonical relative path under an
+`fs` root or directory resource. It accepts ustar regular files and
 directories, per-entry PAX `path` and `size` records, and GNU long-name
 records. Other PAX fields may not alter a member's path, size, or kind. The
 result contains normalized regular-file paths in archive order and omits
 directory entries.
 
+`tar.read` accepts the same format without filesystem access and
+returns every member, directories included, in archive order as
+`{path kind bytes}`. The validation and limits below apply to both words.
+
 Every member name must be valid UTF-8, relative, and nonempty after
 normalization. A name may contain no empty, `.`, or `..` component. Absolute
 paths, platform-rooted paths, duplicate normalized paths, links, devices,
-FIFOs, unsupported member kinds, malformed gzip/tar/PAX data, checksum
+FIFOs, unsupported member kinds, malformed tar/PAX data, header checksum
 failures, and size disagreement raise `` `domain ``.
 
-The uncompressed tar stream is limited to 1,073,741,824 bytes and 100,000
+The tar stream is limited to 1,073,741,824 bytes and 100,000
 regular-file or directory members. Exceeding either limit raises `` `domain ``.
 
-Extraction resolves the destination's parent beneath the root through the
-confined `fs` resolver, then uses a unique `.ecl-fs-*` sibling staging
-directory relative to that parent handle. Files are created exclusively.
-Failure and cancellation remove the staging tree through bounded reverse-order
-work. A same-parent no-clobber rename publishes the completed tree after
-validation and handle closure. The destination is never overwritten or merged.
-Concurrent extractors may stage independently; one may publish, and the others
-receive an `` `io `` destination-exists error.
+Extraction is a composition of public words. It validates the whole archive
+with `tar.read` before any filesystem change, stages it with `fs.stage-dir`,
+creates each member with `fs.mkdirs` and `fs.create-bytes`, and publishes with
+`fs.commit-dir`. Those words' confinement, limits, staging, and no-clobber
+publication apply unchanged, and their failures surface as their own. A failure
+closes the stage before it is re-raised, so the destination is never
+overwritten, merged, or partially published. Concurrent extractors may stage
+independently; one publishes, and the others receive `fs.commit-dir`'s
+`` `io `` failure with reason `` `already-exists ``.
 
-A non-list byte container, non-symbol root, or non-string destination raises
-`` `type ``. A byte outside `0..255` raises `` `domain `` with its zero-based
-`` `index ``. An unknown root or non-canonical destination raises `` `domain `` with the `fs` failure data. Host or
-filesystem failures raise `` `io `` with the relevant `` `path ``. Failure exposes no
-partial destination and opens no member outside the staging root.
+A non-list byte container raises `` `type ``, and a byte outside `0..255` raises
+`` `domain `` with its zero-based `` `index ``.
 
 ### Tables
 
-A table is an ordinary insertion-ordered dictionary. It has at least one
+A table is an ordinary dictionary. It has at least one
 entry, every key is a distinct nonempty string, and every value is a list of
 the same length. Zero-row tables are valid. `type` reports `` `dict ``, and core
 dictionary operations may produce a value that no longer satisfies the table
@@ -617,34 +620,33 @@ Table validation uses these error kinds:
 
 Joins are stable equijoins over `[left-name right-name]` pairs. Duplicate keys
 expand to the full many-to-many product in left-row order and then right-row
-order. A result contains the left columns in their original order followed by
-right non-key columns in right-column order. `table.left-join-with` emits one
+order. A result contains the left columns and the right non-key columns.
+`table.left-join-with` emits one
 row for an unmatched left row and requires a fill value for every appended
 right column.
 
 ### HTTP
 
-The HTTP module is a client with content decoding. Responses have the shape
-`{status int, headers dict, body value}`. `http.get`, `http.post`, and
-`http.send` return the body as a string. `http.get-bytes` returns decoded
-response octets as a byte list. Transfer framing and compressed wire bytes are
-not exposed.
+The HTTP module is a client with content decoding. Its one word, `http.send`,
+consumes an `http.request` dictionary with required `` `method `` and
+`` `target `` fields and returns `{status int, headers dict, body bytes}`: the
+decoded response octets as a byte list, which `chars` decodes as UTF-8 text.
+Transfer framing and compressed wire bytes are not exposed.
 
-Each client word consumes one partial or complete `http.request` dictionary
-with a required `` `target `` URL. `http.get` and `http.get-bytes` supply GET and
-follow redirects for bodyless requests; `http.post` supplies POST, an empty
-body, and no redirect following. `http.send` requires the request's own
-`` `method `` and does not follow redirects. Request fields override method,
-headers, and exact body bytes without changing the Session's network
-authority. POST, PUT, and PATCH admit bodies; a nonempty body with another
-method is `` `domain ``.
+Request fields set the method, headers, exact body bytes, and redirect policy
+without changing the Session's network authority. POST, PUT, and PATCH admit
+bodies; a nonempty body with another method is `` `domain ``. The optional
+`` `follow-redirects `` flag (1 by default) replays a bodiless request at a 3xx
+location, other than for a 304, up to three times and switches to GET after a
+303; with 0 the 3xx response is returned. A request with a body is never
+replayed.
 
 Connection refusal, TLS failure, invalid URLs, and protocol errors raise
 `` `io `` with the URL in `` `path ``. Every HTTP status is returned as response data.
 
 Internal tests may supply a TLS trust override containing an absolute CA-file
-path and a fixed verification timestamp. That configuration uses only the
-named CA file and timestamp. The default configuration uses system trust
+path and a fixed verification timestamp. That configuration uses only that
+CA file and timestamp. The default configuration uses system trust
 roots and the current time. ECL code and process environment variables cannot
 change the override.
 
@@ -682,18 +684,9 @@ and contains only ASCII letters, digits, and hyphens, up to 64 bytes. Built-in
 CLI commands take precedence. Otherwise `ecl <name> ...` consults only that
 installation directory, never the project or `PATH`.
 
-Each application's `application.json` has exactly these fields:
-
-```json
-{"format": 1, "entry": "main.ecl", "module_map": "ecl.modules"}
-```
-
-Both paths are nonempty UTF-8 paths beneath the application's directory,
-without empty, dot, parent, drive, or backslash components. Descriptors are
-limited to 16 KiB and entry source to 16 MiB. Unknown fields and unsupported
-formats are errors. A descriptor is data and executes no code.
-
-The entry script runs in an ordinary Session using the application's map.
+An application directory is one that contains `main.ecl`, the entry script,
+limited to 16 MiB. The entry script runs in an ordinary Session using the
+`ecl.modules` map beside it.
 The caller's working directory, trailing arguments, environment, and standard
 streams are preserved, including standard input as data. The caller's project
 map, including an explicitly selected map, does not replace the application
@@ -744,15 +737,15 @@ The command reads these environment variables at startup:
 
 ### Standard input
 
-Standard input is the device `fd.in`, available in `-e` and script-file
-modes: `fd.read` returns what the host has, `fd.read-all` the rest of the
+Standard input is the device `stream.in`, available in `-e` and script-file
+modes: `stream.read` returns what the host has, `stream.read-all` the rest of the
 stream as bytes, and `io.read` or `io.lines` the same as text. An exhausted
 stream reads as `[]` or `""` on every later read. There is no ambient file
 access: file words live in `fs` and act beneath the selected named root or
 directory resource. Standard input carries program source in `ecl -` and in
-non-terminal invocation with no arguments, so `fd.in` raises `` `io `` in those
-modes. `io.stdin` remains as `fd.in io.read`. Standard output and error are
-`fd.out` and `fd.err`; `io.print` and `io.eprint` write text through them.
+non-terminal invocation with no arguments, so `stream.in` raises `` `io `` in those
+modes. `io.stdin` remains as `stream.in io.read`. Standard output and error are
+`stream.out` and `stream.err`; `io.print` and `io.eprint` write text through them.
 
 ### REPL
 
@@ -770,8 +763,7 @@ editor remains usable.
 `ecl test` requires a module map with a designated local scope. It loads every
 ECL artifact in that scope, including files with no exported modules, discovers their declared tests, and invokes the selected runner in a
 Test Session. Each source artifact is loaded once, including when an earlier
-source already loaded it through an exported module. Private modules keep
-their defining-file visibility. Dependency sources are loaded only as needed.
+source already loaded it through an exported module. Dependency sources are loaded only as needed.
 The default runner is `test.default.run`.
 
 `--runner <qualified-word>` selects another public runner. Arguments after

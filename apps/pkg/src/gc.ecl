@@ -5,7 +5,7 @@
  (path -- lock : "Read a portable retained-resolution input through an explicit directory.")
  (pkg.project.absolute dup path.dirname fs.open-dir
   (|path directory|
-   directory path path.basename fs.read-text pkg.resolution.read directory port.close) call)
+   directory path path.basename fs.read-text pkg.resolution.read directory port.close) apply)
  `lock-file defp
 
  ### defp retain
@@ -56,7 +56,7 @@
    `retained hashes (pkg.cache.filename) each put cursor fs.next-entry
    (dup dict.size 0 >) (entry dup `cursor at fs.next-entry) while pop
    `removed at cursor port.close)
-  directory hashes pair swap cat call) `collect-at def
+  directory hashes pair swap cat apply) `collect-at def
 
  ### defp collect
  (path hashes -- count : "Join the cache directory after incremental collection.")

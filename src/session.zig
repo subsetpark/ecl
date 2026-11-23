@@ -36,8 +36,8 @@ pub const Value = value.Value;
 pub const InitError = error{ OutOfMemory, InvalidHostConfig };
 
 /// Why Session construction rejected its host configuration. The caller owns
-/// the storage; after `InvalidHostConfig` it holds one bounded reason naming
-/// the rejected input, so every embedder can report it without re-deriving it.
+/// the storage; after `InvalidHostConfig` it holds one bounded reason identifying
+/// the rejected input, so the caller can report it without re-deriving it.
 pub const InitDiagnostic = struct {
     buffer: [512]u8 = @splat(0),
     len: usize = 0,
@@ -48,7 +48,7 @@ pub const InitDiagnostic = struct {
 
     fn fail(self: *InitDiagnostic, comptime format: []const u8, args: anytype) error{InvalidHostConfig} {
         var writer: std.Io.Writer = .fixed(&self.buffer);
-        // Truncation keeps the leading reason, which names the rejected input.
+        // Truncation keeps the leading reason, which identifies the rejected input.
         writer.print(format, args) catch {};
         self.len = console_api.completeUtf8Len(self.buffer[0..writer.end]);
         return error.InvalidHostConfig;
@@ -453,13 +453,13 @@ pub const Session = enum(usize) {
                     error.Invalid => return diagnostic.fail("invalid module map: {s}", .{rejection.message()}),
                 };
                 errdefer map.deinit();
-                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), &registry, map, host.initial_cwd);
+                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), map, host.initial_cwd);
             }
             break :discovery null;
         };
         errdefer if (owned_module_snapshot) |module_snapshot| module_snapshot.deinit();
         var test_authority = if (mode == .language_tests)
-            @as(?modules.TestAuthority, try registry.createTestAuthority(owned_module_snapshot))
+            @as(?modules.TestAuthority, try registry.createTestAuthority())
         else
             null;
         errdefer if (test_authority) |*authority| authority.deinit();
@@ -575,8 +575,8 @@ pub const Session = enum(usize) {
         // retirement, including reservations inherited by escaped descendants.
         core.filesystem_owner.deinit();
         core.allocator().destroy(core.filesystem_owner);
-        // Last, and only here. A parked anchor is named by a scope cell that
-        // holds no reference to it, so it stays valid until execution has
+        // Last, and only here. A scope cell points to a parked anchor without
+        // holding a reference to it, so the anchor stays valid until execution has
         // provably stopped -- which `scheduler.deinit` at the top of this
         // function guarantees, ahead of every teardown below it.
         host.reclaimTombstones(modules.destroyParkedAnchor);
@@ -795,6 +795,18 @@ pub const Session = enum(usize) {
         const allocator = self.coreState().allocator();
         return .fromOwned(allocator, try printer.toOwnedString(allocator, item));
     }
+    /// The target of a session module alias spelled `namespace`, if it is one.
+    fn sessionAliasTarget(self: *Session, namespace: []const u8) ?[]const u8 {
+        const id = lookupInterned(namespace) orelse return null;
+        const module = intern.moduleName(id) catch return null;
+        const binding = intern.moduleBindingName(module) orelse return null;
+        var view = self.coreState().registry.view();
+        defer view.deinit();
+        return switch (view.sessionFind(binding) orelse return null) {
+            .module => |target| intern.get(intern.moduleId(target)),
+            .definition, .alias => null,
+        };
+    }
     /// Runs one blocking observation turn without exposing environment,
     /// registry, or reclamation authority. The rendered result owns no lease
     /// and can therefore outlive this Session.
@@ -803,9 +815,14 @@ pub const Session = enum(usize) {
         prefix: []const u8,
     ) error{OutOfMemory}!CompletionSet {
         const dot = lastDot(prefix);
+        // A namespace that is a session module alias completes from its target.
+        const target_bytes: ?[]const u8 = if (dot) |separator|
+            self.sessionAliasTarget(prefix[0..separator]) orelse prefix[0..separator]
+        else
+            null;
         if (dot) |separator| {
             if (separator == 0) return .empty;
-            if (!try self.loadModuleForObservation(prefix[0..separator])) return .empty;
+            if (!try self.loadModuleForObservation(target_bytes.?)) return .empty;
         }
         const core = self.coreState();
         defer core.scheduler.settleRootRetirement();
@@ -818,7 +835,7 @@ pub const Session = enum(usize) {
             // Observation has already resolved the cold module through the
             // ordinary loader, so completion sees one authoritative published
             // generation regardless of transport or prior execution.
-            if (lookupInterned(namespace_bytes)) |namespace_id| {
+            if (lookupInterned(target_bytes.?)) |namespace_id| {
                 if (intern.moduleName(namespace_id) catch null) |module_name| {
                     var acquisition = core.registry.acquireCursor(module_name);
                     defer acquisition.deinit();
@@ -854,6 +871,21 @@ pub const Session = enum(usize) {
             .item => |name| if (std.mem.startsWith(u8, intern.get(name), prefix))
                 try found.append(name),
         };
+        // Session module aliases are not words, but they complete as namespaces.
+        var view = core.registry.view();
+        defer view.deinit();
+        if (view.sessionEntries()) |entries_cursor| {
+            var entries = entries_cursor;
+            while (true) switch (entries.advance()) {
+                .pending => {},
+                .complete => break,
+                .item => |entry| switch (entry.value) {
+                    .module => if (std.mem.startsWith(u8, intern.get(intern.bindingId(entry.key)), prefix))
+                        try found.append(intern.bindingId(entry.key)),
+                    .definition, .alias => {},
+                },
+            };
+        }
         // An embedded module resolves on first mention, so it is a real
         // completion before anything has loaded it. The registry knows only
         // the ones already published, which made the stdlib appear to exist
@@ -1330,7 +1362,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             try fiber.callOwned(body.take().list);
         }
         fn reflect(fiber: *machine.Fiber) machine.MachineError!void {
-            try fiber.executeWord(.{ .name = try intern.intern("which") });
+            try fiber.executeWord(.{ .name = try intern.intern("see") });
         }
     };
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1371,7 +1403,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     defer image.deinit();
     var sealed = try image.sealLiteralGroup();
     defer sealed.deinit();
-    _ = try modules.testing.register(registry, &sealed);
+    try modules.testing.register(registry, &sealed);
 
     try Probe.runOk(&runtime, "`task.pending probe.reflect 99");
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);
@@ -1557,7 +1589,7 @@ test "source-defined failures retain provenance after their unit" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "trace (`div `boom)") != null);
     const runtime_error = (try session.runUnit(
         "assembled.ecl",
-        "1 0 (div) cons cons call",
+        "1 0 (div) cons cons apply",
     )).err;
     defer session.release(runtime_error);
     const runtime_rendered = try printer.toOwnedString(allocator, runtime_error);

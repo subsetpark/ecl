@@ -535,12 +535,12 @@ pub fn word(
     for (function.param_types[1..]) |maybe_parameter_type| {
         const parameter_type = maybe_parameter_type orelse @compileError("ecl-native: callback capabilities must have concrete types");
         if (parameter_type == *BuildValues) {
-            if (build_values) @compileError("ecl-native: callback names a capability more than once");
+            if (build_values) @compileError("ecl-native: callback declares a capability more than once");
             if (reschedule)
                 @compileError("ecl-native: BuildValues must precede Reschedule");
             build_values = true;
         } else if (isReschedulePointer(parameter_type)) {
-            if (reschedule) @compileError("ecl-native: callback names a capability more than once");
+            if (reschedule) @compileError("ecl-native: callback declares a capability more than once");
 
             reschedule = true;
             RescheduleType = @typeInfo(parameter_type).pointer.child;

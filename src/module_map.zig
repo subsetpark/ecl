@@ -99,7 +99,7 @@ pub fn discover(allocator: std.mem.Allocator, io: std.Io, start: []const u8, exp
 }
 
 /// Why validation rejected a document. The caller owns the storage; after
-/// `error.Invalid` it holds one bounded reason naming the offending document,
+/// `error.Invalid` it holds one bounded reason identifying the offending document,
 /// scope, path, or module. The innermost failure wins, so a referenced map's
 /// own reason is not replaced by its referrer's.
 pub const Diagnostic = struct {
@@ -113,7 +113,7 @@ pub const Diagnostic = struct {
     fn fail(self: *Diagnostic, comptime format: []const u8, args: anytype) error{Invalid} {
         if (self.len == 0) {
             var writer: std.Io.Writer = .fixed(&self.buffer);
-            // Truncation keeps the leading reason, which names the offender.
+            // Truncation keeps the leading reason, which identifies the offender.
             writer.print(format, args) catch {};
             self.len = console.completeUtf8Len(self.buffer[0..writer.end]);
         }
@@ -190,7 +190,7 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
     errdefer result.deinit();
     for (0..@intCast(definitions.length())) |index| {
         const name = ownedText(allocator, dict.keyAt(definitions, index)) catch |err|
-            return diagnostic.reject(err, "scope {d} in `{s}` must be named by a non-empty string without control characters", .{ index, path });
+            return diagnostic.reject(err, "scope {d} in `{s}` must be keyed by a non-empty string without control characters", .{ index, path });
         errdefer allocator.free(name);
         for (owned.scopes.items) |scope| if (std.mem.eql(u8, name, scope.name))
             return diagnostic.fail("scope `{s}` is declared twice", .{name});
@@ -208,7 +208,7 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
     const local_value = data.field(top, "local") catch |err|
         return diagnostic.reject(err, "module map `{s}` has no `local`", .{path});
     const local_name = ownedText(allocator, local_value) catch |err|
-        return diagnostic.reject(err, "module map `{s}` `local` must name a scope", .{path});
+        return diagnostic.reject(err, "module map `{s}` `local` must be a scope name", .{path});
     defer allocator.free(local_name);
     owned.local = findScope(owned, local_name) orelse
         return diagnostic.fail("local scope `{s}` is not declared in `scopes`", .{local_name});

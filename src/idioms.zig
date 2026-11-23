@@ -37,7 +37,7 @@ pub const PhraseOp = enum {
     /// `where` continued by `at`: the elements a mask selects, without the
     /// index list `where` would build.
     where_at,
-    /// `cons` continued by `call`: `x (q) cons call` runs `q` with `x` on
+    /// `cons` continued by `apply`: `x (q) cons apply` runs `q` with `x` on
     /// the stack, which is what calling `(x q...)` does, without building it.
     /// `cons` stores its head as data, so this holds for every head: a symbol
     /// enters quoted and the built quotation would push it.
@@ -45,12 +45,17 @@ pub const PhraseOp = enum {
     /// `cons` continued by `dip`: `x (q) cons dip` protects the value beneath
     /// `x` and runs `q` with `x` on the stack, without building `(x q...)`.
     cons_dip,
+    /// `grade` continued by `at` over the list it grades, as `dup grade at`
+    /// leaves it: the sorted list, without the permutation `grade` would
+    /// build and `at` would gather through.
+    grade_at,
 
     pub fn spelling(self: PhraseOp) []const u8 {
         return switch (self) {
             .reshape_sum, .reshape_product => "reshape",
             .where_at => "where",
             .cons_call, .cons_dip => "cons",
+            .grade_at => "grade",
         };
     }
 };
@@ -108,7 +113,7 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 6 + 8 + 5]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 6 + 8 + 6]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -198,7 +203,7 @@ pub const registry = blk: {
     };
     index += 1;
     for ([_]struct { operation: PhraseOp, consumer: []const u8 }{
-        .{ .operation = .cons_call, .consumer = "call" },
+        .{ .operation = .cons_call, .consumer = "apply" },
         .{ .operation = .cons_dip, .consumer = "dip" },
     }) |phrase| {
         entries[index] = .{
@@ -210,6 +215,14 @@ pub const registry = blk: {
         };
         index += 1;
     }
+    entries[index] = .{
+        .context = .phrase,
+        .pattern = &.{},
+        .operation = .{ .phrase = .grade_at },
+        .source_word = "grade",
+        .following = &.{.{ .spelling = "at" }},
+    };
+    index += 1;
     std.debug.assert(index == entries.len);
     break :blk entries;
 };
@@ -247,7 +260,7 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
 }
 
 /// Whether `word`, where the phrase runs, is the core binding expected: a
-/// builtin, and the given primitive when one is named.
+/// builtin, and the given primitive when one is given.
 fn wordMatches(fiber: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) bool {
     if (!plainWord(word.slot)) return false;
     return liveWord(fiber.peekWord(word), primitive) != null;
@@ -258,7 +271,7 @@ fn wordMatches(fiber: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl)
 /// probe rather than a full lookup. A word the fiber has not resolved is
 /// looked up in full and remembered, since the phrase consumes it instead of
 /// dispatching it. Either way it must be the core builtin expected; its trace
-/// word is what a fault inside the phrase names.
+/// word is what a fault inside the phrase reports.
 fn followingWord(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.TraceWord {
     if (!plainWord(word.slot)) return null;
     return liveWord(try fiber.resolveForRecognition(word), null);
@@ -459,6 +472,15 @@ fn applyPhrase(fiber: *Fiber, first: u16) MachineError!bool {
                 commitPhrase(fiber, count, last.?);
                 try combinators.dipBelowHead(fiber);
             },
+            .grade_at => {
+                if (!sameListShape(fiber)) continue;
+                // `grade` is the only word of the phrase that can fault, so
+                // the fused pass reports as `grade`, not as `at`.
+                commitPhrase(fiber, count, fiber.active_word);
+                var duplicate = try fiber.popValue();
+                duplicate.deinit();
+                try order.sortValues(fiber);
+            },
         }
         return true;
     }
@@ -478,6 +500,17 @@ fn consShape(fiber: *Fiber, depth: usize) bool {
     const head = &stack[stack.len - 2];
     if (head.* == .symbol) head.symbol.slot = env.unquoted(head.symbol.slot);
     return true;
+}
+
+/// Whether `list grade at` gathers the list through its own grade: the two
+/// operands are one list, as `dup` leaves them. Anything else, including an
+/// equal list that is a different value, runs the words as written.
+fn sameListShape(fiber: *Fiber) bool {
+    if (fiber.available() < 2) return false;
+    const stack = fiber.stack.items;
+    const top = stack[stack.len - 1];
+    const below = stack[stack.len - 2];
+    return top == .list and below == .list and top.list == below.list;
 }
 
 /// Counts a recognition in the instrumented build; nothing otherwise.

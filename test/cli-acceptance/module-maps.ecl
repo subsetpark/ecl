@@ -27,12 +27,12 @@
  (invalid? pop) `invalid defp
 
  ### defp diagnoses
- (spec fragment label -- : "Require check-map to reject a map with a diagnostic naming the fix.")
+ (spec fragment label -- : "Require check-map to reject a map with a diagnostic stating the fix.")
  (|spec fragment label| spec label invalid? fragment label expect-contains) `diagnoses defp
 
  ### defp rejects
  (binary text detail -- :
-  "Require a candidate document to be rejected with a diagnostic naming the fix.")
+  "Require a candidate document to be rejected with a diagnostic stating the fix.")
  (|binary text detail|
   binary "maps/candidate" text document detail "rejection detail" diagnoses) `rejects defp
 
@@ -65,7 +65,7 @@
   dup "maps/unpublished" "{format 1 map \"complete\"}" document "unpublished reference" succeeds
   pop
   dup "maps/unpublished" "{format 1 map \"reference\"}" document "chained reference" invalid
-  # Each rejection names what to fix rather than only that the map is invalid.
+  # Each rejection states what to fix rather than only that the map is invalid.
   dup "broken" "must contain exactly one dict" rejects
   dup "{format 2 map \"complete\"}" "must declare `format 1`" rejects
   dup complete "local \"local\"" "local \"other\"" str.replace
@@ -81,7 +81,7 @@
   # Validation discovers new sources with the same rules as startup.
   "() `localmod @defm" "module-maps/maps/src/duplicate.ecl" write
   dup ["maps/complete"] check "duplicate module" invalid
-  # The diagnostic names the module and both declaring files.
+  # The diagnostic reports the module and both declaring files.
   dup ["module `localmod`" "`src/duplicate.ecl`" "`src/entry.ecl`" "scope `local`"] swap
   (|fragment binary| binary ["maps/complete"] check fragment "duplicate diagnostic" diagnoses 0)
   cons each pop
@@ -96,7 +96,7 @@
   dup ["--document" "maps/new"] check "document without stdin marker" usage
   # Builtin precedence and explicit-map independence also apply here.
   `cwd "module-maps/share/ecl/apps/check-map" fs.mkdirs
-  "{\"format\":999}" "module-maps/share/ecl/apps/check-map/application.json" write
+  "1 exit" "module-maps/share/ecl/apps/check-map/main.ecl" write
   dup ["--module-map" "missing" "check-map" "maps/complete"] "module-maps" invocation
   "explicit map ignored" succeeds pop
   # Relative source roots survive relocation of the containing document.

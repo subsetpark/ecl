@@ -23,7 +23,7 @@
    directory digest [3] 3 pack (pkg.cache.write-at) cat @attempt result.err? 1 equal
    directory digest pkg.cache.read-at [1 2] equal
    directory port.close)
-  call)
+  apply)
  `exact-byte-cache test
 
  ### test disabled-cache

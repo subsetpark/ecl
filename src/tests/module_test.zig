@@ -296,24 +296,24 @@ test "reflection remains cancellable across sorting and identifier output" {
     try std.testing.expect(std.mem.indexOf(u8, words_rendered, "unit cancelled") != null);
     try std.testing.expect(words_runtime.lastPolls() >= 1);
 
-    var which_output = std.Io.Writer.Allocating.init(allocator);
-    defer which_output.deinit();
+    var see_output = std.Io.Writer.Allocating.init(allocator);
+    defer see_output.deinit();
     var runtime_inputs6 = try runtime_fixture.Fixture.init();
     defer runtime_inputs6.deinit();
-    var which_runtime = try session.Session.init(allocator, &.{}, runtime_inputs6.inputs(.{ .output = &which_output.writer }), .default, .evaluate);
-    defer which_runtime.deinit();
+    var see_runtime = try session.Session.init(allocator, &.{}, runtime_inputs6.inputs(.{ .output = &see_output.writer }), .default, .evaluate);
+    defer see_runtime.deinit();
     const define_first = try std.fmt.allocPrint(allocator, "(1) `{s} def", .{first_bytes});
     defer allocator.free(define_first);
-    try expectOk(&which_runtime, define_first);
-    try which_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(first) } });
-    which_runtime.requestCancellation();
-    const which_failure = (try which_runtime.runUnit("reflection-poll.ecl", "which")).err;
-    defer which_runtime.release(which_failure);
-    const which_rendered = try printer.toOwnedString(allocator, which_failure);
-    defer allocator.free(which_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, which_rendered, "unit cancelled") != null);
-    try std.testing.expect(which_runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 0), which_output.written().len);
+    try expectOk(&see_runtime, define_first);
+    try see_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(first) } });
+    see_runtime.requestCancellation();
+    const see_failure = (try see_runtime.runUnit("reflection-poll.ecl", "see")).err;
+    defer see_runtime.release(see_failure);
+    const see_rendered = try printer.toOwnedString(allocator, see_failure);
+    defer allocator.free(see_rendered);
+    try std.testing.expect(std.mem.indexOf(u8, see_rendered, "unit cancelled") != null);
+    try std.testing.expect(see_runtime.lastPolls() >= 1);
+    try std.testing.expectEqual(@as(usize, 0), see_output.written().len);
 
     const qualified_bytes = try allocator.alloc(u8, "poll-module.".len + first_bytes.len);
     defer allocator.free(qualified_bytes);
@@ -335,7 +335,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     try expectOk(&qualified_runtime, module_source);
     try qualified_runtime.pushOwned(.{ .symbol = .{ .name = qualified } });
     qualified_runtime.requestCancellation();
-    const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "which")).err;
+    const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "see")).err;
     defer qualified_runtime.release(qualified_failure);
     const qualified_rendered = try printer.toOwnedString(allocator, qualified_failure);
     defer allocator.free(qualified_rendered);
@@ -349,8 +349,8 @@ test "reflection failures are total" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "5 which", &.{"kind type"});
-    try expectErrorContains(&runtime, "`missing which", &.{"kind undefined-word"});
+    try expectErrorContains(&runtime, "5 see", &.{"kind type"});
+    try expectErrorContains(&runtime, "`missing see", &.{"kind undefined-word"});
 }
 
 /// Redefines one top-level name once per count, from a word that recurses
@@ -459,11 +459,15 @@ test "session: mutation settlement is independent of a busy sole worker" {
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
+const registry_workers = 4;
+const registry_commits_per_worker = 50;
+
 const RegistryThreadContext = struct {
     registry: *modules.Registry,
     failed: *std.atomic.Value(bool),
     shared: intern.ModuleName,
-    disjoint: [4]intern.ModuleName,
+    /// One fresh module name per commit, so a lost update loses a name.
+    distinct: *const [registry_workers][registry_commits_per_worker]intern.ModuleName,
 };
 
 fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool {
@@ -471,15 +475,13 @@ fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool
     defer candidate.deinit();
     var sealed = candidate.sealLiteralGroup() catch return false;
     defer sealed.deinit();
-    _ = modules.testing.register(context.registry, &sealed) catch return false;
+    modules.testing.register(context.registry, &sealed) catch return false;
     return true;
 }
 
-fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
-    for (0..50) |_| {
-        if (!commitCandidate(context, context.shared) or
-            !commitCandidate(context, context.disjoint[worker_id]))
-        {
+fn registryWorker(context: RegistryThreadContext, worker_id: usize) void {
+    for (context.distinct[worker_id]) |name| {
+        if (!commitCandidate(context, context.shared) or !commitCandidate(context, name)) {
             context.failed.store(true, .release);
             return;
         }
@@ -487,7 +489,6 @@ fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
             context.failed.store(true, .release);
             return;
         };
-        if (lease.generationNumber() == 0) context.failed.store(true, .release);
         lease.deinit();
     }
 }
@@ -504,32 +505,32 @@ test "registry: concurrent commits are linearized without lost names" {
     }
     var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
+    var distinct: [registry_workers][registry_commits_per_worker]intern.ModuleName = undefined;
+    for (&distinct, 0..) |*names, worker| {
+        for (names, 0..) |*name, commit| {
+            var buffer: [64]u8 = undefined;
+            name.* = try intern.internModuleName(try std.fmt.bufPrint(&buffer, "worker-module-{d}-{d}", .{ worker, commit }));
+        }
+    }
     var failed = std.atomic.Value(bool).init(false);
     const context = RegistryThreadContext{
         .registry = &registry,
         .failed = &failed,
         .shared = try intern.internModuleName("shared-module"),
-        .disjoint = .{
-            try intern.internModuleName("worker-module-0"),
-            try intern.internModuleName("worker-module-1"),
-            try intern.internModuleName("worker-module-2"),
-            try intern.internModuleName("worker-module-3"),
-        },
+        .distinct = &distinct,
     };
-    var threads: [4]std.Thread = undefined;
+    var threads: [registry_workers]std.Thread = undefined;
     for (&threads, 0..) |*thread, index| {
-        thread.* = try std.Thread.spawn(.{}, registryWorker, .{ context, @as(u32, @intCast(index)) });
+        thread.* = try std.Thread.spawn(.{}, registryWorker, .{ context, index });
     }
     for (threads) |thread| thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    var lease = modules.testing.acquire(&registry, context.shared).?;
-    defer lease.deinit();
-    try std.testing.expectEqual(@as(u64, 200), lease.generationNumber());
-    for (0..4) |index| {
-        var disjoint = modules.testing.acquire(&registry, context.disjoint[index]).?;
-        defer disjoint.deinit();
-        try std.testing.expectEqual(@as(u64, 50), disjoint.generationNumber());
-    }
+    // Every commit published from a snapshot no other commit had replaced,
+    // so every name any worker registered is still in the directory.
+    for (distinct) |names| for (names) |name| {
+        var lease = modules.testing.acquire(&registry, name) orelse return error.LostRegistration;
+        lease.deinit();
+    };
 }
 
 test "loader: failures and cycles are total" {
@@ -592,7 +593,6 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     defer releases.releaseValue(document_value);
     const document = env.documentation(document_value.list).?;
     const first_name = try intern.internModuleName("allocation-module");
-    const alias_name = try intern.internNamespace("allocation-alias");
     const second_name = try intern.internModuleName("allocation-second-module");
     const word_name = try intern.internNamespace("answer");
     var first = try registry.createImage(first_name, .ordinary);
@@ -607,9 +607,8 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var first_sealed = try first.sealLiteralGroup();
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, &first_sealed);
-    try modules.testing.alias(&registry, alias_name, first_name);
-    var lease = modules.testing.acquire(&registry, try intern.internModuleName("allocation-alias")).?;
+    try modules.testing.register(&registry, &first_sealed);
+    var lease = modules.testing.acquire(&registry, first_name).?;
     defer lease.deinit();
     var second = try registry.createImage(first_name, .ordinary);
     defer second.deinit();
@@ -621,13 +620,13 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var second_sealed = try second.sealLiteralGroup();
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, &second_sealed);
+    try modules.testing.register(&registry, &second_sealed);
     var third = try registry.createImage(second_name, .ordinary);
     defer third.deinit();
     try third.stageDefinition(word_name, constant.module(effect, .public));
     var third_sealed = try third.sealLiteralGroup();
     defer third_sealed.deinit();
-    _ = try modules.testing.register(&registry, &third_sealed);
+    try modules.testing.register(&registry, &third_sealed);
 }
 
 test "registry APIs propagate every allocation failure" {
@@ -647,16 +646,15 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     const reserved = "module name `dict` is reserved for the standard library";
     // `dict` has not loaded yet: the refusal cannot depend on that.
     try expectErrorContains(&runtime, "((a b -- c) (pop pop 0) `has? def) `dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
-    try expectOk(&runtime, "{a 1} `a dict.has? {kind user msg \"dict did not load\"} assert");
+    try expectErrorContains(&runtime, "`m `dict alias", &.{reserved});
+    try expectOk(&runtime, "{a 1} [a] dict.has? [1] match? {kind user msg \"dict did not load\"} assert");
     // Loaded, it is refused the same way, and an alias cannot claim the name.
     try expectErrorContains(&runtime, "() `dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
-    try expectErrorContains(&runtime, "() `m @defm `dict `m alias", &.{reserved});
+    try expectErrorContains(&runtime, "(`m `dict alias) `m @defm", &.{reserved});
     try expectErrorContains(&runtime, "((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
-    try expectOk(&runtime, "(\"abc\" \"z\" str.index-of) @attempt `err at `kind at `domain match? " ++
+    try expectOk(&runtime, "(\"abc\" -1 str.repeat) @attempt `err at `kind at `domain match? " ++
         "{kind user msg \"str lost error\"} assert");
     // A dotted name under a stdlib prefix is an ordinary module.
     try expectOk(&runtime, "((1) `one def) `dict.extra @defm dict.extra.one 1 = {kind user} assert");
@@ -673,7 +671,7 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     const reserved = "module name `dict` is reserved for the standard library";
     // `map` applies the caller's quotation under `@attempt`, `either`
     // inline; neither runs it as standard-library code.
-    try expectOk(&runtime, "[] result.ok (`d `dict alias []) result.map `err at `kind at `domain match? " ++
+    try expectOk(&runtime, "[] result.ok (`m `dict alias []) result.map `err at `kind at `domain match? " ++
         "{kind user msg \"alias escaped\"} assert");
     try expectErrorContains(&runtime, "[] result.ok (() `dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");

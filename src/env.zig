@@ -401,7 +401,7 @@ pub const Definition = struct {
     lifetime: Lifetime,
     /// Which member is active is the handle's type: a `Reservation` reads
     /// `reserved`, a `Definition` reads `sealed`. Safe builds check the
-    /// active member; only this file names the field.
+    /// active member; only this file mentions the field.
     body_state: BodyState,
     visibility: Visibility = .public,
     origin: BindingOrigin = .top,
@@ -410,7 +410,7 @@ pub const Definition = struct {
     source: ?reader_types.SourceSlice = null,
     root: DefinitionRoot,
     attribution: Attribution = .own,
-    /// The module image the definition belongs to, as `modules` names it.
+    /// The module image the definition belongs to, as `modules` represents it.
     /// Opaque here: `env` never dereferences it.
     home: ?*anyopaque = null,
 
@@ -711,24 +711,28 @@ pub const Executable = opaque {
     }
 };
 
-/// A name's entry in a directory: a definition, or a name alias that every
-/// later binding or lookup follows through the registry. An alias freezes the
-/// mapping, never the target it selects.
+/// A name's entry in a directory: a definition, a name alias that every
+/// later binding or lookup follows through the registry, or a module alias.
+/// An alias freezes the mapping, never the target it selects.
 pub const Entry = union(enum) {
     definition: *Definition,
     alias: Alias,
+    /// `name -> module`: a qualified word written in this scope whose module
+    /// part is exactly this name denotes `module` instead. Private to the scope,
+    /// never a word, and followed at every binding or lookup.
+    module: intern.ModuleName,
 
     pub fn retain(self: Entry) void {
         switch (self) {
             .definition => |definition| if (definition.lifetime == .counted) definition.retain(),
-            .alias => {},
+            .alias, .module => {},
         }
     }
 
     pub fn release(self: Entry, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .definition => |definition| if (definition.lifetime == .counted) definition.release(releases),
-            .alias => {},
+            .alias, .module => {},
         }
     }
 };
@@ -741,8 +745,12 @@ pub const Alias = struct {
 };
 
 /// A directory of names. Session and image directories are immutable once
-/// readers can reach them; core's is filled only while it is being built.
+/// readers can reach them.
 pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
+
+/// Core's directory, filled only while core is built. Core never imports or
+/// aliases, so it holds definitions alone.
+pub const CoreMap = poll.FixedMap(intern.BindingName, *Definition);
 
 /// A name in a module group under construction: a reservation the group will
 /// seal, a definition sealed at creation, or an alias. Only the construction
@@ -752,6 +760,7 @@ pub const GroupEntry = union(enum) {
     reserved: *Reservation,
     definition: *Definition,
     alias: Alias,
+    module: intern.ModuleName,
 };
 
 /// A module group's construction directory.
@@ -759,7 +768,7 @@ pub const GroupMap = poll.FixedMap(intern.BindingName, GroupEntry);
 
 const ScopeAllocation = enum { embedded, heap };
 
-/// Which root a scope is. A session or core-building scope names the one
+/// Which root a scope is. A session or core-building scope denotes the one
 /// directory of its kind; a module root is its image's own scope, which
 /// `modules` reaches by field parent.
 pub const ScopeStorage = union(enum) {
@@ -773,8 +782,8 @@ pub const Scope = struct {
     storage: ScopeStorage,
     refs: std.atomic.Value(u32) = .init(1),
     allocation: ScopeAllocation = .embedded,
-    /// A module image's cell, which its words name. Allocated on first use, so
-    /// an image nothing links into costs nothing. Session and core words name
+    /// A module image's cell, which its words refer to. Allocated on first use, so
+    /// an image nothing links into costs nothing. Session and core words refer to
     /// the `Env`'s own cells instead.
     label_cell: std.atomic.Value(?*ScopeCell) = .init(null),
     retirement: heap.ReleaseDomain.Retirement = .{},
@@ -804,7 +813,7 @@ pub const Scope = struct {
             std.debug.assert(old != 0);
             if (old != 1) return .{ .scope = scope, .state = .complete };
             _ = scope.refs.load(.acquire);
-            // A word written in this scope names its cell and nothing else, so
+            // A word written in this scope refers to its cell and nothing else, so
             // the cell retires with it: binding such a word afterwards is a
             // definite failure rather than a silent change of meaning.
             const cleared = scope.label_cell.swap(null, .acq_rel);
@@ -971,7 +980,7 @@ comptime {
         @compileError("scope id bit budget does not cover its tag type");
 }
 
-/// What a `ScopeId` names right now.
+/// What a `ScopeId` denotes right now.
 pub const ScopeResolution = union(enum) {
     /// Id zero: a word with no written-in scope, which resolves in core.
     unscoped,
@@ -982,7 +991,7 @@ pub const ScopeResolution = union(enum) {
     /// The session's top-level directory.
     session,
     /// A live image cell. The scope is not handed over here: reaching it
-    /// requires a `Liveness` proof, because a cell names its image without
+    /// requires a `Liveness` proof, because a cell points to its image without
     /// holding it.
     cell: *ScopeCell,
 };
@@ -1010,7 +1019,7 @@ pub const SymbolLinker = struct {
     }
 };
 
-/// What a module image's scope cell names to prove the image live: its
+/// What a module image's scope cell points at to prove the image live: its
 /// reference anchor, which outlives the image. Opaque here so `env` never
 /// dereferences it and holds no dependency on `modules`.
 pub const ImageAnchor = opaque {};
@@ -1018,13 +1027,13 @@ pub const ImageAnchor = opaque {};
 pub const ScopeCell = struct {
     id: ScopeId,
     scope: std.atomic.Value(?*Scope) = .init(null),
-    /// The image anchor this cell names; null for core and the session.
+    /// The image anchor this cell points to; null for core and the session.
     owner: std.atomic.Value(?*ImageAnchor) = .init(null),
     kind: Kind = .image,
 
     pub const Kind = enum { core, session, image };
 
-    /// Fills in what this cell names, before its id has escaped. The owner is
+    /// Fills in what this cell points to, before its id has escaped. The owner is
     /// stored before the scope, so a reader that can see the scope can already
     /// see what to acquire before touching it.
     pub fn publishOwned(self: *ScopeCell, scope: *Scope, owner: ?*ImageAnchor) void {
@@ -1041,7 +1050,7 @@ pub const ScopeCell = struct {
         return self.scope.load(.acquire);
     }
 
-    /// Marks the cell as naming nothing. The `Env` owns every cell and frees
+    /// Marks the cell as pointing to nothing. The `Env` owns every cell and frees
     /// them together at teardown, the one point at which no reader exists.
     pub fn retire(self: *ScopeCell) void {
         self.scope.store(null, .release);
@@ -1158,7 +1167,7 @@ const ScopeIndex = Directory(ScopeId, ScopeCell);
 
 /// A locals operation the reader lowered `|...|` into carries its count or
 /// index in the link field with this flag set: one form per bind, read, or
-/// drop. It names no root. Scope ids stay below it.
+/// drop. It denotes no root. Scope ids stay below it.
 pub const local_operand_flag: u32 = 1 << 30;
 
 /// See `value.quote_flag`. Scope ids stay below it. A locals operation carries
@@ -1187,7 +1196,7 @@ pub fn localOperand(raw: u32) ?u32 {
     return raw & ~(local_operand_flag | quote_flag);
 }
 
-/// What a word's link names.
+/// What a word's link denotes.
 pub const WordTarget = union(enum) {
     /// Built by the implementation for itself: resolves in core.
     unlinked,
@@ -1211,7 +1220,7 @@ const core_capacity_hint: usize = 2048;
 const EnvState = struct {
     host: *const heap.HostCleanup,
     /// Core's directory: filled while core is built, immutable once frozen.
-    core: NameMap,
+    core: CoreMap,
     core_frozen: bool = false,
     core_cell: ScopeCell,
     session_cell: ScopeCell,
@@ -1227,9 +1236,9 @@ const EnvState = struct {
         // table is a bootstrap defect rather than a runtime condition.
         if (self.core.count() * 2 >= self.core.slots.len) return error.OutOfMemory;
         var lookup = self.core.rawLookup(name);
-        const existing = poll.drive(?Entry, &lookup, .{});
+        const existing = poll.drive(?*Definition, &lookup, .{});
         if (existing != null) return error.Duplicate;
-        var put = self.core.putCursor(name, .{ .definition = definition });
+        var put = self.core.putCursor(name, definition);
         _ = poll.drive(bool, &put, .{});
     }
 };
@@ -1248,7 +1257,7 @@ pub const Env = enum(usize) {
         const allocator = host.allocator();
         const locals_words = try intern.LocalsWords.mint();
         const idiom_names = try idioms.Names.mint();
-        var core_init = NameMap.initCursor(allocator, core_capacity_hint);
+        var core_init = CoreMap.initCursor(allocator, core_capacity_hint);
         errdefer core_init.deinit();
         const core = while (true) switch (try core_init.advance()) {
             .pending => {},
@@ -1272,8 +1281,8 @@ pub const Env = enum(usize) {
             backing.core.deinit();
             allocator.destroy(backing);
         }
-        // Core and the session need real ids: a word linked to either names
-        // it, and id zero would mean "unscoped".
+        // Core and the session need real ids: a word linked to either refers
+        // to it, and id zero would mean "unscoped".
         backing.core_cell.id = try backing.scopes.register(allocator, &backing.core_cell);
         backing.session_cell.id = try backing.scopes.register(allocator, &backing.session_cell);
         return @fromBackingInt(@intCast(@intFromPtr(backing)));
@@ -1286,10 +1295,7 @@ pub const Env = enum(usize) {
         var entries = backing.core.rawEntries();
         while (true) switch (entries.advance()) {
             .pending => {},
-            .item => |entry| switch (entry.value) {
-                .definition => |definition| definition.retireStatic(releases),
-                .alias => {},
-            },
+            .item => |entry| entry.value.retireStatic(releases),
             .complete => break,
         };
         // Drain completely before freeing: a retiring definition may release
@@ -1327,7 +1333,7 @@ pub const Env = enum(usize) {
         return heap.hostDomain(self.privateState().host);
     }
 
-    /// Links words written into the root `root` names.
+    /// Links words written into the root `root` identifies.
     pub fn linker(_: *const Env, root: ScopeId) SymbolLinker {
         return .{ .root = root };
     }
@@ -1376,7 +1382,7 @@ pub const Env = enum(usize) {
         return cell;
     }
 
-    /// What a word's root id names right now.
+    /// What a word's root id identifies right now.
     pub fn scopeOf(self: *const Env, id: ScopeId) ScopeResolution {
         if (id == .none) return .unscoped;
         const cell = self.privateState().scopes.get(id) orelse return .retired;
@@ -1389,7 +1395,7 @@ pub const Env = enum(usize) {
 
     /// One lookup in core's directory. Core is immutable once frozen, and
     /// written only by the bootstrap fiber before then.
-    pub fn coreLookup(self: *const Env, name: intern.BindingName) NameMap.RawLookupCursor {
+    pub fn coreLookup(self: *const Env, name: intern.BindingName) CoreMap.RawLookupCursor {
         return self.privateState().core.rawLookup(name);
     }
 
@@ -1400,15 +1406,12 @@ pub const Env = enum(usize) {
         var cursor = self.coreLookup(name);
         while (true) switch (cursor.advance()) {
             .pending => {},
-            .complete => |found| return if (found) |entry| switch (entry) {
-                .definition => |definition| definition.visibility == .public,
-                .alias => |alias| alias.visibility == .public,
-            } else false,
+            .complete => |found| return if (found) |definition| definition.visibility == .public else false,
         };
     }
 
     /// Core's names, for enumeration.
-    pub fn coreEntries(self: *const Env) NameMap.RawEntryCursor {
+    pub fn coreEntries(self: *const Env) CoreMap.RawEntryCursor {
         return self.privateState().core.rawEntries();
     }
 

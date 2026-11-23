@@ -1,8 +1,8 @@
 //! Session-owned filesystem authority behind named root directory handles.
 //!
-//! A `Config` names directories once, at Session construction; every
+//! A `Config` declares directories once, at Session construction; every
 //! later operation is descriptor-relative to the retained handle for the root
-//! an ECL program names by symbol. The resolver walks one component per step
+//! an ECL program selects by symbol. The resolver walks one component per step
 //! with `O_NOFOLLOW`, splices symlink targets into its own bounded input, and
 //! keeps a handle stack anchored at the root so a relative `..` can pop only
 //! within the capability. No path string is ever turned back into an absolute
@@ -73,7 +73,13 @@ pub const FilesystemOwner = struct {
     io: std.Io,
     roots: []OwnedRoot,
     limits: Limits,
-    live: std.atomic.Value(usize) = .init(0),
+    /// Guards `live` and the admission queue.
+    mutex: std.Io.Mutex = .init,
+    /// Slots held by admitted operations, including ones handed to a queued
+    /// operation that has not yet resumed.
+    live: usize = 0,
+    queue_first: ?*Admission = null,
+    queue_last: ?*Admission = null,
     directory_issuer: *@import("resource_issuer.zig").Identity,
 
     pub fn init(
@@ -142,7 +148,7 @@ pub const FilesystemOwner = struct {
 
     pub fn deinit(self: *FilesystemOwner) void {
         self.directory_issuer.release();
-        std.debug.assert(self.live.load(.acquire) == 0);
+        std.debug.assert(self.live == 0 and self.queue_first == null);
         for (self.roots) |*root| {
             root.dir.close(self.io);
             self.host.allocator().free(root.name);
@@ -155,20 +161,40 @@ pub const FilesystemOwner = struct {
         return @ptrCast(self);
     }
 
-    fn reserveLive(self: *FilesystemOwner) bool {
-        var observed = self.live.load(.acquire);
-        while (observed < self.limits.max_live_operations) {
-            if (self.live.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |actual|
-                observed = actual
-            else
-                return true;
+    /// A newcomer takes a free slot only when nobody is queued, so a slot
+    /// freed while others wait cannot be overtaken.
+    fn admitLocked(self: *FilesystemOwner, request: *Admission) void {
+        if (self.queue_first == null and self.live < self.limits.max_live_operations) {
+            self.live += 1;
+            request.state = .admitted;
+            return;
         }
-        return false;
+        request.state = .queued;
+        request.previous = self.queue_last;
+        request.next = null;
+        if (self.queue_last) |last| last.next = request else self.queue_first = request;
+        self.queue_last = request;
     }
 
-    fn releaseLive(self: *FilesystemOwner) void {
-        const old = self.live.fetchSub(1, .acq_rel);
-        std.debug.assert(old != 0);
+    fn unlinkLocked(self: *FilesystemOwner, request: *Admission) void {
+        if (request.previous) |previous| previous.next = request.next else self.queue_first = request.next;
+        if (request.next) |next| next.previous = request.previous else self.queue_last = request.previous;
+        request.previous = null;
+        request.next = null;
+    }
+
+    /// A released slot passes to the oldest queued request without becoming
+    /// free. The wake runs under the lock, as `external.WaitList` does:
+    /// delivery never cancels a registration inline.
+    fn releaseSlotLocked(self: *FilesystemOwner) void {
+        const head = self.queue_first orelse {
+            std.debug.assert(self.live != 0);
+            self.live -= 1;
+            return;
+        };
+        self.unlinkLocked(head);
+        head.state = .admitted;
+        if (head.waiter) |target| target.wake(.ready);
     }
 };
 
@@ -254,12 +280,6 @@ pub fn findRoot(access_value: *external.FilesystemAccess, symbol: u32) ?*RootHan
 pub const RootSelection = union(enum) {
     named: *RootHandle,
     resource: *@import("directory_resource.zig").Lease,
-    pub fn reservation(self: RootSelection) ?*Reservation {
-        return switch (self) {
-            .named => null,
-            .resource => |lease| lease.reservation(),
-        };
-    }
     pub fn dir(self: RootSelection) std.Io.Dir {
         return switch (self) {
             .named => |root| root.dir(),
@@ -289,94 +309,82 @@ pub fn hostIo(access_value: *external.FilesystemAccess) std.Io {
     return ownerFromAccess(access_value).io;
 }
 
-/// A live-operation slot is a consuming capability released exactly once
-/// after the operation's terminal cleanup.
-pub const OperationSlot = struct {
-    state: union(enum) { owned: *FilesystemOwner, borrowed: *Reservation, pair: struct { first: *Reservation, second: *Reservation }, released },
+/// One operation's place in the Session's live-operation limit. Requests past
+/// the limit wait in arrival order, and a released slot passes directly to the
+/// oldest waiter. Only host work that runs to completion without waiting on
+/// another operation holds a slot, so a holder never waits on a waiter and the
+/// queue cannot deadlock.
+///
+/// The queue links into this value, so it must stay at one address from its
+/// first `poll` until `release`. It is its own readiness source for the parked
+/// task: the scheduler ends that registration while delivering the wake or
+/// cancellation, before the holder can resume or retire.
+pub const Admission = struct {
+    owner: ?*FilesystemOwner = null,
+    state: enum { idle, queued, admitted } = .idle,
+    previous: ?*Admission = null,
+    next: ?*Admission = null,
+    waiter: ?external.WakeTarget = null,
 
-    pub fn release(self: *OperationSlot) void {
-        const state = self.state;
-        self.state = .released;
-        switch (state) {
-            .owned => |owner| owner.releaseLive(),
-            .borrowed => |reservation| reservation.releaseClaim(),
-            .pair => |pair| {
-                pair.first.releaseClaim();
-                pair.second.releaseClaim();
-            },
-            .released => {},
-        }
-    }
-};
-
-pub fn reserveOperation(access_value: *external.FilesystemAccess) ?OperationSlot {
-    const owner = ownerFromAccess(access_value);
-    if (!owner.reserveLive()) return null;
-    return .{ .state = .{ .owned = owner } };
-}
-
-/// One retained admission slot shared by derived roots. A claim owns a
-/// reference independently of the root lease that selected it.
-pub const Reservation = opaque {
-    const State = struct {
-        owner: *FilesystemOwner,
-        refs: std.atomic.Value(usize) = .init(1),
-        busy: std.atomic.Value(bool) = .init(false),
+    pub const Poll = union(enum) {
+        admitted,
+        /// Park on this source, then poll again.
+        queued: external.ReadinessSource,
     };
-    fn state(self: *Reservation) *State {
-        return @ptrCast(@alignCast(self));
+
+    /// Requests admission on first call and observes the request afterwards.
+    pub fn poll(self: *Admission, access_value: *external.FilesystemAccess) Poll {
+        const owner = ownerFromAccess(access_value);
+        std.debug.assert(self.owner == null or self.owner == owner);
+        self.owner = owner;
+        std.Io.Threaded.mutexLockUncancelable(&owner.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owner.mutex);
+        if (self.state == .idle) owner.admitLocked(self);
+        return switch (self.state) {
+            .idle => unreachable,
+            .admitted => .admitted,
+            .queued => .{ .queued = external.readinessSource(Admission, self, 0) },
+        };
     }
-    pub fn create(access: *external.FilesystemAccess) error{ OutOfMemory, Limit }!*Reservation {
-        const owner = ownerFromAccess(access);
-        if (!owner.reserveLive()) return error.Limit;
-        errdefer owner.releaseLive();
-        const owned = try owner.host.allocator().create(State);
-        owned.* = .{ .owner = owner };
-        return @ptrCast(owned);
+
+    /// Leaves the queue or hands the slot on. Idempotent; every holder calls
+    /// it from terminal cleanup, and earlier when it stops needing the slot.
+    pub fn release(self: *Admission) void {
+        const owner = self.owner orelse return;
+        std.Io.Threaded.mutexLockUncancelable(&owner.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owner.mutex);
+        std.debug.assert(self.waiter == null);
+        switch (self.state) {
+            .idle => {},
+            .queued => owner.unlinkLocked(self),
+            .admitted => owner.releaseSlotLocked(),
+        }
+        self.state = .idle;
     }
-    pub fn retain(self: *Reservation) void {
-        _ = self.state().refs.fetchAdd(1, .monotonic);
+
+    pub fn retainReadiness(_: *Admission) void {}
+    pub fn releaseReadiness(_: *Admission) void {}
+
+    pub fn registerReadiness(self: *Admission, _: u64, target: external.WakeTarget) external.RegisterError!external.RegisterResult {
+        const owner = self.owner.?;
+        std.Io.Threaded.mutexLockUncancelable(&owner.mutex);
+        defer std.Io.Threaded.mutexUnlock(&owner.mutex);
+        if (self.state == .admitted) return .{ .ready = .ready };
+        std.debug.assert(self.state == .queued and self.waiter == null);
+        target.retain();
+        self.waiter = target;
+        return .{ .registered = external.readinessRegistration(Admission, self) };
     }
-    pub fn release(self: *Reservation) void {
-        const owned = self.state();
-        if (owned.refs.fetchSub(1, .acq_rel) != 1) return;
-        const owner = owned.owner;
-        owner.releaseLive();
-        owner.host.allocator().destroy(owned);
-    }
-    pub fn claim(self: *Reservation) ?OperationSlot {
-        if (self.state().busy.swap(true, .acq_rel)) return null;
-        self.retain();
-        return .{ .state = .{ .borrowed = self } };
-    }
-    fn releaseClaim(self: *Reservation) void {
-        self.state().busy.store(false, .release);
-        self.release();
+
+    pub fn cancelReadiness(self: *Admission) void {
+        const owner = self.owner.?;
+        std.Io.Threaded.mutexLockUncancelable(&owner.mutex);
+        const target = self.waiter;
+        self.waiter = null;
+        std.Io.Threaded.mutexUnlock(&owner.mutex);
+        if (target) |waiter| waiter.release();
     }
 };
-
-pub fn reserveSelected(access: *external.FilesystemAccess, root: RootSelection) ?OperationSlot {
-    if (root.reservation()) |reservation| return reservation.claim();
-    return reserveOperation(access);
-}
-
-pub fn reservePair(access: *external.FilesystemAccess, first: RootSelection, second: ?RootSelection) ?OperationSlot {
-    const a = first.reservation();
-    const b = if (second) |root| root.reservation() else null;
-    if (a) |left| {
-        var claim = left.claim() orelse return null;
-        if (b) |right| if (right != left) {
-            _ = right.claim() orelse {
-                claim.release();
-                return null;
-            };
-            return .{ .state = .{ .pair = .{ .first = left, .second = right } } };
-        };
-        return claim;
-    }
-    if (b) |right| return right.claim();
-    return reserveOperation(access);
-}
 
 /// The closed portable failure vocabulary. Host error names never reach a
 /// program as data; every syscall failure maps here exactly once.
@@ -476,7 +484,7 @@ pub fn reasonForError(err: anyerror) Reason {
 
 pub const PathClass = enum { root, entry };
 
-/// The canonical `fs` path grammar. `.` names the root itself; every other
+/// The canonical `fs` path grammar. `.` denotes the root itself; every other
 /// path is one or more nonempty components separated by exactly one `/`, with
 /// no `.`, `..`, NUL, leading, trailing, or repeated separators. Normalization
 /// is never applied here: a caller normalizes first and accepts the result
@@ -533,7 +541,7 @@ pub const Resolved = union(enum) {
 };
 
 pub const ResolveMode = enum {
-    /// Follow a final symlink within the root; the result names the object
+    /// Follow a final symlink within the root; the result identifies the object
     /// the link chain reaches.
     follow_final,
     /// Return the final entry unfollowed, so the operation acts on the link.
@@ -1264,7 +1272,7 @@ test "filesystem config rejects relative roots, duplicate names, and zero limits
     try std.testing.expect(findRoot(owner.access(), try intern.intern("other")) == null);
 }
 
-test "live-operation reservations are exhausted and released exactly" {
+test "admission queues in arrival order and hands released slots to the oldest waiter" {
     var cleanup = heap.HostOwner.init(std.testing.allocator);
     defer cleanup.cleanup().drain();
     var scratch = std.testing.tmpDir(.{});
@@ -1273,18 +1281,44 @@ test "live-operation reservations are exhausted and released exactly" {
     defer std.testing.allocator.free(path);
     var owner = try FilesystemOwner.init(cleanup.cleanup(), std.testing.io, .{
         .roots = &.{.{ .name = "cwd", .absolute_path = path }},
-        .limits = .{ .max_live_operations = 2 },
+        .limits = .{ .max_live_operations = 1 },
     });
     defer owner.deinit();
-    var first = reserveOperation(owner.access()).?;
-    var second = reserveOperation(owner.access()).?;
-    try std.testing.expect(reserveOperation(owner.access()) == null);
+    const Expect = struct {
+        fn admitted(request: *Admission, access_value: *external.FilesystemAccess) !void {
+            try std.testing.expect(request.poll(access_value) == .admitted);
+        }
+        fn queued(request: *Admission, access_value: *external.FilesystemAccess) !void {
+            switch (request.poll(access_value)) {
+                .admitted => return error.TestUnexpectedResult,
+                .queued => |source| {
+                    var owned = source;
+                    owned.deinit();
+                },
+            }
+        }
+    };
+    const access_value = owner.access();
+    var first: Admission = .{};
+    var second: Admission = .{};
+    var third: Admission = .{};
+    var late: Admission = .{};
+    try Expect.admitted(&first, access_value);
+    try Expect.queued(&second, access_value);
+    try Expect.queued(&third, access_value);
     first.release();
     first.release();
-    var third = reserveOperation(owner.access()).?;
-    try std.testing.expect(reserveOperation(owner.access()) == null);
-    second.release();
+    try Expect.admitted(&second, access_value);
+    try Expect.queued(&third, access_value);
+    try Expect.queued(&late, access_value);
     third.release();
+    try Expect.queued(&late, access_value);
+    second.release();
+    try Expect.admitted(&late, access_value);
+    late.release();
+    var fresh: Admission = .{};
+    try Expect.admitted(&fresh, access_value);
+    fresh.release();
 }
 
 test "resolver confines symlink targets to the root" {

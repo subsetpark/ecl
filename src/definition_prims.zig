@@ -29,13 +29,12 @@ fn bind(comptime mode: Mode) env.PrimitiveImpl {
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "def", .primitive = bind(.def), .effect = "... body name --", .doc = "An optional annotation may sit beneath the body. Bind a quotation to a public word, with optional effect and documentation metadata. See [Definition annotations](SPEC.md#definition-annotations) for the annotation forms and validation; see [Modules](SPEC.md#modules) for module-context requirements." },
-        .{ .name = "defp", .primitive = bind(.defp), .effect = "... body name --", .doc = "An optional annotation may sit beneath the body. Bind a private module word, with optional effect and documentation metadata. A top-level `defp` is an error." },
-        .{ .name = "test", .primitive = bind(.test_declaration), .effect = "... body name --", .doc = "An optional annotation may sit beneath the body. Declare a first-class test in the separate catalog of the exact direct module construction body. Accepts the same optional effect and documentation annotation forms as `def`. Tests may share names with words and are absent from application lookup, exports, imports, reflection, and module invocation. Top-level, nested-quotation, and child-Unit use is `` `domain ``. Application Sessions validate and discard declarations without retaining bodies or checking duplicate test names; Test Sessions retain them and reject duplicate names." },
-        .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of a resolved binding. Missing documentation is `` `domain ``." },
-        .{ .name = "effect", .primitive = declaredEffect, .effect = "name -- annotation", .doc = "Return the declared stack effect of a resolved binding as an annotation such as `(x y -- z)`, or `()` when it declares none." },
-        .{ .name = "which", .primitive = which, .effect = "name --", .doc = "Print where a name resolves (module, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition." },
-        .{ .name = "see", .primitive = see, .effect = "name --", .doc = "Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and captured body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of the source they were read from, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors." },
+        .{ .name = "def", .primitive = bind(.def), .effect = "... body name --", .doc = "Bind `name` to `body` in the current scope. Optionally, consume an annotation quotation below the body as binding metadata." },
+        .{ .name = "defp", .primitive = bind(.defp), .effect = "... body name --", .doc = "Bind `name` to `body` in the current scope. This is only valid in a module body, and prevents the binding from being accessed outside of the module image. Optionally, consume an annotation quotation below the body as binding metadata." },
+        .{ .name = "test", .primitive = bind(.test_declaration), .effect = "... body name --", .doc = "Create a test binding of `name` to `body` in module scope. The binding is only visible when run in a test session. A test descriptor for the program will be returned when `tests` is run inside the test session." },
+        .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of `name`." },
+        .{ .name = "effect", .primitive = declaredEffect, .effect = "name -- annotation", .doc = "Return the stack effect of `name`, or `()`." },
+        .{ .name = "see", .primitive = see, .effect = "name --", .doc = "Print `name`'s combined annotation, when present, followed by its body." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -634,7 +633,7 @@ fn declaredEffect(fiber: *Fiber) MachineError!void {
 }
 
 /// Resolve a binding and yield its declared effect: the validated annotation
-/// words `which` and `see` print, shared rather than copied. Effects are
+/// words `see` prints, shared rather than copied. Effects are
 /// optional, so a binding without one yields `()`, which no declared effect
 /// can equal: even `( -- )` holds its `--`.
 const EffectDriver = struct {
@@ -655,200 +654,6 @@ const EffectDriver = struct {
                     return .{ .output = try list.fromValues(fiber.allocator, &.{}) };
                 declared.retain();
                 return .{ .output = .{ .list = declared.header() } };
-            },
-        };
-        return .stepped;
-    }
-};
-
-fn which(fiber: *Fiber) MachineError!void {
-    const requested = try fiber.popWord();
-    try fiber.startDriver(WhichDriver.init(fiber, requested));
-}
-
-const WhichDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    requested: value.Symbol,
-    actions: heap.Owned(reflection.ActionPlan),
-    state: heap.Owned(State),
-
-    const OwnedContext = struct {
-        resolved: heap.Owned(machine.Reflected),
-        /// The core binding the resolved definition shadows, if any.
-        shadows: ?intern.TraceWord,
-
-        fn deinit(
-            self: *OwnedContext,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-        ) void {
-            self.resolved.deinit(releases, allocator);
-        }
-    };
-    const State = union(enum) {
-        resolve: heap.Owned(machine.ExplicitLookup),
-        base_actions: struct {
-            context: OwnedContext,
-            step: u8,
-            requirement_index: usize,
-            requirement_separator: bool,
-        },
-        shadow_actions: struct {
-            context: OwnedContext,
-            index: usize,
-            emit_name: bool,
-        },
-        render: OwnedContext,
-        write: struct {
-            context: OwnedContext,
-            rendered: heap.Owned([]u8),
-        },
-
-        pub fn deinit(
-            self: *State,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-        ) void {
-            switch (self.*) {
-                .resolve => |*cursor| cursor.deinit(releases, allocator),
-                .base_actions => |*base| base.context.deinit(releases, allocator),
-                .shadow_actions => |*shadows| shadows.context.deinit(releases, allocator),
-                .render => |*context| context.deinit(releases, allocator),
-                .write => |*write| {
-                    write.rendered.deinit(releases, allocator);
-                    write.context.deinit(releases, allocator);
-                },
-            }
-        }
-    };
-
-    fn init(fiber: *Fiber, requested: value.Symbol) WhichDriver {
-        return .{
-            .requested = requested,
-            .actions = .init(reflection.ActionPlan.init(fiber.allocator)),
-            .state = .init(.{ .resolve = .init(
-                machine.ExplicitLookup.init(fiber, requested),
-            ) }),
-        };
-    }
-    fn add(self: *WhichDriver, action: reflection.Action) error{OutOfMemory}!void {
-        try self.actions.borrowMut().add(action);
-    }
-    fn advanceBaseActions(
-        self: *WhichDriver,
-        base: *@FieldType(State, "base_actions"),
-    ) error{OutOfMemory}!void {
-        const resolved = base.context.resolved.borrow();
-        switch (base.step) {
-            0 => try self.add(.{ .name = self.requested.name }),
-            1 => try self.add(.{ .bytes = " -> " }),
-            2 => try self.add(.{ .trace_word = resolved.trace_word }),
-            3 => try self.add(.{ .bytes = " " }),
-            4 => try self.add(.{ .bytes = switch (resolved.definition.code()) {
-                .source => "def",
-                .builtin => "primitive",
-                .native => "native",
-            } }),
-            5 => try self.add(.{ .bytes = " " }),
-            6 => try self.add(.{ .bytes = @tagName(resolved.definition.visibility) }),
-            7 => if (resolved.home != null)
-                try self.add(.{ .bytes = " generation " }),
-            8 => if (resolved.home) |home|
-                try self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } }),
-            9 => if (resolved.definition.effect != null) try self.add(.{ .bytes = " " }),
-            10 => if (resolved.definition.effect) |effect|
-                try self.add(.{ .value = .{ .list = effect.header() } }),
-            11 => switch (resolved.definition.code()) {
-                .native => try self.add(.{ .bytes = " requires " }),
-                else => {},
-            },
-            12 => {
-                const requirements = switch (resolved.definition.code()) {
-                    .native => |callable| callable.instance.requirements(),
-                    else => &.{},
-                };
-                if (base.requirement_index == requirements.len) {
-                    const context = base.context;
-                    self.state.borrowMut().* = .{ .shadow_actions = .{
-                        .context = context,
-                        .index = 0,
-                        .emit_name = false,
-                    } };
-                    return;
-                }
-                if (base.requirement_index != 0 and !base.requirement_separator) {
-                    try self.add(.{ .bytes = ", " });
-                    base.requirement_separator = true;
-                    return;
-                }
-                try self.add(.{ .bytes = native_module.capabilityName(
-                    requirements[base.requirement_index].id,
-                ) });
-                base.requirement_index += 1;
-                base.requirement_separator = false;
-                return;
-            },
-            else => unreachable,
-        }
-        base.step += 1;
-    }
-    pub fn advance(fiber: *Fiber, self: *WhichDriver) MachineError!machine.WorkProgress {
-        const work = fiber.workBudget();
-        while (work.spend()) switch (self.state.borrowMut().*) {
-            .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
-                .pending => {},
-                .complete => |outcome| {
-                    const resolved = switch (try resolveForReflection(
-                        fiber,
-                        self,
-                        self.requested,
-                        outcome,
-                    )) {
-                        .retry => |progress| return progress,
-                        .resolved => |resolution| resolution,
-                    };
-                    cursor.deinit(fiber.releases, fiber.allocator);
-                    const shadows = resolved.shadows(fiber.environment, self.requested.name);
-                    self.state.borrowMut().* = .{ .base_actions = .{
-                        .context = .{
-                            .resolved = .init(resolved),
-                            .shadows = shadows,
-                        },
-                        .step = 0,
-                        .requirement_index = 0,
-                        .requirement_separator = false,
-                    } };
-                },
-            },
-            .base_actions => |*base| try self.advanceBaseActions(base),
-            .shadow_actions => |*shadows| {
-                if (shadows.index == @intFromBool(shadows.context.shadows != null)) {
-                    try self.add(.{ .bytes = "\n" });
-                    self.actions.borrowMut().seal();
-                    const context = shadows.context;
-                    self.state.borrowMut().* = .{ .render = context };
-                } else if (!shadows.emit_name) {
-                    try self.add(.{ .bytes = "; shadows " });
-                    shadows.emit_name = true;
-                } else {
-                    try self.add(.{ .trace_word = shadows.context.shadows.? });
-                    shadows.index += 1;
-                    shadows.emit_name = false;
-                }
-            },
-            .render => |*context| switch (try self.actions.borrowMut().advance(work)) {
-                .pending => {},
-                .complete => |bytes| {
-                    const moved = context.*;
-                    self.state.borrowMut().* = .{ .write = .{
-                        .context = moved,
-                        .rendered = .init(bytes),
-                    } };
-                },
-            },
-            .write => |*write| {
-                fiber.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(fiber);
-                return .completed;
             },
         };
         return .stepped;

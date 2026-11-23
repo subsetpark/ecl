@@ -364,7 +364,6 @@ pub fn build(b: *std.Build) void {
             .install_subdir = "share/ecl/apps/pkg/src",
         });
         b.installFile("apps/pkg/main.ecl", "share/ecl/apps/pkg/main.ecl");
-        b.installFile("apps/pkg/application.json", "share/ecl/apps/pkg/application.json");
         b.installFile("apps/pkg/installed.modules", "share/ecl/apps/pkg/ecl.modules");
         b.getInstallStep().dependOn(native_build.installExtension(b, extension, "share/ecl/apps/pkg"));
         const pkg_git_acceptance = addCheckCommand(b, "pkg git acceptance", .always);
@@ -506,14 +505,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pkg_tests.step);
     // Full generation verification repeatedly inspects sealed archives. Keep this
     // public ECL acceptance outside the fast precommit policy-test tier.
-    // Ported format and SemVer property corpora retain their full-suite budget.
-    const run_pkg_contracts = addCheckCommand(b, "ecl pkg contracts", .always);
-    run_pkg_contracts.addArtifactArg(exe);
-    run_pkg_contracts.addArg("--module-map");
-    run_pkg_contracts.addFileArg(b.path("apps/pkg/test/contracts/ecl.modules"));
-    run_pkg_contracts.addArg("test");
-    b.step("test-pkg-contracts", "Run the package manifest, version, and solver contract corpora in ECL").dependOn(&run_pkg_contracts.step);
-    test_step.dependOn(&run_pkg_contracts.step);
     const run_pkg_generations = addCheckCommand(b, "ecl pkg generations", .always);
     run_pkg_generations.addArtifactArg(exe);
     run_pkg_generations.addArg("--module-map");
@@ -949,9 +940,9 @@ pub fn build(b: *std.Build) void {
             "env: retirement claims coalesce descendant wakes and republish availability",
             "registry: concurrent commits are linearized without lost names",
             "native:",
-            "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
-            "archive: unpack-tgz uses directory leases inside staged generations",
-            "archive: open-tgz exposes metadata and bounded member contents without package rules",
+            "tar: unpack preserves existing destinations and has one concurrent winner",
+            "tar: unpack uses directory leases inside staged generations",
+            "tar: read returns members as values without package rules",
             "pkg store: existing immutable entry wins concurrent install",
             "pkg store: concurrent catalog repairs publish complete metadata",
             "process:",
@@ -969,14 +960,14 @@ pub fn build(b: *std.Build) void {
             "fs: directory resources own confined descriptors and close with their scope",
             "fs: concurrent creates have exactly one winner and no staging residue",
             "fs: cancellation before commit leaves the destination unchanged",
-            "fs: streaming publication and reservations enforce total limits and rollback",
+            "fs: streaming publication enforces total limits and rollback",
             "fs: directory kinds and child errors retain public type precedence and context",
             "fs: concurrent symlink replacement cannot escape retained roots",
-            "fs: direct reservations follow derived roots and pair admission",
+            "fs: open writers and lock waiters hold no live-operation slot",
             "fs: completed operations release admission before the next call",
             "fs: direct writers serialize chunks and preserve validation before admission",
             "fs: direct writer finalization joins admitted chunks",
-            "archive: direct extraction preserves stream limits and joined rollback",
+            "tar: extraction applies the filesystem transfer limit and rolls back",
         },
     });
     tsan_tests.linkage = runtime_linkage;
@@ -1165,7 +1156,7 @@ pub fn build(b: *std.Build) void {
             "tests.unit_boundary_test.",
             "tests.module_body_test.",
             "tests.stdlib_test.",
-            "tests.archive_test.",
+            "tests.tar_test.",
             "tests.random_test.",
             "tests.hostio_test.",
             // Filesystem words and the pure path module. Every
@@ -1186,6 +1177,9 @@ pub fn build(b: *std.Build) void {
             // sleeps, and there is no fixture process.
             "tests.http_server_test.",
             "byte_ring.test.",
+            // Filesystem owner, resolver, and admission queue units over a
+            // temporary directory; no Session, no sleeps.
+            "filesystem_port.test.",
             // Kind conversions and the reserved `core.` qualifier. Every case
             // is a handful of scalar words through the public Session and the
             // whole file costs well under a second.
@@ -1367,7 +1361,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(analysis_step);
     precommit_step.dependOn(native_negative_step);
     precommit_step.dependOn(&run_precommit_tests.step);
-    // A small isolated CLI fixture proves descriptor, cwd, argument, and stream
+    // A small isolated CLI fixture proves application, cwd, argument, and stream
     // behavior without adding an external service or an ambient input stream.
     precommit_step.dependOn(&cli_acceptance.step);
     precommit_step.dependOn(&run_pkg_tests.step);

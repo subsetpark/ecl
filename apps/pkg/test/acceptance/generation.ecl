@@ -12,7 +12,7 @@
 
  ### defp manifest
  (-- manifest : "Describe a project with one exact archive dependency.")
- ({format 2 name "project" version "1.0.0" sources [] exports []}
+ ({format 2 name "project" version "1.0.0" sources []}
   `requires {} "sample"
   {package "sample" version "1.0.0" source
    {kind archive url "https://fixture.invalid/sample.tgz"}}
@@ -37,7 +37,7 @@
   project `directory at "ecl.pkg" manifest str fs.create-text
   project `directory at "ecl.modules" "broken" fs.create-text
   project pkg.project.lock
-  project started project pair (build) cat call port.close) `exercise defp
+  project started project pair (build) cat apply port.close) `exercise defp
 
  ### defp build
  (work project -- : "Install one exact dependency without any network or shared cache.")
@@ -58,7 +58,7 @@
   [{kind ecl path "src/api.ecl" exports ["sample.api"]}] equal
   work lock pkg.resolution.write pkg.install.activate
   project pkg.install.verify
-  project started project pair (reproduce) cat call
+  project started project pair (reproduce) cat apply
   project rejected-map
   project recover-publication
   project work `location at check-damage) `build defp
@@ -79,7 +79,7 @@
  (project -- : "Reject a conflicting local declaration before publishing a candidate generation.")
  (|project|
   project `directory at "collision.ecl" "() `sample.api @defm" fs.publish-text
-  project started project pair (reject-work) cat call) `rejected-map defp
+  project started project pair (reject-work) cat apply) `rejected-map defp
 
  ### defp reject-work
  (work project -- : "Join failed staging and retain both active root files exactly.")
@@ -97,7 +97,7 @@
  ### defp recover-publication
  (project -- : "Prepare a different valid graph and interrupt after publishing its root lock.")
  (|project|
-  project started project pair (recover-work) cat call) `recover-publication defp
+  project started project pair (recover-work) cat apply) `recover-publication defp
 
  ### defp recover-work
  (work project -- :
@@ -105,7 +105,7 @@
  (|work project|
   project `directory at "ecl.modules" fs.read-text
   work manifest `requires {} put 1 pkg.install.selection
-  work project 3 pack (interrupt-work) cat call) `recover-work defp
+  work project 3 pack (interrupt-work) cat apply) `recover-work defp
 
  ### defp interrupt-work
  (previous-map next-lock work project -- :
@@ -142,7 +142,7 @@
  (|path|
   `cwd path fs.mkdir
   {} `path path pkg.project.absolute put `directory path pkg.project.absolute fs.open-dir put
-  path pair (run-project) cat call) `run-at defp
+  path pair (run-project) cat apply) `run-at defp
 
  ### defp run-project
  (project path -- : "Clean up both successful and failed test invocations.")
@@ -157,7 +157,6 @@
  test
 
  ### def run
- (-- : "Require the generation acceptance registration before invoking the built-in test runner.")
- (tests len 1 = {kind user msg "generation acceptance test was not registered"} assert
-  test.default.run) `run def
+ (-- : "Run only the generation acceptance test; package modules carry their own tests.")
+ (`pkg.test.generation pkg.test.support.run-module) `run def
 ) `pkg.test.generation @defm

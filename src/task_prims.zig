@@ -16,8 +16,8 @@ const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "@spawn", .primitive = spawn, .effect = "quotation -- task", .doc = "Run the quotation concurrently on an empty child stack. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency)." },
-        .{ .name = "@give", .primitive = give, .effect = "ports quotation -- task", .doc = "Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The child stack starts with the ports, in list order. \n\nIncluding a port in `ports` which isn't owned by the calling unit is `` `domain ``, as is giving a closed port or the same port twice. At most 16 ports may be given at once; more is `` `domain ``. The transfer is all-or-nothing: on any refusal, no port changes owner.\n\nOwnership doesn't determine what unit(s) a port is accessible from, but which unit controls its lifetime. See [Concurrency](SPEC.md#concurrency)." },
+        .{ .name = "@spawn", .primitive = spawn, .effect = "quotation -- task", .doc = "Create a new task and evaluate `quotation`." },
+        .{ .name = "@give", .primitive = give, .effect = "ports quotation -- task", .doc = "Create a new task and evaluate `quotation`. The tasks's stack will be seeded with the contents of `ports`. Every port in `ports` additionally has its ownership transferred to the new task; the port's lifetime is determined by the lifetime of the task that owns it." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -26,7 +26,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 pub const doc =
     \\Task handles are created by the core unit constructors `@spawn` and `@give`. A handle
     \\observes a task's lifetime and result. `task.address` derives the task's address, which
-    \\names only its mailbox, and `task.self` is the executing task's own. Use `(task.await) each`
+    \\reaches only its mailbox, and `task.self` is the executing task's own. Use `(task.await) each`
     \\to collect results in input order without cancelling siblings or re-raising task errors.
     \\
     \\Request and reply is a composition over `send` and `receive`: spawn a helper task, send its
@@ -35,17 +35,17 @@ pub const doc =
 ;
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "await", .primitive = await, .effect = "task -- result", .doc = "Park until the task completes; return its cached `{ok …}`/`{err …}` result. Idempotent. See [Concurrency](SPEC.md#concurrency)." },
-    .{ .name = "cancel", .primitive = cancel, .effect = "task --", .doc = "Request cancellation; the task's result becomes `{err {kind cancelled …}}`. No-op when already terminal." },
+    .{ .name = "await", .primitive = await, .effect = "task -- result", .doc = "Park until `task` completes; return a result value containing the completed task's stack." },
+    .{ .name = "cancel", .primitive = cancel, .effect = "task --", .doc = "Request cancellation of `task`; its result becomes `{err {kind cancelled …}}`." },
     .{ .name = "cancel-self", .primitive = cancelSelf, .effect = "--", .doc = "Request cancellation of the current task." },
-    .{ .name = "pending", .primitive = tasks, .effect = "-- tasks", .doc = "Pending descendant tasks in deterministic spawn preorder." },
-    .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "Race a nonempty all-task list; among tasks already terminal at entry the lowest index wins, otherwise the first completion." },
-    .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "`task.await` with a nonnegative int deadline; expiry returns `{err {kind timeout}}` without cancelling the task. A terminal task beats even a zero deadline. A deadline beyond any instant the scheduler clock can report is `` `overflow `` before the wait registers." },
-    .{ .name = "address", .primitive = address, .effect = "task -- address", .doc = "The address of a task's mailbox. Two addresses of one task match. An address outlives its task; after the task ends it names a closed mailbox." },
-    .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "The executing task's own address. `` `domain `` outside a task: the session root owns tasks but has no mailbox." },
-    .{ .name = "send", .primitive = send, .effect = "address value --", .doc = "Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified." },
-    .{ .name = "receive", .primitive = receive, .effect = "-- value", .doc = "Take the oldest message from the executing task's mailbox, parking until one arrives. `` `domain `` outside a task." },
-    .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "`task.receive` with a nonnegative int deadline: `{ok value}`, or `{err {kind timeout}}` when nothing arrives in time. A deadline beyond any instant the scheduler clock can report is `` `overflow ``. `` `domain `` outside a task." },
+    .{ .name = "pending", .primitive = tasks, .effect = "-- tasks", .doc = "Push all pending descendant tasks." },
+    .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "Park until the first task in `tasks` completes and return its result." },
+    .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "Await a task with a nonnegative int deadline; expiry returns `{err {kind timeout}}` without cancelling the task." },
+    .{ .name = "address", .primitive = address, .effect = "task -- address", .doc = "The address of `task`'s mailbox." },
+    .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "The address of the current task's mailbox." },
+    .{ .name = "send", .primitive = send, .effect = "address value --", .doc = "Push a value to the mailbox at `address`. Any value may be sent except one containing a task handle, which is `` `type ``. If the mailbox is full, park until a message is received from it." },
+    .{ .name = "receive", .primitive = receive, .effect = "-- value", .doc = "Pop the oldest message from the current task's mailbox, parking if the mailbox is empty." },
+    .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "`task.receive` with a nonnegative int deadline: `{ok value}`, or `{err {kind timeout}}`. " },
 };
 
 fn spawnTask(

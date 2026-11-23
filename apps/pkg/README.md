@@ -32,7 +32,7 @@ the root and every selected package, including packages with no dependencies.
 Every selection is reachable from the root, and the graph is acyclic. Sources
 remain HTTPS archives or Git repositories pinned to full commits.
 
-Changing the root's version, exports, or local source patterns does not itself
+Changing the root's version or local source patterns does not itself
 update dependencies. Changing its name or dependency declarations makes the
 lock incompatible and requires `pkg update`. When minimal version selection
 raises a dependency above a declared minimum, ordinary sync fetches the selected
@@ -49,15 +49,16 @@ bypasses this discovery and selection entirely.
 
 `pkg.resolution` owns validation, canonical serialization, compatibility, and
 sealed-manifest checks. `zig build test-pkg-app` invokes ECL's built-in test
-runner against the application's test map; package policy assertions live in
-ECL. The larger manifest, SemVer, and solver corpora run under
-`zig build test-pkg-contracts` in the full suite. Separate-process orchestration and controlled external services remain
-host integration fixtures.
+runner against the application's test map. Unit tests live in the modules whose
+logic they test, sharing the assertions in `pkg.test.support`; tests that need
+repository fixtures or write to the working directory stay under `test/`.
+Separate-process orchestration and controlled external services remain host
+integration fixtures.
 
 ## Commands and installation
 
-The distribution ships the entry script, inert application descriptor, module
-map, ECL module sources, and `git.eclmod` together beneath `share/ecl/apps/pkg/`.
+The distribution ships the entry script `main.ecl`, the module map
+`ecl.modules`, ECL module sources, and `git.eclmod` together beneath `share/ecl/apps/pkg/`.
 The entry passes ordinary process arguments to `pkg.command.main`. Application
 loading uses its own map, so project-local modules cannot replace package
 application modules and broken project runtime state does not prevent startup.
@@ -92,8 +93,8 @@ serves Git, copies checkout inputs, and launches test phases.
 
 ## Source package archives
 
-`pkg.bundle` applies package rules through `archive.open-tgz`, member metadata,
-bounded member reads, and `source.declarations`. The shared archive parser owns
+`pkg.bundle` applies package rules to the member values `gzip.decompress
+tar.read` returns and to `source.declarations`. The shared archive parser owns
 path safety, duplicate-member checks, and rejection of links and special files.
 The application requires one regular root `ecl.pkg`, rejects `.eclmod` payloads
 and reserved `.ecl-package.tgz` / `.ecl-package.catalog` control files, and limits
@@ -103,10 +104,9 @@ Manifest patterns select at most 4,096 source artifacts, each at most 16 MiB.
 `*` and `?` match bytes within a path component; `**` matches zero or more whole
 components. The application matcher uses dynamic programming through ordinary
 ECL evaluation, so pattern processing remains cancellable without exponential
-backtracking. Selected files are parsed without execution. Only literal
-top-level module declarations named by the manifest's exports enter the
-artifact map; all declared exports must occur exactly once. Other registrations
-remain file-private, including duplicate private names in different artifacts.
+backtracking. Selected files are parsed without execution. Every literal
+top-level module declaration enters the artifact map as an export; each must be
+package-owned and occur exactly once.
 Unselected regular data files are retained by installation.
 
 ## Application orchestration

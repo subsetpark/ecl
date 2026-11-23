@@ -1,7 +1,7 @@
 # Archive fixtures
 
 Each `*.tgz.hex` file is an ASCII hexadecimal encoding of the exact bytes
-passed to `archive.unpack-tgz`. Keeping the corpus textual makes malicious tar
+passed to `gzip.decompress` and `tar.unpack`. Keeping the corpus textual makes malicious tar
 headers reviewable and stable in source control.
 
 `empty.tgz.hex` contains no members, `valid.tgz.hex` contains a directory and

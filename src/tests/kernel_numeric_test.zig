@@ -429,12 +429,12 @@ test "numeric: derived comparisons, negation, remainder, and totals" {
         .{ .name = "remainder", .source = "7 3 mod -7 3 mod", .expected = "1 -1" },
         .{
             .name = "comparisons and booleans",
-            .source = "[1 2] [1 3] <> 1 2 <= 2 1 >= [0 1] [1 1] and [0 1] [1 0] or",
+            .source = "[1 2] [1 3] not= 1 2 <= 2 1 >= [0 1] [1 1] and [0 1] [1 0] or",
             .expected = "[0 1] 1 1 [0 1] [1 1]",
         },
         .{
-            .name = "symbols compare by name under = and <>, whatever their occurrence",
-            .source = "`a `a = `a `b = `a `a <> `a 1 = 1 `a <> [`a 1] [a 2] = (`a) first `a = {k a} {k a} =",
+            .name = "symbols compare by name under = and not=, whatever their occurrence",
+            .source = "`a `a = `a `b = `a `a not= `a 1 = 1 `a not= [`a 1] [a 2] = (`a) first `a = {k a} {k a} =",
             .expected = "1 0 0 0 1 [1 0] 1 {k 1}",
         },
         .{
@@ -509,19 +509,19 @@ test "numeric: every binary word reduces and scans in order" {
     try helper.expectStacks(&.{
         .{
             .name = "inequality scans a mask to its running parity",
-            .source = "300 range 7 mod 0 = 0 (<>) scan 0 (+) fold " ++
-                "[1 0 1 1 0] 0 (<>) scan [1 0 1 1 0] 1 (<>) scan " ++
-                "[1 0 1 1 0] 0 (<>) fold [1 0 1 1 0] (<>) fold1",
+            .source = "300 range 7 mod 0 = 0 (not=) scan 0 (+) fold " ++
+                "[1 0 1 1 0] 0 (not=) scan [1 0 1 1 0] 1 (not=) scan " ++
+                "[1 0 1 1 0] 0 (not=) fold [1 0 1 1 0] (not=) fold1",
             .expected = "153 [1 1 0 1 1] [0 0 1 0 0] 1 1",
         },
         .{
             .name = "inequality compares the accumulator, whatever the operands",
-            .source = "[5 5 0 7] 5 (<>) scan [1.5 0 1] 0 (<>) scan \"ab\\\"c\\\"d\" \\\" = 0 (<>) scan",
+            .source = "[5 5 0 7] 5 (not=) scan [1.5 0 1] 0 (not=) scan \"ab\\\"c\\\"d\" \\\" = 0 (not=) scan",
             .expected = "[0 1 1 1] [1 1 0] [0 0 1 1 0 0]",
         },
         .{
             .name = "a parity scan feeds a chain of boolean words",
-            .source = "[1 0 1 1 0] 0 (<>) scan [1 1 1 1 1] and not",
+            .source = "[1 0 1 1 0] 0 (not=) scan [1 1 1 1 1] and not",
             .expected = "[0 0 1 0 0]",
         },
         .{

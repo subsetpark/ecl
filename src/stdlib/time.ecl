@@ -9,36 +9,34 @@
     Arithmetic is checked: leaving the int millisecond range is `` `overflow ``. Calendar words use
     the proleptic Gregorian calendar with no leap seconds, so Unix time here is the POSIX count in
     which every day has exactly 86,400,000 milliseconds. The representable range runs from
-    `-292275055-05-16T16:47:04.192` through `292278994-08-17T07:12:55.807`. Nothing in this module
-    reads a clock. Every failure is raised against the public word the program called, so an
-    overflow inside the arithmetic is reported as that word's own `` `overflow ``.")
+    `-292275055-05-16T16:47:04.192` through `292278994-08-17T07:12:55.807`.")
 (
  ### defp fail
  (kind message word -- : "Raise an error attributed to a public time word.")
- (|kind message word| `kind kind `msg message `word word 6 pack dict.from-flat raise) `fail defp
+ (|kind message word| `kind kind `msg message `word word 6 pack dict.from-kvs raise) `fail defp
 
  ### defp type-error
- (word expected -- : "Raise a type error naming the public word and what it expected.")
+ (word expected -- : "Raise a type error reporting the public word and what it expected.")
  (|word expected| `type word chars " expected " cat expected cat word fail) `type-error defp
 
  ### defp int-arg
- (value word expected -- value : "Return an int argument or raise a type error naming the word.")
+ (value word expected -- value : "Return an int argument or raise a type error reporting the word.")
  (rolldown dup type `int match? (nip nip) (pop type-error) if) `int-arg defp
 
  ### defp unix?
  (value -- bool : "Return 1 when a value is exactly a {unix milliseconds} timestamp.")
  (dup type `dict match?
-  (dup dict.size 1 = (dup `unix dict.has? (dup `unix at type `int match?) (0) if) (0) if nip)
+  (dup dict.size 1 = (dup `unix has? (dup `unix at type `int match?) (0) if) (0) if nip)
   (pop 0)
   if) `unix? defp
 
  ### defp millis
- (timestamp word -- milliseconds : "Unwrap a timestamp or raise a type error naming the word.")
+ (timestamp word -- milliseconds : "Unwrap a timestamp or raise a type error reporting the word.")
  (swap dup unix? (nip `unix at) (pop "a {unix milliseconds} timestamp" type-error) if) `millis defp
 
  ### defp tag
  (milliseconds -- timestamp : "Tag an int millisecond count as a Unix timestamp.")
- (`unix swap pair dict.from-flat) `tag defp
+ (`unix swap pair dict.from-kvs) `tag defp
 
  ### defp checked
  (values quotation word -- result :
@@ -47,7 +45,7 @@
   word
   word chars " left the millisecond range" cat
   values quotation cat @attempt
-  dup `ok dict.has?
+  dup `ok has?
   (`ok at first nip nip)
   (`err at dup `kind at `overflow match? (pop swap `overflow rollup fail) (nip nip raise) if)
   if) `checked defp
@@ -145,7 +143,7 @@
  (year month day hour minute second millisecond weekday -- fields : "Build the to-utc dictionary.")
  (|year month day hour minute second millisecond weekday|
   `year year `month month `day day `hour hour `minute minute `second second
-  `millisecond millisecond `weekday weekday 16 pack dict.from-flat) `utc-fields defp
+  `millisecond millisecond `weekday weekday 16 pack dict.from-kvs) `utc-fields defp
 
  ### defp time-of-day
  (hour minute second millisecond -- milliseconds : "Combine validated clock fields.")
@@ -159,13 +157,13 @@
  ### defp check-field
  (pair -- : "Validate one calendar field entry for from-utc.")
  (dup first
-  dup type `symbol match? not (`time.from-utc "symbol field names" type-error) when
-  field-names in? not
+  dup type `symbol match? (`time.from-utc "symbol field names" type-error) unless
+  field-names in?
   (`domain
    "time.from-utc accepts only year, month, day, hour, minute, second, millisecond, and weekday fields"
    `time.from-utc fail)
-  when
-  1 at type `int match? not (`time.from-utc "integer calendar fields" type-error) when)
+  unless
+  1 at type `int match? (`time.from-utc "integer calendar fields" type-error) unless)
  `check-field defp
 
  ### defp from-utc-fail
@@ -188,7 +186,7 @@
   ("time.from-utc millisecond must be 0 through 999" from-utc-fail)
   when
   year month day era-parts
-  dup 719465 - 7 fmod weekday <> weekday? and
+  dup 719465 - 7 fmod weekday not= weekday? and
   ("time.from-utc weekday disagrees with the date" from-utc-fail)
   when
   hour minute second millisecond time-of-day 3 pack
@@ -221,7 +219,7 @@
 
  ### defp shaped
  (text pattern -- : "Require text of the pattern's length to match it character by character.")
- ((shaped?) zip-with (1 =) all? not (malformed) when) `shaped defp
+ ((shaped?) zip-with (1 =) all? (malformed) unless) `shaped defp
 
  ### defp fraction-digits
  (digits -- millisecond rest : "Read a fraction's digits, keeping the first three.")
@@ -238,7 +236,7 @@
  ### defp offset
  (rest -- milliseconds : "Read a numeric offset that ends the text.")
  (|rest|
-  rest first \+ match? rest first \- match? or not (malformed) when
+  rest first \+ match? rest first \- match? or (malformed) unless
   rest len 6 < (malformed) when
   rest 1 drop 5 take "dd:dd" shaped
   rest 1 drop 2 take int
@@ -252,7 +250,7 @@
  (rest -- milliseconds : "Read the UTC designator or numeric offset that ends the text.")
  (dup len 0 = (malformed) when
   dup first dup \Z match? swap \z match? or
-  (len 1 = not (malformed) when 0)
+  (len 1 = (malformed) unless 0)
   (offset)
   if) `zone defp
 
@@ -269,7 +267,7 @@
 
  ### def from-unix
  (milliseconds -- timestamp :
-  "Tag an integer Unix millisecond count as `{unix milliseconds}`. Negative counts name instants
+  "Tag an integer Unix millisecond count as `{unix milliseconds}`. Negative counts denote instants
    before 1970.")
  (`time.from-unix "an integer Unix millisecond count" int-arg tag) `from-unix def
 
@@ -328,12 +326,12 @@
    month's length in that year, hour 0 through 23, minute and second 0 through 59, and millisecond 0
    through 999; anything else is `` `domain ``. `to-utc` output round-trips exactly.")
  (|fields|
-  fields type `dict match? not (`time.from-utc "a dictionary of UTC calendar fields" type-error)
-  when
+  fields type `dict match? (`time.from-utc "a dictionary of UTC calendar fields" type-error)
+  unless
   fields dict.pairs (check-field) for
-  fields `year dict.has? fields `month dict.has? and fields `day dict.has? and not
+  fields `year has? fields `month has? and fields `day has? and
   ("time.from-utc requires year, month, and day" from-utc-fail)
-  when
+  unless
   fields `year at
   fields `month at
   fields `day at
@@ -341,7 +339,7 @@
   fields `minute 0 dict.get
   fields `second 0 dict.get
   fields `millisecond 0 dict.get
-  fields `weekday dict.has?
+  fields `weekday has?
   fields `weekday 0 dict.get
   civil-instant) `from-utc def
 
@@ -364,7 +362,7 @@
    designator, trailing characters, a non-ASCII scalar, or an empty fraction, is `` `parse ``; a
    well-formed field outside its range, including second `60`, is `` `domain ``.")
  (|text|
-  text text? not (`time.parse "a string" type-error) when
+  text text? (`time.parse "a string" type-error) unless
   text len 35 > (malformed) when
   text (int 127 >) each (1 =) any? (malformed) when
   text len 19 < (malformed) when

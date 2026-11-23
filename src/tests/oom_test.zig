@@ -50,7 +50,7 @@ fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     defer source.deinit();
     try source.writer.writeAll("`cwd \"archive\" ");
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeAll(" archive.unpack-tgz pop");
+    try source.writer.writeAll(" gzip.decompress tar.unpack pop");
     return allocator.dupe(u8, source.written());
 }
 
@@ -59,7 +59,7 @@ fn archiveResourceSource(allocator: std.mem.Allocator) ![]u8 {
     defer source.deinit();
     try source.writer.writeAll("`cwd \"generation\" fs.stage-dir `stage set stage \"archive\" ");
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeAll(" archive.unpack-tgz pop stage fs.commit-dir");
+    try source.writer.writeAll(" gzip.decompress tar.unpack pop stage fs.commit-dir");
     return allocator.dupe(u8, source.written());
 }
 
@@ -67,9 +67,7 @@ fn archiveViewSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeAll(" archive.open-tgz `view set " ++
-        "view archive.next-member pop view archive.next-member pop " ++
-        "view 1 archive.read-member pop view port.close");
+    try source.writer.writeAll(" gzip.decompress tar.read pop");
     return allocator.dupe(u8, source.written());
 }
 
@@ -191,7 +189,7 @@ const LockedAllocator = struct {
 ///
 /// The sweep replays a probe once per allocation point, so a bare "produced an
 /// unexpected language error" leaves nothing to act on: the only way forward is
-/// to bisect the probe by hand. The dict names the word and the message
+/// to bisect the probe by hand. The dict reports the word and the message
 /// directly. Rendering allocates from the same injected allocator, so it can
 /// legitimately fail mid-sweep — but a deterministic bug shows up on the first,
 /// uninjected replay, which is exactly where rendering succeeds.
@@ -531,7 +529,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-dict-text.ecl",
         "{a 1} `b 2 put dict.keys pop [\"a\" \"b\"] \"—\" str.join \"—\" str.split pop " ++
-            "[a b] [1 2] dict.from-lists dict.keys pop [c 3] dict.from-flat dict.keys pop " ++
+            "[a b] [1 2] dict.zip dict.keys pop [c 3] dict.from-kvs dict.keys pop " ++
             "[1 2 3] 1 9 put pop [1 2] 0 del pop \"ab\" reverse 0 \\λ put pop " ++
             "[a 1] str [1] \"{}\" str.format pop [\"raw\"] \"{}\" str.format pop",
     );
@@ -543,7 +541,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "1 `oom-rebind set 2 `oom-rebind set " ++
             "(1 0 div) @attempt pop (5 6 +) @attempt pop " ++
             "({kind custom data {detail 7}} raise) @attempt pop " ++
-            "[3 4] (+) cat call pop 2 3 [(+) (*) (-)] cleave pop pop pop " ++
+            "[3 4] (+) cat apply pop 2 3 [(+) (*) (-)] cleave pop pop pop " ++
             "(5 6 +) @attempt pop " ++
             "(7 8 +) @spawn task.await pop " ++
             "(1 2) @attempt pop " ++
@@ -613,7 +611,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-reflection.ecl",
         "(( -- n ) (1) `f def) `reflection-module @defm " ++
             "`reflection-module (f) import words " ++
-            "`f which `reflection-module.f see " ++
+            "`f see `reflection-module.f see " ++
             "(: \"D\") () `oom-documented @defm `oom-documented module-doc pop",
     );
     try runOk(&runtime, "oom-loader.ecl", "`stats (answer) import answer pop");
@@ -633,14 +631,14 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-module.ecl",
         "*file* pop " ++
             "(1 `x setp ( -- n ) (x) `get def) `allocation-module @defm " ++
-            "`allocation-module (get) import get pop `short `allocation-module alias short.get pop " ++
+            "`allocation-module (get) import get pop `allocation-module `short alias short.get pop " ++
             "(2 `x setp ( -- n ) (x) `get def) `allocation-module @defm get pop " ++
             "(((dup) `f def) `bad @defm) @attempt pop " ++
             // A construction that leaves a value behind is refused, and that
             // refusal allocates its error.
             "((21 1 +) `oom-leftover @defm) @attempt pop " ++
             // Calls, failures inside calls, and reloads each have their own
-            // allocation-failure paths through registration. A body that names
+            // allocation-failure paths through registration. A body that refers to
             // an undefined word fails its group's seal; an explicit lookup
             // fails only when it runs.
             "(((missing) `f def) `oom-unbound @defm) @attempt pop " ++
@@ -796,7 +794,7 @@ fn stdlibSessionAllocationProbe(
     var diagnostics_buffer: [1024]u8 = undefined;
     var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
     // The scratch directory is the working-directory root, the project root,
-    // and the shared cache store at once: every host surface a snippet names
+    // and the shared cache store at once: every host surface a snippet mentions
     // resolves to the same temporary directory.
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
@@ -884,7 +882,7 @@ fn stdlibSessionAllocationProbe(
             "oom-dict.ecl",
             "[1 2] [0 1] del pop " ++
                 "[[a 1] [b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
-                "dup [1 2] [3 4] dict.put pop dup `a dict.has? pop dup [b a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
+                "dup [1 2] [3 4] dict.put pop dup `a has? pop dup [b a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
                 "dup [a b] dict.keys-exactly? pop dup [a] (1 +) dict.update " ++
                 "dup `c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) each " ++
                 "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup [a] dict.take " ++
@@ -936,14 +934,14 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-table.ecl",
             "{\"r\" [\"e\" \"w\"] \"v\" [1 2]} " ++
-                "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
+                "[\"r\"] (|g| {} \"t\" g \"v\" at (sum) each put) table.aggregate pop " ++
                 "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
                 "{\"n\" 0} table.left-join-with pop",
         ),
         .archive_hash => try runOk(
             &runtime,
             "oom-archive-hash.ecl",
-            "[97] archive.sha256 pop",
+            "[97] hash.sha256 pop",
         ),
         .archive_view => {
             const archive_source = try archiveViewSource(scaffold_allocator);
@@ -966,8 +964,8 @@ fn stdlibSessionAllocationProbe(
             // Console, environment, and standard-input refusal paths.
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
-                "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (fd.in) @attempt pop " ++
-                "fd.out [1] fd.write fd.err ([1] [2]) fd.write",
+                "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (stream.in) @attempt pop " ++
+                "stream.out [1] stream.write stream.err ([1] [2]) stream.write",
         ),
         .directory_enumeration => try runOk(
             &runtime,
@@ -1000,7 +998,7 @@ fn stdlibSessionAllocationProbe(
         .filesystem_stream => try runOk(
             &runtime,
             "oom-stream.ecl",
-            "`cwd fs.reserve `root set root \"published\" fs.open-writer `writer set " ++
+            "`cwd \".\" fs.child-dir `root set root \"published\" fs.open-writer `writer set " ++
                 "writer [65 66] fs.write-chunk writer [] fs.write-chunk writer fs.commit-file " ++
                 "root \"aborted\" fs.open-writer `writer set writer [67] fs.write-chunk writer port.close root (\"missing/sub\" fs.child-dir) cons @attempt pop root port.close",
         ),
@@ -1048,7 +1046,7 @@ fn stdlibSessionAllocationProbe(
             // One granted bind read back and closed twice, one denied port,
             // and one listener released by its child scope.
             "net.core.listener {address \"127.0.0.1\" port 0} port.open dup net.local-address pop " ++
-                "dup net.close net.close " ++
+                "dup port.shutdown port.shutdown " ++
                 "({address \"127.0.0.1\" port 1} net.listen) @attempt pop " ++
                 "({address \"127.0.0.1\" port 0} net.listen net.local-address) @spawn task.await pop",
         ),
@@ -1059,7 +1057,7 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-net-connection.ecl",
             "{address \"127.0.0.1\" port 0} net.listen `l set " ++
-                "(l net.accept) @spawn `waiting set 0 clock.sleep l net.close " ++
+                "(l net.accept) @spawn `waiting set 0 clock.sleep l port.shutdown " ++
                 "waiting task.await pop (l net.accept) @attempt pop",
         ),
         // Every ordinal is deterministic: two binds, one closed, then a give
@@ -1070,7 +1068,7 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-give.ecl",
             "{address \"127.0.0.1\" port 0} net.listen `a set " ++
-                "{address \"127.0.0.1\" port 0} net.listen `b set b net.close " ++
+                "{address \"127.0.0.1\" port 0} net.listen `b set b port.shutdown " ++
                 "(a b pair (pop pop) @give) @attempt pop " ++
                 "(a a pair (pop pop) @give) @attempt pop " ++
                 "a wrap (pop) @give task.await pop",
@@ -1094,15 +1092,14 @@ fn stdlibSessionAllocationProbe(
                 "(\"Host: x\") http.server.parse-headers dup http.server.content-length pop pop " ++
                 "200 \"ok\" http.response.text dup \"content-type\" http.response.header pop " ++
                 "http.server.render-response pop " ++
-                "\"GET\" \"/a?b=1\" http.request.new dup http.request.query pop \"x\" \"y\" http.request.with-header pop " ++
+                "{query \"b=1\"} http.request.query pop \"GET\" \"/a\" http.request.new \"x\" \"y\" http.request.with-header pop " ++
                 "(l {max-in-flight 1} (pop http.response.not-found) http.server.@serve) @spawn " ++
-                "0 clock.sleep dup task.cancel task.await pop l net.close",
+                "0 clock.sleep dup task.cancel task.await pop l port.shutdown",
         ),
         .http => try runOk(
             &runtime,
             "oom-http.ecl",
-            "({target \"http://127.0.0.1:1/x\"} http.get) @attempt pop " ++
-                "({target \"http://127.0.0.1:1/x\"} http.get-bytes) @attempt pop " ++
+            "({method \"GET\" target \"http://127.0.0.1:1/x\" follow-redirects 0} http.send) @attempt pop " ++
                 "(\"GET\" \"http://127.0.0.1:1/x\" http.request.new http.send) @attempt pop",
         ),
         .process => {
@@ -1112,7 +1109,7 @@ fn stdlibSessionAllocationProbe(
                 scaffold_allocator,
                 "`proc (spawn run) import " ++
                     "proc.core.process {{executable \"{s}\" args (\"block\" \"λ\") cwd \"/\" env {{\"ECL_OOM_PROCESS\" \"é🌍\"}}}} port.open " ++
-                    "dup proc.core.stdin port.endpoint dup [0] fd.write port.finish " ++
+                    "dup proc.core.stdin port.endpoint dup [0] stream.write port.finish " ++
                     "dup proc.core.stdout port.endpoint pop dup proc.core.stderr port.endpoint pop pop " ++
                     "{{executable \"{s}\" args (\"echo\") stdin [0 1]}} proc.run pop " ++
                     "{{executable \"/definitely/not/allowed\" " ++
@@ -1546,7 +1543,7 @@ test "oom: core: invocation completion frames survive allocation failure" {
         std.heap.smp_allocator,
         NativePortProbe(
             "((((((((task.pending pop 1 sample.increment pop " ++
-                "0) call 0) call 0) call 0) call 0) call 0) call 0) call 0) call",
+                "0) apply 0) apply 0) apply 0) apply 0) apply 0) apply 0) apply 0) apply",
             "task.pending pop 1 sample.increment pop",
         ).run,
     );
@@ -1633,7 +1630,7 @@ test "oom: standard-library and host: native port registered byte input" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
-            "dup portprobe.input port.endpoint [1] fd.write " ++
+            "dup portprobe.input port.endpoint [1] stream.write " ++
             "dup portprobe.input port.endpoint port.finish port.close port.close",
     ).run);
 }
@@ -1651,9 +1648,9 @@ test "oom: standard-library and host: native port registered byte output" {
     // scheduling, so sweep the concurrent shape like the other byte tests.
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
-            "dup portprobe.input port.endpoint [1] fd.write " ++
+            "dup portprobe.input port.endpoint [1] stream.write " ++
             "dup portprobe.input port.endpoint port.finish dup port.await " ++
-            "dup portprobe.output port.endpoint 1 fd.read pop port.close port.close",
+            "dup portprobe.output port.endpoint 1 stream.read pop port.close port.close",
     ).run);
 }
 
@@ -1790,12 +1787,12 @@ test "oom: standard-library and host: stdlib: table propagates every allocation 
     try checkStdlibSurface(.table);
 }
 
-test "oom: standard-library and host: stdlib: archive hash propagates every allocation failure" {
+test "oom: standard-library and host: stdlib: hash propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_hash);
 }
 
-test "oom: standard-library and host: stdlib: archive unpack propagates every allocation failure" {
+test "oom: standard-library and host: stdlib: tar unpack propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_unpack);
 }
@@ -1855,7 +1852,7 @@ test "oom: standard-library and host: common network endpoint publication and tr
             const first_failure_index = failing.alloc_index;
             if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
             try runOk(&runtime, "oom-net-endpoint.ecl", "c net.core.input port.endpoint `r set c net.core.output port.endpoint `w set " ++
-                "w [0 255] fd.write w port.finish r 1 fd.read pop r 1 fd.read pop r 1 fd.read pop c port.close");
+                "w [0 255] stream.write w port.finish r 1 stream.read pop r 1 stream.read pop r 1 stream.read pop c port.close");
             return first_failure_index;
         }
     };
@@ -1942,7 +1939,7 @@ test "oom: standard-library and host: native port directional writer" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.declared [] port.open dup portprobe.declared-stream [] port.begin " ++
-            "dup portprobe.declared-output port.endpoint 8 fd.read pop " ++
+            "dup portprobe.declared-output port.endpoint 8 stream.read pop " ++
             "dup port.await port.close port.close",
     ).run);
 }
@@ -2099,12 +2096,12 @@ test "oom: standard-library and host: stdlib: directory enumeration propagates e
     try checkStdlibSurface(.directory_enumeration);
 }
 
-test "oom: standard-library and host: stdlib: archive directory resources propagate every allocation failure" {
+test "oom: standard-library and host: stdlib: tar directory resources propagate every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_resource);
 }
 
-test "oom: standard-library and host: stdlib: archive inspection propagates every allocation failure" {
+test "oom: standard-library and host: stdlib: tar read propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_view);
 }
@@ -2266,9 +2263,9 @@ test "oom: standard-library and host: accepted connection SDK lifecycle" {
 test "oom: standard-library and host: native activity stream supervision" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
-        "instanceprobe.activity 8 port.open (|p| p instanceprobe.activity-in port.endpoint [1 2] fd.write " ++
-            "p instanceprobe.activity-ready port.endpoint 1 fd.read pop " ++
-            "p instanceprobe.activity-out port.endpoint 8 fd.read pop p port.close) call",
+        "instanceprobe.activity 8 port.open (|p| p instanceprobe.activity-in port.endpoint [1 2] stream.write " ++
+            "p instanceprobe.activity-ready port.endpoint 1 stream.read pop " ++
+            "p instanceprobe.activity-out port.endpoint 8 stream.read pop p port.close) apply",
         "",
     ).run);
 }

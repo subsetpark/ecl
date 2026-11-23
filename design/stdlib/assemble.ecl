@@ -56,7 +56,7 @@
  (|forms indices|
   forms indices 1 - at (chars) each
   indices 2 - dup forms swap at (helper-mark?) each - forms swap at)
- call) `definitions def
+ apply) `definitions def
 
 ### def adjacency
 (names bodies -- matrix :
@@ -92,11 +92,11 @@
   each mutually recursive cycle counted once.")
 (over swap adjacency condensed
  dup (pop 0) each swap (rank-step) cons converge
- dict.from-lists) `ranks def
+ dict.zip) `ranks def
 
 ### def rank-of
 (name ranks -- rank : "Return a name's rank, or zero for a word without a definition.")
-(swap dup2 dict.has? (at) (pop pop 0) if) `rank-of def
+(swap dup2 has? (at) (pop pop 0) if) `rank-of def
 
 ### def rank-order
 (names ranks -- indices : "Return the permutation ordering names by rank, then by codepoint.")
@@ -139,7 +139,7 @@
   empty string for a documentation-only annotation.")
 ((slot-text) each dup ":" find take
  dup "--" find over len <
- ((|words| "`( " words " " str.join cat " )` — " cat) call)
+ ((|words| "`( " words " " str.join cat " )` — " cat) apply)
  (pop "")
  if) `effect-text def
 
@@ -213,7 +213,8 @@
 (|name names| names name find names len <) `member? def
 
 ### def require-all
-(names known message -- : "Fail, naming every name the known list lacks, unless it holds them all.")
+(names known message -- :
+ "Fail, listing every name the known list lacks, unless it holds them all.")
 (|names known message|
  names known (member? not) cons each where names swap at
  dup empty? swap ", " str.join message swap cat check) `require-all def
@@ -238,7 +239,7 @@
  "Map each fragment entry's word to its examples, refusing an entry for a word the section does not
   export.")
 (|entries names|
- entries (entry-name) each names "a fragment entry names a word the section does not export: "
+ entries (entry-name) each names "a fragment entry refers to a word the section does not export: "
  require-all
  entries (entry-name) each entries (examples-of) each zip dict.from-pairs) `examples def
 
@@ -279,14 +280,10 @@
  "Render one section: its fragment's header passed through the introduce quotation, then an entry
   for every exported word in rank order, each from reflection plus its fragment examples.")
 (|path title qualifier names ranks introduce|
- path title fragment swap introduce call swap names examples qualifier pair
+ path title fragment swap introduce apply swap names examples qualifier pair
  names ranks rank-order names swap at
  swap (|name context| name context first context 1 at render-entry) cons each
  cons "\n\n" str.join) `section def
-
-### def documented-modules
-(-- names : "Return every standard-library module name except the `.core` implementations.")
-(stdlib (chars) each dup (".core" str.ends? not) each where at) `documented-modules def
 
 ### def module-section
 (module known -- text : "Render one module's section from its exports and its source ranks.")
@@ -301,15 +298,12 @@
 
 ### def module-sections
 (-- texts :
- "Render one section per documented module in name order, refusing a fragment with no module.")
+ "Render one section per module fragment in name order; a fragment matching no module fails in
+  `exports`.")
 (`cwd "design/stdlib/modules" fs.list (`name at) each
- dup (".md" str.ends?) each where at (-3 drop) each
- documented-modules
- (|fragments modules|
-  fragments modules "a module fragment names no standard-library module: " require-all
-  "src/stdlib" ecl-files (module-ranks pair) each dict.from-pairs
-  modules swap (module-section) cons each)
- call) `module-sections def
+ dup (".md" str.ends?) each where at (-3 drop) each dup grade at
+ "src/stdlib" ecl-files (module-ranks pair) each dict.from-pairs
+ (module-section) cons each) `module-sections def
 
 ### def document
 (-- text : "Assemble the complete reference.")

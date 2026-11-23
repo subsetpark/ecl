@@ -28,18 +28,14 @@ fn runPath(source: []const u8, path: []const u8) !cli.Result {
 
 test "native runtime: loaded artifacts behave identically at one and eight workers" {
     const source = "40 sample.increment sample.twin sample.singleton " ++
-        "sample.cooperative `sample.increment which";
+        "sample.cooperative";
     var one = try run(source, "1", false);
     defer one.deinit();
     var eight = try run(source, "8", false);
     defer eight.deinit();
     try one.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{
-            "native public generation 1",
-            "requires call, build-values, reschedule",
-            "41 [41] 42",
-        },
+        .stdout_contains = &.{"41 [41] 42"},
         .stderr = "",
     });
     try std.testing.expectEqual(one.term, eight.term);

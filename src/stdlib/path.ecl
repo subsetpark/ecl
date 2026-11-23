@@ -57,7 +57,7 @@
  ("path.normalize expects a string path" checked
   dup "/" str.starts?
   swap "/" str.split
-  over `absolute swap `parts [] 4 pack dict.from-flat
+  over `absolute swap `parts [] 4 pack dict.from-kvs
   (clean-step) fold
   `parts at "/" str.join
   swap ("/" swap cat) () if

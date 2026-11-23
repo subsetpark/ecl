@@ -13,16 +13,19 @@ const abi = @import("native-abi");
 const env = @import("env.zig");
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
-const archive_module = @import("stdlib/archive.zig");
+const gzip_module = @import("stdlib/gzip.zig");
+const hash_module = @import("stdlib/hash.zig");
+const tar_module = @import("stdlib/tar.zig");
 const io_module = @import("stdlib/io.zig");
 const dict_module = @import("stdlib/dict.zig");
+const error_core = @import("stdlib/error.zig");
 const rand_module = @import("stdlib/rand.zig");
 const fs_module = @import("stdlib/fs.zig");
 const clock_module = @import("stdlib/clock.zig");
 const port_core = @import("stdlib/port.zig");
 const task_module = @import("task_prims.zig");
 const str_core = @import("stdlib/str.zig");
-const fd_core = @import("stdlib/fd.zig");
+const stream_core = @import("stdlib/stream.zig");
 const host_module = @import("stdlib/host.zig");
 const source_module = @import("stdlib/source.zig");
 
@@ -70,6 +73,7 @@ const modules = [_]Module{
         .name = "<stdlib:error>",
         .text = @embedFile("stdlib/error.ecl"),
     } } },
+    .{ .name = "error.core", .entry = .{ .builtin = .{ .words = &error_core.words, .doc = error_core.doc } } },
     .{ .name = "result", .entry = .{ .source = .{
         .name = "<stdlib:result>",
         .text = @embedFile("stdlib/result.ecl"),
@@ -84,11 +88,11 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/io.ecl"),
     } } },
     .{ .name = "io.core", .entry = .{ .builtin = .{ .words = &io_module.words, .doc = io_module.doc } } },
-    .{ .name = "fd", .entry = .{ .source = .{
-        .name = "<stdlib:fd>",
-        .text = @embedFile("stdlib/fd.ecl"),
+    .{ .name = "stream", .entry = .{ .source = .{
+        .name = "<stdlib:stream>",
+        .text = @embedFile("stdlib/stream.ecl"),
     } } },
-    .{ .name = "fd.core", .entry = .{ .builtin = .{ .words = &fd_core.words, .doc = fd_core.doc } } },
+    .{ .name = "stream.core", .entry = .{ .builtin = .{ .words = &stream_core.words, .doc = stream_core.doc } } },
     .{ .name = "csv", .entry = .{ .source = .{
         .name = "<stdlib:csv>",
         .text = @embedFile("stdlib/csv.ecl"),
@@ -128,7 +132,13 @@ const modules = [_]Module{
         .name = "<stdlib:path>",
         .text = @embedFile("stdlib/path.ecl"),
     } } },
-    .{ .name = "archive", .entry = .{ .builtin = .{ .words = &archive_module.words, .doc = archive_module.doc } } },
+    .{ .name = "gzip", .entry = .{ .builtin = .{ .words = &gzip_module.words, .doc = gzip_module.doc } } },
+    .{ .name = "hash", .entry = .{ .builtin = .{ .words = &hash_module.words, .doc = hash_module.doc } } },
+    .{ .name = "tar", .entry = .{ .source = .{
+        .name = "<stdlib:tar>",
+        .text = @embedFile("stdlib/tar.ecl"),
+    } } },
+    .{ .name = "tar.core", .entry = .{ .builtin = .{ .words = &tar_module.words, .doc = tar_module.doc } } },
     .{ .name = "clock", .entry = .{ .builtin = .{ .words = &clock_module.words, .doc = clock_module.doc } } },
     .{ .name = "time", .entry = .{ .source = .{
         .name = "<stdlib:time>",
@@ -180,18 +190,5 @@ pub fn find(name: []const u8) ?Entry {
 pub fn names() [modules.len][]const u8 {
     var result: [modules.len][]const u8 = undefined;
     for (modules, &result) |module, *slot| slot.* = module.name;
-    return result;
-}
-
-/// Every embedded module name in codepoint order, computed at compile time
-/// for reflection.
-pub fn sortedNames() [modules.len][]const u8 {
-    @setEvalBranchQuota(100_000);
-    var result = names();
-    std.mem.sort([]const u8, &result, {}, struct {
-        fn less(_: void, left: []const u8, right: []const u8) bool {
-            return std.mem.order(u8, left, right) == .lt;
-        }
-    }.less);
     return result;
 }

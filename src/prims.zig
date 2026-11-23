@@ -31,23 +31,24 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "rollup", .primitive = rollup, .effect = "x y z -- z x y", .doc = "Rotate the top three stack values upward." },
         .{ .name = "rolldown", .primitive = rolldown, .effect = "x y z -- y z x", .doc = "Rotate the top three stack values downward." },
         .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the operand stack into a bottom-to-top list while leaving every original value in place." },
-        .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Whole-value structural equality.\n\nEx.:\n```\n  [1 2] [1 2] =\n[1 1]\n  [1 2] [1 2] match?\n1\n```" },
+        .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Compare two whole values for equality." },
         .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value's kind as a symbol: one of `int`, `float`, `char`, `symbol`, `list`, `dict`, `task`, `port`, or `address`." },
-        .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Evaluate a symbol's binding and dispatch. Non-symbols are `` `type ``; missing words are `` `undefined-word ``." },
+        .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Evaluate a symbol's binding and dispatch." },
         .{ .name = "parse", .primitive = parse, .effect = "string -- quotation", .doc = "Parse source text into an unevaluated quotation. Reading interns every symbol and word in the string." },
-        .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. See [Conversions](SPEC.md#conversions)." },
-        .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a UTF-8 string as a byte list: an integer list whose elements are 0 through 255. A byte list is returned unchanged. Any other value is `` `type ``. Inverse of `chars`; see [Conversions](SPEC.md#conversions)." },
-        .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A spelling that is not yet interned is `` `domain ``, as is a string that is not a valid symbol spelling; any other value is `` `type ``. Every symbol written in loaded source is interned, so this succeeds for any key a program compares against and never grows the interned name space; use `intern` to create one. See [Conversions](SPEC.md#conversions)." },
-        .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A new valid spelling is added to the intern table; a string that is not a valid symbol spelling is `` `domain ``. Interned symbols live for the whole process and are never reclaimed, and the table's capacity is fixed, so interning unbounded external input can exhaust it and fail with out-of-memory. See [Conversions](SPEC.md#conversions)." },
-        .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of a string in the integer-literal grammar. A string outside that grammar is `` `parse ``. A float is `` `type ``: choose `floor`, `round`, or `ceil` instead. Any other value is also `` `type ``." },
-        .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a string in the numeric-literal grammar. A string outside that grammar is `` `parse ``; any other value is `` `type ``." },
-        .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, whatever its length, and a list of chars or codepoints becomes the string of those chars. An int outside the Unicode scalar range, or a list element outside it, is `` `domain ``; any other value is `` `type ``." },
-        .{ .name = "@attempt", .primitive = attempt, .effect = "quotation -- result", .doc = "Run the quotation as a new unit on an empty, isolated stack. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`. To start the unit on values, build them into the quotation: `values (q) cat @attempt`." },
+        .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string." },
+        .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a UTF-8 string as a byte list: an integer list whose elements are 0 through 255." },
+        .{ .name = "bytes?", .primitive = bytesPredicate, .effect = "value -- bool", .doc = "Return 1 when the value is a byte list, a list of integers in `0...255` such as `bytes` returns and `stream.write` accepts as one piece, and 0 for anything else, including a string." },
+        .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Given a string, return the symbol with the same spelling. Returns a symbol unchanged." },
+        .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A new valid spelling is added to the intern table. Interned symbols live for the whole process and are never reclaimed, and the table's capacity is fixed, so interning unbounded external input can exhaust it and fail with out-of-memory." },
+        .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Convert a value to an int, or parse a string representation of an int." },
+        .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Convert a value to a float, or parse a string representation of a float." },
+        .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Convert a value to a char. Pervades, so its behaviour when applied to a list is equivalent to `chars`." },
+        .{ .name = "@attempt", .primitive = attempt, .effect = "quotation -- result", .doc = "Run the quotation as a new unit on an empty, isolated stack. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`." },
         .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise an error from an error dict." },
-        .{ .name = "helper", .primitive = helper, .effect = "quotation -- quotation", .doc = "Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`. The mark belongs to that quotation, not to an equal one; a list built at run time is `` `domain ``, and any other value is `` `type ``." },
+        .{ .name = "helper", .primitive = helper, .effect = "quotation -- quotation", .doc = "Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`." },
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "The process arguments following the script or source, as a list of strings." },
-        .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status." },
-        .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error. Absent host IO is `` `io ``." },
+        .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Called from the root unit, cancel and quiesce all descendants, then terminate the process with the given status." },
+        .{ .name = "getenv", .primitive = getenv, .effect = "name -- value", .doc = "Return the value of the variable `name` in the process environment." },
     };
     try core.installBuiltins(&definitions);
     try combinators.install(core);
@@ -222,7 +223,7 @@ fn execute(fiber: *Fiber) MachineError!void {
     var item = try fiber.popValue();
     defer item.deinit();
     const word = switch (item.borrow()) {
-        // `execute` runs the word a symbol names, quoted occurrence or not.
+        // `execute` runs the word a symbol denotes, quoted occurrence or not.
         .symbol => |word| value.Symbol{ .name = word.name, .slot = env.unquoted(word.slot) },
         else => return fiber.typeError("a symbol"),
     };
@@ -272,10 +273,10 @@ pub const NumericParseTarget = enum {
 
 // ── Kind conversions ────────────────────────────────────────────────────────
 //
-// Each word names its target kind and accepts the documented source kinds;
+// Each word identifies its target kind and accepts the documented source kinds;
 // anything else is `'type`. Toward text one polymorphic word suffices
 // (chars), because every source has one text content. Away from text the
-// target must be named (int, float, char, symbol, bytes), because a
+// target must be stated (int, float, char, symbol, bytes), because a
 // string alone does not say what it should become. `str` stays the readable
 // representation and `parse` the reader; neither is a conversion.
 
@@ -377,6 +378,60 @@ fn bytesWord(fiber: *Fiber) MachineError!void {
         .encoder = .init(encoder),
     });
 }
+
+fn bytesPredicate(fiber: *Fiber) MachineError!void {
+    var item = try fiber.popValue();
+    defer item.deinit();
+    const source = item.borrow();
+    if (source != .list) return fiber.pushOwned(.{ .int = 0 });
+    switch (source.list.kind()) {
+        .leaf_u8 => return fiber.pushOwned(.{ .int = 1 }),
+        .leaf_i64, .generic_spine => {},
+        else => return fiber.pushOwned(.{ .int = 0 }),
+    }
+    if (source.list.length() == 0) return fiber.pushOwned(.{ .int = 1 });
+    try fiber.startDriver(BytesPredicate{ .source = .init(item.take()) });
+}
+
+/// `bytes?` over an int or generic list, a block at a time. An int leaf is
+/// judged by its block's minimum and maximum; a generic list element by
+/// element.
+const BytesPredicate = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    source: heap.Owned(Value),
+    index: usize = 0,
+
+    pub fn advance(fiber: *Fiber, self: *BytesPredicate) MachineError!machine.WorkProgress {
+        const work = fiber.workBudget();
+        const source = self.source.borrow();
+        const count: usize = @intCast(source.list.length());
+        while (!work.exhausted()) {
+            if (self.index == count) return .{ .output = .{ .int = 1 } };
+            const end = self.index + work.take(count - self.index);
+            const accepted = switch (source.list.kind()) {
+                .leaf_i64 => range: {
+                    var low: i64 = std.math.maxInt(i64);
+                    var high: i64 = std.math.minInt(i64);
+                    for (heap.i64s(source.list)[self.index..end]) |number| {
+                        low = @min(low, number);
+                        high = @max(high, number);
+                    }
+                    break :range low >= 0 and high <= 255;
+                },
+                else => each: {
+                    for (self.index..end) |position| {
+                        const element = list.atUnchecked(source, position);
+                        if (element != .int or element.int < 0 or element.int > 255) break :each false;
+                    }
+                    break :each true;
+                },
+            };
+            if (!accepted) return .{ .output = .{ .int = 0 } };
+            self.index = end;
+        }
+        return .stepped;
+    }
+};
 
 const StringBytesDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
@@ -844,9 +899,20 @@ fn helper(fiber: *Fiber) MachineError!void {
         return fiber.fail(.domain, "helper needs a quotation read from source");
 }
 fn raise(fiber: *Fiber) MachineError!void {
+    try startErrorShape(fiber, .raise);
+}
+/// `error.core.valid?`: report, without raising, whether `raise` would accept
+/// the value as an error dict. Sharing the driver keeps one schema.
+pub fn errorValid(fiber: *Fiber) MachineError!void {
+    try startErrorShape(fiber, .report);
+}
+fn startErrorShape(fiber: *Fiber, outcome: ErrorShapeDriver.Outcome) MachineError!void {
     var raised = try fiber.popValue();
     defer raised.deinit();
-    if (raised.borrow() != .dict) return fiber.typeError("an error dict");
+    if (raised.borrow() != .dict) switch (outcome) {
+        .raise => return fiber.typeError("an error dict"),
+        .report => return fiber.pushIntoFreed(.{ .int = 0 }),
+    };
     const keys = [5]u32{
         try intern.intern("kind"),
         try intern.intern("msg"),
@@ -854,18 +920,23 @@ fn raise(fiber: *Fiber) MachineError!void {
         try intern.intern("trace"),
         try intern.intern("data"),
     };
-    try fiber.startDriver(RaiseDriver{ .raised = .init(raised.take()), .keys = keys });
+    try fiber.startDriver(ErrorShapeDriver{ .raised = .init(raised.take()), .keys = keys, .outcome = outcome });
 }
-const RaiseDriver = struct {
+/// The error-dict schema: a symbol at `kind`, and when present a string at
+/// `msg`, a symbol at `word`, a list of symbols at `trace`, a dict at `data`.
+const ErrorShapeDriver = struct {
+    const Outcome = enum { raise, report };
+
     raised: heap.Owned(Value),
     keys: [5]u32,
+    outcome: Outcome,
     field_index: usize = 0,
     lookup: ?heap.Owned(dict.FindCursor) = null,
     trace: ?Value = null,
     trace_index: usize = 0,
     phase: enum { lookup, trace, finish } = .lookup,
 
-    pub fn advance(fiber: *Fiber, self: *RaiseDriver) MachineError!machine.WorkProgress {
+    pub fn advance(fiber: *Fiber, self: *ErrorShapeDriver) MachineError!machine.WorkProgress {
         switch (self.phase) {
             .lookup => {
                 if (self.field_index == self.keys.len) {
@@ -882,7 +953,7 @@ const RaiseDriver = struct {
                     .complete => |found| {
                         self.lookup.?.deinit(fiber.releases, fiber.allocator);
                         self.lookup = null;
-                        try self.validateField(fiber, found);
+                        if (self.invalidField(found)) |expected| return self.reject(fiber, expected);
                         if (self.phase == .lookup) self.field_index += 1;
                         return .stepped;
                     },
@@ -894,7 +965,7 @@ const RaiseDriver = struct {
                 const end = self.trace_index + fiber.workBudget().take(count - self.trace_index);
                 while (self.trace_index != end) : (self.trace_index += 1) {
                     if (list.atUnchecked(trace, self.trace_index) != .symbol)
-                        return fiber.typeError("an error dict with symbols at `trace");
+                        return self.reject(fiber, "an error dict with symbols at `trace");
                 }
                 if (self.trace_index == count) {
                     self.trace = null;
@@ -903,37 +974,45 @@ const RaiseDriver = struct {
                 }
                 return .stepped;
             },
-            .finish => {
-                const raised = self.raised.take();
-                return fiber.raiseOwned(raised);
+            .finish => switch (self.outcome) {
+                .raise => return fiber.raiseOwned(self.raised.take()),
+                .report => return .{ .output = .{ .int = 1 } },
             },
         }
     }
-    fn validateField(self: *RaiseDriver, fiber: *Fiber, found: ?Value) MachineError!void {
+    fn reject(self: *ErrorShapeDriver, fiber: *Fiber, expected: []const u8) MachineError!machine.WorkProgress {
+        return switch (self.outcome) {
+            .raise => fiber.typeError(expected),
+            .report => .{ .output = .{ .int = 0 } },
+        };
+    }
+    /// The schema violation in the current field, if any.
+    fn invalidField(self: *ErrorShapeDriver, found: ?Value) ?[]const u8 {
         switch (self.field_index) {
             0 => if (found == null or found.? != .symbol)
-                return fiber.typeError("an error dict containing a symbol at `kind"),
+                return "an error dict containing a symbol at `kind",
             1 => if (found) |message| {
                 if (!message.isString())
-                    return fiber.typeError("an error dict with a string at `msg");
+                    return "an error dict with a string at `msg";
             },
             2 => if (found) |word| {
                 if (word != .symbol)
-                    return fiber.typeError("an error dict with a symbol at `word");
+                    return "an error dict with a symbol at `word";
             },
             3 => if (found) |trace| {
                 if (trace != .list)
-                    return fiber.typeError("an error dict with symbols at `trace");
+                    return "an error dict with symbols at `trace";
                 self.trace = trace;
                 self.trace_index = 0;
                 self.phase = .trace;
             },
             4 => if (found) |data| {
                 if (data != .dict)
-                    return fiber.typeError("an error dict with a dict at `data");
+                    return "an error dict with a dict at `data";
             },
             else => unreachable,
         }
+        return null;
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };

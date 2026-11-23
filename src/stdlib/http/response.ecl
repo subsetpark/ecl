@@ -1,11 +1,10 @@
 ### module http.response
-(: "Words over the response dictionary `{status headers body}`: the value `http.get`, `http.post`,
-    and `http.send` return and the value an `http.server` handler leaves. They build a response,
-    read its headers by name regardless of letter case, classify its status, and return updated
-    copies. `valid?` accepts every well-shaped value; the wire rules a server enforces (no 1xx,
-    reserved header names, no CR or LF) belong to `http.server.render-response`. A word given a
-    value that is not a response dictionary, a status outside `100...599`, or a name that is not a
-    string is `` `type ``.")
+(: "Words over the response dictionary `{status headers body}`: the value `http.send` returns and
+    the value an `http.server` handler leaves. They build a response, read its headers by name
+    regardless of letter case, classify its status, and return updated copies. `valid?` accepts
+    every well-shaped value; the wire rules a server enforces (no 1xx, reserved header names, no CR
+    or LF) belong to `http.server.render-response`. A word given a value that is not a response
+    dictionary, a status outside `100...599`, or a name that is not a string is `` `type ``.")
 (
  ### defp type-error
  (message -- error : "Build a `type error with the message.")
@@ -64,7 +63,7 @@
  ### def new
  (status -- response :
   "Return `{status status headers {} body \"\"}`. A status outside `100...599` is `` `type ``.")
- (checked-status `status swap `headers {} `body "" 6 pack dict.from-flat) `new def
+ (checked-status `status swap `headers {} `body "" 6 pack dict.from-kvs) `new def
 
  ### def text
  (status string -- response :
@@ -74,8 +73,8 @@
   swap checked-status swap
   (|status body|
    `status status `headers {"content-type" ("text/plain; charset=utf-8")} `body body 6 pack
-   dict.from-flat)
-  call) `text def
+   dict.from-kvs)
+  apply) `text def
 
  ### def json
  (status value -- response :
@@ -85,17 +84,17 @@
  (swap checked-status swap
   (|status value|
    `status status `headers {"content-type" ("application/json")} `body value json.emit 6 pack
-   dict.from-flat)
-  call) `json def
+   dict.from-kvs)
+  apply) `json def
 
  ### def redirect
  (location -- response :
   "Return a 302 response with `{\"location\" (location)}` as its headers and an empty body. A
    non-string location is `` `type ``.")
  (dup str.str? "http.response.redirect expects a string location" type-error assert
-  (|location| `status 302 `headers "location" location wrap pair dict.from-flat `body "" 6 pack
-   dict.from-flat)
-  call) `redirect def
+  (|location| `status 302 `headers "location" location wrap pair dict.from-kvs `body "" 6 pack
+   dict.from-kvs)
+  apply) `redirect def
 
  ### def not-found
  (-- response : "Return 404 \"not found\" text.")
@@ -111,9 +110,9 @@
 
  ### def header
  (response name -- values :
-  "Return every value of a header as a list, matching the name regardless of letter case and in
-   dictionary order; a string value counts as one. `()` when the header is absent. A non-response or
-   non-string name is `` `type ``.")
+  "Return every value of a header as a list, matching the name regardless of letter case; a string
+   value counts as one. `()` when the header is absent. A non-response or non-string name is ``
+   `type ``.")
  (checked-name swap checked `headers at dict.pairs swap (values-of) cons each raze) `header def
 
  ### def header?
@@ -149,11 +148,11 @@
   dup str.str? (wrap) () if
   swap checked-name
   (|response value name|
-   response checked `headers at name dup2 dict.has? (at dup str.str? (wrap) when) (pop pop ())
+   response checked `headers at name dup2 has? (at dup str.str? (wrap) when) (pop pop ())
    if value cat
    response `headers at name rolldown put
    response `headers rolldown put)
-  call) `with-header def
+  apply) `with-header def
 
  ### def with-headers
  (response headers -- response :

@@ -49,7 +49,7 @@
   (|long|
    "a,\"" long cat "\nq\"\"\",z\nb,c,d" cat csv.parse
    dup (len) each [3 3] equal dup first 1 at len 150003 equal 1 at ("b" "c" "d") equal)
-  call
+  apply
   ("a,b\n" 20000 repeat "\"open" cat csv.parse) `parse "record 20001, column 1"
   raises-containing)
  `across-blocks test
@@ -72,12 +72,13 @@
  `invalid-input test
 
  ### test typed-columns
- (-- : "Fields stay text until a table cast converts a column.")
+ (-- : "Fields stay text until a quotation converts a column.")
  ("id,score,name\n1,2.5,Ada\n02,3,Bob" csv.parse table.from-header-rows
   dup {"id" ("1" "02") "score" ("2.5" "3") "name" ("Ada" "Bob")} equal
-  {"id" (int) "score" (float)} table.cast
+  {"id" ((int) each) "score" ((float) each)} dict.evolve
   {"id" [1 2] "score" [2.5 3.0] "name" ("Ada" "Bob")} equal
-  ("id\nx" csv.parse table.from-header-rows {"id" (int)} table.cast pop) `parse "integer literal"
+  ("id\nx" csv.parse table.from-header-rows {"id" ((int) each)} dict.evolve pop) `parse
+  "integer literal"
   raises-containing)
  `typed-columns test
 

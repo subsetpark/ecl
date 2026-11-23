@@ -22,7 +22,7 @@
   `domain error.new "invalid generation destination" error.with-message assert
   project `directory at location path.dirname fs.mkdirs
   project `directory at location fs.stage-dir
-  project location offline 3 pack (started) cat call) `start def
+  project location offline 3 pack (started) cat apply) `start def
 
  ### defp started
  (stage project location offline -- work :
@@ -40,13 +40,13 @@
   "Validate and install one selected package without retaining archive payloads.")
  (|state name|
   state `work at `context at state `lock at `packages at name at pkg.obtain.requirement
-  state name pair (install-bytes) cat call) `install defp
+  state name pair (install-bytes) cat apply) `install defp
 
  ### defp install-bytes
  (bytes state name -- state : "Seal the exact source bytes and unpack only a validated package.")
  (|bytes state name|
   bytes pkg.bundle.inspect
-  state name bytes 3 pack (install-bundle) cat call) `install-bytes defp
+  state name bytes 3 pack (install-bundle) cat apply) `install-bytes defp
 
  ### defp install-bundle
  (bundle state name bytes -- state :
@@ -56,7 +56,7 @@
   state [work stage] at-path
   "archives/" state `lock at `packages at name at `hash at pkg.cache.filename cat bytes
   fs.create-bytes
-  state [work stage] at-path "packages/" name cat bytes archive.unpack-tgz pop
+  state [work stage] at-path "packages/" name cat bytes gzip.decompress tar.unpack pop
   state `bundles state `bundles at name bundle put put) `install-bundle defp
 
  ### def finish
@@ -65,8 +65,8 @@
  (|work manifest-text lock-text|
   lock-text pkg.resolution.read manifest-text pkg.manifest.read pkg.resolution.compatible
   {} swap `lock swap put `work work put `bundles {} put
-  dup `lock at `packages at dict.keys sort swap (install) fold
-  `bundles at work manifest-text lock-text 3 pack (publish) cat call) `finish def
+  dup `lock at `packages at dict.keys dup grade at swap (install) fold
+  `bundles at work manifest-text lock-text 3 pack (publish) cat apply) `finish def
 
  ### defp publish
  (bundles work manifest-text lock-text -- :

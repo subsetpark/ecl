@@ -15,18 +15,17 @@
  (fixture (pkg.bundle.inspect) cons @attempt result.err? 1 equal) `rejected defp
 
  ### test source-inspection
- (-- : "Inspect literal exports without executing package source, retaining data files.")
+ (-- : "Inspect declared modules without executing package source, retaining data files.")
  ("valid" fixture pkg.bundle.inspect
   dup `manifest at `name at "sample" equal
   `artifacts at [{kind ecl path "src/api.ecl" exports ["sample.api"]}] equal
-  `cwd "package-source-executed" fs.exists? 0 equal
-  "private-duplicates" fixture pkg.bundle.inspect `artifacts at
-  (`exports at) each raze ["sample.api"] equal)
+  `cwd "package-source-executed" fs.exists? 0 equal)
  `source-inspection test
 
  ### test rejected-layouts
- (-- : "Package policy rejects native payloads, missing exports, duplicates, and malformed source.")
- (["missing-manifest" "missing-export" "duplicate-export" "native" "malformed-source" "reserved"
+ (-- :
+  "Package policy rejects native payloads, unowned and duplicate modules, and malformed source.")
+ (["missing-manifest" "unowned-module" "duplicate-export" "native" "malformed-source" "reserved"
    "symlink" "traversal"]
   (rejected) for)
  `rejected-layouts test

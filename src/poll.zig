@@ -138,7 +138,7 @@ pub fn driveVoidFallible(cursor: anytype, args: anytype) !void {
 /// resumable. `Comparator` supplies `Context`, `Cursor`, `Error`, `init`,
 /// `advance`, and `deinit`; `advance` returns
 /// `Error!Progress(std.math.Order)`. A failed comparison ends the sort with
-/// its cursor still held, so the caller can name the pair that failed;
+/// its cursor still held, so the caller can report the pair that failed;
 /// `deinit` releases it with everything else.
 pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
     return struct {

@@ -1,7 +1,7 @@
 ### module stdlib.test.dict
 (
  `stdlib.test.support
- (equal raises-containing raises-word documented)
+ (equal raises-containing raises-data raises-word documented)
  import
 
  ### test observations
@@ -10,26 +10,31 @@
   {a 1 b 2} dict.keys [a b] equal
   {a 1 b 2} dict.vals [1 2] equal
   {a 1 b 2} dict.pairs ((a 1) (b 2)) equal
-  {a 1} `a dict.has? 1 equal
-  {a 1} `b dict.has? 0 equal
+  {a 1} `a has? 1 equal
+  {a 1} `b has? 0 equal
+  {a 1 b 2} [b z a] dict.has? [1 0 1] equal
+  [b z] {a 1 b 2} dict.in? [1 0] equal
+  {[1 2] 9} [[1 2] [1]] dict.has? [1 0] equal
   {a 1 b 2} [b a] dict.keys-exactly? 1 equal
   {a 1} [a b] dict.keys-exactly? 0 equal
-  {"ab" 9} "ab" dict.has? 1 equal
-  {[1 2] 9} [1 2] dict.has? 1 equal
-  {missing 9} (missing) first dict.has? 1 equal
+  {"ab" 9} "ab" has? 1 equal
+  {[1 2] 9} [1 2] has? 1 equal
+  {missing 9} (missing) first has? 1 equal
   {`a `b} {a b} equal
   {`a `b} dict.vals [b] equal
-  {{a 1} 9} {a 1} dict.has? 1 equal
-  {1 9} 1.0 dict.has? 1 equal
-  {"ab" 9} "a" dict.has? 0 equal
+  {{a 1} 9} {a 1} has? 1 equal
+  {1 9} 1.0 has? 1 equal
+  {"ab" 9} "a" has? 0 equal
   ({a 1} len) `type `len raises-word
   ([] dict.size) `type `dict.core.size raises-word
-  ([] `a dict.has?) `type `dict.core.has? raises-word)
+  ({a 1} `a dict.has?) `type "list of keys" raises-containing
+  ([] [a] dict.has?) `type `dict.core.has? raises-word)
  `observations test
 
  ### test gathering
  (-- : "Gather whole keys in request order.")
  ({a 1 b 2 c 3} [c a c] dict.at [3 1 3] equal
+  [c a c] {a 1 b 2 c 3} dict.of [3 1 3] equal
   {[c a] 7 b 2} [[c a] b] dict.at [7 2] equal
   {"ab" 9 [1 2] 8} ["ab" [1 2] "ab"] dict.at [9 8 9] equal
   {"ab" 9 [1 2] 8} ["ab" [3] [1 2] [3]] [0] dict.at-or [9 [0] 8 [0]] equal
@@ -46,6 +51,9 @@
   `domain
   "could not find the dict key"
   raises-containing
+  ({a 1} [a missing] dict.at) `domain `key `missing raises-data
+  ({a 1} `missing at) `domain `key `missing raises-data
+  ({a 1} [missing] (1 +) dict.update) `domain `key `missing raises-data
   ({a 1} `a dict.at) `type `dict.core.at raises-word
   ([] [] dict.at) `type `dict.core.at raises-word)
  `gathering test
@@ -88,7 +96,7 @@
   `shape
   "two-element pairs"
   raises-containing
-  ([[a 1] [a 2]] dict.from-pairs) `domain `dict.core.from-flat raises-word)
+  ([[a 1] [a 2]] dict.from-pairs) `domain `dict.core.from-kvs raises-word)
  `construction test
 
  ### test mapping
@@ -98,6 +106,14 @@
   {a 1 b 2} (pair) dict.map {a (a 1) b (b 2)} equal
   ((dict.map-values) first execute) `undefined-word `dict.map-values raises-word)
  `mapping test
+
+ ### test evolve
+ (-- : "Apply per-key quotations to existing keys and reject missing keys.")
+ ({a 1 b 2 c 3} {a (1 +) c (10 *)} dict.evolve {a 2 b 2 c 30} equal
+  {a 1} {} dict.evolve {a 1} equal
+  {a ["1" "2"] b ["x"]} {a ((int) each)} dict.evolve {a [1 2] b ("x")} equal
+  ({a 1} {z ("reached" fail)} dict.evolve) `domain "could not find" raises-containing)
+ `evolve test
 
  ### test selection
  (-- : "Filter and select keys while preserving dictionary order.")
@@ -130,9 +146,10 @@
 
  ### test documentation
  (-- : "Expose documentation for every dict module export.")
- ([dict.size dict.keys dict.vals dict.pairs dict.has? dict.at dict.at-or dict.get dict.put
-   dict.merge dict.associate dict.from-flat dict.from-lists dict.from-pairs
-   dict.from-keys dict.keys-exactly? dict.update dict.update-or
+ ([dict.size dict.keys dict.vals dict.pairs dict.has? dict.in? dict.at dict.of dict.at-or dict.get
+   dict.put
+   dict.merge dict.associate dict.from-kvs dict.zip dict.from-pairs
+   dict.from-keys dict.keys-exactly? dict.update dict.update-or dict.evolve
    dict.map dict.filter dict.reject dict.take
    dict.del dict.split dict.merge-with]
   documented)

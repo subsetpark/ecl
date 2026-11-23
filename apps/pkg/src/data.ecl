@@ -14,5 +14,5 @@
 
  ### def sorted-entries
  (holder -- pairs : "Return a dict's entries in ascending key order.")
- (|holder| holder dict.keys sort holder (entry-of) cons each) `sorted-entries def
+ (|holder| holder dict.keys dup grade at holder (entry-of) cons each) `sorted-entries def
 ) `pkg.data @defm

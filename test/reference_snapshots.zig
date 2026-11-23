@@ -21,7 +21,7 @@ const cases = [_]Case{
     .{ .name = "min", .source = "2 3.0 min" },
     .{ .name = "max", .source = "2 3.0 max" },
     .{ .name = "=", .source = "[1 2] [1 3] =" },
-    .{ .name = "<>", .source = "[1 2] [1 3] <>" },
+    .{ .name = "not=", .source = "[1 2] [1 3] not=" },
     .{ .name = "<", .source = "[1 2] 2 <" },
     .{ .name = ">", .source = "[1 2] 2 >" },
     .{ .name = "<=", .source = "[1 2] 2 <=" },
@@ -51,14 +51,14 @@ const cases = [_]Case{
     .{ .name = "reverse", .source = "\"abc\" reverse \"\" reverse" },
     .{ .name = "range", .source = "5 range" },
     .{ .name = "grade", .source = "[2 1 2 1] grade" },
-    .{ .name = "sort", .source = "[2 1 2 1] sort" },
+    .{ .name = "dup grade at", .source = "[2 1 2 1] dup grade at" },
     .{ .name = "distinct", .source = "[2 1 2 1] distinct" },
     .{ .name = "dict.keys", .source = "{a 1 b 2} dict.keys" },
     .{ .name = "dict.vals", .source = "{a 1 b 2} dict.vals" },
     .{ .name = "put", .source = "{a 1} `b 2 put" },
     .{ .name = "del", .source = "{a 1 b 2} `a del" },
     .{ .name = "dict.merge", .source = "{a 1 b 2} {b 20 c 3} dict.merge" },
-    .{ .name = "dict.has?", .source = "{\"ab\" 9} \"ab\" dict.has? {[1 2] 9} [1 2] dict.has?" },
+    .{ .name = "has?", .source = "{\"ab\" 9} \"ab\" has? {[1 2] 9} [1 2] has?" },
     .{ .name = "split", .source = "\"a—b—\" \"—\" str.split first" },
     .{ .name = "join", .source = "[\"a\" 2] \"-\" str.join" },
     .{ .name = "str.format", .source = "[3.14 2] \"pi={} n={}\" str.format" },
@@ -99,7 +99,6 @@ const cases = [_]Case{
     .{ .name = "result.map-err", .source = "{kind io} result.err (pop {kind domain}) result.map-err" },
     .{ .name = "set", .source = "3 `x set x" },
     .{ .name = "set quotation", .source = "(dup *) `q set q" },
-    .{ .name = "which", .source = "3 `x set `x which" },
     .{ .name = "see", .source = "3 `x set `x see" },
     .{ .name = "see set", .source = "`set see" },
     .{ .name = "setp", .source = "1 `x setp" },
@@ -125,12 +124,12 @@ const cases = [_]Case{
     .{
         .name = "table aggregate",
         .source = "{\"r\" [\"e\" \"w\" \"e\"] \"v\" [1 2 3]} [\"r\"] " ++
-            "[[\"t\" \"v\" (sum)]] table.aggregate",
+            "(|g| {} \"t\" g \"v\" at (sum) each put) table.aggregate",
     },
     .{ .name = "table invalid", .source = "{\"a\" [1 2] \"b\" [3]} table.rows" },
     .{ .name = "getenv unset", .source = "\"ECL_SNAPSHOT_ABSENT\" getenv" },
     .{ .name = "read-text missing", .source = "`cwd \"no-such-file.ecl\" fs.read-text" },
-    .{ .name = "http dead port", .source = "{target \"http://127.0.0.1:1/x\"} http.get" },
+    .{ .name = "http dead port", .source = "{method \"GET\" target \"http://127.0.0.1:1/x\"} http.send" },
     // Bit patterns and counter-based randomness. Every draw here is seeded, so
     // the transcript is as reproducible as the arithmetic above it.
     .{ .name = "band", .source = "[12 10] 6 band" },
@@ -257,8 +256,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\[1 0]
         \\stderr:
         \\<empty>
-        \\=== <> ===
-        \\source: [1 2] [1 3] <>
+        \\=== not= ===
+        \\source: [1 2] [1 3] not=
         \\exit: 0
         \\stdout:
         \\[0 1]
@@ -467,8 +466,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\[1 3 0 2]
         \\stderr:
         \\<empty>
-        \\=== sort ===
-        \\source: [2 1 2 1] sort
+        \\=== dup grade at ===
+        \\source: [2 1 2 1] dup grade at
         \\exit: 0
         \\stdout:
         \\[1 1 2 2]
@@ -516,8 +515,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\{a 1 b 20 c 3}
         \\stderr:
         \\<empty>
-        \\=== dict.has? ===
-        \\source: {"ab" 9} "ab" dict.has? {[1 2] 9} [1 2] dict.has?
+        \\=== has? ===
+        \\source: {"ab" 9} "ab" has? {[1 2] 9} [1 2] has?
         \\exit: 0
         \\stdout:
         \\1 1
@@ -809,13 +808,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\(dup *)
         \\stderr:
         \\<empty>
-        \\=== which ===
-        \\source: 3 `x set `x which
-        \\exit: 0
-        \\stdout:
-        \\x -> x def public
-        \\stderr:
-        \\<empty>
         \\=== see ===
         \\source: 3 `x set `x see
         \\exit: 0
@@ -828,7 +820,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\(... value name -- :
-        \\ "(annotation value name -- ) *or* (value name -- ). Bind `value` as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. `annotation` is published as the constant's metadata.")
+        \\ "Bind `name` to `value` in the current scope. Accepts an optional annotation below `value` as metadata on the binding.")
         \\(swap wrap swap def)
         \\stderr:
         \\<empty>
@@ -857,7 +849,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: `qualify doc
         \\exit: 0
         \\stdout:
-        \\"<401-characters-elided>"
+        \\"Create a symbol value containing the qualified name `module-name`.`binding-name`."
         \\stderr:
         \\<empty>
         \\=== result ok ===
@@ -889,7 +881,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "an ok result must carry a list of success values" word raise trace (`raise `assert `result.map) data {source "<stdlib:result>" line 33 col 90 sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<stdlib:result>" line 33 col 90} {source "<command>" line 1 col 18})}}
+        \\{kind type msg "an ok result must carry a list of success values" word raise trace (`raise `assert `result.map) data {source "<stdlib:result>" line 13 col 90 sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<stdlib:result>" line 13 col 90} {source "<command>" line 1 col 18})}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -899,11 +891,11 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\=== str index-of missing ===
         \\source: "abc" "z" str.index-of
-        \\exit: 1
+        \\exit: 0
         \\stdout:
-        \\<empty>
+        \\3
         \\stderr:
-        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (`raise `assert `str.index-of) data {source "<stdlib:str>" line <^\d+$> col <^\d+$> sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<stdlib:str>" line <^\d+$> col <^\d+$>} {source "<command>" line 1 col 11})}}
+        \\<empty>
         \\=== csv parse ===
         \\source: "a,,c
         \\d,,f" csv.parse
@@ -925,7 +917,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind parse msg "csv: malformed quoting at record 1, column 1" word raise trace (`raise `csv.refuse `csv.misquoted `csv.unclosed `csv.checked `csv.fielded `csv.separated `csv.quoted `csv.lexed `csv.tail `csv.finished `csv.parse) data {source "<stdlib:csv>" line 12 col 60 sites ({source "<stdlib:csv>" line 12 col 60} {source "<stdlib:csv>" line 36 col 92} {source "<stdlib:csv>" line 41 col 11} {source "<stdlib:csv>" line 64 col 19} {source "<stdlib:csv>" line 75 col 39} {source "<stdlib:csv>" line 81 col 81} {source "<stdlib:csv>" line 86 col 52} {source "<stdlib:csv>" line 90 col 26} {source "<stdlib:csv>" line 120 col 67} {source "<stdlib:csv>" line 124 col 2} {source "<stdlib:csv>" line 154 col 32} {source "<command>" line 1 col 7})}}
+        \\{kind parse msg "csv: malformed quoting at record 1, column 1" word raise trace (`raise `csv.refuse `csv.misquoted `csv.unclosed `csv.checked `csv.fielded `csv.separated `csv.quoted `csv.lexed `csv.tail `csv.finished `csv.parse) data {source "<stdlib:csv>" line 12 col 60 sites ({source "<stdlib:csv>" line 12 col 60} {source "<stdlib:csv>" line 36 col 92} {source "<stdlib:csv>" line 41 col 11} {source "<stdlib:csv>" line 64 col 19} {source "<stdlib:csv>" line 75 col 39} {source "<stdlib:csv>" line 81 col 81} {source "<stdlib:csv>" line 86 col 54} {source "<stdlib:csv>" line 90 col 26} {source "<stdlib:csv>" line 120 col 67} {source "<stdlib:csv>" line 124 col 2} {source "<stdlib:csv>" line 147 col 32} {source "<command>" line 1 col 7})}}
         \\=== json parse ===
         \\source: "{\"a\":[1,null,true]}" json.parse
         \\exit: 0
@@ -962,7 +954,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== table aggregate ===
-        \\source: {"r" ["e" "w" "e"] "v" [1 2 3]} ["r"] [["t" "v" (sum)]] table.aggregate
+        \\source: {"r" ["e" "w" "e"] "v" [1 2 3]} ["r"] (|g| {} "t" g "v" at (sum) each put) table.aggregate
         \\exit: 0
         \\stdout:
         \\{"r" ("e" "w") "t" [4 2]}
@@ -974,7 +966,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind shape msg "table columns must share one length" word raise trace (`raise `assert `table.rows) data {source "<stdlib:table>" line 32 col 77 sites ({source "prelude.ecl" line <^\d+$> col <^\d+$>} {source "<stdlib:table>" line 32 col 77} {source "<command>" line 1 col 21})}}
+        \\{kind shape msg "flip requires rows of the same length" word flip trace (`flip `table.transpose) data {source "<stdlib:table>" line <^\d+$> col <^\d+$> sites ({source "<stdlib:table>" line <^\d+$> col <^\d+$>} {source "<stdlib:table>" line <^\d+$> col <^\d+$>})}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
@@ -990,12 +982,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{kind io msg "entry does not exist" word fs.read-text trace (`fs.read-text) data {operation read-text root cwd path "no-such-file.ecl" reason not-found source "<command>" line 1 col 25 sites ({source "<command>" line 1 col 25})}}
         \\=== http dead port ===
-        \\source: {target "http://127.0.0.1:1/x"} http.get
+        \\source: {method "GET" target "http://127.0.0.1:1/x"} http.send
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind io msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" word http.get trace (`http.get) data {path "http://127.0.0.1:1/x" source "<command>" line 1 col 33 sites ({source "<command>" line 1 col 33})}}
+        \\{kind io msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" word http.send trace (`http.send) data {path "http://127.0.0.1:1/x" source "<command>" line 1 col 46 sites ({source "<command>" line 1 col 46})}}
         \\=== band ===
         \\source: [12 10] 6 band
         \\exit: 0

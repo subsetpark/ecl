@@ -1,5 +1,6 @@
 //! Private streaming storage uses the same confined publication primitives as
-//! whole-file writes. Its resource owns the root lease and admission until join.
+//! whole-file writes. Its resource owns the root lease until join; it holds no
+//! live-operation slot, so an open writer never blocks another operation.
 const std = @import("std");
 const fs = @import("filesystem_port.zig");
 const heap = @import("heap.zig");
@@ -10,7 +11,6 @@ const State = struct {
     issuer: *Identity,
     access: *external.FilesystemAccess,
     root: fs.RootSelection,
-    slot: fs.OperationSlot,
     target: fs.Resolved,
     staged: fs.StagedFile,
     written: u64 = 0,
@@ -28,22 +28,20 @@ pub const Stream = opaque {
     fn state(self: *Stream) *State {
         return @ptrCast(@alignCast(self));
     }
-    /// Consumes all three capabilities on success and failure. The caller has
+    /// Consumes the root, target, and staging on success and failure. The caller has
     /// already validated an absent destination and created private storage.
-    pub fn create(access: *external.FilesystemAccess, root: fs.RootSelection, slot: fs.OperationSlot, target: fs.Resolved, staged: fs.StagedFile) error{OutOfMemory}!*Stream {
+    pub fn create(access: *external.FilesystemAccess, root: fs.RootSelection, target: fs.Resolved, staged: fs.StagedFile) error{OutOfMemory}!*Stream {
         const issuer = fs.resourceIssuer(access);
         const owned = issuer.allocator().create(State) catch |err| {
             var file = staged;
             file.dispose();
             var destination = target;
             destination.deinit(issuer.allocator(), fs.hostIo(access));
-            var admission = slot;
-            admission.release();
             root.deinit();
             return err;
         };
         issuer.retain();
-        owned.* = .{ .issuer = issuer, .access = access, .root = root, .slot = slot, .target = target, .staged = staged };
+        owned.* = .{ .issuer = issuer, .access = access, .root = root, .target = target, .staged = staged };
         return fromState(owned);
     }
     pub fn remaining(self: *Stream) u64 {
@@ -96,7 +94,6 @@ pub const Stream = opaque {
         const issuer = owned.issuer;
         owned.staged.dispose();
         owned.target.deinit(issuer.allocator(), fs.hostIo(owned.access));
-        owned.slot.release();
         owned.root.deinit();
         issuer.allocator().destroy(owned);
         issuer.release();

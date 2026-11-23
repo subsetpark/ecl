@@ -8,7 +8,7 @@
  (-- : "Keep counter-based random draws deterministic and order-independent.")
  ([0 0] 100 rand.int pair ([0 1] 35) equal
   [0 0] 100 rand.int nip [0 0] 100 rand.int nip = 1 equal
-  [0 0] 100 rand.int nip [7 0] 100 rand.int nip <> 1 equal
+  [0 0] 100 rand.int nip [7 0] 100 rand.int nip not= 1 equal
   [0 0] 100 rand.int pop [0 1] equal
   [0 5] 3 100 rand.ints pop [0 8] equal
   [4 9] 0 100 rand.ints () equal [4 9] equal
@@ -44,7 +44,7 @@
  ([42 0] 4 8 rand.deal nip dup distinct len 4 equal
   dup (0 <) any? 0 equal
   (8 >=) any? 0 equal
-  [42 0] 8 8 rand.deal nip sort [0 1 2 3 4 5 6 7] equal
+  [42 0] 8 8 rand.deal nip dup grade at [0 1 2 3 4 5 6 7] equal
   [42 0] 0 0 rand.deal nip len 0 equal
   [42 0] 0 5 rand.deal pop [42 0] equal
   [42 0] 3 10 rand.deal pop [42 3] equal
@@ -64,12 +64,12 @@
   dup 0 at over 2 at match? 1 equal
   dup 1 at over 3 at match? 1 equal
   0 at [42 4] equal
-  [42 0] [10 20 30 40] rand.shuffle nip sort [10 20 30 40] equal
+  [42 0] [10 20 30 40] rand.shuffle nip dup grade at [10 20 30 40] equal
   [42 0] [] rand.shuffle nip [] equal
   [42 0] [] rand.shuffle pop [42 0] equal
-  [42 0] "abcd" rand.shuffle nip dup len 4 equal dup type `list equal sort "abcd" equal
+  [42 0] "abcd" rand.shuffle nip dup len 4 equal dup type `list equal dup grade at "abcd" equal
   [42 0] [1 two "three" [4]] rand.shuffle nip len 4 equal
-  [42 0] 1000 range rand.shuffle nip sort 1000 range equal
+  [42 0] 1000 range rand.shuffle nip dup grade at 1000 range equal
   ([42 0] 1 rand.shuffle) `type `rand.shuffle raises-word
   (5 [1 2] rand.shuffle) `type "generator state" raises-containing)
  `shuffle test

@@ -128,10 +128,10 @@ def main():
                 # body reaches it with over instead of capturing it.
                 return (
                     'git.snapshot [] port.open (|p| p git.fetch ' + req + ' port.begin (|x| '
-                    'x git.output port.endpoint [] over 65536 fd.read '
-                    '(dup empty? not) (cat over 65536 fd.read) while pop nip '
+                    'x git.output port.endpoint [] over 65536 stream.read '
+                    '(dup empty? not) (cat over 65536 stream.read) while pop nip '
                     "`cwd " + json.dumps(filename) + ' rolldown fs.create-bytes '
-                    'x port.result x port.close) call p port.close) call'
+                    'x port.result x port.close) apply p port.close) apply'
                 )
 
             for selector, revision, filename in [('tag', 'release', 'tag.tgz'),
@@ -178,8 +178,8 @@ def main():
             run(['git', 'commit', '-m', 'large'], repo)
             run(['git', 'tag', 'large'], repo)
             begin = 'git.snapshot [] port.open `p set p git.fetch ' + request('tag', 'large') + ' port.begin `x set '
-            invoke(begin + 'x git.output port.endpoint 1 fd.read pop x port.cancel x port.close p port.close')
-            invoke(begin + 'x git.output port.endpoint 1 fd.read pop '
+            invoke(begin + 'x git.output port.endpoint 1 stream.read pop x port.cancel x port.close p port.close')
+            invoke(begin + 'x git.output port.endpoint 1 stream.read pop '
                    'git.snapshot [] port.open `q set q git.fetch ' + request() +
                    ' port.begin `y set y port.cancel y port.close q port.close '
                    'x port.cancel x port.close p port.close')

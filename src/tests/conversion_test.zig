@@ -114,6 +114,14 @@ test "conversion: bytes encodes strings and passes byte lists through" {
     try expectError(&runtime, "7 bytes", &.{"kind type"});
 }
 
+test "conversion: bytes? recognizes exact byte lists" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "[1 2 255] bytes? [1 256] bytes? [-1] bytes? \"ab\" bytes? \"ab\" bytes bytes? [] bytes? 7 bytes? [1 \\a] bytes? [1 2.0] bytes? 300 range bytes? 256 range bytes?", "1 0 0 0 1 1 0 0 0 0 1");
+}
+
 test "conversion: symbol is lookup-only and intern is the one word that creates" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
@@ -233,7 +241,6 @@ test "conversion: char accepts chars, ints, strings, and lists of codepoints" {
     try expectStack(&runtime, "1114111 char int", "1114111");
     try expectStack(&runtime, "\"λ\" char \"\" char \"ab\" char", "\"λ\" \"\" \"ab\"");
     try expectStack(&runtime, "[97 98 99] char \"abc\" 1 + char [955 97] char [128512 97] char (\\a 98) char [] char", "\"abc\" \"bcd\" \"λa\" \"😀a\" \"ab\" \"\"");
-    try expectStack(&runtime, "\"abc\" 1 + char str.core.kind", "string");
     try expectError(&runtime, "1114112 char", &.{ "kind domain", "Unicode scalar" });
     try expectError(&runtime, "55296 char", &.{ "kind domain", "Unicode scalar" });
     try expectError(&runtime, "57343 char", &.{ "kind domain", "Unicode scalar" });
@@ -271,8 +278,8 @@ test "conversion: a symbol built from a string links to the root that built it" 
     // the session.
     try expectStack(
         &runtime,
-        "(pop 99) `dup def ((call) `apply def) `conv-link @defm " ++
-            "\"dup\" symbol (execute) cons `q set 1 q call 1 q conv-link.apply",
+        "(pop 99) `dup def ((apply) `invoke def) `conv-link @defm " ++
+            "\"dup\" symbol (execute) cons `q set 1 q apply 1 q conv-link.invoke",
         "99 99",
     );
 }
@@ -287,7 +294,7 @@ test "conversion: a symbol the implementation builds means core's binding" {
     try expectStack(
         &runtime,
         "(pop pop 55) `at def ([] 5 core.at) @attempt `err 0 dict.get `word 0 dict.get (execute) cons `q set " ++
-            "[7 8] 1 q call",
+            "[7 8] 1 q apply",
         "8",
     );
 }

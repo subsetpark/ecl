@@ -24,7 +24,6 @@
 }
 ("gold" "silver" `null "gold" "silver" "unknown")
 domain
-domain
 ("gold" "silver" `null)
 symbol
 "gold"

@@ -144,17 +144,17 @@ test "multiline child does not force the following sibling to break" {
 }
 
 test "multiline modules break only their local top-level run" {
-    const source = "((1) `x def) call dup `stats pair wrap";
+    const source = "((1) `x def) apply dup `stats pair wrap";
     try expectFormat(
         source,
-        "(\n ### def x\n (1) `x def) call dup `stats pair wrap\n",
+        "(\n ### def x\n (1) `x def) apply dup `stats pair wrap\n",
     );
     try expectParseEquivalent(source);
 
-    const trailing_break = "((1) `x def\n) call dup `stats pair wrap";
+    const trailing_break = "((1) `x def\n) apply dup `stats pair wrap";
     try expectFormat(
         trailing_break,
-        "(\n ### def x\n (1) `x def\n) call dup `stats pair wrap\n",
+        "(\n ### def x\n (1) `x def\n) apply dup `stats pair wrap\n",
     );
     try expectParseEquivalent(trailing_break);
 }

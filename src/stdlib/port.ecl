@@ -46,8 +46,7 @@
     progress; waiting for completion does not drain them.
 
     `port.call` is an ECL composition. It closes the exchange before returning its result or
-    re-raising its terminal error. It leaves the resource with its owner. The public `port` module
-    composes the host operations exported by `port.core`.
+    re-raising its terminal error. It leaves the resource with its owner.
 
     Configuration and initial requests may contain integers, floats, characters, symbols, lists,
     dictionaries, and port capabilities. Executable words, tasks, and modules are rejected

@@ -18,7 +18,7 @@ const byte_stream = @import("port_bytes.zig");
 fn Handle(comptime Object: type) type {
     return struct {
         const Cell = @This();
-        const Active = struct { object: Object, access: *external.FilesystemAccess, leases: usize = 0, reservation: ?*fs.Reservation = null };
+        const Active = struct { object: Object, access: *external.FilesystemAccess, leases: usize = 0 };
         issuer: *Identity,
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -193,7 +193,6 @@ fn Handle(comptime Object: type) type {
             if (Object == *Stage or Object == *Stream) {
                 if (!self.phase.retiring.object.cleanupStep()) return false;
             } else self.phase.retiring.object.close(self.io);
-            if (self.phase.retiring.reservation) |reservation| reservation.release();
             std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             self.phase = .closed;
             var detached = self.ownership.release();
@@ -259,14 +258,13 @@ pub fn isEnumeration(item: Value) bool {
 
 /// Consumes dir on either outcome. A staging owner's closure also joins any
 /// enumeration opened through its roots or dependent descendants.
-pub fn adoptEnumeration(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: std.Io.Dir, parent: Value, ticket: ?*fs.Reservation) error{ OutOfMemory, ScopeClosing }!Value {
+pub fn adoptEnumeration(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: std.Io.Dir, parent: Value) error{ OutOfMemory, ScopeClosing }!Value {
     const group = dependentGroup(parent, scope) catch |err| {
         dir.close(fs.hostIo(access));
         return err;
     };
     defer if (group) |g| g.release();
-    if (ticket) |reservation| reservation.retain();
-    return adoptReservedHandle(Enumeration, access, scope, .{ .dir = dir, .iterator = dir.iterate() }, group, ticket);
+    return adoptHandle(Enumeration, access, scope, .{ .dir = dir, .iterator = dir.iterate() }, group);
 }
 
 /// Advances at most one directory entry. Names are copied before unlocking;
@@ -276,8 +274,6 @@ pub fn next(item: Value) Next {
     std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     defer std.Io.Threaded.mutexUnlock(&cell.mutex);
     if (cell.phase != .open) return .closed;
-    var admission: ?fs.OperationSlot = if (cell.phase.open.reservation) |ticket| ticket.claim() orelse return .{ .failed = .limit } else null;
-    defer if (admission) |*slot| slot.release();
     const cursor = &cell.phase.open.object;
     const entry = (cursor.iterator.next(cell.io) catch |err| return .{ .failed = fs.reasonForError(err) }) orelse return .end;
     if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) return .pending;
@@ -307,8 +303,8 @@ const FileCell = Handle(std.Io.File);
 
 /// A file opened for reading, as `fs.open-reader` returns it: the scope owns
 /// the file through a handle cell exactly as it owns a lock, and the value
-/// the program holds is a reader endpoint over that cell, so `fd.read` and
-/// the words over it apply unchanged and `fd.close` closes the file. The
+/// the program holds is a reader endpoint over that cell, so `stream.read` and
+/// the words over it apply unchanged and `port.close` closes the file. The
 /// scope closing closes it too; a read after that is `'io`.
 pub const FileReader = struct {
     memory: std.mem.Allocator,
@@ -374,7 +370,7 @@ pub const FileReader = struct {
 
 /// Consumes the file on either outcome and returns the reader endpoint.
 pub fn adoptReader(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, file: std.Io.File) error{ OutOfMemory, ScopeClosing }!Value {
-    const cell = try adoptCell(std.Io.File, access, scope, file, null, null);
+    const cell = try adoptCell(std.Io.File, access, scope, file, null);
     errdefer {
         cell.resourceClose();
         cell.releasePort();
@@ -388,13 +384,10 @@ pub fn adoptReader(access: *external.FilesystemAccess, scope: *scheduler.TaskSco
     return try endpoints.Endpoint.create(FileReader, .reader, issuer.next(), reader);
 }
 
+// Consumes the object on either outcome.
 fn adoptHandle(comptime Object: type, access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: Object, dependent: ?*scheduler.ExternalGroup) error{ OutOfMemory, ScopeClosing }!Value {
-    return adoptReservedHandle(Object, access, scope, dir, dependent, null);
-}
-// Consumes both the object and its optional reservation on either outcome.
-fn adoptReservedHandle(comptime Object: type, access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: Object, dependent: ?*scheduler.ExternalGroup, reservation: ?*fs.Reservation) error{ OutOfMemory, ScopeClosing }!Value {
     const ResourceCell = Handle(Object);
-    const cell = try adoptCell(Object, access, scope, dir, dependent, reservation);
+    const cell = try adoptCell(Object, access, scope, dir, dependent);
     return resource.Resource.create(ResourceCell, .direct, cell.issuer.next(), cell) catch |err| {
         cell.resourceClose();
         cell.releasePort();
@@ -404,19 +397,18 @@ fn adoptReservedHandle(comptime Object: type, access: *external.FilesystemAccess
 
 /// The scope-owned cell behind every handle resource: created, published
 /// into the scope, and attached to its parent's group. The caller wraps it
-/// as a resource value or as an endpoint. Consumes the object and the
-/// reservation on either outcome.
-fn adoptCell(comptime Object: type, access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: Object, dependent: ?*scheduler.ExternalGroup, reservation: ?*fs.Reservation) error{ OutOfMemory, ScopeClosing }!*Handle(Object) {
+/// as a resource value or as an endpoint. Consumes the object on either
+/// outcome.
+fn adoptCell(comptime Object: type, access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: Object, dependent: ?*scheduler.ExternalGroup) error{ OutOfMemory, ScopeClosing }!*Handle(Object) {
     const issuer = @import("filesystem_port.zig").resourceIssuer(access);
     const io = @import("filesystem_port.zig").hostIo(access);
     const ResourceCell = Handle(Object);
     const cell = issuer.allocator().create(ResourceCell) catch |err| {
         if (Object == *Stage or Object == *Stream) dir.retire() else dir.close(io);
-        if (reservation) |ticket| ticket.release();
         return err;
     };
     issuer.retain();
-    cell.* = .{ .issuer = issuer, .allocator = issuer.allocator(), .io = io, .phase = .{ .open = .{ .object = dir, .access = access, .reservation = reservation } }, .writes = if (Object == *Stream) .init(&cell.mutex) else {} };
+    cell.* = .{ .issuer = issuer, .allocator = issuer.allocator(), .io = io, .phase = .{ .open = .{ .object = dir, .access = access } }, .writes = if (Object == *Stream) .init(&cell.mutex) else {} };
     transfers.publishScope(ResourceCell, cell, scope, ResourceCell.owner) catch |err| {
         cell.resourceClose();
         cell.releasePort();
@@ -439,26 +431,24 @@ pub fn isStage(item: Value) bool {
 }
 
 /// Consumes the private stage on either outcome.
-pub fn adoptStage(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, stage: *Stage, parent: Value, ticket: ?*fs.Reservation) error{ OutOfMemory, ScopeClosing }!Value {
+pub fn adoptStage(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, stage: *Stage, parent: Value) error{ OutOfMemory, ScopeClosing }!Value {
     const group = dependentGroup(parent, scope) catch |err| {
         stage.retire();
         return err;
     };
     defer if (group) |g| g.release();
-    if (ticket) |reservation| reservation.retain();
-    return adoptReservedHandle(*Stage, access, scope, stage, group, ticket);
+    return adoptHandle(*Stage, access, scope, stage, group);
 }
 
 /// Consumes dir on either outcome. Descendants of staging share its permanent
 /// dependency group even if their task ownership is transferred.
-pub fn adoptChild(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: std.Io.Dir, parent: Value, ticket: ?*fs.Reservation) error{ OutOfMemory, ScopeClosing }!Value {
+pub fn adoptChild(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: std.Io.Dir, parent: Value) error{ OutOfMemory, ScopeClosing }!Value {
     const group = dependentGroup(parent, scope) catch |err| {
         dir.close(fs.hostIo(access));
         return err;
     };
     defer if (group) |g| g.release();
-    if (ticket) |reservation| reservation.retain();
-    return adoptReservedHandle(std.Io.Dir, access, scope, dir, group, ticket);
+    return adoptHandle(std.Io.Dir, access, scope, dir, group);
 }
 
 /// Consumes a stream on either outcome. Its root lease joins directory close;
@@ -624,11 +614,6 @@ fn commitCell(comptime Cell: type, cell: *Cell) Commit {
         }
         return .{ .pending = external.readinessSource(Cell, cell, 1) };
     }
-    var admission: ?fs.OperationSlot = if (cell.phase.sealing.reservation) |ticket| ticket.claim() orelse {
-        std.Io.Threaded.mutexUnlock(&cell.mutex);
-        return .{ .failed = .limit };
-    } else null;
-    defer if (admission) |*slot| slot.release();
     // This fixed namespace operation is serialized with cancellation.
     const failure = cell.phase.sealing.object.commit();
     std.Io.Threaded.mutexUnlock(&cell.mutex);
@@ -638,16 +623,13 @@ fn commitCell(comptime Cell: type, cell: *Cell) Commit {
 }
 
 const Origin = union(enum) { directory: *DirectoryCell, stage: *StageCell };
-const LeaseState = struct { origin: Origin, io: std.Io, dir: std.Io.Dir, ticket: ?*fs.Reservation };
+const LeaseState = struct { origin: Origin, io: std.Io, dir: std.Io.Dir };
 pub const Lease = opaque {
     fn state(self: *Lease) *LeaseState {
         return @ptrCast(@alignCast(self));
     }
     pub fn dir(self: *Lease) std.Io.Dir {
         return self.state().dir;
-    }
-    pub fn reservation(self: *Lease) ?*fs.Reservation {
-        return self.state().ticket;
     }
     pub fn deinit(self: *Lease) void {
         const owned = self.state();
@@ -676,6 +658,6 @@ fn acquireCell(comptime Cell: type, cell: *Cell, origin: Origin) error{ OutOfMem
     const dir = root.openDir(cell.io, ".", .{ .iterate = true }) catch return error.Io;
     cell.retainReadiness();
     cell.phase.open.leases += 1;
-    owned.* = .{ .origin = origin, .io = cell.io, .dir = dir, .ticket = cell.phase.open.reservation };
+    owned.* = .{ .origin = origin, .io = cell.io, .dir = dir };
     return @ptrCast(owned);
 }
