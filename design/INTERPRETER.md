@@ -387,7 +387,9 @@ Locals declarations are the one general source lowering. `locals.zig` validates
 local names and rewrites local loads into private core operations over a
 Fiber-owned locals stack. A local may not cross into a nested quotation; source
 must use explicit quotation construction such as `cons` when it wants value
-capture.
+capture. Slots are a declaration the reader writes for itself: a list's slots
+lower as the names `.x` through its highest slot, and since no symbol is spelled
+that way, a slot cannot capture a word the body writes.
 
 The lowering produces ordinary forms consumed directly by the frame machine.
 This keeps the machine point-free and local lifetime visible: the lowered

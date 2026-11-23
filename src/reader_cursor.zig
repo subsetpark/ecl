@@ -479,6 +479,9 @@ const AtomBuilder = struct {
     marker: enum { none, task_digits, port_digits, address_digits },
     /// The atom is a quote's symbol: its occurrence pushes the symbol when run.
     quoted: bool = false,
+    /// The atom is a slot, which reads as an occurrence of its own spelling
+    /// for its list's lowering to replace; no symbol is spelled that way.
+    slot: bool = false,
 
     fn initQuoted(token: Token, allocator: std.mem.Allocator, symbol_linker: ?env.SymbolLinker) AtomBuilder {
         var builder = init(token, allocator, symbol_linker);
@@ -524,7 +527,8 @@ const AtomBuilder = struct {
                 "address display markers are runtime-only and cannot be parsed",
             ),
         }
-        if (!self.delimited and self.classification == null) {
+        if (self.slot and self.inserter == null) self.inserter = intern.insertionCursor(self.token.bytes);
+        if (!self.delimited and self.classification == null and self.inserter == null) {
             if (self.classifier == null) self.classifier = .init(self.token.bytes);
             return switch (self.classifier.?.advance()) {
                 .pending => .pending,
@@ -997,6 +1001,8 @@ const Context = struct {
     body: FormList,
     names: NameList,
     locals: LocalsState,
+    /// The highest slot position written at this list's own level, 0 for none.
+    slots: u2 = 0,
 
     fn init(allocator: std.mem.Allocator, kind: ContainerKind, start: Span, source_start: usize) Context {
         return .{
@@ -1009,7 +1015,7 @@ const Context = struct {
         };
     }
     fn hasLocals(self: *const Context) bool {
-        return self.locals == .body_with_locals;
+        return self.locals == .body_with_locals or self.slots != 0;
     }
     fn deinit(self: *Context, releases: *heap.ReleaseDomain) void {
         self.body.retire(releases);
@@ -1205,12 +1211,22 @@ const CollectionBuilder = struct {
                 if (self.context.hasLocals()) {
                     const body = try self.allocator.alloc(locals.SpannedValue, count);
                     errdefer self.allocator.free(body);
-                    const names = try self.allocator.alloc(locals.Name, self.context.names.count);
+                    const slots = self.context.slots;
+                    const names = try self.allocator.alloc(
+                        locals.Name,
+                        if (slots != 0) slots else self.context.names.count,
+                    );
+                    // Slots bind every position up to the highest one written,
+                    // so `(.y)` binds two values and reads the top one.
+                    if (slots != 0) for (names, lexer.slot_spellings[0..slots]) |*name, spelling| {
+                        name.* = .{ .bytes = spelling, .span = self.context.start };
+                    };
                     self.state = .{ .gather_locals = .{
                         .body = body,
                         .names = names,
                         .body_from = self.context.body.iterator(),
                         .names_from = self.context.names.iterator(),
+                        .names_index = if (slots != 0) names.len else 0,
                     } };
                 } else if (self.context.kind == .dictionary) {
                     if (count % 2 != 0) {
@@ -1243,6 +1259,7 @@ const CollectionBuilder = struct {
                     gather.body,
                     self.context.start,
                     self.diag,
+                    self.context.slots == 0,
                 );
                 const body = gather.body;
                 const names = gather.names;
@@ -1630,7 +1647,26 @@ const ParserCursor = struct {
         }
         if (closeKind(token.kind) != null) return self.closeContext(token);
         if (token.kind == .quoted) return self.beginQuote(token);
+        if (token.kind == .atom) if (lexer.slotPosition(token.bytes)) |position|
+            return self.beginSlot(token, position);
         try self.beginScalar(token);
+    }
+    /// A slot raises its list's slot count; see Forms. Its occurrence reads
+    /// like a symbol until the list's lowering replaces it.
+    fn beginSlot(self: *ParserCursor, token: Token, position: u2) error{Parse}!void {
+        const context = self.contexts.topPtr() orelse return self.failSlot(token, "is legal only in a list");
+        switch (context.locals) {
+            .unavailable => return self.failSlot(token, "is legal only in a list"),
+            .body_with_locals => return self.failSlot(token, "cannot share a list with a locals declaration"),
+            .unchecked, .body, .names => {},
+        }
+        context.slots = @max(context.slots, position);
+        try self.beginScalar(token);
+        self.state.scalar.atom.slot = true;
+    }
+    fn failSlot(self: *ParserCursor, token: Token, comptime message: []const u8) error{Parse} {
+        self.diag.setFmt(token.span, "slot `{s}` " ++ message, .{token.bytes});
+        return error.Parse;
     }
     /// `` `x `` reads as one occurrence of the symbol `x` marked quoted: run,
     /// it pushes the symbol, the value `(x) core.first` pushes; see Lexical

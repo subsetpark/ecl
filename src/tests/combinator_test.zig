@@ -834,6 +834,29 @@ test "combinators: cached body words spend no kernel polls per element" {
     try std.testing.expect(runtime.lastPolls() <= count + count / 64 + 64);
 }
 
+test "slots: implicit locals bind up to the highest slot their list writes" {
+    try support.expectStacks(&.{
+        .{ .name = "read twice", .source = "[1 2 3] (.x .x *) each", .expected = "[1 4 9]" },
+        .{ .name = "two slots", .source = "3 4 (.y .x -) apply", .expected = "1" },
+        .{ .name = "three slots", .source = "1 2 3 (.z .y .x) apply", .expected = "3 2 1" },
+        // The highest slot sets the count; lower ones are bound unread.
+        .{ .name = "a gap binds the lower slot", .source = "1 2 (.y) apply", .expected = "2" },
+        .{ .name = "a wider gap", .source = "0 1 2 3 (.z 10 *) apply", .expected = "0 30" },
+        .{ .name = "a slot binder is a locals binder", .source = "(.y .x) (|x y| y x) match?", .expected = "1" },
+        // A slot belongs to the innermost list that writes it.
+        .{ .name = "a nested list's slots are its own", .source = "5 [1 2] (.y (.x 10 *) each .x) apply", .expected = "[10 20] 5" },
+        .{ .name = "slots nest inside a locals body", .source = "1 (|a| a (.x 2 *) apply) apply", .expected = "2" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "outside a list", .source = ".x", .kind = "parse" },
+        .{ .name = "inside a dict", .source = "{.x 1}", .kind = "parse" },
+        .{ .name = "beside a locals declaration", .source = "(|a| a .x)", .kind = "parse" },
+        .{ .name = "as a local name", .source = "(|.x| 1)", .kind = "parse" },
+        .{ .name = "quoted", .source = "(`.x)", .kind = "parse" },
+        .{ .name = "underflow blames the binding", .source = "1 (.y) apply", .kind = "underflow", .message = "local binding needs 2 stack values, but found 1" },
+    });
+}
+
 test "locals: the reserved backend words behave and blame as before" {
     // The reader lowers `|a b|` into single-form locals operations named
     // `_ll`, `_gl`, and `_dl`. The names stay reserved from every publication,

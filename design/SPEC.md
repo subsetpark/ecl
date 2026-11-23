@@ -116,7 +116,9 @@ characters. An atom is classified whole-token, in this order:
    of that symbol, which run pushes the symbol: `` `foo `` and `(foo) first`
    push the same value. 
    `` ` `` is reserved token-initially and banned inside symbols.
-4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
+4. **Slot** — exactly `.x`, `.y`, or `.z`: an implicit local (see Forms).
+   Slots are not symbols and cannot be quoted.
+5. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
 
 **Symbols** are one or more segments joined by `.`. The last `.` in a symbol
@@ -162,6 +164,12 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
   the top value, so `1 2 (|x y| x y -) apply` is `-1`.
   Locals do **not** exhibit lexical scoping: a local is not visible inside a
   nested quotation within the declaring body. 
+- Slots are implicit locals. A list whose top-level forms include a slot binds
+  as many values as its highest slot's position (`.x` 1, `.y` 2, `.z` 3), and
+  each slot pushes its value: `(.x .x *)` is `(|x| x x *)`, and `(.y 1 +)`
+  consumes two values and keeps the top one. A slot belongs to the innermost
+  list that contains it, so a nested list's slots are its own. A list may not
+  have both a locals declaration and slots at its top level.
 
 ## Values and external representations
 

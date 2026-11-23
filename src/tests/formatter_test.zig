@@ -137,6 +137,7 @@ test "formatter applies uniform aligned structural layout" {
     try expectFormat("(alpha beta\ngamma delta)", "(alpha beta\n gamma delta)\n");
     try expectFormat("(\n foo\n)", "(\n foo\n)\n");
     try expectFormat("(| x y | x y)", "(|x y| x y)\n");
+    try expectFormat("( .y  .x * )", "(.y .x *)\n");
 }
 
 test "multiline child does not force the following sibling to break" {

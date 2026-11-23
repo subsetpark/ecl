@@ -40,6 +40,9 @@ pub const LowerCursor = struct {
     body: []const SpannedValue,
     locals_span: Span,
     diag: *Diag,
+    /// Names written in a declaration are validated; slot spellings are the
+    /// reader's own and are interned as they are.
+    validate_names: bool,
     local_indices: []?usize,
     state: State,
 
@@ -107,6 +110,7 @@ pub const LowerCursor = struct {
         body: []const SpannedValue,
         locals_span: Span,
         diag: *Diag,
+        validate_names: bool,
     ) Error!LowerCursor {
         if (names.len == 0) {
             diag.set(locals_span, "a locals declaration must contain at least one name");
@@ -120,6 +124,7 @@ pub const LowerCursor = struct {
             .body = body,
             .locals_span = locals_span,
             .diag = diag,
+            .validate_names = validate_names,
             .local_indices = local_indices,
             .state = .{ .locals_init = LocalMap.initCursor(allocator, names.len) },
         };
@@ -129,6 +134,14 @@ pub const LowerCursor = struct {
         self.state.deinit(self.allocator);
         self.allocator.free(self.local_indices);
         self.* = undefined;
+    }
+
+    fn nameWork(self: *const LowerCursor, index: usize) NameWork {
+        const bytes = self.names[index].bytes;
+        return if (self.validate_names)
+            .{ .classify = .{ .index = index, .cursor = .init(bytes) } }
+        else
+            .{ .intern = .{ .index = index, .cursor = intern.insertionCursor(bytes) } };
     }
 
     fn failName(self: *LowerCursor, name: Name) error{Parse} {
@@ -188,10 +201,7 @@ pub const LowerCursor = struct {
                     }
                     const next = put.index + 1;
                     if (next == self.names.len) return true;
-                    names_state.work = .{ .classify = .{
-                        .index = next,
-                        .cursor = .init(self.names[next].bytes),
-                    } };
+                    names_state.work = self.nameWork(next);
                 },
             },
         }
@@ -287,10 +297,7 @@ pub const LowerCursor = struct {
                     cursor.deinit();
                     self.state = .{ .names = .{
                         .locals = locals,
-                        .work = .{ .classify = .{
-                            .index = 0,
-                            .cursor = .init(self.names[0].bytes),
-                        } },
+                        .work = self.nameWork(0),
                     } };
                     break :result .pending;
                 },
