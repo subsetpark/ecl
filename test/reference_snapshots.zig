@@ -120,11 +120,10 @@ const cases = [_]Case{
     .{ .name = "json emit", .source = "{a 1} json.emit" },
     .{ .name = "json emit key", .source = "{1 2} json.emit" },
     .{ .name = "table rows", .source = "{\"a\" [1 2] \"b\" [\"x\" \"y\"]} table.rows" },
-    .{ .name = "table where", .source = "{\"a\" [1 2 3]} [1 0 1] table.where" },
+    .{ .name = "table at", .source = "{\"a\" [1 2 3]} [1 0 1] where table.at" },
     .{
-        .name = "table aggregate",
-        .source = "{\"r\" [\"e\" \"w\" \"e\"] \"v\" [1 2 3]} [\"r\"] " ++
-            "(|g| {} \"t\" g \"v\" at (sum) each put) table.aggregate",
+        .name = "table grouped",
+        .source = "{\"r\" [\"e\" \"w\" \"e\"] \"v\" [1 2 3]} dup [\"r\"] table.group-by dict.vals table.at",
     },
     .{ .name = "table invalid", .source = "{\"a\" [1 2] \"b\" [3]} table.rows" },
     .{ .name = "getenv unset", .source = "\"ECL_SNAPSHOT_ABSENT\" getenv" },
@@ -946,18 +945,18 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\((1 "x") (2 "y"))
         \\stderr:
         \\<empty>
-        \\=== table where ===
-        \\source: {"a" [1 2 3]} [1 0 1] table.where
+        \\=== table at ===
+        \\source: {"a" [1 2 3]} [1 0 1] where table.at
         \\exit: 0
         \\stdout:
         \\{"a" [1 3]}
         \\stderr:
         \\<empty>
-        \\=== table aggregate ===
-        \\source: {"r" ["e" "w" "e"] "v" [1 2 3]} ["r"] (|g| {} "t" g "v" at (sum) each put) table.aggregate
+        \\=== table grouped ===
+        \\source: {"r" ["e" "w" "e"] "v" [1 2 3]} dup ["r"] table.group-by dict.vals table.at
         \\exit: 0
         \\stdout:
-        \\{"r" ("e" "w") "t" [4 2]}
+        \\{"r" (("e" "e") ("w")) "v" ([1 3] [2])}
         \\stderr:
         \\<empty>
         \\=== table invalid ===

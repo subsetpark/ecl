@@ -37,17 +37,6 @@ test "order: grouped reductions compose from nested selectors" {
     });
 }
 
-test "order: aggregate quotations resolve normally" {
-    try helper.expectStack(
-        "(pop 999) `sum def {\"v\" [1 2]} [] " ++
-            "(|g| {} \"quoted\" g \"v\" at (sum) each put \"core\" g \"v\" at (core.sum) each put) table.aggregate",
-        "{\"quoted\" [999] \"core\" [3]}",
-    );
-    try helper.expectErrors(&.{
-        .{ .name = "symbol aggregate", .source = "{\"v\" [1 2]} [] `sum table.aggregate", .kind = "type", .word = "each" },
-    });
-}
-
 test "order: cmp and grade share exact whole-value ordering" {
     try helper.expectStack(
         "1 1 cmp 1 2 cmp 2 1 cmp " ++

@@ -1,30 +1,29 @@
 ## table
 
-### aggregate
+### at
 
 #### Examples
 
-Given this table, grouped by `"region"`:
-
 ```ecl
-{"region" ["east" "west" "east"] "amount" [10 20 30]}
+{"name" ("Ada" "Lin" "Bo") "score" [20 10 30]} dup "score" at grade table.at
+# => {"name" ("Lin" "Ada" "Bo") "score" [10 20 30]}
+
+{"name" ("Ada" "Lin") "score" [10 20]} [1 0] where table.at
+# => {"name" ("Ada") "score" [10]}
 ```
 
-the quotation receives the non-key columns, each holding one slice per group,
-in first-seen group order (`"east"`, then `"west"`):
+Gathering `group-by`'s index lists makes each column a list of per-group
+slices. The first cell of each key slice is that group's key, and reducing
+each value slice aggregates it:
 
 ```ecl
-{"amount" ([10 30] [20])}
-```
+{"region" ["east" "west" "east"] "amount" [10 20 30]} dup ["region"] table.group-by
+dict.vals table.at
+# => {"region" (("east" "east") ("west")) "amount" ([10 30] [20])}
 
-It reduces each slice and returns the output columns, which follow the key
-columns in the result:
-
-```ecl
-{"region" ["east" "west" "east"] "amount" [10 20 30]} ["region"]
-(|g| {} "total" g "amount" at (sum) each put "n" g "amount" at (len) each put)
-table.aggregate
-# => {"region" ("east" "west") "total" [40 20] "n" [2 1]}
+dup ["region"] table.select ((first) each) each
+"total" rolldown "amount" at (sum) each table.with-column
+# => {"region" ("east" "west") "total" [40 20]}
 ```
 
 ### from-records
@@ -61,13 +60,4 @@ table.aggregate
 ```ecl
 {"name" ("Ada" "Lin") "score" [10 20]} ("score") table.select
 # => {"score" [10 20]}
-```
-
-### where
-
-#### Examples
-
-```ecl
-{"name" ("Ada" "Lin") "score" [10 20]} [1 0] table.where
-# => {"name" ("Ada") "score" [10]}
 ```

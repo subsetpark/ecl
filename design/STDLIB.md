@@ -2203,6 +2203,33 @@ A table is any dict whose values are lists of equal length.
 
 The `table.` words model such a value as a table where the column names are the keys, the values are the columns, and a row is an indexing into each column for some index.
 
+### at
+`( table indices -- table )` — Gather the rows of `table` at `indices`, as `at` gathers a list. A list of indices selects and reorders rows; a list of index lists, such as `group-by`'s values, makes each column a list of slices, one per index list.
+
+#### Examples
+
+```ecl
+{"name" ("Ada" "Lin" "Bo") "score" [20 10 30]} dup "score" at grade table.at
+# => {"name" ("Lin" "Ada" "Bo") "score" [10 20 30]}
+
+{"name" ("Ada" "Lin") "score" [10 20]} [1 0] where table.at
+# => {"name" ("Ada") "score" [10]}
+```
+
+Gathering `group-by`'s index lists makes each column a list of per-group
+slices. The first cell of each key slice is that group's key, and reducing
+each value slice aggregates it:
+
+```ecl
+{"region" ["east" "west" "east"] "amount" [10 20 30]} dup ["region"] table.group-by
+dict.vals table.at
+# => {"region" (("east" "east") ("west")) "amount" ([10 30] [20])}
+
+dup ["region"] table.select ((first) each) each
+"total" rolldown "amount" at (sum) each table.with-column
+# => {"region" ("east" "west") "total" [40 20]}
+```
+
 ### rename
 `( table mapping -- table )` — Rename columns in `table` mapping names to their replacements in `mapping`.
 
@@ -2227,16 +2254,6 @@ The `table.` words model such a value as a table where the column names are the 
 ```ecl
 ["name" "score"] [("Ada" 10) ("Lin" 20)] table.from-rows
 # => {"name" ("Ada" "Lin") "score" [10 20]}
-```
-
-### where
-`( table mask -- table )` — Given `mask` over the rows of `table`, take each row as many times as is reflected by its index in the mask.
-
-#### Examples
-
-```ecl
-{"name" ("Ada" "Lin") "score" [10 20]} [1 0] table.where
-# => {"name" ("Ada") "score" [10]}
 ```
 
 ### with-column
@@ -2273,34 +2290,6 @@ The `table.` words model such a value as a table where the column names are the 
 
 ### rows
 `( table -- rows )` — Return `table`'s rows in order.
-
-### aggregate
-`( table names (q: grouped -- columns) -- table )` — Group `table` by `names` and apply `q` once to the grouped table, in which each non-key column holds one slice per group. `q` returns a dict of output columns with one value per group, typically by reducing each slice, as in `g "v" at (sum) each`. The result holds the key columns, then the output columns, with one row per group.
-
-#### Examples
-
-Given this table, grouped by `"region"`:
-
-```ecl
-{"region" ["east" "west" "east"] "amount" [10 20 30]}
-```
-
-the quotation receives the non-key columns, each holding one slice per group,
-in first-seen group order (`"east"`, then `"west"`):
-
-```ecl
-{"amount" ([10 30] [20])}
-```
-
-It reduces each slice and returns the output columns, which follow the key
-columns in the result:
-
-```ecl
-{"region" ["east" "west" "east"] "amount" [10 20 30]} ["region"]
-(|g| {} "total" g "amount" at (sum) each put "n" g "amount" at (len) each put)
-table.aggregate
-# => {"region" ("east" "west") "total" [40 20] "n" [2 1]}
-```
 
 ### inner-join
 `( left right pairs -- table )` — Return the stable inner equijoin for `[left-name right-name]` key pairs. Duplicate keys expand to the full many-to-many product in left-row then right-row order, and no key pairs give the cross product. The result contains every left column and the right non-key columns; colliding non-key names are `` `domain ``.

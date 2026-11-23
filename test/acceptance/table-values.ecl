@@ -44,7 +44,7 @@ sales ["city" "id"] select io.pp
 sales {"city" "town"} rename io.pp
 sales "id" [9 9 9] with-column io.pp
 sales "flag" [1 0 1] with-column io.pp
-sales [1 0 1] table.where io.pp
+sales [1 0 1] where table.at io.pp
 
 # CSV emission takes text fields; parsing with a text schema preserves them.
 sales {"id" ((str) each)} dict.evolve header-rows csv.emit csv.parse from-header-rows io.pp

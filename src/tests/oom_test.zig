@@ -934,7 +934,7 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-table.ecl",
             "{\"r\" [\"e\" \"w\"] \"v\" [1 2]} " ++
-                "[\"r\"] (|g| {} \"t\" g \"v\" at (sum) each put) table.aggregate pop " ++
+                "dup [\"r\"] table.group-by dict.vals table.at \"v\" at (sum) each pop " ++
                 "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
                 "{\"n\" 0} table.left-join-with pop",
         ),

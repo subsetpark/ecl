@@ -10,36 +10,39 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
-## `table.aggregate` runs one quotation over grouped columns — 2026-11-22
+## Aggregation as `group-by`, `table.at`, and `each` — 2026-11-22
 
-`table.aggregate` takes one `( grouped -- columns )` quotation in place of
-`[output input reducer]` triples. It runs once, over a table whose non-key
-columns each hold one slice per group, built by one nested gather per column;
-`(sum) each` over those slices takes the existing nested reduction path. A
-first version ran the quotation once per group on a sub-table and stacked the
-returned records: 388 ms for one reducer and 848 ms for three at 200,000
-groups, because every group paid for interpreted dispatch, a dict, and a
-record. Idiom recognition cannot recover that cost, since it fuses one offered
-application and the per-group pipeline lives in a source definition.
+`table.aggregate` is gone. Aggregation is composed: `group-by dict.vals
+table.at` turns every column into per-group slices with one nested gather per
+column, `(sum) each` reduces a slice list through the existing nested path, and
+`((first) each) each` over the key columns, or `(first) each table.at` over the
+group indices, recovers the keys. Two intermediate designs were measured on the
+way. One ran a quotation once per group on a sub-table and took 388 ms for one
+reducer and 848 ms for three at 200,000 groups: interpreted dispatch, a dict,
+and a record per group, which idiom recognition cannot reach because it fuses
+one offered application. The other ran one quotation over the grouped columns
+and matched the composed form.
 
 Zig 0.17.1 ReleaseSafe, Apple M4 Max, macOS. Each figure is the hyperfine mean
 of nine process runs after one warmup, less a run of the same build that only
-builds the table and groups it (21-23 ms at 100 groups, 39-45 ms at 200,000).
+builds the table and groups it (18-23 ms at 100 groups, 37-41 ms at 200,000).
 The table has 1,000,000 int rows keyed by row number modulo the group count.
 One reducer is `sum`; three are `sum`, `len`, and `(min) fold1`. The control is
-the triple form at the previous commit.
+`aggregate` with `[output input reducer]` triples at the previous commit.
 
-| Groups | Reducers | Triples | Grouped quotation |
+| Groups | Reducers | Triples | Composed, keys by `((first) each) each` |
 |---:|---:|---:|---:|
-| 100 | 1 | 2 ms | 1 ms |
-| 100 | 3 | 7 ms | 2 ms |
-| 200,000 | 1 | 29 ms | 32 ms |
-| 200,000 | 3 | 83 ms | 50 ms |
+| 100 | 1 | 1 ms | 6 ms |
+| 100 | 3 | 7 ms | 6 ms |
+| 200,000 | 1 | 33 ms | 61 ms |
+| 200,000 | 3 | 87 ms | 82 ms |
 
-Triples gathered the input column once per specification; the grouped table
-gathers each column once, so several reducers over one column get cheaper.
-Including the key columns in the grouped table cost about 15 ms at 200,000
-groups for slices nobody reads, so they are left out.
+The value column is gathered once however many reducers read it, which is why
+three reducers come out ahead. Recovering keys by gathering the whole key
+column and taking each slice's first cell is the cost at one reducer; taking
+the first index of each group and gathering the key columns flat brings 200,000
+groups and one reducer to 45 ms. Triples read keys from the group dictionary
+for free.
 
 ## Vector primitives under `csv`, and `csv.emit` as one gather — 2026-11-13
 

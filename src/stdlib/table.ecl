@@ -23,7 +23,7 @@
 
  ### defp record-column
  (name records -- column : "Return one field from each record, preserving record order.")
- (|name records| records name (at) cons each) `record-column defp
+ (|name records| records name (core.at) cons each) `record-column defp
 
  ### defp records-table
  (names records -- table : "Gather the `names` fields of every record into columns.")
@@ -49,7 +49,7 @@
 
  ### def select
  (table names -- table : "Select the columns `names`.")
- (|table names| names names table (swap at) cons each dict.zip) `select def
+ (|table names| names names table (swap core.at) cons each dict.zip) `select def
 
  ### def rename
  (table mapping -- table :
@@ -69,6 +69,13 @@
   table column fits?
   `shape error.new "a column must match the table's row count" error.with-message assert
   table name column put) `with-column def
+
+ ### def at
+ (table indices -- table :
+  "Gather the rows of `table` at `indices`, as `at` gathers a list. A list of indices selects and
+   reorders rows; a list of index lists, such as `group-by`'s values, makes each column a list of
+   slices, one per index list.")
+ (|table indices| table indices (core.at) cons each) `at def
 
  ### defp transpose
  (lists count -- transposed :
@@ -93,26 +100,17 @@
  (|names excluded|
   names excluded name-set (swap has? not) cons filter) `exclude defp
 
- ### def where
- (table mask -- table :
-  "Given `mask` over the rows of `table`, take each row as many times as is reflected by its index
-   in the mask.")
- (|table mask|
-  table mask fits?
-  `shape error.new "a table mask must match the table's row count" error.with-message assert
-  table mask core.where (at) cons each) `where def
-
- # --- grouping, aggregation, and joins -------------------------------------
+ # --- grouping and joins ---------------------------------------------------
 
  ### defp selected-groups
  (table names -- groups : "Group selected columns using whole composite row keys.")
- (|table names| names table (swap at) cons each group-columns) `selected-groups defp
+ (|table names| names table (swap core.at) cons each group-columns) `selected-groups defp
 
  ### defp keyed-groups
  (table names -- groups :
   "Group rows with scalar keys for one column and composite keys for multiple columns.")
  (|table names| names len 1 =
-  table names first (at group) cons cons
+  table names first (core.at group) cons cons
   table names (selected-groups) cons cons if) `keyed-groups defp
 
  ### defp global-group
@@ -127,42 +125,12 @@
   table names (keyed-groups) cons cons
   if) `group-by def
 
- ### defp key-columns
- (groups names -- columns : "Return grouping-key columns in name order.")
- (|groups names| names len 1 =
-  groups (dict.keys wrap) cons
-  groups names (composite-key-columns) cons cons
-  if) `key-columns defp
-
- ### defp composite-key-columns
- (groups names -- columns : "Split composite group keys into one column per name.")
- (|groups names| groups dict.keys names len transpose) `composite-key-columns defp
-
- ### defp beside
- (left right -- table :
-  "Place the columns of `right` after those of `left`; shared names are `` `domain ``.")
- (|left right| left dict.keys right dict.keys cat left dict.vals right dict.vals cat dict.zip)
- `beside defp
-
- ### def aggregate
- (table names (q: grouped -- columns) -- table :
-  "Group `table` by `names` and apply `q` once to the grouped table, in which each non-key column
-   holds one slice per group. `q` returns a dict of output columns with one value per group,
-   typically by reducing each slice, as in `g \"v\" at (sum) each`. The result holds the key
-   columns, then the output columns, with one row per group.")
- (|table names q|
-  table names group-by
-  dup names key-columns names swap dict.zip
-  swap dict.vals (at) cons table names dict.del swap each
-  wrap q each first
-  beside) `aggregate def
-
  ### defp ordered-matches
  (left-groups right-groups -- matches : "Expand distinct-key matches into original left-row order.")
  (|left-groups right-groups|
   right-groups left-groups dict.keys [] dict.at-or
-  left-groups dict.vals (len) each core.where at
-  left-groups dict.vals raze grade at) `ordered-matches defp
+  left-groups dict.vals (len) each where core.at
+  left-groups dict.vals raze grade core.at) `ordered-matches defp
 
  ### defp join-matches
  (left right pairs -- matches :
@@ -170,7 +138,7 @@
    matches every right row.")
  (|left right pairs|
   left pairs (first) each group-by
-  right pairs (1 at) each group-by
+  right pairs (1 core.at) each group-by
   ordered-matches) `join-matches defp
 
  ### defp fill-matches
@@ -182,13 +150,13 @@
   "Gather all joined columns from shared row selectors.")
  (|left right-columns extra matches|
   left dict.keys extra cat
-  left dict.vals matches (len) each core.where (at) cons each
-  right-columns matches raze (at) cons each
+  left dict.vals matches (len) each where (core.at) cons each
+  right-columns matches raze (core.at) cons each
   cat dict.zip) `join-columns defp
 
  ### defp join-extra
  (right pairs -- extra : "Return the right non-key column names to append.")
- (|right pairs| right dict.keys pairs (1 at) each exclude) `join-extra defp
+ (|right pairs| right dict.keys pairs (1 core.at) each exclude) `join-extra defp
 
  ### def inner-join
  (left right pairs -- table :
@@ -198,7 +166,7 @@
    names are `` `domain ``.")
  (|left right pairs|
   left
-  right pairs join-extra dup right (swap at) cons each swap
+  right pairs join-extra dup right (swap core.at) cons each swap
   left right pairs join-matches
   join-columns) `inner-join def
 
@@ -209,8 +177,8 @@
  (|left right pairs fill|
   left
   right pairs join-extra
-  dup right (swap at) cons each
-  over fill (swap at) cons each
+  dup right (swap core.at) cons each
+  over fill (swap core.at) cons each
   (append) zip-with
   swap
   left right pairs join-matches
