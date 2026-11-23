@@ -114,6 +114,27 @@ test "numeric: stored widths compute and fault as ints across blocks" {
     });
 }
 
+test "numeric: integer division floors and mod takes the divisor's sign" {
+    try helper.expectStacks(&.{
+        .{
+            .name = "scalar operands of every sign",
+            .source = "-7 2 div 7 -2 div -7 -2 div 7 2 div -7 2 mod 7 -2 mod -7 -2 mod 7 2 mod",
+            .expected = "-4 -4 3 3 1 -1 -1 1",
+        },
+        .{
+            .name = "elementwise operands of every sign",
+            .source = "[-7 7 -7 7] [2 -2 -2 2] div [-7 7 -7 7] [2 -2 -2 2] mod",
+            .expected = "[-4 -4 3 3] [1 -1 -1 1]",
+        },
+        .{
+            .name = "a wide array over a scalar divisor",
+            .source = "24 range 12 - 5 div 24 range 12 - -5 mod",
+            .expected = "[-3 -3 -2 -2 -2 -2 -2 -1 -1 -1 -1 -1 0 0 0 0 0 1 1 1 1 1 2 2] " ++
+                "[-2 -1 0 -4 -3 -2 -1 0 -4 -3 -2 -1 0 -4 -3 -2 -1 0 -4 -3 -2 -1 0 -4]",
+        },
+    });
+}
+
 test "numeric: transcendental non-finite edges" {
     try helper.expectStacks(&.{
         .{
@@ -426,7 +447,7 @@ test "kernel: bitwise words are pattern words over the integer bit pattern" {
 test "numeric: derived comparisons, negation, remainder, and totals" {
     try helper.expectStacks(&.{
         .{ .name = "negation and magnitude", .source = "-2 neg -0.0 neg [-2 3] abs", .expected = "2 0.0 [2 3]" },
-        .{ .name = "remainder", .source = "7 3 mod -7 3 mod", .expected = "1 -1" },
+        .{ .name = "remainder", .source = "7 3 mod -7 3 mod", .expected = "1 2" },
         .{
             .name = "comparisons and booleans",
             .source = "[1 2] [1 3] not= 1 2 <= 2 1 >= [0 1] [1 1] and [0 1] [1 0] or",

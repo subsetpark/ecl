@@ -1225,8 +1225,9 @@ into those keys.
   unchanged, so the result is `\a`.
 - Arithmetic on int64 that overflows is an `` `overflow `` error — no wrapping, no
   promotion to float or bignum. Scalar and array arithmetic behave identically.
-- `/` is float division. `div` is checked integer division; its division by
-  zero is `` `domain ``.
+- `/` is float division. `div` is checked integer division, floored toward
+  negative infinity; `mod` is its remainder and takes the sign of the divisor,
+  so `x y div y * x y mod +` is `x`. Division by zero is `` `domain ``.
 - Float arithmetic follows IEEE 754, so a finite computation may produce
   `inf` or `-inf`: overflow (`1e308 10 *`), poles (`0 log` is `-inf`), and
   division of a nonzero number by zero (`1 0 /` is `inf`, `1 -0.0 /` is

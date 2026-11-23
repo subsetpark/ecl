@@ -571,7 +571,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 `( x y -- z )` — Evaluate the numeric minimum of `x` and `y`.
 
 ### mod
-`( x y -- z )` — Compute remainder of `x` / `y`.
+`( x y -- z )` — Compute the remainder of floored `x` / `y`, taking the sign of `y`.
 
 ### module-doc
 `( module-name -- string )` — Return the docstring of `module-name`'s current image.

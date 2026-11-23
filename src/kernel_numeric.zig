@@ -74,7 +74,7 @@ fn binaryDefinition(comptime operation: BinaryOp) env.BuiltinWord {
         .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``." },
         .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``." },
         .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``." },
-        .mod => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute remainder of `x` / `y`." },
+        .mod => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute the remainder of floored `x` / `y`, taking the sign of `y`." },
         .ne => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` != `y`." },
         .le => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` <= `y`." },
         .ge => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` >= `y`." },
@@ -1115,9 +1115,9 @@ fn integerDivision(left: Value, right: Value, remainder: bool) ScalarError!Value
     if (right.int == 0) return error.Domain;
     if (left.int == std.math.minInt(i64) and right.int == -1) return error.Overflow;
     return .{ .int = if (remainder)
-        @rem(left.int, right.int)
+        @mod(left.int, right.int)
     else
-        @divTrunc(left.int, right.int) };
+        @divFloor(left.int, right.int) };
 }
 
 fn power(left: Value, right: Value) ScalarError!Value {
@@ -1687,8 +1687,8 @@ fn binaryKernel(
             return switch (operation) {
                 .bsl => @bitCast(@as(u64, @bitCast(x)) << @intCast(y)),
                 .bsr => @bitCast(@as(u64, @bitCast(x)) >> @intCast(y)),
-                .int_div => @divTrunc(x, y),
-                .mod => @rem(x, y),
+                .int_div => @divFloor(x, y),
+                .mod => @mod(x, y),
                 else => unreachable,
             };
         }
@@ -1709,8 +1709,8 @@ fn binaryKernel(
             return switch (operation) {
                 .bsl => @bitCast(@as(Pattern, @bitCast(x)) << @as(Count, @intCast(y))),
                 .bsr => @bitCast(@as(Pattern, @bitCast(x)) >> @as(Count, @intCast(y))),
-                .int_div => @divTrunc(x, y),
-                .mod => @rem(x, y),
+                .int_div => @divFloor(x, y),
+                .mod => @mod(x, y),
                 else => unreachable,
             };
         }
@@ -1890,7 +1890,7 @@ fn binaryKernel(
                         const fault = (wb == zeros) | ((wb == -ones) & (wa == least));
                         // A faulting lane divides by one instead.
                         const divisor = @select(i64, fault, ones, wb);
-                        const values = if (operation == .mod) @rem(wa, divisor) else @divTrunc(wa, divisor);
+                        const values = if (operation == .mod) @mod(wa, divisor) else @divFloor(wa, divisor);
                         return .{ .values = values, .faults = Vectors.mask(fault) };
                     },
                     else => unreachable,
