@@ -1,4 +1,4 @@
-//! Public behavior of the builtin archive module.
+//! Public behavior of the builtin tar module over gzip-compressed fixtures.
 //!
 //! Fixtures are exact hexadecimal program inputs. Extraction is confined to a
 //! Session filesystem root named `'root`, so every case uses a temporary
@@ -80,7 +80,7 @@ fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
     try writer.writeByte('"');
 }
 
-/// `'root "destination" [bytes] archive.unpack-tgz` for a root-relative
+/// `'root "destination" [bytes] gzip.decompress tar.unpack` for a root-relative
 /// destination path.
 fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
     return unpackSourceAt(bytes, "`root", destination);
@@ -96,16 +96,16 @@ fn unpackSourceAt(bytes: []const u8, root: []const u8, destination: []const u8) 
         if (index != 0) try source.writer.writeByte(' ');
         try source.writer.print("{d}", .{byte});
     }
-    try source.writer.writeAll("] archive.unpack-tgz");
+    try source.writer.writeAll("] gzip.decompress tar.unpack");
     return allocator.dupe(u8, source.written());
 }
 
-fn viewSource(bytes: []const u8) ![]u8 {
+fn readSource(bytes: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try source.writer.writeByte('[');
     for (bytes) |byte| try source.writer.print("{d} ", .{byte});
-    try source.writer.writeAll("] archive.open-tgz");
+    try source.writer.writeAll("] gzip.decompress tar.read");
     return allocator.dupe(u8, source.written());
 }
 
@@ -222,43 +222,29 @@ fn expectIoError(scratch: *Scratch, source: []const u8, expected: support.ErrorC
     try support.expectLanguageError(failure, expected);
 }
 
-test "archive: open-tgz exposes metadata and bounded member contents without package rules" {
+test "tar: read returns members as values without package rules" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const bytes = try decodeHex(.valid);
     defer allocator.free(bytes);
-    const opened = try viewSource(bytes);
-    defer allocator.free(opened);
-    const source = try std.fmt.allocPrint(allocator, "{s} `a set a archive.next-member a 2 archive.read-member " ++
-        "a archive.next-member a 1 archive.read-member a 65536 archive.read-member a 1 archive.read-member " ++
-        "a archive.next-member a 3 archive.read-member a archive.next-member a 1 archive.read-member " ++
-        "a port.close (a archive.next-member) @attempt `err at `kind at", .{opened});
-    defer allocator.free(source);
-    try expectIoStack(&scratch, source, "{path \"lib\" kind directory size 0} [] " ++
-        "{path \"lib/main.ecl\" kind file size 3} [52] [50 10] [] " ++
-        "{path \"README.md\" kind file size 8} [102 105 120] {} [] io");
-    const scoped = try std.fmt.allocPrint(allocator, "{s} type", .{opened});
-    defer allocator.free(scoped);
-    try expectIoStackConfig(&scratch, .{ .worker_pool = 4 }, scoped, "port");
-    const concurrent = try std.fmt.allocPrint(allocator, "{s} `a set a archive.next-member pop a archive.next-member pop " ++
-        "(a 1 archive.read-member first) @spawn `x set " ++
-        "(a 1 archive.read-member first) @spawn `y set " ++
-        "x task.await `ok at first y task.await `ok at first pair sort a port.close", .{opened});
-    defer allocator.free(concurrent);
-    try expectIoStackConfig(&scratch, .{ .worker_pool = 4 }, concurrent, "[50 52]");
+    const read = try readSource(bytes);
+    defer allocator.free(read);
+    try expectIoStack(&scratch, read, "({path \"lib\" kind directory bytes []} " ++
+        "{path \"lib/main.ecl\" kind file bytes [52 50 10]} " ++
+        "{path \"README.md\" kind file bytes [102 105 120 116 117 114 101 10]})");
     try scratch.expectEntryCount(0);
     inline for (.{ Fixture.parent_path, Fixture.symlink, Fixture.duplicate, Fixture.malformed }) |fixture| {
         const invalid_bytes = try decodeHex(fixture);
         defer allocator.free(invalid_bytes);
-        const invalid_view = try viewSource(invalid_bytes);
-        defer allocator.free(invalid_view);
-        const rejected = try std.fmt.allocPrint(allocator, "({s}) @attempt `err at `kind at", .{invalid_view});
+        const invalid_read = try readSource(invalid_bytes);
+        defer allocator.free(invalid_read);
+        const rejected = try std.fmt.allocPrint(allocator, "({s}) @attempt `err at `kind at", .{invalid_read});
         defer allocator.free(rejected);
         try expectIoStack(&scratch, rejected, "domain");
     }
 }
 
-test "archive: unpack-tgz uses directory leases inside staged generations" {
+test "tar: unpack uses directory leases inside staged generations" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const bytes = try decodeHex(.valid);
@@ -284,26 +270,26 @@ test "archive: unpack-tgz uses directory leases inside staged generations" {
     try scratch.expectEntryCount(1);
 }
 
-test "archive: direct extraction preserves stream limits and joined rollback" {
+test "tar: extraction applies the filesystem transfer limit and rolls back" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    scratch.limits.max_stream_transfer_bytes = 2;
+    scratch.limits.max_transfer_bytes = 2;
     const bytes = try decodeHex(.valid);
     defer allocator.free(bytes);
     const source = try unpackSource(bytes, "limited");
     defer allocator.free(source);
     try expectIoError(&scratch, source, .{
-        .name = "archive member stream limit",
+        .name = "archive member transfer limit",
         .source = source,
         .kind = "overflow",
-        .word = "archive.unpack-tgz",
+        .word = "fs.create-bytes",
         .data = &.{.{ .name = "reason", .expected = .{ .symbol = "limit" } }},
     });
     try scratch.expectAbsent("limited");
     try scratch.expectEntryCount(0);
 }
 
-test "archive: unpack-tgz atomically extracts regular files and returns paths" {
+test "tar: unpack atomically extracts regular files and returns paths" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const bytes = try decodeHex(.valid);
@@ -355,7 +341,7 @@ test "archive: unpack-tgz atomically extracts regular files and returns paths" {
     try scratch.expectEntryCount(4);
 }
 
-test "archive: unpack-tgz rejects traversal malformed and over-limit archives without publication" {
+test "tar: unpack rejects traversal malformed and over-limit archives without publication" {
     inline for (.{
         Fixture.absolute_path,
         .parent_path,
@@ -375,13 +361,13 @@ test "archive: unpack-tgz rejects traversal malformed and over-limit archives wi
         defer allocator.free(destination);
         const source = try unpackSource(bytes, destination);
         defer allocator.free(source);
-        try expectIoError(&scratch, source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = "archive.unpack-tgz" });
+        try expectIoError(&scratch, source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = if (fixture == .malformed) "gzip.decompress" else "tar.core.read" });
         try scratch.expectAbsent(name);
         try scratch.expectEntryCount(0);
     }
 }
 
-test "archive: unpack-tgz rejects links and special nodes without publication" {
+test "tar: unpack rejects links and special nodes without publication" {
     inline for (.{ Fixture.symlink, .hardlink, .char_device, .block_device, .fifo }, 0..) |fixture, index| {
         var scratch = try Scratch.init();
         defer scratch.deinit();
@@ -393,7 +379,7 @@ test "archive: unpack-tgz rejects links and special nodes without publication" {
         defer allocator.free(destination);
         const source = try unpackSource(bytes, destination);
         defer allocator.free(source);
-        try expectIoError(&scratch, source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = "archive.unpack-tgz" });
+        try expectIoError(&scratch, source, .{ .name = @tagName(fixture), .source = source, .kind = "domain", .word = if (fixture == .malformed) "gzip.decompress" else "tar.core.read" });
         try scratch.expectAbsent(name);
         try scratch.expectEntryCount(0);
     }
@@ -441,7 +427,7 @@ fn concurrentUnpack(result: *ConcurrentResult) void {
                 .name = "concurrent loser",
                 .source = result.source,
                 .kind = "io",
-                .word = "archive.unpack-tgz",
+                .word = "fs.commit-dir",
             }) catch result.unexpected.store(true, .release);
             runtime.release(failure);
             _ = result.io_failures.fetchAdd(1, .monotonic);
@@ -450,7 +436,7 @@ fn concurrentUnpack(result: *ConcurrentResult) void {
     runtime.deinit();
 }
 
-test "archive: unpack-tgz preserves existing destinations and has one concurrent winner" {
+test "tar: unpack preserves existing destinations and has one concurrent winner" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const bytes = try decodeHex(.valid);
@@ -466,9 +452,8 @@ test "archive: unpack-tgz preserves existing destinations and has one concurrent
         .name = "existing destination",
         .source = existing_source,
         .kind = "io",
-        .word = "archive.unpack-tgz",
-        .data = &.{.{ .name = "destination-exists", .expected = .{ .int = 1 } }},
-        .message_contains = "already exists",
+        .word = "fs.commit-dir",
+        .data = &.{.{ .name = "reason", .expected = .{ .symbol = "already-exists" } }},
     });
     const sentinel = try scratch.directory.dir.readFileAlloc(std.testing.io, "existing/sentinel", allocator, .unlimited);
     defer allocator.free(sentinel);
@@ -493,7 +478,7 @@ test "archive: unpack-tgz preserves existing destinations and has one concurrent
     try scratch.expectEntryCount(2);
 }
 
-test "archive: cancellation never publishes a destination" {
+test "tar: cancellation never publishes a destination" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const bytes = try decodeHex(.valid);
@@ -518,7 +503,7 @@ test "archive: cancellation never publishes a destination" {
         .filesystem = scratch.filesystem(),
     }), .cooperative, .evaluate);
     defer runtime.deinit();
-    switch (try runtime.runUnit("<archive-warm>", "[] archive.sha256 pop")) {
+    switch (try runtime.runUnit("<archive-warm>", "[] hash.sha256 pop")) {
         .ok => {},
         .incomplete, .err => return error.UnexpectedWarmupResult,
     }
@@ -533,7 +518,7 @@ test "archive: cancellation never publishes a destination" {
 
     try scratch.expectEntryCount(0);
 
-    // Non-canonical destinations fail before decompression.
+    // Non-canonical destinations fail before any filesystem change.
     for ([_]struct { destination: []const u8, reason: []const u8 }{
         .{ .destination = ".", .reason = "invalid-path" },
         .{ .destination = "a/../b", .reason = "invalid-path" },
@@ -545,14 +530,14 @@ test "archive: cancellation never publishes a destination" {
             .name = case.destination,
             .source = malformed,
             .kind = "domain",
-            .word = "archive.unpack-tgz",
+            .word = "fs.stage-dir",
             .data = &.{.{ .name = "reason", .expected = .{ .symbol = case.reason } }},
         });
     }
     try scratch.expectEntryCount(0);
 }
 
-test "archive: allocation and filesystem failures never publish a destination" {
+test "tar: allocation and filesystem failures never publish a destination" {
     // Allocation failures for both drivers are exhaustively replayed by
     // oom_test; this behavioral case exercises an actual staging failure.
     var scratch = try Scratch.init();
@@ -567,7 +552,7 @@ test "archive: allocation and filesystem failures never publish a destination" {
         .name = "missing destination parent",
         .source = source,
         .kind = "io",
-        .word = "archive.unpack-tgz",
+        .word = "fs.stage-dir",
         .data = &.{.{ .name = "reason", .expected = .{ .symbol = "not-found" } }},
     });
     try scratch.expectAbsent("missing-parent");
@@ -582,12 +567,12 @@ test "archive: allocation and filesystem failures never publish a destination" {
         .name = "escaping destination parent",
         .source = escaping,
         .kind = "io",
-        .word = "archive.unpack-tgz",
+        .word = "fs.stage-dir",
         .data = &.{.{ .name = "reason", .expected = .{ .symbol = "symlink-escape" } }},
     });
     try scratch.expectEntryCount(1);
 }
 
-test "archive: cold-loads through the builtin manifest" {
-    try support.expectStack("[97] archive.sha256 len", "64");
+test "tar: cold-loads through the builtin manifest" {
+    try support.expectStack("([] tar.read) @attempt `err at `kind at", "domain");
 }

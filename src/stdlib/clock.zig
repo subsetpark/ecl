@@ -39,7 +39,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "unix", .effect = "-- timestamp", .doc = "Read the process realtime clock as `{unix ms}`. Convert with the `time` module. Wall time can jump and must not be used for scheduling deadlines.", .primitive = unix },
 };
 
-/// The two clock domains a tagged value can name. The tag is the dictionary's
+/// The two clock domains a tagged value can denote. The tag is the dictionary's
 /// only key, so the two never compare equal and neither passes for the other.
 const Domain = enum { unix, monotonic };
 

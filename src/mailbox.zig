@@ -1,4 +1,4 @@
-//! A task's mailbox: the only thing an address names.
+//! A task's mailbox: the only thing an address points to.
 //!
 //! Every task owns one mailbox, created with its cell and closed when the
 //! cell's fiber becomes terminal. An address value holds a reference to the
@@ -100,7 +100,7 @@ pub const Mailbox = struct {
         self.release();
     }
 
-    /// The mailbox an address value names.
+    /// The mailbox an address value points to.
     pub fn fromAddress(address: Value) *Mailbox {
         return @ptrCast(@alignCast(heap.addressTarget(address.address)));
     }

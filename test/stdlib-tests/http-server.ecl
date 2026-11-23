@@ -142,7 +142,7 @@
   ["HTTP/1.1 200 OK" "X-Ok_1!: a\tb" "X-Ok_1!: c d" "Content-Length: 0" "Connection: close" "" ""]
   crlf str.join
   equal
-  ("GET" "/r?next=%0D%0AX-Evil:%20yes" http.request.new http.request.query "next" at
+  ({query "next=%0D%0AX-Evil:%20yes"} http.request.query "next" at
    http.response.redirect
    http.server.render-response)
   `domain

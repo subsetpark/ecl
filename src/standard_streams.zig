@@ -1,8 +1,8 @@
 //! The standard streams as port endpoints. A Session owns one input device
-//! and two output devices for the whole of its life; `fd.in`, `fd.out`, and
-//! `fd.err` publish the same three endpoint values every time, so the console
-//! is one device kind with every other byte stream and `fd.read` and
-//! `fd.write` need to know nothing about it.
+//! and two output devices for the whole of its life; `stream.in`, `stream.out`, and
+//! `stream.err` publish the same three endpoint values every time, so the console
+//! is one device kind with every other byte stream and `stream.read` and
+//! `stream.write` need to know nothing about it.
 //!
 //! The devices are not resources: no task scope owns them, nothing closes
 //! them, and `@give` never moves them. What they share with a resource's

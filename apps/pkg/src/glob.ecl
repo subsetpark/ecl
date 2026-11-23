@@ -4,14 +4,14 @@
  ### defp initial-step
  (row token star? -- row : "Only leading wildcard tokens can match empty input.")
  (|row token star|
-  row row last token star call and append) `initial-step defp
+  row row last token star apply and append) `initial-step defp
 
  ### defp cell-value
  (state token -- bool : "Evaluate one wildcard recurrence without backtracking.")
  (|state token|
-  token state `context at 1 at call
+  token state `context at 1 at apply
   state `index at state `old at swap at
-  token state `item at state `context at 2 at call and
+  token state `item at state `context at 2 at apply and
   state `new at last state `old at state `index at 1 + at or
   pair swap at) `cell-value defp
 
@@ -45,4 +45,34 @@
  ### def matches?
  (pattern path -- bool : "Match portable source globs; ** spans zero or more complete components.")
  ("/" str.split swap "/" str.split swap ("**" match?) (segment) matches) `matches? def
+
+ `pkg.test.support `t alias
+
+ ### defp check
+ (pattern path expected -- : "Assert source-pattern selection independently of the matcher.")
+ (|pattern path expected|
+  pattern path pkg.glob.matches? expected match?
+  {kind user msg "source glob assertion failed"} assert) `check defp
+
+ ### test source-patterns
+ (-- : "Match component wildcards and recursive paths with no exponential backtracking.")
+ ("src/**/*.ecl" "src/main.ecl" 1 check
+  "src/**/*.ecl" "src/deep/main.ecl" 1 check
+  "src/*.ecl" "src/deep/main.ecl" 0 check
+  "**/main.ecl" "main.ecl" 1 check
+  "**/main.ecl" "src/main.ecl" 1 check
+  "**/main.ecl" "src/main.txt" 0 check
+  "src/**" "src/one/two" 1 check
+  "a?c" "abc" 1 check
+  "a?c" "ac" 0 check
+  "a*c" "ac" 1 check
+  "a*c" "abc" 1 check
+  "a*c" "ab" 0 check
+  "a*b*c" "abbc" 1 check
+  "a*b*c" "abcx" 0 check
+  "?" "λ" 0 check
+  "??" "λ" 1 check
+  "λ*.ecl" "λ.ecl" 1 check
+  "**/a/**/b" "x/a/y/z/b" 1 check)
+ `source-patterns test
 ) `pkg.glob @defm

@@ -565,7 +565,7 @@ pub const SpanArchive = enum(usize) {
         return self.privateState().indexed(header);
     }
 
-    /// Re-scopes a module construction body into the image `linker` names.
+    /// Re-scopes a module construction body into the image `linker` designates.
     /// Consuming on success and failure alike: the cursor owns `body` from
     /// here on, and a failure releases it.
     pub fn rescopeCursor(
@@ -800,9 +800,9 @@ pub const SpanArchive = enum(usize) {
             item: value.Value,
         ) error{OutOfMemory}!?value.Value {
             shared: switch (item) {
-                // The one rewrite: a symbol occurrence inside the body names
+                // The one rewrite: a symbol occurrence inside the body refers to
                 // the image the body is becoming. A lowered locals
-                // operation names no slot and keeps its operand; a quoted
+                // operation refers to no slot and keeps its operand; a quoted
                 // occurrence stays quoted under its new link.
                 .symbol => |reference| return if (env.localOperand(reference.slot) != null) item else .{
                     .symbol = .{
@@ -1675,7 +1675,7 @@ test "spans: re-scoping carries spans onto a copy that links every word" {
     try std.testing.expect(fixture.archive.projection(root) != null);
     try std.testing.expectEqual(root.length(), copy.length());
 
-    // Every symbol occurrence in the copy names the requested scope, and the
+    // Every symbol occurrence in the copy refers to the requested scope, and the
     // source's do not; the quoted name `go` stays quoted under its new link.
     var words: usize = 0;
     var quoted: usize = 0;
@@ -1781,7 +1781,7 @@ test "spans: one reclamation root has one code provenance owner" {
     // And once the first releases its receipt the root is free again.
     var second = try SpanArchiveOwner.init(&owner);
 
-    // A receipt names one issuance independently of owner addresses: replaying the first
+    // A receipt identifies one issuance independently of owner addresses: replaying the first
     // archive's receipt cannot detach the second's registration, so the
     // surviving archive keeps recycling its slots.
     var stale: heap.HostOwner.CodeRetirementRegistration = @fromBackingInt(@intCast(1));

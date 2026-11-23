@@ -1,8 +1,8 @@
 //! Proof surface for the monomorphic flat-leaf kernel migration (Step 14).
 //!
 //! Every test here is stubbed by the migration's first patch and implemented by
-//! exactly one later patch, named in its `// PENDING: Patch N` comment. A stub
-//! that outlives its named patch leaves the migration unfinished even when the
+//! exactly one later patch, cited in its `// PENDING: Patch N` comment. A stub
+//! that outlives its cited patch leaves the migration unfinished even when the
 //! suite passes.
 //!
 //! These cases follow the `kernel_test_support.zig` conventions: whole-session
@@ -336,9 +336,9 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
     // Every binary word the numeric family installs or lends to the prelude,
     // spelled as it appears in source.
     const binary_words = [_][]const u8{
-        "+",   "-",   "*",    "/",   "div",  "mod", "pow", "atan2",
-        "min", "max", "=",    "<>",  "<",    ">",   "<=",  ">=",
-        "and", "or",  "band", "bor", "bxor", "bsl", "bsr", "+%",
+        "+",   "-",   "*",    "/",    "div",  "mod", "pow", "atan2",
+        "min", "max", "=",    "not=", "<",    ">",   "<=",  ">=",
+        "and", "or",  "band", "bor",  "bxor", "bsl", "bsr", "+%",
         "-%",  "*%",
     };
     const unary_words = [_][]const u8{
@@ -578,7 +578,7 @@ test "typed differential: sequence order text and random operation parity across
         .{ .codepoints = &astral },
     }) |inputs| {
         try expectParity(&runtime, inputs, "grade");
-        try expectParity(&runtime, inputs, "sort");
+        try expectParity(&runtime, inputs, "dup grade at");
     }
     try expectParity(&runtime, .{ .symbols = &symbol_values }, "grade");
 
@@ -800,7 +800,7 @@ test "typed kernels: hashed distinct keeps first occurrences under leaf equality
 // Typed `grade` sorts (key, position) pairs: insertion-sorted runs, then merge
 // passes that resume mid-merge across budget boundaries. Heavy duplicates
 // make stability observable in the permutation itself.
-test "typed kernels: grade and sort keep the stable permutation across runs merges and budget boundaries" {
+test "typed kernels: grade and dup grade at keep the stable permutation across runs merges and budget boundaries" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -812,11 +812,11 @@ test "typed kernels: grade and sort keep the stable permutation across runs merg
         defer allocator.free(numbers);
         for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 1009)) - 500;
         try expectParity(&runtime, .{ .ints = numbers }, "grade dup len range * 0 (+) fold");
-        try expectParity(&runtime, .{ .ints = numbers }, "sort 1 drop 0 (+) fold");
+        try expectParity(&runtime, .{ .ints = numbers }, "dup grade at 1 drop 0 (+) fold");
         try expectParity(&runtime, .{ .ints = numbers }, "reverse grade 25 take");
     }
     try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "grade");
-    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "sort");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "dup grade at");
 }
 
 // A recognized `each` or `zip-with` over a boxed spine arms one cursor per
@@ -1244,13 +1244,13 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
 
     // Full vectors plus a short tail, every operand shape, and every explicit
     // infallible vector family.
-    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max", "band", "bor", "bxor", "+%", "-%", "*%" }) |word| {
+    inline for ([_][]const u8{ "=", "not=", "<", ">", "<=", ">=", "min", "max", "band", "bor", "bxor", "+%", "-%", "*%" }) |word| {
         try expectParity(&runtime, .{ .int_pair = .{ .left = left, .right = right } }, word);
         try expectParity(&runtime, .{ .ints = left }, "3 " ++ word);
         try expectParity(&runtime, .{ .ints = left }, "3 swap " ++ word);
     }
     try expectParity(&runtime, .{ .ints = left }, "bnot");
-    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max" }) |word| {
+    inline for ([_][]const u8{ "=", "not=", "<", ">", "<=", ">=", "min", "max" }) |word| {
         try expectParity(&runtime, .{ .float_pair = .{ .left = left_real, .right = right_real } }, word);
         try expectParity(&runtime, .{ .floats = left_real }, "3.5 " ++ word);
         try expectParity(&runtime, .{ .floats = left_real }, "3.5 swap " ++ word);
@@ -1291,7 +1291,7 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
     }
 }
 
-/// Runs `source` over `inputs` and asserts the language error names `kind` at
+/// Runs `source` over `inputs` and asserts the language error reports `kind` at
 /// logical `index`. Parity with the generic route proves the whole outcome;
 /// this pins the one fact parity cannot, that the case faulted at all.
 fn expectFaultAt(

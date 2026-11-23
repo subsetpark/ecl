@@ -136,7 +136,7 @@ const FailureDriver = struct {
     /// the first activation that is not one. The failing word's own entry is
     /// the failing token, unless that word is itself a helper reported at its
     /// caller. An unknown call site ends the walk but keeps the attribution:
-    /// the report omits a position rather than naming the helper body.
+    /// the report omits a position rather than citing the helper body.
     fn attribute(self: *FailureDriver, index: usize) void {
         if (self.attribution_closed) return;
         const first = @intFromBool(self.failure.word != null and self.failure.word_attribution != .caller);

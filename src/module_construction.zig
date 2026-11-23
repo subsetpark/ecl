@@ -33,7 +33,7 @@ pub fn begin(
     var candidate = try registry.createImage(name, fiber.current.?.site.registration_provenance);
     errdefer candidate.deinit();
     if (doc) |document| candidate.document(document);
-    // Every word in the body names the image. A specialized leaf holds no
+    // Every word in the body refers to the image. A specialized leaf holds no
     // symbol and no container, so it opens the boundary unchanged in this
     // step; any other body is re-scoped, which is user-sized and therefore
     // ordinary resumable scheduler work: the driver holds the candidate
@@ -66,7 +66,6 @@ fn advanceRegistration(
 ) MachineError!WorkProgress {
     return switch (cursor.advance() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.NameConflict => return fiber.fail(.domain, "module name collides with an alias"),
         error.ReservedName => return fiber.fail(.domain, "module name `core` is reserved for the core qualifier"),
     }) {
         .pending => .stepped,
@@ -238,15 +237,16 @@ const ModuleSealDriver = struct {
                     .pending => {},
                     .item => |entry| {
                         const owned = via.image();
-                        // Shadowing in a shipped module is deliberate.
-                        if (owned.provenance() != .standard_library)
+                        // Shadowing in a shipped module is deliberate, and a
+                        // module alias is not a word, so it shadows nothing.
+                        if (owned.provenance() != .standard_library and entry.value != .module)
                             fiber.warnCoreShadowing(entry.key, owned.moduleName());
                         switch (entry.value) {
                             .reserved => |reservation| validate.current = .{
                                 .reservation = reservation,
                                 .cursor = binder.ValidationCursor.init(fiber.releases, reservation.quotation()),
                             },
-                            .definition, .alias => {},
+                            .definition, .alias, .module => {},
                         }
                     },
                     .complete => self.phase.borrowMut().* = .{ .seal = via.image().sealCursor() },
@@ -260,9 +260,6 @@ const ModuleSealDriver = struct {
             }) {
                 .pending => {},
                 .complete => {
-                    const owned = via.image();
-                    const provenance = owned.provenance();
-                    const name = owned.moduleName();
                     fiber.retireDriver(self);
                     var built = via.closeBoundary();
                     var sealed = heap.Owned(modules.SealedImage).init(built.seal());
@@ -270,7 +267,7 @@ const ModuleSealDriver = struct {
                     const driver = try fiber.allocator.create(ModuleCompletionDriver);
                     // The cursor owns the sealed image from here; nothing can fail after.
                     driver.* = .{
-                        .cursor = .init(fiber.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
+                        .cursor = .init(fiber.inherited.registry.registrationCursor(sealed.take())),
                     };
                     via.adoptDriver(driver);
                     return .detached;

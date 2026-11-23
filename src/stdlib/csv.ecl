@@ -1,6 +1,6 @@
 ### module csv
 (: "RFC 4180 comma-separated values. `parse` splits text into rows of string fields and `emit`
-    renders rows back; neither converts a field. A typed column is a `table.cast` over parsed
+    renders rows back; neither converts a field. Convert a column with `dict.evolve` over parsed
     rows.")
 (
  ### setp block
@@ -31,7 +31,7 @@
   s i take s n and i take reverse 0 (or) scan reverse not and 0 (+) fold 1 +) `located defp
 
  ### defp misquoted
- (record column -- : "Raise the parse error naming a record and field.")
+ (record column -- : "Raise the parse error reporting a record and field.")
  (|record column|
   `parse "csv: malformed quoting at record " record str cat ", column " cat column str cat refuse)
  `misquoted defp
@@ -83,7 +83,7 @@
 
  ### defp quoted
  (text quote base -- rows : "Find the characters inside quotes, and the newlines.")
- (|x q base| x q q 0 (<>) scan x "\n" first = base separated) `quoted defp
+ (|x q base| x q q 0 (not=) scan x "\n" first = base separated) `quoted defp
 
  ### defp lexed
  (text base -- rows : "Split whole newline-terminated records that follow `base` earlier ones.")
@@ -112,7 +112,7 @@
  ### defp step
  (state block -- state :
   "Advance the held pieces, quote parity, row chunks, and record count by one block.")
- (|state block| state block block \" = state 1 at (<>) scan ended) `step defp
+ (|state block| state block block \" = state 1 at (not=) scan ended) `step defp
 
  ### defp tail
  (chunks count text -- chunks : "Lex a final record that no newline ends.")
@@ -125,7 +125,7 @@
  `finished defp
 
  ### defp uneven
- (widths record -- : "Raise the shape error naming a record and both widths.")
+ (widths record -- : "Raise the shape error reporting a record and both widths.")
  (|widths at-record|
   `shape "csv: record " at-record 1 + str cat " has " cat widths at-record at str cat
   " fields where record 1 has " cat widths first str cat refuse) `uneven defp
@@ -141,15 +141,8 @@
  ### def parse
  (input -- rows :
   "Split RFC 4180 comma-separated content into rows of string fields. Input is a string or a list of
-   UTF-8 bytes. Every record is data and every field is text: nothing is converted, so a typed
-   column is a `table.cast` away. Accept CRLF or LF records, quoted commas and newlines,
-   doubled-quote escapes, and a final record with no terminator. Preserve blank records and empty
-   fields. Empty input is no rows.
-
-   Records of unequal width are `` `shape ``. A quote inside an unquoted field, text after a closing
-   quote, a carriage return outside quotes that no newline follows, and an unclosed quote are ``
-   `parse ``, naming the record and field. Input that is neither text nor UTF-8 bytes fails as
-   `chars` does.")
+   UTF-8 bytes. Accept CRLF or LF records, quoted commas and newlines, doubled-quote escapes, and a
+   final record with no terminator. Preserve blank records and empty fields.")
  (chars dup len block + 1 - block div range block * cut
   () 0 () 0 4 pack (step) fold finished rectangular) `parse def
 
@@ -169,11 +162,11 @@
 
  ### defp runs
  (source starts lengths -- text : "A source's runs joined in order, skipping the empty ones.")
- (|x s l| x s l l 0 > where (|x s l k| x s k at l k at gathered) call) `runs defp
+ (|x s l| x s l l 0 > where (|x s l k| x s k at l k at gathered) apply) `runs defp
 
  ### defp braided
  (a b c -- list : "Three lists of one length interleaved, an element of each in turn.")
- (|a b c| a b cat c cat a len (|all n| all n 3 * range dup 3 mod n * swap 3 div + at) call)
+ (|a b c| a b cat c cat a len (|all n| all n 3 * range dup 3 mod n * swap 3 div + at) apply)
  `braided defp
 
  ### defp assembled
@@ -192,7 +185,7 @@
   flat quote 1 + where at
   special ends at special starts at - 0 >
   lens doubled ends at doubled starts at - +
-  widths where dup -1 followed <> assembled) `joined defp
+  widths where dup -1 followed not= assembled) `joined defp
 
  ### defp marked
  (widths lengths text quote -- text :
@@ -225,10 +218,8 @@
 
  ### def emit
  (rows -- text :
-  "Render rows of string fields as canonical, CRLF-terminated RFC 4180 text, quoting exactly the
-   fields that hold a comma, a quote, a carriage return, or a newline, and doubling their quotes. No
-   rows is the empty string. Non-list rows and non-string fields are `` `type ``; a row with no
-   fields is `` `shape ``.")
+  "Render rows of string fields as canonical, CRLF-terminated RFC 4180 text, quoting any fields with
+   commas, quotes, carriage returns, or newlines.")
  (dup type `list match? `type "csv.emit expects a list of records" refuse-unless
   dup "csv.emit expects every record to be a list" measured 0 = 0 (or) fold not
   `shape "csv.emit rejects a record with no fields" refuse-unless

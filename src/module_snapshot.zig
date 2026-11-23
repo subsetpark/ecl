@@ -22,14 +22,14 @@ const SourceState = struct {
     owner: *Backing,
     artifact: ArtifactId,
     absolute_path: []u8,
-    private_registry: modules.Registry,
     committed: std.atomic.Value(bool) = .init(false),
 };
 comptime {
     heap.requireSingleHostCapability(Backing);
 }
 
-/// Lexical file identity. Private registrations remain owned by this artifact.
+/// Lexical file identity: the artifact code was written in, which fixes its
+/// scope's visibility and the modules it may register.
 pub const SourceScope = opaque {
     fn state(self: *const SourceScope) *SourceState {
         return @ptrCast(@alignCast(@constCast(self)));
@@ -43,9 +43,6 @@ pub const SourceScope = opaque {
         const artifact = source.owner.map.artifact(source.artifact);
         const scope = source.owner.map.scope(artifact.scope);
         return .{ .scope_name = scope.name, .root = scope.root, .relative_path = artifact.path, .scope_id = artifact.scope, .artifact_id = source.artifact, .kind = artifact.kind };
-    }
-    pub fn registry(self: *const SourceScope) *modules.Registry {
-        return &self.state().private_registry;
     }
     pub fn exports(self: *const SourceScope, name: intern.ModuleName) bool {
         const source = self.state();
@@ -72,7 +69,7 @@ pub const Snapshot = opaque {
     }
     /// Consumes the complete validated map on success; failure leaves it with the caller.
     /// All runtime allocations derive from the Session's host cleanup owner.
-    pub fn fromMap(host: *const heap.HostCleanup, main: *const modules.Registry, map: *module_map.Validated, start: []const u8) error{OutOfMemory}!*Snapshot {
+    pub fn fromMap(host: *const heap.HostCleanup, map: *module_map.Validated, start: []const u8) error{OutOfMemory}!*Snapshot {
         const allocator = host.allocator();
         const owned = try allocator.create(Backing);
         errdefer allocator.destroy(owned);
@@ -81,14 +78,10 @@ pub const Snapshot = opaque {
         const sources = try allocator.alloc(SourceState, map.artifacts().len);
         errdefer allocator.free(sources);
         var built: usize = 0;
-        errdefer for (sources[0..built]) |*source| {
-            source.private_registry.deinit();
-            allocator.free(source.absolute_path);
-        };
+        errdefer for (sources[0..built]) |*source| allocator.free(source.absolute_path);
         for (sources, map.artifacts(), 0..) |*source, artifact, index| {
             const absolute = try std.fs.path.join(allocator, &.{ map.scope(artifact.scope).root, artifact.path });
-            errdefer allocator.free(absolute);
-            source.* = .{ .owner = owned, .artifact = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .absolute_path = absolute, .private_registry = try modules.Registry.initPrivate(host, main) };
+            source.* = .{ .owner = owned, .artifact = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .absolute_path = absolute };
             built += 1;
         }
         owned.* = .{ .host = host, .map = map, .sources = sources, .start_dir = start_dir };
@@ -107,12 +100,6 @@ pub const Snapshot = opaque {
     pub fn localScope(self: *const Snapshot) ScopeId {
         return self.backing().map.local();
     }
-    pub fn localSource(self: *const Snapshot, id: ArtifactId) ?*const SourceScope {
-        const owned = self.backing();
-        const index = @backingInt(id);
-        if (index >= owned.sources.len or owned.map.artifacts()[index].scope != owned.map.local()) return null;
-        return @ptrCast(&owned.sources[index]);
-    }
     pub fn localSourceCursor(self: *const Snapshot) LocalSourceCursor {
         return .{ .owner = self.backing() };
     }
@@ -129,10 +116,7 @@ pub const Snapshot = opaque {
     pub fn deinit(self: *Snapshot) void {
         const owned = self.backing();
         const allocator = owned.host.allocator();
-        for (owned.sources) |*source| {
-            source.private_registry.deinit();
-            allocator.free(source.absolute_path);
-        }
+        for (owned.sources) |*source| allocator.free(source.absolute_path);
         allocator.free(owned.sources);
         allocator.free(owned.start_dir);
         owned.map.deinit();

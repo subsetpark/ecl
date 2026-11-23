@@ -1,8 +1,8 @@
 //! Name resolution. A word occurrence carries the root it was written in, and
 //! resolves there against one captured publication view. Dispatch resolves
 //! each word when it is reached, through the same resolver one word at a time;
-//! a construction validates its bodies with it first, so a word that names
-//! nothing fails the definition rather than its call.
+//! a construction validates its bodies with it first, so a word that resolves
+//! to nothing fails the definition rather than its call.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -21,7 +21,7 @@ pub const LookupChain = machine.LookupChain;
 pub const Group = struct {
     image_scope: env.ScopeId,
     /// The name the group will be registered under. A qualified name with
-    /// this module is the group naming itself, which no registry lookup can
+    /// this module is the group referring to itself, which no registry lookup can
     /// answer before publication.
     module: intern.ModuleName,
     /// The group's construction directory. Null until the group's staged
@@ -46,8 +46,8 @@ pub const Context = struct {
     registry: *modules.Registry,
     project: ?*const map_state.Snapshot,
     libraries: machine.EmbeddedLibraries,
-    /// The provenance a qualified name written outside any module searches
-    /// private registries under.
+    /// The provenance a qualified name written outside any module resolves
+    /// under.
     provenance: modules.RegistrationProvenance,
     /// Construction in progress. Only a validating resolver reads these; an
     /// explicit lookup's context leaves them null.
@@ -131,7 +131,7 @@ pub fn ResolverIn(comptime mode: Mode) type {
         owner_provenance: ?modules.RegistrationProvenance = null,
         /// Whether the occurrence or alias being resolved belongs to the group
         /// under construction. Only then does the group's own module name mean
-        /// the group; anything else names the registered module.
+        /// the group; anything else denotes the registered module.
         group_owned: bool = false,
         /// Brent's cycle detection over alias hops: a hop that repeats the saved
         /// one proves a cycle, and the saved hop moves forward at each power of
@@ -159,6 +159,8 @@ pub fn ResolverIn(comptime mode: Mode) type {
             dot,
             prefix,
             prefix_validate,
+            prefix_alias,
+            group_prefix_alias,
             export_name,
             export_validate,
             acquire,
@@ -180,13 +182,14 @@ pub fn ResolverIn(comptime mode: Mode) type {
             acquisition: machine.ModuleLookupCursor,
             export_lookup: modules.ModuleNameLookupCursor,
             lookup: env.NameMap.RawLookupCursor,
+            core_lookup: env.CoreMap.RawLookupCursor,
             group_lookup: env.GroupMap.RawLookupCursor,
 
             fn deinit(self: *Work) void {
                 switch (self.*) {
                     .acquisition => |*cursor| cursor.deinit(),
                     .export_lookup => |*cursor| cursor.deinit(),
-                    .none, .dot, .atom, .module_validation, .binding_validation, .lookup, .group_lookup => {},
+                    .none, .dot, .atom, .module_validation, .binding_validation, .lookup, .core_lookup, .group_lookup => {},
                 }
                 self.* = .none;
             }
@@ -300,13 +303,13 @@ pub fn ResolverIn(comptime mode: Mode) type {
         }
 
         fn beginCore(self: *Self, context: *const Context, binding: intern.BindingName) Progress {
-            self.work = .{ .lookup = context.environment.coreLookup(binding) };
+            self.work = .{ .core_lookup = context.environment.coreLookup(binding) };
             self.phase = .core_lookup;
             return .pending;
         }
 
         /// Follows one directory entry: a definition resolves, an alias starts a
-        /// qualified lookup of its target.
+        /// qualified lookup of its target, and a module alias is not a word.
         fn follow(self: *Self, context: *const Context, entry: env.Entry, require_public: bool) Progress {
             switch (entry) {
                 .definition => |definition| {
@@ -315,6 +318,7 @@ pub fn ResolverIn(comptime mode: Mode) type {
                     return self.found(definition);
                 },
                 .alias => |alias| return self.followAlias(context, alias, require_public),
+                .module => return self.miss(.{ .unresolved = if (require_public) .qualified else self.plainChain() }),
             }
         }
 
@@ -329,6 +333,53 @@ pub fn ResolverIn(comptime mode: Mode) type {
                 },
                 .definition => |definition| return self.follow(context, .{ .definition = definition }, require_public),
                 .alias => |alias| return self.followAlias(context, alias, require_public),
+                .module => |module| return self.follow(context, .{ .module = module }, require_public),
+            }
+        }
+
+        /// Begins the lookup of the export atom after the module part.
+        fn beginExportName(self: *Self) Progress {
+            self.work.deinit();
+            self.work = .{ .atom = intern.lookupCursor(self.spelling()[self.dot_index + 1 ..]) };
+            self.phase = .export_name;
+            return .pending;
+        }
+
+        /// A module part that is one segment may be a module alias of the scope
+        /// the word was written in, which then denotes its target. Core holds no
+        /// aliases, so a word written there goes straight to the registry.
+        fn beginPrefixAlias(self: *Self, context: *const Context) Progress {
+            const binding = intern.moduleBindingName(self.prefix.?) orelse return self.beginExportName();
+            switch (self.root) {
+                .core, .retired => return self.beginExportName(),
+                .session => {
+                    if (context.view.sessionFind(binding)) |entry| self.applyPrefixAlias(entry);
+                    return self.beginExportName();
+                },
+                .image => |cell| {
+                    self.work.deinit();
+                    if (self.groupOwned()) {
+                        self.work = .{ .group_lookup = context.group.?.directory.?.rawLookup(binding) };
+                        self.phase = .group_prefix_alias;
+                        return .pending;
+                    }
+                    const owner = cell.ownerHandle() orelse return self.beginExportName();
+                    if (self.image_pin == null) self.image_pin = modules.tryPinAnchor(owner, context.module_access) orelse
+                        return self.miss(.retired);
+                    const scope = cell.scopeUnder(.fresh_pin) orelse return self.miss(.retired);
+                    const home = modules.homeForModuleRootScope(scope) orelse return self.beginExportName();
+                    const lookup = home.lookupCursor(binding) orelse return self.beginExportName();
+                    self.work = .{ .lookup = lookup };
+                    self.phase = .prefix_alias;
+                    return .pending;
+                },
+            }
+        }
+
+        fn applyPrefixAlias(self: *Self, entry: env.Entry) void {
+            switch (entry) {
+                .module => |target| self.prefix = target,
+                .definition, .alias => {},
             }
         }
 
@@ -382,8 +433,8 @@ pub fn ResolverIn(comptime mode: Mode) type {
             return .pending;
         }
 
-        /// The provenance private registries are searched under: the image's
-        /// own for a word written in one, otherwise the resolving site's.
+        /// The provenance a qualified name resolves under: the image's own for a
+        /// word written in one, otherwise the resolving site's.
         fn provenance(self: *const Self, context: *const Context) modules.RegistrationProvenance {
             if (self.owner_provenance) |owner| return owner;
             switch (self.root) {
@@ -436,9 +487,24 @@ pub fn ResolverIn(comptime mode: Mode) type {
                     .pending => .pending,
                     .complete => |maybe_module| {
                         self.prefix = maybe_module orelse return self.miss(.{ .unresolved = .qualified });
-                        self.work = .{ .atom = intern.lookupCursor(self.spelling()[self.dot_index + 1 ..]) };
-                        self.phase = .export_name;
-                        return .pending;
+                        return self.beginPrefixAlias(context);
+                    },
+                },
+                .prefix_alias => switch (self.work.lookup.advance()) {
+                    .pending => .pending,
+                    .complete => |maybe_entry| {
+                        if (maybe_entry) |entry| self.applyPrefixAlias(entry);
+                        return self.beginExportName();
+                    },
+                },
+                .group_prefix_alias => if (mode == .lookup) unreachable else switch (self.work.group_lookup.advance()) {
+                    .pending => .pending,
+                    .complete => |maybe_entry| {
+                        if (maybe_entry) |entry| switch (entry) {
+                            .module => |target| self.prefix = target,
+                            .reserved, .definition, .alias => {},
+                        };
+                        return self.beginExportName();
                     },
                 },
                 .export_name => switch (self.work.atom.advance()) {
@@ -507,27 +573,19 @@ pub fn ResolverIn(comptime mode: Mode) type {
                     .pending => .pending,
                     .complete => |maybe_export| {
                         const export_id = maybe_export orelse return self.miss(.{ .unresolved = .core });
-                        self.work = .{ .lookup = context.environment.coreLookup(@fromBackingInt(export_id)) };
+                        self.work = .{ .core_lookup = context.environment.coreLookup(@fromBackingInt(export_id)) };
                         self.phase = .core_lookup;
                         return .pending;
                     },
                 },
-                .core_lookup => switch (self.work.lookup.advance()) {
+                .core_lookup => switch (self.work.core_lookup.advance()) {
                     .pending => .pending,
-                    .complete => |maybe_entry| {
-                        const entry = maybe_entry orelse return self.miss(.{ .unresolved = self.plainChain() });
+                    .complete => |maybe_definition| {
+                        const definition = maybe_definition orelse return self.miss(.{ .unresolved = self.plainChain() });
                         // A private core binding is reachable only from core's own
                         // definitions, never by a plain or qualified word.
-                        return switch (entry) {
-                            .definition => |definition| if (definition.visibility == .private)
-                                self.miss(.{ .unresolved = self.plainChain() })
-                            else
-                                self.found(definition),
-                            .alias => alias: {
-                                self.group_owned = false;
-                                break :alias self.follow(context, entry, true);
-                            },
-                        };
+                        if (definition.visibility == .private) return self.miss(.{ .unresolved = self.plainChain() });
+                        return self.found(definition);
                     },
                 },
                 .image_lookup => switch (self.work.lookup.advance()) {
@@ -547,7 +605,7 @@ pub fn ResolverIn(comptime mode: Mode) type {
 }
 
 /// Validates a definition body for its construction: every top-level
-/// unquoted occurrence must resolve, a word naming the construction's own
+/// unquoted occurrence must resolve, a word referring to the construction's own
 /// members included, so a misspelled word fails the definition rather than
 /// the call. It records nothing: the body resolves each word again when it
 /// runs. Nested quotations and quoted words stay data. A qualified word whose

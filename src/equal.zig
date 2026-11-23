@@ -71,7 +71,7 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
     return switch (a) {
         .int, .float => unreachable,
         .char => |codepoint| codepoint == b.char,
-        // Two symbols match when they name the same thing. A symbol's scope
+        // Two symbols match when they denote the same thing. A symbol's scope
         // is resolution metadata outside its identity as a value: `(dup)`
         // written in a module, `(dup)` written at the session, and `"dup"
         // symbol` are the same datum, and `match?` has always said so.

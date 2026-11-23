@@ -111,13 +111,13 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
 
 test "stdlib: an imported standard-library builtin is that builtin under its import's contract" {
     // `dict` imports its kernels from `dict.core`, as a session may. The
-    // binding is the builtin itself, so a failure inside it names the
+    // binding is the builtin itself, so a failure inside it reports the
     // attribute's qualified name with no forwarding frame. A standard-library
     // word's effect is not checked at the boundary, so too few values are the
     // builtin's own underflow; a user module's effect is still a contract.
     try support.expectStacks(&.{
         .{
-            .name = "a kernel failure names the kernel",
+            .name = "a kernel failure reports the kernel",
             .source = "([1 2] 0 9 dict.get) @attempt `err at dup `word at swap `trace at",
             .expected = "dict.core.get (`dict.core.get)",
         },
@@ -165,23 +165,23 @@ test "stdlib: qualified reference auto-loads an unregistered module" {
     });
 }
 
-test "stdlib: a body names a word of an unregistered module without loading it" {
-    // Binding a body does not load a module it names; the word resolves,
+test "stdlib: a body refers to a word of an unregistered module without loading it" {
+    // Binding a body does not load a module it refers to; the word resolves,
     // loading the module, when the body first reaches it. So a misspelled
     // export or module is reported by the call, not by the definition.
     try support.expectStacks(&.{
         .{
-            .name = "a definition naming a missing export still defines",
+            .name = "a definition referring to a missing export still defines",
             .source = "(result.nope) `f def 7",
             .expected = "7",
         },
         .{
-            .name = "a definition naming an unknown module still defines",
+            .name = "a definition referring to an unknown module still defines",
             .source = "(nosuch-module.word) `f def 7",
             .expected = "7",
         },
         .{
-            .name = "a module naming a missing export still seals",
+            .name = "a module referring to a missing export still seals",
             .source = "((result.nope) `f def) `m @defm 7",
             .expected = "7",
         },
@@ -196,7 +196,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
             .expected = "{ok [3]} {ok [3]}",
         },
         .{
-            .name = "a prefix not yet interned names a module that has not loaded",
+            .name = "a prefix not yet interned denotes a module that has not loaded",
             .source = "(\"a,b\" csv.parse) `f def f",
             .expected = "((\"a\" \"b\"))",
         },
@@ -289,8 +289,8 @@ test "stdlib: qualified reflection auto-loads every module transport" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "`csv.parse which `result.ok see");
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "csv.parse") != null);
+    try expectOk(&runtime, "`csv.parse see `result.ok see");
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Split RFC 4180") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(dup type `list match?") != null);
 }
 

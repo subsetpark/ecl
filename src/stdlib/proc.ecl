@@ -3,33 +3,22 @@
     available as an ordinary standard-library operation. Executable access is determined by the
     operating system.
 
-    The public words are ECL compositions over registered process capabilities, common port
-    transport, and task primitives.
+    `proc.spawn` creates a process resource subject to the common structured-value and process
+    limits. The resource supports the process words and the common `port` lifecycle words.
 
-    `proc.core.process` is the registered process factory. Applying `port.open` to it and a spawn
-    specification creates a process resource subject to the common structured-value and process
-    limits as `proc.spawn`. The returned resource supports the process words and common lifecycle
-    words; the factory is an opaque identity for the process resource kind.
+    `proc.wait` has its own FIFO lane; `proc.terminate` and `proc.kill` share an independent control
+    lane and do not wait for exit. Cancelling a wait leaves the process running. Process exit leaves
+    the resource open for further operations; closing the resource prevents new operations and joins
+    backend cleanup.
 
-    The registered operations `proc.core.wait`, `proc.core.terminate`, `proc.core.kill`, and
-    `proc.core.capture-limits` require an empty request list. Wait returns the termination
-    dictionary described below. Terminate and kill request the corresponding process action and
-    return `[]`; they do not wait for process exit. Capture-limits returns a dictionary with ``
-    `stdout `` and `` `stderr `` capture limits. Wait has its own FIFO lane; the other operations
-    share an independent control lane. Cancelling a wait leaves the process running and makes its
-    lane reusable after cancellation settles. Each exchange result is claimable once, while
-    completion observation is repeatable. Process exit leaves the resource open for further
-    operations; closing the resource prevents new admission and joins backend cleanup.
-
-    `proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint selectors for process
-    resources, and `proc.stdin`, `proc.stdout`, and `proc.stderr` are the endpoints they select.
-    `port.endpoint` with stdin grants writing and finishing, so `fd.write` and `fd.finish` apply;
-    stdout and stderr grant reading, so `fd.read`, `fd.read-line`, `fd.read-all`, and the `io`
-    readers apply. An endpoint is borrowed, so `fd.close` on it is `` `type ``; close the resource
-    with `port.close`. Their byte, EOF, and single-reader contracts are shared with the
-    corresponding process words. Finishing stdin delivers accepted bytes before closing that
-    direction, is idempotent, and rejects subsequent writes, including empty writes. Endpoints share
-    permitted use without owning the resource; they cannot be transferred with `@give`.
+    `proc.stdin`, `proc.stdout`, and `proc.stderr` borrow the process's byte streams. Stdin grants
+    writing and finishing, so `stream.write` and `port.finish` apply; stdout and stderr grant
+    reading, so `stream.read`, `stream.read-line`, `stream.read-all`, and the `io` readers apply. An
+    endpoint is borrowed, so `port.close` on it is `` `type ``; close the resource instead. Their
+    byte, EOF, and single-reader contracts are shared with the corresponding process words.
+    Finishing stdin delivers accepted bytes before closing that direction, is idempotent, and
+    rejects subsequent writes, including empty writes. Endpoints share permitted use without owning
+    the resource; they cannot be transferred with `@give`.
 
     A spawn specification is a dictionary whose keys are symbols, with only the fields ``
     `executable `` (required), `` `args ``, `` `cwd ``, and `` `env ``. The nested environment
@@ -46,10 +35,10 @@
 
     Prefer `proc.run` when the output fits a known bound. With `proc.spawn`, feed stdin and drain
     **both** output pipes concurrently when they can fill. A child may wait for stdin EOF before
-    exiting, so call `proc.close-input` when feeding is complete. `proc.wait` does not drain output:
-    waiting first can deadlock on a full pipe. Reads may split text characters or application
-    messages across chunks. Close the resource with `port.close` when finished; waiting for exit
-    does not close it.
+    exiting, so finish it with `proc.stdin port.finish` when feeding is complete. `proc.wait` does
+    not drain output: waiting first can deadlock on a full pipe. Reads may split text characters or
+    application messages across chunks. Close the resource with `port.close` when finished; waiting
+    for exit does not close it.
 
     Bytes are ordinary integer lists whose elements are all in `0...255`. Process streams do not
     decode Unicode. A port is an opaque identity capability that prints `<port:N>` and has type ``
@@ -58,8 +47,8 @@
 (
  ### def spawn
  (spec -- resource :
-  "Start the directly named, authorized executable with stdin, stdout, and stderr pipes. `spec` is a
-   symbol-keyed dictionary:
+  "Start the directly specified, authorized executable with stdin, stdout, and stderr pipes. `spec`
+   is a symbol-keyed dictionary:
    - `` `executable ``, required: an absolute path string.
    - `` `args ``: a list of argument strings, default `[]`; it excludes the executable name.
    - `` `cwd ``: an absolute path string without `.` or `..` components, default the host-configured
@@ -80,22 +69,23 @@
  (proc.core.process swap port.open) `spawn def
 
  ### def stdin
- (resource -- fd :
-  "The process's stdin as a writable byte endpoint for `fd.write` and `fd.finish`. Each call borrows
-   a new endpoint value over the same pipe; the pipe closes with the process resource, so the value
-   is `` `type `` to `fd.close`.")
+ (resource -- stream :
+  "The process's stdin as a writable byte endpoint for `stream.write` and `port.finish`. Each call
+   borrows a new endpoint value over the same pipe; the pipe closes with the process resource, so
+   the value is `` `type `` to `port.close`.")
  (proc.core.stdin port.endpoint) `stdin def
 
  ### def stdout
- (resource -- fd :
-  "The process's stdout as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all`,
-   and the `io` readers. Each call borrows a new endpoint value over the same pipe, and a line
-   reader's read-ahead belongs to the value, so read lines through one value. Drain stderr
-   concurrently when it can fill, or use `proc.run` to capture both streams.")
+ (resource -- stream :
+  "The process's stdout as a readable byte endpoint for `stream.read`, `stream.read-line`,
+   `stream.read-all`, and the `io` readers. Each call borrows a new endpoint value over the same
+   pipe, and a line reader's read-ahead belongs to the value, so read lines through one value. Drain
+   stderr concurrently when it can fill, or use `proc.run` to capture both streams.")
  (proc.core.stdout port.endpoint) `stdout def
 
  ### def stderr
- (resource -- fd : "The process's stderr as a readable byte endpoint, with `stdout`'s contract.")
+ (resource -- stream :
+  "The process's stderr as a readable byte endpoint, with `stdout`'s contract.")
  (proc.core.stderr port.endpoint) `stderr def
 
  ### def write
@@ -105,14 +95,7 @@
    contiguous. A non-list is `` `type ``; invalid byte elements are `` `domain ``; finished, closed,
    or broken stdin is `` `io ``. Acceptance does not mean all bytes have reached the child. Drain
    stdout and stderr concurrently to avoid pipe deadlock.")
- (swap stdin swap fd.write) `write def
-
- ### def close-input
- (resource -- :
-  "Finish stdin after queued bytes have been written, sending EOF to the child. Idempotent. A
-   concurrent or later write, including an empty write, is `` `io ``. Output remains readable; this
-   does not wait for process exit or close the process resource.")
- (stdin fd.finish) `close-input def
+ (swap stdin swap stream.write) `write def
 
  ### def read-stdout
  (resource max -- bytes :
@@ -122,7 +105,7 @@
    `domain ``; at most one stdout read may be pending, so overlap is `` `contract ``; pipe failure
    is `` `io ``. Use `chars` to decode UTF-8. Drain stderr concurrently when it can fill, or use
    `proc.run` to capture both streams.")
- (swap stdout swap fd.read) `read-stdout def
+ (swap stdout swap stream.read) `read-stdout def
 
  ### def read-stderr
  (resource max -- bytes :
@@ -132,7 +115,7 @@
    `domain ``; at most one stderr read may be pending, so overlap is `` `contract ``; pipe failure
    is `` `io ``. Drain stdout concurrently when it can fill, or use `proc.run` to capture both
    streams.")
- (swap stderr swap fd.read) `read-stderr def
+ (swap stderr swap stream.read) `read-stderr def
 
  ### def wait
  (resource -- termination :
@@ -176,12 +159,12 @@
  (|reader limit chunks size chunk|
   reader limit chunks chunk append size chunk len +
   dup limit <= `overflow error.new "process capture limit exceeded" error.with-message assert
-  reader 4096 fd.read) `capture-step defp
+  reader 4096 stream.read) `capture-step defp
 
  ### defp capture
  (reader limit -- bytes : "Drain bounded chunks and reject capture overflow.")
  (|reader limit|
-  reader limit [] 0 reader 4096 fd.read
+  reader limit [] 0 reader 4096 stream.read
   (dup len 0 >) (capture-step) while pop pop rollup pop pop raze) `capture defp
 
  ### defp await-all
@@ -191,9 +174,9 @@
   while nip) `await-all defp
 
  ### defp run-result
- (fields -- result : "Return process results in a stable field order.")
+ (fields -- result : "Return the `term`, `stdout`, and `stderr` fields as a process result.")
  (|fields|
-  `term fields `term at `stdout fields `stdout at `stderr fields `stderr at 6 pack dict.from-flat)
+  `term fields `term at `stdout fields `stdout at `stderr fields `stderr at 6 pack dict.from-kvs)
  `run-result defp
 
  ### defp run-streams
@@ -201,12 +184,12 @@
   "Concurrently feed, drain, and observe process exit.")
  (|spec process stdout-limit stderr-limit|
   process stdin spec `stdin [] dict.get pair
-  (dup len 0 > (over swap fd.write) (pop) if fd.finish {}) cat @spawn
+  (dup len 0 > (over swap stream.write) (pop) if port.finish {}) cat @spawn
   process stdout stdout-limit pair
-  (capture `stdout swap pair dict.from-flat) cat @spawn
+  (capture `stdout swap pair dict.from-kvs) cat @spawn
   process stderr stderr-limit pair
-  (capture `stderr swap pair dict.from-flat) cat @spawn
-  process (wait `term swap pair dict.from-flat) cons @spawn
+  (capture `stderr swap pair dict.from-kvs) cat @spawn
+  process (wait `term swap pair dict.from-kvs) cons @spawn
   4 pack await-all run-result process port.close) `run-streams defp
 
  ### defp checked-limit
@@ -229,7 +212,7 @@
 
  ### defp run-wait
  (task spec -- result : "Apply the optional task deadline and always join cancellation.")
- (dup `timeout-ms dict.has?
+ (dup `timeout-ms has?
   (`timeout-ms at task.await-for)
   (pop task.await)
   if) `run-wait defp
@@ -268,12 +251,12 @@
   assert
   dup `stdin [] dict.get dup type `list match? `type error.new "expected a stdin byte list"
   error.with-message assert
-  fd.bytes? `domain error.new "expected stdin bytes in 0...255" error.with-message assert
+  bytes? `domain error.new "expected stdin bytes in 0...255" error.with-message assert
   dup `timeout-ms 0 dict.get nonnegative pop
   dup (run-body) cons @spawn dup rolldown pair (run-wait) cat @attempt
   swap dup task.cancel task.await pop
   result.or-raise first
-  dup `err dict.has?
+  dup `err has?
   (dup `err at dup `kind at `timeout match?
    ("process deadline expired" error.with-message raise)
    (pop) if)

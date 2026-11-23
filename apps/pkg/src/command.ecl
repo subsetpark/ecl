@@ -25,7 +25,7 @@
   "Run explicitly selected resolution policy and publish an immutable generation.")
  (|arguments update vendor|
   arguments offline pkg.project.find
-  update vendor pair (synchronize-project) cat call) `synchronize defp
+  update vendor pair (synchronize-project) cat apply) `synchronize defp
 
  ### defp synchronize-project
  (offline project update vendor -- :
@@ -54,7 +54,7 @@
   dup pkg.name.valid? require
   {} `path host.cwd put `directory host.cwd fs.open-dir put
   (|name project|
-   project pkg.project.lock name project initialize port.close project project-close) call) `init
+   project pkg.project.lock name project initialize port.close project project-close) apply) `init
  defp
 
  ### defp absent
@@ -68,15 +68,15 @@
  (|name project|
   ["ecl.pkg" "ecl.lock" "ecl.modules"] project `directory at (absent) cons for
   project `directory at "src" fs.mkdirs
-  {format 2 version "0.1.0" sources ["src/**/*.ecl"] exports [] requires {}} `name name put
-  project (initialize-manifest) cons call) `initialize defp
+  {format 2 version "0.1.0" sources ["src/**/*.ecl"] requires {}} `name name put
+  project (initialize-manifest) cons apply) `initialize defp
 
  ### defp initialize-manifest
  (manifest project -- :
   "Create manifest, lock, and usable local-source map without package bootstrap.")
  (|manifest project|
   manifest {} pkg.solver.resolve
-  manifest project pair (initialize-lock) cat call) `initialize-manifest defp
+  manifest project pair (initialize-lock) cat apply) `initialize-manifest defp
 
  ### defp initialize-lock
  (lock manifest project -- :
@@ -96,7 +96,7 @@
  ### defp why
  (arguments -- : "Explain one selected module owner.")
  (dup len 1 = require first pkg.project.find
-  (|module project| project read-lock module pkg.report.why io.prin project project-close) call)
+  (|module project| project read-lock module pkg.report.why io.prin project project-close) apply)
  `why defp
 
  ### defp verify
@@ -114,7 +114,7 @@
  (|arguments|
   arguments first pkg.name.valid? require arguments 1 at pkg.version.validate pop
   arguments 2 at pkg.fetch.archive
-  arguments (archive-bytes) cons call) `archive-requirement defp
+  arguments (archive-bytes) cons apply) `archive-requirement defp
 
  ### defp archive-bytes
  (bytes arguments -- requirement bytes :
@@ -132,7 +132,7 @@
  (|arguments|
   arguments 1 at ["--tag" "--commit"] swap (match?) cons any? require
   arguments first arguments 1 at "--tag" match? (`tag) (`commit) if arguments 2 at pkg.fetch.git
-  arguments first (git-snapshot) cons call) `git-requirement defp
+  arguments first (git-snapshot) cons apply) `git-requirement defp
 
  ### defp git-snapshot
  (snapshot url -- requirement bytes :
@@ -151,7 +151,7 @@
    project pkg.project.lock project pkg.install.recover
    arguments first pkg.name.url?
    arguments (git-requirement) cons arguments (archive-requirement) cons if
-   project (record) cons call port.close project project-close) call) `add defp
+   project (record) cons apply port.close project project-close) apply) `add defp
 
  ### defp record
  (requirement bytes project -- :
@@ -174,5 +174,5 @@
   {"init" (init) "add" (add) "sync" (sync) "update" (update) "vendor" (vendor)
    "verify" (verify) "tree" (tree) "why" (why) "gc" (gc)}
   (|arguments command commands|
-   commands command dict.has? require arguments 1 drop commands command at call) call) `main def
+   commands command has? require arguments 1 drop commands command at apply) apply) `main def
 ) `pkg.command @defm

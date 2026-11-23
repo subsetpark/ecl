@@ -18,13 +18,10 @@
  ("POST" "/" http.request.new "h\u{E9}" http.request.with-body) `posted defp
 
  ### test construction
- (-- : "Build a request from method and target, splitting path and query at the first ?.")
- ("GET" "/users/42?id=7&x=%2F" http.request.new
-  {method "GET" target "/users/42?id=7&x=%2F" path "/users/42" query "id=7&x=%2F"
-   headers {} body [] peer ""}
+ (-- : "Build an outbound request from method and target with empty headers and body.")
+ ("GET" "http://example.test/users/42?id=7" http.request.new
+  {method "GET" target "http://example.test/users/42?id=7" headers {} body []}
   equal
-  "POST" "/x" http.request.new `query at "" equal
-  "GET" "/a?b?c" http.request.new dup `path at "/a" equal `query at "b?c" equal
   "GET" "/" http.request.new http.request.valid? 1 equal
   (5 "/" http.request.new) `type "string method" raises-containing
   ("GET" 5 http.request.new) `type "string target" raises-containing)
@@ -79,16 +76,16 @@
 
  ### test query
  (-- : "Decode the query string into a dict, percent-decoding escapes and letting later keys win.")
- ("GET" "/?a=1&b=%2Fx&c&a=2" http.request.new http.request.query {"a" "2" "b" "/x" "c" ""} equal
-  "GET" "/" http.request.new http.request.query {} equal
+ ({query "a=1&b=%2Fx&c&a=2"} http.request.query {"a" "2" "b" "/x" "c" ""} equal
+  {query ""} http.request.query {} equal
   {} http.request.query {} equal
-  "GET" "/?&&" http.request.new http.request.query {} equal
-  "GET" "/?k=a=b" http.request.new http.request.query {"k" "a=b"} equal
-  "GET" "/?a+b=c+d" http.request.new http.request.query {"a+b" "c+d"} equal
-  "GET" "/?%C3%A9=%c3%a9" http.request.new http.request.query {"\u{E9}" "\u{E9}"} equal
-  ("GET" "/?a=%2" http.request.new http.request.query) `domain "truncated" raises-containing
-  ("GET" "/?a=%zz" http.request.new http.request.query) `domain "malformed" raises-containing
-  ("GET" "/?a=%FF" http.request.new http.request.query) `domain "valid UTF-8" raises-containing
+  {query "&&"} http.request.query {} equal
+  {query "k=a=b"} http.request.query {"k" "a=b"} equal
+  {query "a+b=c+d"} http.request.query {"a+b" "c+d"} equal
+  {query "%C3%A9=%c3%a9"} http.request.query {"\u{E9}" "\u{E9}"} equal
+  ({query "a=%2"} http.request.query) `domain "truncated" raises-containing
+  ({query "a=%zz"} http.request.query) `domain "malformed" raises-containing
+  ({query "a=%FF"} http.request.query) `domain "valid UTF-8" raises-containing
   (5 http.request.query) `type "request dict" raises-containing)
  `query test
 

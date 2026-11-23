@@ -1,5 +1,5 @@
-//! Console primitives behind the `io` module, published as `io.core`; the
-//! `io` module itself is ECL source over these and over the `fd` devices.
+//! Console primitives behind the `io` module, which imports them; the
+//! `io` module itself is ECL source over these and over the `stream` devices.
 //!
 //! The host-backed words reuse the core implementations directly. Derived
 //! words schedule fixed quotations in their definition-site module,
@@ -32,43 +32,43 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "pp",
         .effect = "value --",
-        .doc = "Pretty-print any value plus newline in the display layout of Printing. Best-effort: huge leaves may be elided, so there is no round-trip guarantee. Use core `str` for canonical rendering.",
+        .doc = "Print any value plus newline as a diagnostic display: strings and lists longer than 256 elements print as an elision marker with their length, and matrices print one row per line.",
         .primitive = prims.ioPp,
     },
     .{
         .name = "prin",
         .effect = "string --",
-        .doc = "Write a string's characters as UTF-8 to standard output without adding a newline. Non-string is `` `type ``.",
+        .doc = "Write a string to standard output without adding a newline.",
         .primitive = prims.ioPrin,
     },
     .{
         .name = "print",
         .effect = "string --",
-        .doc = "Write a string followed by a newline to standard output. Semantically `io.prin \"\\n\" io.prin`.",
+        .doc = "Write a string followed by a newline to standard output.",
         .primitive = print,
     },
     .{
         .name = "eprint",
         .effect = "string --",
-        .doc = "Write a string followed by a newline to the Session's diagnostics stream: standard error under the command line, the host's diagnostics writer when embedded, and never standard output. When the host supplies no diagnostics writer the string is dropped and the word succeeds. Non-string is `` `type ``; a failed write is `` `io ``.",
+        .doc = "Write a string followed by a newline to standard error.",
         .primitive = eprint,
     },
     .{
         .name = "inspect",
         .effect = "value -- value",
-        .doc = "Pretty-print a value while leaving it on the stack; the pipeline probe. Semantically `dup io.pp`.",
+        .doc = "Pretty-print a value while leaving it on the stack.",
         .primitive = inspect,
     },
     .{
         .name = "debug",
         .effect = "value label -- value",
-        .doc = "Write the string label, `\": \"`, and the value's pretty-printed representation plus newline, leaving the value on the stack. Semantically `io.prin \": \" io.prin io.inspect`; a non-string label is the same `` `type `` failure as `io.prin`.",
+        .doc = "Print `label`, `\": \"`, and the value's pretty-printed representation plus newline, leaving the value on the stack.",
         .primitive = debug,
     },
     .{
         .name = "stack",
         .effect = "--",
-        .doc = "Stack-polymorphic; leaves the operand stack unchanged. Print each value in the currently visible operand window as a bottom-up indexed display block. `[0]` is the bottom and the largest index is the top; continuation lines align after the prefix. An isolated quotation sees only values above its isolation floor. An empty visible window writes nothing. Rendering is best-effort and may use the same multiline dictionary, array, and elision layout as `io.pp`.",
+        .doc = "Print each value in the currently visible operand window as a bottom-up indexed display block.",
         .primitive = prims.ioStack,
     },
 };

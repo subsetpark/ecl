@@ -353,7 +353,7 @@ pub const DictAtFn = *const fn (
 /// Reads one value nested inside a declared aggregate input. `path` holds one
 /// step per level from the input's root: a list level is indexed directly,
 /// while a dict level addresses entry `n`'s key as `2 * n` and its value as
-/// `2 * n + 1`. An empty path names the input itself. Cost is bounded by
+/// `2 * n + 1`. An empty path addresses the input itself. Cost is bounded by
 /// `max_read_path_depth`, and the budget is charged per step walked.
 pub const ReadPathFn = *const fn (
     call_context: *anyopaque,

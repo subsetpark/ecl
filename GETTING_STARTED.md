@@ -154,12 +154,12 @@ ecl> 4 (1 +)
 4 (1 +)
 ```
 
-We can then call that sequence simply by "unwrapping" it, which will put its
+We can then apply that sequence simply by "unwrapping" it, which will put its
 elements onto the stack (evaluating them), in order:
 
 ```
 4 (1 +)
-ecl> call
+ecl> apply
 5
 ```
 
@@ -381,7 +381,7 @@ Here's another way to write the same program:
 
 ```
 [2 10 20]
-ecl> (|l| l sum l len /) call
+ecl> (|l| l sum l len /) apply
 10.666666666666666
 ```
 

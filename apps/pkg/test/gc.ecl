@@ -18,5 +18,5 @@
    directory "keep.txt" fs.read-text "unrelated" equal
    directory [5 6] pkg.fetch.hash pkg.cache.filename fs.lstat `kind at `directory equal
    directory [1 2] pkg.fetch.hash wrap pkg.gc.collect-at 0 equal
-   directory port.close) call) `explicit-retention test
+   directory port.close) apply) `explicit-retention test
 ) `pkg.test.gc @defm

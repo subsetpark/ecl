@@ -1,26 +1,26 @@
-# DoD-29: CSV text is explicitly cast, derived, filtered, grouped, and
+# DoD-29: CSV text is explicitly converted, derived, filtered, grouped, and
 # aggregated with ordinary ECL quotations. No header or numeric inference
 # happens anywhere: every coercion below is requested by name.
-`table (from-header-rows column cast with-column group-by aggregate) import
+`table (from-header-rows with-column group-by select) import
 
 `cwd "test/acceptance/sales.csv" fs.read-text csv.parse
 from-header-rows `raw set
 raw io.pp
-raw "amount" column io.pp
+raw "amount" at io.pp
 
-# Everything arrives as text; casting is the only coercion.
-raw "amount" column first type io.pp
-raw {"amount" (float) "quantity" (int)} cast `sales set
+# Everything arrives as text; conversion is explicit.
+raw "amount" at first type io.pp
+raw {"amount" ((float) each) "quantity" ((int) each)} dict.evolve `sales set
 sales io.pp
-sales "amount" column first type io.pp
+sales "amount" at first type io.pp
 
 # A derived column must match the row count exactly.
-sales "revenue" sales "amount" column sales "quantity" column * with-column `derived set
+sales "revenue" sales "amount" at sales "quantity" at * with-column `derived set
 derived io.pp
 
-# Filtering takes an exact 0/1 mask, which is an ordinary pervasive comparison.
-derived "revenue" column 100 > io.pp
-derived dup "revenue" column 100 > table.where `large set
+# Filtering turns an ordinary pervasive comparison into row indices with `where`.
+derived "revenue" at 100 > io.pp
+derived dup "revenue" at 100 > where table.at `large set
 large io.pp
 
 # Grouping keys appear in first-occurrence order with stable ascending indices.
@@ -28,10 +28,18 @@ derived ["region"] group-by io.pp
 derived ["region" "rep"] group-by io.pp
 derived [] group-by io.pp
 
-# Aggregation returns key columns first, then one column per specification in
-# the order given, one row per group.
-derived ["region"]
-[["revenue" "revenue" (sum)] ["count" "revenue" (len)] ["mean" "revenue" (mean)]]
-aggregate io.pp
-large ["region"] [["revenue" "revenue" (sum)]] aggregate io.pp
-derived [] [["total" "revenue" (sum)] ["rows" "revenue" (len)]] aggregate io.pp
+# Gathering the group indices makes every column a list of per-group slices.
+# The first cell of each key slice is the group's key; reducing each value
+# slice gives one aggregate per group.
+derived dup ["region"] group-by dict.vals table.at `by-region set
+by-region ["region"] select ((first) each) each
+"revenue" by-region "revenue" at (sum) each with-column
+"count" by-region "revenue" at (len) each with-column
+"mean" by-region "revenue" at (mean) each with-column
+io.pp
+large dup ["region"] group-by dict.vals table.at `large-by-region set
+large-by-region ["region"] select ((first) each) each
+"revenue" large-by-region "revenue" at (sum) each with-column
+io.pp
+derived dup [] group-by dict.vals table.at "revenue" at `overall set
+{} "total" overall (sum) each with-column "rows" overall (len) each with-column io.pp

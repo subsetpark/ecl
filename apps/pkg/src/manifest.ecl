@@ -3,7 +3,7 @@
 (
  ### setp manifest-keys
  # Required manifest keys.
- [format name version sources exports requires]
+ [format name version sources requires]
  `manifest-keys setp
 
  ### setp requirement-keys
@@ -48,11 +48,6 @@
   (pop 0)
   if)
  `source-globs-valid? defp
-
- ### defp export-owned?
- (name package -- bool : "Return 1 when an exported module belongs to its package.")
- (|name package| package name pkg.name.owns?)
- `export-owned? defp
 
  ### defp archive-source?
  (source -- bool : "Return 1 for the exact archive source fields.")
@@ -111,7 +106,7 @@
   `type error.new "a manifest is a dict" error.with-message assert
   candidate manifest-keys dict.keys-exactly?
   `domain error.new
-  "a manifest has exactly the keys `format `name `version `sources `exports `requires"
+  "a manifest has exactly the keys `format `name `version `sources `requires"
   error.with-message
   assert
   candidate `format at 2 match?
@@ -123,15 +118,6 @@
   candidate `version at pkg.version.validate pop
   candidate `sources at source-globs-valid?
   `domain error.new "manifest sources are distinct portable glob strings" error.with-message assert
-  candidate `exports at type `list match?
-  `type error.new "manifest exports are a list of exact module names"
-  error.with-message assert
-  candidate `exports at (pkg.name.valid?) all?
-  `domain error.new "an exported module has a canonical name" error.with-message assert
-  candidate `exports at dup distinct len swap len =
-  `domain error.new "manifest exports are distinct module names" error.with-message assert
-  candidate `exports at candidate `name at (export-owned?) cons all?
-  `domain error.new "a package owns every module it exports" error.with-message assert
   candidate `requires at type `dict match?
   `type error.new "manifest requirements are a dict from local alias to requirement"
   error.with-message assert
@@ -184,9 +170,113 @@
    manifest `name at str
    manifest `version at str
    manifest `sources at str
-   manifest `exports at str
    manifest `requires at render-requirements)
   infra
-  "{{format 2 name {} version {} sources {} exports {} requires {}}}\n" str.format)
+  "{{format 2 name {} version {} sources {} requires {}}}\n" str.format)
  `write def
+
+ `pkg.test.support `t alias
+
+ ### setp manifest-text
+ "{format 2 name \"my.proj\" version \"0.1.0\" sources [\"**/*\"] requires {\"foo\" {package \"foo\" version \"1.2.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
+ `manifest-text setp
+
+ ### test read-and-validate
+ (-- : "Read canonical manifests and enforce their declared schema.")
+ (manifest-text pkg.manifest.read `name at "my.proj" t.equal
+  "# a comment\n{format 2 name \"a\" version \"0.1.0\" sources [] requires {}}"
+  pkg.manifest.read `requires at dict.size 0 t.equal
+  manifest-text parse first dup pkg.manifest.validate match? 1 t.equal
+  ("{format 2" pkg.manifest.read) `parse t.raises
+  ("{} {}" pkg.manifest.read) `shape "exactly one form" t.raises-containing
+  ("" pkg.manifest.read) `shape "exactly one form" t.raises-containing
+  ("[1 2]" pkg.manifest.read) `type "a manifest is a dict" t.raises-containing
+  ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {} require {}}"
+   pkg.manifest.read)
+  `domain
+  "exactly the keys"
+  t.raises-containing
+  ("{format 2 name \"a\" version \"0.1.0\"}" pkg.manifest.read)
+  `domain
+  "exactly the keys"
+  t.raises-containing
+  ("{format 1 name \"a\" version \"0.1.0\" sources [] requires {}}"
+   pkg.manifest.read)
+  `domain
+  "migrate format 1"
+  t.raises-containing
+  ("{format 2 name \"My.Proj\" version \"0.1.0\" sources [] requires {}}"
+   pkg.manifest.read)
+  `domain
+  "lowercase segments"
+  t.raises-containing)
+ `read-and-validate test
+
+ ### test globs-and-requirements
+ (-- : "Validate portable globs, URLs, hashes, and package collisions.")
+ (("{format 2 name \"a\" version \"0.1.0\" sources [\"src//*.ecl\"] requires {}}"
+   pkg.manifest.read)
+  `domain
+  "portable glob strings"
+  t.raises-containing
+  ("{format 2 name \"a\" version \"0.1.0\" sources [\"src/prefix**/*.ecl\"] requires {}}"
+   pkg.manifest.read)
+  `domain
+  "portable glob strings"
+  t.raises-containing
+  ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"http://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
+   pkg.manifest.read)
+  `domain
+  "HTTPS"
+  t.raises-containing
+  ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-ABC\"}}}"
+   pkg.manifest.read)
+  `domain
+  "lowercase hex"
+  t.raises-containing
+  ("{format 2 name \"foo\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
+   pkg.manifest.read)
+  `domain
+  "require itself"
+  t.raises-containing
+  ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"foo.bar\" {package \"foo.bar\" version \"1.0.0\" source {kind archive url \"https://e.com/g.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
+   pkg.manifest.read)
+  `domain
+  "require itself"
+  t.raises-containing
+  ("{format 2 name \"p\" version \"0.1.0\" sources [] requires {\"p-\" {package \"p-\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {package \"p.a\" version \"1.0.0\" source {kind archive url \"https://e.com/g.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
+   pkg.manifest.read)
+  `domain
+  "require itself"
+  t.raises-containing
+  ("{format 2 name \"p\" version \"0.1.0\" sources [] requires {\"p0\" {package \"p0\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {package \"p.a\" version \"1.0.0\" source {kind archive url \"https://e.com/g.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
+   pkg.manifest.read)
+  `domain
+  "require itself"
+  t.raises-containing)
+ `globs-and-requirements test
+
+ ### test writing
+ (-- : "Round-trip manifests while retaining requirement insertion order.")
+ ({format 2 name "a" version "0.1.0" sources ["**/*"]
+   requires
+   {"z"
+    {package "z" version "2.0.0" source {kind archive url "https://e.com/z.tgz"}
+     hash "sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}
+    "b"
+    {package "b" version "1.0.0" source {kind archive url "https://e.com/b.tgz"}
+     hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
+  dup pkg.manifest.write pkg.manifest.read match? 1 t.equal
+  {format 2 name "a" version "0.1.0" sources ["**/*"]
+   requires
+   {"z"
+    {package "z" version "2.0.0" source {kind archive url "https://e.com/z.tgz"}
+     hash "sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}
+    "b"
+    {package "b" version "1.0.0" source {kind archive url "https://e.com/b.tgz"}
+     hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
+  pkg.manifest.write
+  "{format 2 name \"a\" version \"0.1.0\" sources (\"**/*\") requires {\"z\" {package \"z\" version \"2.0.0\" source {kind archive url \"https://e.com/z.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"} \"b\" {package \"b\" version \"1.0.0\" source {kind archive url \"https://e.com/b.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}\n"
+  t.equal)
+ `writing test
 ) `pkg.manifest @defm

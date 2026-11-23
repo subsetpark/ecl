@@ -1,4 +1,4 @@
-//! Executable proofs for immutable dict and Unicode text kernels.
+//! Executable proofs for immutable dict and collection-update kernels.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
@@ -7,7 +7,7 @@ const list = @import("../list.zig");
 const dict = @import("../dict.zig");
 const helper = @import("kernel_test_support.zig");
 
-test "dict-text: polymorphic collection updates preserve ownership" {
+test "dict: polymorphic collection updates preserve ownership" {
     try helper.expectStack(
         "{a 1} `b 2 put {a 1 b 2} `a del {[1 2] 9} [1 2] 10 put " ++
             "[1 2 3] 1 9 put [1 2 3] 1 del",
@@ -15,7 +15,7 @@ test "dict-text: polymorphic collection updates preserve ownership" {
     );
 }
 
-test "dict-text: put pervades over list selectors with conforming replacements" {
+test "dict: put pervades over list selectors with conforming replacements" {
     try helper.expectStack(
         "[10 20 30 40] [1 3] 0 put " ++
             "[10 20 30 40] [1 3] [90 80] put " ++
@@ -54,7 +54,7 @@ test "dict-text: put pervades over list selectors with conforming replacements" 
     });
 }
 
-test "dict-text: del removes original list positions through pervasive selectors" {
+test "dict: del removes original list positions through pervasive selectors" {
     try helper.expectStack(
         "[10 20 30 40 50] [3 4] del " ++
             "[10 20 30 40 50] [[4 1] 4] del " ++
@@ -78,11 +78,11 @@ test "dict-text: del removes original list positions through pervasive selectors
     });
 }
 
-test "dict-text: dict.from-lists and polymorphic list updates" {
+test "dict: dict.zip and polymorphic list updates" {
     try helper.expectStack(
         "1 type 1.0 type \\a type `a type (missing) first type [] type {} type " ++
             "[a 1] str " ++
-            "[a b] [1 2] dict.from-lists [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap " ++
+            "[a b] [1 2] dict.zip [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap " ++
             "[1 2 3] 1 del \"abc\" 0 del",
         "int float char symbol symbol list dict " ++
             "\"(a 1)\" " ++
@@ -90,16 +90,16 @@ test "dict-text: dict.from-lists and polymorphic list updates" {
     );
     try helper.expectErrors(&.{
         .{
-            .name = "dict.from-lists requires conforming lists",
-            .source = "[a] [1 2] dict.from-lists",
+            .name = "dict.zip requires conforming lists",
+            .source = "[a] [1 2] dict.zip",
             .kind = "shape",
-            .word = "dict.core.from-lists",
+            .word = "dict.core.zip",
         },
         .{
-            .name = "dict.from-lists requires distinct keys",
-            .source = "[a a] [1 2] dict.from-lists",
+            .name = "dict.zip requires distinct keys",
+            .source = "[a a] [1 2] dict.zip",
             .kind = "domain",
-            .word = "dict.core.from-lists",
+            .word = "dict.core.zip",
         },
         .{
             .name = "put index must be in bounds",
@@ -144,103 +144,35 @@ test "dict-text: dict.from-lists and polymorphic list updates" {
     );
 }
 
-test "dict-text: dict.from-flat converts one flat list without evaluation" {
+test "dict: dict.from-kvs converts one flat list without evaluation" {
     try helper.expectStack(
-        "`total 3 4 + pair dict.from-flat",
+        "`total 3 4 + pair dict.from-kvs",
         "{total 7}",
     );
-    try helper.expectStack("[plus +] dict.from-flat", "{plus +}");
+    try helper.expectStack("[plus +] dict.from-kvs", "{plus +}");
     try helper.expectErrors(&.{
         .{
-            .name = "dict.from-flat requires an even item count",
-            .source = "[1] dict.from-flat",
+            .name = "dict.from-kvs requires an even item count",
+            .source = "[1] dict.from-kvs",
             .kind = "contract",
-            .word = "dict.core.from-flat",
+            .word = "dict.core.from-kvs",
         },
         .{
-            .name = "dict.from-flat rejects numerically duplicate keys",
-            .source = "[1 one 1.0 two] dict.from-flat",
+            .name = "dict.from-kvs rejects numerically duplicate keys",
+            .source = "[1 one 1.0 two] dict.from-kvs",
             .kind = "domain",
-            .word = "dict.core.from-flat",
+            .word = "dict.core.from-kvs",
         },
         .{
-            .name = "dict.from-flat requires a list",
-            .source = "1 dict.from-flat",
+            .name = "dict.from-kvs requires a list",
+            .source = "1 dict.from-kvs",
             .kind = "type",
-            .word = "dict.core.from-flat",
+            .word = "dict.core.from-kvs",
         },
     });
 }
 
-test "dict-text: split handles codepoints substrings and empty separators" {
-    try helper.expectStack(
-        "\"a—b—\" \"—\" str.split \"ab\" \"\" str.split " ++
-            "\"\" \"\" str.split \"a🙂λ\" \"\" str.split " ++
-            "\"abc\" \"🙂\" str.split \"a🙂b\" \"-\" str.split \"🙂a🙂\" \"🙂\" str.split",
-        "(\"a\" \"b\" \"\") (\"a\" \"b\") () (\"a\" \"🙂\" \"λ\") " ++
-            "(\"abc\") (\"a🙂b\") (\"\" \"a\" \"\")",
-    );
-}
-
-test "dict-text: narrow split counts separators across budget steps and keeps parts whole" {
-    // One-byte-wide text and separator take the fused kernel. A separator
-    // that straddles a step boundary is counted once, parts longer than a
-    // step are copied whole, and the results match the general kernel's.
-    try helper.expectStack(
-        "\"x\" 65535 take \"--\" cat \"y\" cat \"--\" str.split (len) each " ++
-            "\"ab--\" 80000 take \"--\" str.split dup len swap first " ++
-            "\"a,b,,c\" \",\" str.split \"xyx\" \"x\" str.split \"aaa\" \"aa\" str.split \"ab\\n\" \"\\n\" str.split \"\" \",\" str.split",
-        "[65535 1] 20001 \"ab\" (\"a\" \"b\" \"\" \"c\") (\"\" \"y\" \"\") (\"\" \"a\") (\"ab\" \"\") (\"\")",
-    );
-    // The same inputs widened past one byte go through the general kernel,
-    // which must agree on the part count and on every part after the first.
-    try helper.expectStack(
-        "\"λ\" \"ab--\" 80000 take cat \"--\" str.split dup len swap dup 1 at swap 20000 at " ++
-            "\"ab--\" 80000 take \"--\" str.split dup len swap dup 1 at swap 20000 at " ++
-            "\"λxyx\" \"x\" str.split dup 1 at swap 2 at \"xyx\" \"x\" str.split dup 1 at swap 2 at",
-        "20001 \"ab\" \"\" 20001 \"ab\" \"\" \"y\" \"\" \"y\" \"\"",
-    );
-}
-
-test "dict-text: join requires strings and chooses narrow char width" {
-    try helper.expectStack(
-        "[\"a\" \"b\"] \"—\" str.join [\"a\" \"λ\" \"🙂\"] \"\" str.join " ++
-            "[\"a\"] \"🙂\" str.join [] \"🙂\" str.join",
-        "\"a—b\" \"aλ🙂\" \"a\" \"\"",
-    );
-    try helper.expectError(.{
-        .name = "join reports the non-string member",
-        .source = "[\"a\" 2] \"-\" str.join",
-        .kind = "type",
-        .word = "str.core.join",
-        .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
-    });
-}
-
-test "dict-text: format splices strings and canonically renders other values" {
-    try helper.expectStack(
-        "[\"Ada\" 2] \"name={} n={} {{ok}}\" str.format " ++
-            "\"foo\" str wrap \"source={}\" str.format " ++
-            "[\"\"] \"a{}b\" str.format",
-        "\"name=Ada n=2 {ok}\" \"source=\\\"foo\\\"\" \"ab\"",
-    );
-    try helper.expectErrors(&.{
-        .{
-            .name = "format requires one value per placeholder",
-            .source = "[1] \"{} {}\" str.format",
-            .kind = "contract",
-            .word = "str.core.format",
-        },
-        .{
-            .name = "format rejects an unmatched brace",
-            .source = "[] \"{\" str.format",
-            .kind = "domain",
-            .word = "str.core.format",
-        },
-    });
-}
-
-test "dict-text: large updates yield through the public runtime" {
+test "dict: large updates yield through the public runtime" {
     const allocator = std.testing.allocator;
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();

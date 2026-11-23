@@ -131,6 +131,17 @@ pub fn classify(token: []const u8) Classification {
     return poll.drive(Classification, &cursor, .{});
 }
 
+/// The spellings of the slots, the implicit locals; a slot's position is its
+/// index plus one. None is a valid symbol, so no symbol can collide with one.
+pub const slot_spellings = [_][]const u8{ ".x", ".y", ".z" };
+
+/// A slot's position, 1 through 3, or null when the token is not a slot.
+pub fn slotPosition(token: []const u8) ?u2 {
+    for (slot_spellings, 1..) |spelling, position|
+        if (std.mem.eql(u8, token, spelling)) return @intCast(position);
+    return null;
+}
+
 /// The after portion of an effect is either all named slots or exactly this
 /// token, which declares a fixed before row and a variable after row.
 pub const row_token = "...";

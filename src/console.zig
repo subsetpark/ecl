@@ -4,7 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Prompts are interpreter-authored, so they are named rather than passed as
+/// Prompts are interpreter-authored, so they are enumerated rather than passed as
 /// runtime bytes a caller could fill with anything.
 pub const Prompt = enum {
     primary,
@@ -18,7 +18,7 @@ pub const Prompt = enum {
     }
 };
 
-/// Terminal effects the editor may request, named rather than spelled as
+/// Terminal effects the editor may request, enumerated rather than spelled as
 /// control bytes, so no caller can compose a sequence of its own.
 pub const TerminalAction = enum {
     bell,

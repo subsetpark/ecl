@@ -57,7 +57,7 @@ fn expectErrorContains(
     while (runtime.stackItems().len != 0) try expectOk(runtime, "pop");
 }
 
-test "module bodies: a construction body names its image" {
+test "module bodies: a construction body refers to its image" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -66,12 +66,12 @@ test "module bodies: a construction body names its image" {
     // Top level, and through every container the reader built.
     try expectStack(
         &runtime,
-        "((99) `k defp {a (k)} `d setp ( -- n ) (d `a at call) `go def) `literal-body @defm literal-body.go",
+        "((99) `k defp {a (k)} `d setp ( -- n ) (d `a at apply) `go def) `literal-body @defm literal-body.go",
         "99",
     );
     try expectStack(
         &runtime,
-        "((99) `k defp [(k)] `l setp ( -- n ) (l first call) `go def) `listed @defm listed.go",
+        "((99) `k defp [(k)] `l setp ( -- n ) (l first apply) `go def) `listed @defm listed.go",
         "99",
     );
     // A stored reader body and a literal reader body stamp identically.
@@ -89,7 +89,7 @@ test "module bodies: a runtime-built body is module text too" {
     defer runtime.deinit();
 
     // cat and raze both produce runtime-built values, and every word in the
-    // body they build names the module: a caller's `k` is not reached.
+    // body they build refers to the module: a caller's `k` is not reached.
     try expectErrorContains(&runtime, "7 `k set ((k) `geta) (def) cat `catted @defm catted.geta", &.{ "undefined-word", "scope module" });
     try expectErrorContains(&runtime, "7 `k set [((k) `getc) (def)] raze `razed @defm razed.getc", &.{ "undefined-word", "scope module" });
     // A module whose runtime-built body defines what it uses works as a
@@ -144,7 +144,7 @@ test "module bodies: one reader body serves two images independently" {
     try expectStack(&runtime, "shared `third @defm third.read", "third");
 }
 
-test "module bodies: a nested construction inside a stamped body still names its own image" {
+test "module bodies: a nested construction inside a stamped body still refers to its own image" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -160,7 +160,7 @@ test "module bodies: a nested construction inside a stamped body still names its
             "`outer def) `nest @defm nest.outer",
         "2",
     );
-    // A body with many occurrences is copied whole, every one of them naming
+    // A body with many occurrences is copied whole, every one of them referring to
     // the image. (That the copy is *sliced* is a cursor-level property, proved
     // in `spans.zig` by advancing one element at a time.)
     try expectStack(

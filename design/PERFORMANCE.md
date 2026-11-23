@@ -10,6 +10,40 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## Aggregation as `group-by`, `table.at`, and `each` — 2026-11-22
+
+`table.aggregate` is gone. Aggregation is composed: `group-by dict.vals
+table.at` turns every column into per-group slices with one nested gather per
+column, `(sum) each` reduces a slice list through the existing nested path, and
+`((first) each) each` over the key columns, or `(first) each table.at` over the
+group indices, recovers the keys. Two intermediate designs were measured on the
+way. One ran a quotation once per group on a sub-table and took 388 ms for one
+reducer and 848 ms for three at 200,000 groups: interpreted dispatch, a dict,
+and a record per group, which idiom recognition cannot reach because it fuses
+one offered application. The other ran one quotation over the grouped columns
+and matched the composed form.
+
+Zig 0.17.1 ReleaseSafe, Apple M4 Max, macOS. Each figure is the hyperfine mean
+of nine process runs after one warmup, less a run of the same build that only
+builds the table and groups it (18-23 ms at 100 groups, 37-41 ms at 200,000).
+The table has 1,000,000 int rows keyed by row number modulo the group count.
+One reducer is `sum`; three are `sum`, `len`, and `(min) fold1`. The control is
+`aggregate` with `[output input reducer]` triples at the previous commit.
+
+| Groups | Reducers | Triples | Composed, keys by `((first) each) each` |
+|---:|---:|---:|---:|
+| 100 | 1 | 1 ms | 6 ms |
+| 100 | 3 | 7 ms | 6 ms |
+| 200,000 | 1 | 33 ms | 61 ms |
+| 200,000 | 3 | 87 ms | 82 ms |
+
+The value column is gathered once however many reducers read it, which is why
+three reducers come out ahead. Recovering keys by gathering the whole key
+column and taking each slice's first cell is the cost at one reducer; taking
+the first index of each group and gathering the key columns flat brings 200,000
+groups and one reducer to 45 ms. Triples read keys from the group dictionary
+for free.
+
 ## Vector primitives under `csv`, and `csv.emit` as one gather — 2026-11-13
 
 Baseline is `e601af13`. Zig 0.17.1 ReleaseFast on macOS arm64 (M4 Max),
@@ -20,14 +54,14 @@ their kernels:
 |---|---:|---:|---|
 | `text \, =`, a character leaf against a scalar | 2.14 | 0.38 | instructions per element |
 | `mask 1 =`, a byte leaf against a scalar | 2.14 | 0.43 | instructions per element |
-| `mask 0 (<>) scan` | 6.53 | 2.38 | instructions per element |
+| `mask 0 (not=) scan` | 6.53 | 2.38 | instructions per element |
 | `raze` of 1.14M seven-character strings | 134 | 52 | instructions per string |
 | `1 wrap n take` | 20.1 | 0.36 | instructions per element |
 | `put` of 114k ints into 4M small ints | 12.7 | 1.2 | ms |
 
 A comparison of a narrow leaf with an int scalar widened every element to meet
 the int; it now narrows the scalar once when the element type holds it. A scan
-of `<>` over a mask is a running parity and takes eight positions a step.
+of `not=` over a mask is a running parity and takes eight positions a step.
 `raze` retained and released each child around its copy and made one trip
 through its driver per child; it now runs child after child and copies sixteen
 bytes or fewer inline. A cyclic `take` copied one period at a time and now
@@ -99,7 +133,7 @@ ReleaseFast, instructions retired per step at 65,536 steps:
 
 A chain that did fuse was not faster here either. ReleaseFast, 200 passes
 over a million elements, wall seconds, the unfused control wrapping each later
-word in `(…) call`: a four-word float chain 0.14 fused against 0.12, a
+word in `(…) apply`: a four-word float chain 0.14 fused against 0.12, a
 four-word int chain 0.36 against 0.31. A five-word boolean chain over
 24M-element masks, 30 passes, took 0.23 fused against 0.16 in ReleaseFast and
 0.19 against 0.29 in ReleaseSafe, the one case fusion won; `csv.parse`, which
@@ -172,7 +206,7 @@ resolution.
 | `a b or` (one word, unchanged path) | 4 | 3 |
 | `a b or not` | 47 | 7 |
 | `a b or c d or and` | 57 | 8 |
-| `mask 0 (<>) scan` | 389 | 15 |
+| `mask 0 (not=) scan` | 389 | 15 |
 | `mask 0 (bxor) scan` | 210 | 43 |
 | `mask 0 (or) scan` | 38 | 22 |
 | `mask 0 (+) scan 2 mod` (prior parity spelling) | 52 | 53 |
@@ -182,7 +216,7 @@ resolution.
 | `text text cat` | 17 | 6 |
 
 A baseline chain widened each byte operand to ints a block at a time and wrote
-an int result, eight bytes per position. `<>` and `bxor` were not recognized
+an int result, eight bytes per position. `not=` and `bxor` were not recognized
 reductions and ran as boxed scalar programs. A typed copy of one
 representation was an element-by-element forward loop.
 
@@ -193,7 +227,7 @@ a further word in a chain adds about 0.5 ms.
 An array-style RFC 4180 split written in ECL (quote parity by scan, separator
 and drop masks, `where`, `cut`; validation of quoting; 64K-character blocks)
 over three inputs, three runs each. The updated run spells parity
-`0 (<>) scan`; the baseline spells it `0 (+) scan 2 mod`.
+`0 (not=) scan`; the baseline spells it `0 (+) scan 2 mod`.
 
 | Input | Baseline ms | Updated ms |
 |---|---:|---:|
@@ -794,7 +828,7 @@ Counters over 10,000 float elements, one worker, instrumented ReleaseSafe:
 | `(dup *) each` | 20,009 | 13 | 0 | 19,996 |
 | `(1 + 1 +) each` | 20,009 | 13 | 0 | 19,996 |
 | `(sq) each`, `sq` a source word | 10,015 | 17 | 19,996 | 29,994 |
-| `((1 +) call dup *) each` | 30,009 | 17 | 0 | 39,992 |
+| `((1 +) apply dup *) each` | 30,009 | 17 | 0 | 39,992 |
 | `(\|x\| x x *) each` | 50,009 | 40,011 | 0 | 9,998 |
 | ``(dup `k set k *) each`` | 170,013 | 170,013 | 0 | 19,996 |
 
@@ -903,10 +937,10 @@ output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
 `-Dcpu=native`, Apple M4 Max, instructions retired per process
 (`/usr/bin/time -l`), control master `75b6503`.
 
-1. The standard streams are port endpoints (`fd.in`, `fd.out`, `fd.err`),
+1. The standard streams are port endpoints (`stream.in`, `stream.out`, `stream.err`),
    so a program reads and writes bytes without decoding. `io.stdin bytes`
    decoded 254 MB to codepoints and encoded it back: 55.8 G instructions.
-   `fd.in fd.read-all` is 0.44 G; reading and writing the whole stream back
+   `stream.in stream.read-all` is 0.44 G; reading and writing the whole stream back
    is 0.55 G.
 2. `Utf8Materializer` and `StringEncoder` take ASCII runs sixteen bytes at a
    time and charge the budget per byte instead of per codepoint. `io.read`
@@ -920,7 +954,7 @@ output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
    accumulator in one pass, read from the result lattice as the column fold
    reads it.
 5. `where` continued by `at` is one pass that never builds the index list:
-   `dup 10 <> where at` over the input is 6.72 G and 2,399 MiB → 4.84 G and
+   `dup 10 not= where at` over the input is 6.72 G and 2,399 MiB → 4.84 G and
    730 MiB.
 6. Chars are codepoints in every numeric word and leave as ints; `char` over
    a list of codepoints is the way back. The character kernel, its plan
@@ -930,10 +964,10 @@ output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
    validates each block by its minimum and maximum, 12.5 instructions per
    element, so `str.upper` (now `... 32 * - char`) is 72 M → 35 M per
    1,000,000 chars.
-7. The byte-stream words are one module: `fd.read`/`fd.write` replace
+7. The byte-stream words are one module: `stream.read`/`stream.write` replace
    `port.read`/`port.write`, process pipes and files opened with
-   `fs.open-reader` are endpoints like the devices, and `fd.read-line` keeps
-   its read-ahead on the endpoint value. `fd.in io.lines` over the input is
+   `fs.open-reader` are endpoints like the devices, and `stream.read-line` keeps
+   its read-ahead on the endpoint value. `stream.in io.lines` over the input is
    10.6 G against 41.0 G for `io.stdin "\n" split`; a streaming
    `fs.open-reader` read in 1 MiB chunks is 0.14 G and 9 MiB against 0.37 G
    and 491 MiB for `fs.read-bytes`. `proc.run` validates its `` `stdin `` with
@@ -945,7 +979,7 @@ output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
    a one-byte-wide leaf. The general kernel kept one 24-byte record per text
    position, profiled every part's widest codepoint, and wrote parts through
    a codepoint writer. `"\n" split` of the 254 MB input into 4.17 M lines:
-   3.57 G → 2.75 G, of which the scan is under 0.1 G; `fd.in io.lines` 10.6 G
+   3.57 G → 2.75 G, of which the scan is under 0.1 G; `stream.in io.lines` 10.6 G
    → 4.06 G. What remains is about 530 instructions per part, independent
    of its length: on macOS the system malloc behind the session heap costs
    about 500 instructions per allocation (`sample` puts 62% of the split in
@@ -1029,7 +1063,7 @@ medians, pinned to one P-core, nine interleaved runs, at N=2,000:
 
 A prelude or standard-library definition that matched an idiom used to be
 matched again on every application: each pattern word was resolved through
-the running scope chain to confirm it still named the trusted binding. The
+the running scope chain to confirm it still resolved to the trusted binding. The
 words inside a trusted body are stamped with their defining scope and resolve
 there regardless of later user definitions, and that scope is immutable once
 it freezes. Recognition is now decided once, when core finishes or a module
@@ -1052,9 +1086,9 @@ P-core, median of five runs after a warmup:
 | `1000 spectralnorm`, row dots and weighted rows, ms | 223 | 135 |
 | `1000 spectralnorm`, weighted columns, ms | 90 | 91 |
 
-## Short-spine `cons` in place, and `cons call` / `cons dip` phrases — 2026-11-08
+## Short-spine `cons` in place, and `cons apply` / `cons dip` phrases — 2026-11-08
 
-Partial application written at run time, `x (q) cons call`, paid for a list
+Partial application written at run time, `x (q) cons apply`, paid for a list
 the next word consumed at once. Each spine `cons` allocated a scratch value
 array, ran the copy driver, then the materializer's profiling pass and a
 second allocation for the header: about 0.15 µs against a refcount bump for
@@ -1065,7 +1099,7 @@ pushing the same quotation as a pre-nested literal. Two changes:
   at most 16 elements it fills one header where the word runs, with no
   driver, scratch array, or profiling pass. Longer tails keep the budgeted
   copy.
-- **`cons call` and `cons dip` phrases.** `x (q) cons call` runs `q` with `x`
+- **`cons apply` and `cons dip` phrases.** `x (q) cons apply` runs `q` with `x`
   on the stack, which is what calling `(x q...)` does, and `x (q) cons dip`
   protects the value beneath `x` and does the same; neither builds the list.
   A symbol head would become a word of the built quotation, so it runs the
@@ -1074,11 +1108,11 @@ pushing the same quotation as a pre-nested literal. Two changes:
   every phrase's.
 - **`partial` was folded into `cons`.** As a prelude word,
   `(swap literal swap cons)`, it paid a definition call and three words over
-  `cons`, and its `cons` ended the body, so `partial call` in the caller's
+  `cons`, and its `cons` ended the body, so `partial apply` in the caller's
   code never fused. It was first made a builtin with its own phrases
   (measured below), and then `cons` itself took on storing its head as data,
   which made `partial` the same word: the `partial` rows now describe
-  `cons`, and `cons call` / `cons dip` fuse for every head.
+  `cons`, and `cons apply` / `cons dip` fuse for every head.
 
 A 3-local loop of 300,000 iterations, ReleaseFast `-Dcpu=native`, x86_64 Linux
 (Intel Core Ultra 5 125U), one P-core, internal ms net of the 41 ms loop that
@@ -1088,15 +1122,15 @@ pushes a literal and pops it; control `f15e191`:
 |---|---:|---:|
 | `(1 -) (dip) cons pop` | 44 | 31 |
 | `(1 -) (dip) cons dip` | 89 | 52 |
-| `(1 -) (dip) cons (dip) cons call` | 143 | 88 |
+| `(1 -) (dip) cons (dip) cons apply` | 143 | 88 |
 | `(1 -) (dip) partial pop` | 62 | 32 |
 | `(1 -) (dip) partial dip` | 108 | 53 |
-| `(1 -) (dip) partial call` | 94 | 36 |
-| `(((1 -) dip) dip) call` (pre-nested) | 55 | 55 |
+| `(1 -) (dip) partial apply` | 94 | 36 |
+| `(((1 -) dip) dip) apply` (pre-nested) | 55 | 55 |
 
 Fused `cons dip` now costs what calling the pre-nested literal costs. The
 double-cons form
-still builds its inner list, since the outer `call` consumes it as a value. `tak(22,16,8)` on top of the native `cleave-n` branch,
+still builds its inner list, since the outer `apply` consumes it as a value. `tak(22,16,8)` on top of the native `cleave-n` branch,
 whole process: the `(1 -) (dip) cons dip` form 400 → 364 ms, level with the
 pre-nested 363 ms; the double-cons form 442 → 396 ms.
 
@@ -1115,7 +1149,7 @@ passes fusion saved.
 Zig 0.17.0 ReleaseSafe, native x86_64 Linux (Intel Core Ultra 5 125U, kernel
 7.1.13-2-MANJARO), whole process, median of seven runs, each workload 50
 passes over `1000000 range`. The unfused control wraps each word after the
-first in `(…) call`, which no chain crosses.
+first in `(…) apply`, which no chain crosses.
 
 | Workload | Two-phase executor, ms | Direct leaf, ms | Words one at a time, ms |
 |---|---:|---:|---:|
@@ -1420,7 +1454,7 @@ UTF-8 decoding are included in the read stage, separately from parsing.
 | metal_bands_roster | text | 357 → 361 | 1503 → 764 | 14 → 11 | 20.9 → 41.0 | 360.9 → 386.6 |
 | numeric | bytes | 1 → 1 | 281 → 172 | 9 → 8 | 20.2 → 33.1 | 52.9 → 65.7 |
 
-The five real workloads are the metal datasets named above. The synthetic
+The five real workloads are the metal datasets listed above. The synthetic
 numeric workload has 100,000 rows and eight columns; escaped has 100,000 rows
 and three columns with quotes, Unicode, and embedded newlines; late-mismatch
 has 100,000 rows and three columns ending in a spelling-preserving text fallback.

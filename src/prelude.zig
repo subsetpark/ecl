@@ -98,7 +98,7 @@ pub fn installSource(
         error.OutOfMemory => return error.OutOfMemory,
         error.Ecl => {
             // The prelude is fixed at build time, so a failure here is a
-            // source defect; name it rather than leaving a bare panic.
+            // source defect; report it rather than leaving a bare panic.
             if (fiber.terminal == .failed) {
                 const rendered = try print.toOwnedString(allocator, fiber.terminal.failed);
                 defer allocator.free(rendered);

@@ -31,7 +31,7 @@
   "Try the captured generation and cache before the pinned network source.")
  (|context requirement|
   context requirement `hash at previous
-  context requirement pair (cached-or-network) cat call) `external defp
+  context requirement pair (cached-or-network) cat apply) `external defp
 
  ### defp cached-or-network
  (bytes context requirement -- bytes :
@@ -44,7 +44,7 @@
  (context requirement -- bytes : "Require exact bytes even when a shared cache is present.")
  (|context requirement|
   context `cache at requirement `hash at pkg.cache.read
-  context requirement pair (network-if-empty) cat call) `cache-or-network defp
+  context requirement pair (network-if-empty) cat apply) `cache-or-network defp
 
  ### defp network-if-empty
  (bytes context requirement -- bytes : "Fetch only an artifact unavailable from local inputs.")
@@ -68,7 +68,7 @@
   "Obtain an exact pin, with a private copy independent of cache lifetime.")
  (|context requirement|
   context `downloads at requirement `hash at pkg.cache.read-at
-  context requirement pair (pin-if-empty) cat call) `requirement def
+  context requirement pair (pin-if-empty) cat apply) `requirement def
 
  ### defp pin-if-empty
  (bytes context requirement -- bytes :

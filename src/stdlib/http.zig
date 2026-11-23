@@ -43,80 +43,25 @@ pub const doc =
 
 pub const words = [_]env.BuiltinWord{
     .{
-        .name = "get",
-        .effect = "request -- response",
-        .doc = "Fetch a partial or complete `http.request` value, using GET and redirect following as defaults. The request must carry a string `` `target `` URL. An optional `` `method `` overrides GET, optional `` `headers `` are sent once per value in list order, and an optional byte-list `` `body `` is sent exactly for POST, PUT, or PATCH. A nonempty body with another method is `` `domain ``. Return `{status int, headers dict, body string}`. A transport or protocol failure is `` `io `` carrying the URL in `` `path ``; a non-2xx status is an ordinary response.",
-        .primitive = get,
-    },
-    .{
-        .name = "get-bytes",
-        .effect = "request -- response",
-        .doc = "Perform the same request as `get`, including redirects and content decoding, but return `` `body `` as the exact ordered octets in an ordinary integer byte list. Status and headers retain the same types. This is the binary ingress used for archives; no byte is decoded to or encoded from a Unicode character before hashing.",
-        .primitive = getBytes,
-    },
-    .{
-        .name = "post",
-        .effect = "request -- response",
-        .doc = "Fetch the same request value as `get`, using POST, an empty body, and no redirect following as defaults. An optional `` `method `` or `` `body `` overrides those request defaults. Return the same response shape and errors as `get`.",
-        .primitive = post,
-    },
-    .{
         .name = "send",
         .effect = "request -- response",
-        .doc = "Send a complete `http.request` value. Unlike `get` and `post`, this word supplies no method default: both string `` `method `` and `` `target `` fields are required. Redirects are not followed. Return the same response shape and errors as `get`.",
+        .doc = "Send a complete `http.request` value: string `` `method `` and `` `target `` URL fields are required. Optional fields:\n\n-- `` `headers `` are sent once per value in list order\n-- `` `body `` is sent exactly for POST, PUT, or PATCH.\n-- `` `follow-redirects `` (default 1), when 1, will follow the `Location` of a 3xx response up to three times; otherwise the 3xx is returned. Request `headers` are sent only to the origin the request names: a redirect to another scheme, host, or port drops them, and a redirect from HTTPS to HTTP fails.\n\nReturn `{status int, headers dict, body bytes}`",
         .primitive = send,
     },
 };
 
-fn get(fiber: *Fiber) MachineError!void {
-    return begin(fiber, .{ .method = .GET, .follow_redirects = true }, .text);
-}
-
-fn getBytes(fiber: *Fiber) MachineError!void {
-    return begin(fiber, .{ .method = .GET, .follow_redirects = true }, .bytes);
-}
-
-fn post(fiber: *Fiber) MachineError!void {
-    return begin(fiber, .{ .method = .POST }, .text);
-}
-
 fn send(fiber: *Fiber) MachineError!void {
-    return begin(fiber, .{}, .text);
-}
-
-const ResponseMode = enum { text, bytes };
-
-const RequestDefaults = struct {
-    method: ?std.http.Method = null,
-    follow_redirects: bool = false,
-};
-
-const RequestFields = struct {
-    method: ?Value = null,
-    target: ?Value = null,
-    headers: ?Value = null,
-    body: ?Value = null,
-    params: ?Value = null,
-};
-
-fn begin(fiber: *Fiber, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
     const access = fiber.inherited.runtime().http_access;
     const deadline = fiber.scheduling().scheduler.deadlineAfter(access.limits().deadline_ms) catch
         return fiber.fail(.overflow, "HTTP deadline lies beyond the clock's range");
     var request = try fiber.popValue();
     errdefer request.deinit();
     const fields = try requestFields(fiber, request.borrow());
-    if (fields.method) |requested_method| if (requested_method.list.length() > 7)
+    const requested_method = fields.method orelse return fiber.typeError("a request with a string `method");
+    if (requested_method.list.length() > 7)
         return fiber.fail(.domain, "unsupported HTTP request method");
-    const method = defaults.method orelse required_method: {
-        if (fields.method == null)
-            return fiber.typeError("a request with a string `method");
-        // The request driver parses and replaces this placeholder before it
-        // opens the URL. Requiring the field here keeps a missing method from
-        // silently acquiring a transport-level default.
-        break :required_method .GET;
-    };
     _ = fields.target orelse return fiber.typeError("a request with a string `target URL");
+    const follow_redirects = if (fields.follow_redirects) |flag| flag.int == 1 else true;
     const admitted = access.admit() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Overflow => {
@@ -131,18 +76,28 @@ fn begin(fiber: *Fiber, defaults: RequestDefaults, response_mode: ResponseMode) 
         .limits = access.limits(),
         .deadline = deadline,
         .allocator = fiber.allocator,
-        .method = method,
-        .follow_redirects = defaults.follow_redirects,
-        .response_mode = response_mode,
+        // The request driver parses and replaces this placeholder from the
+        // required `method field before it opens the URL.
+        .method = .GET,
+        .follow_redirects = follow_redirects,
         .request_value = .init(request.take()),
         .fields = fields,
         .state = .start,
     });
 }
 
+const RequestFields = struct {
+    method: ?Value = null,
+    target: ?Value = null,
+    headers: ?Value = null,
+    body: ?Value = null,
+    params: ?Value = null,
+    follow_redirects: ?Value = null,
+};
+
 fn requestFields(fiber: *Fiber, request: Value) MachineError!RequestFields {
     if (request != .dict) return fiber.typeError("a request dict");
-    if (request.dict.length() > 8)
+    if (request.dict.length() > 9)
         return fiber.typeError("a request dict with only recognized fields");
     var fields: RequestFields = .{};
     for (0..@as(usize, @intCast(request.dict.length()))) |index| {
@@ -167,6 +122,9 @@ fn requestFields(fiber: *Fiber, request: Value) MachineError!RequestFields {
         } else if (std.mem.eql(u8, name, "body")) {
             if (item != .list or item.isString()) return fiber.typeError("a request `body byte list");
             fields.body = item;
+        } else if (std.mem.eql(u8, name, "follow-redirects")) {
+            if (item != .int or (item.int != 0 and item.int != 1)) return fiber.typeError("a 0 or 1 request `follow-redirects");
+            fields.follow_redirects = item;
         } else if (std.mem.eql(u8, name, "params")) {
             if (item != .dict) return fiber.typeError("a request `params dict");
             fields.params = item;
@@ -181,7 +139,6 @@ const RequestDriver = struct {
     allocator: std.mem.Allocator,
     method: std.http.Method,
     follow_redirects: bool,
-    response_mode: ResponseMode,
     admitted: *service.Request,
     limits: service.Limits,
     deadline: scheduler.Deadline,
@@ -258,11 +215,6 @@ const RequestDriver = struct {
             dictionary: dict.Materializer,
         },
         release_header_pairs: struct { build: HeaderBuild, headers: Value },
-        response_body_text: struct {
-            exchange: ExchangeData,
-            headers: Value,
-            text: kernel_storage.TextMaterializer,
-        },
         response_body_bytes: struct {
             exchange: ExchangeData,
             headers: Value,
@@ -583,31 +535,11 @@ const RequestDriver = struct {
                 release.build.pairs.deinit(self.allocator);
                 const exchange_data = release.build.exchange;
                 const built = release.headers;
-                self.state = switch (self.response_mode) {
-                    .text => .{ .response_body_text = .{
-                        .exchange = exchange_data,
-                        .headers = built,
-                        .text = .init(self.allocator, exchange_data.body.items),
-                    } },
-                    .bytes => .{ .response_body_bytes = .{
-                        .exchange = exchange_data,
-                        .headers = built,
-                        .bytes = .init(self.allocator, exchange_data.body.items),
-                    } },
-                };
-            },
-            .response_body_text => |*body| switch (try body.text.advance(fiber.workBudget())) {
-                .pending => {},
-                .complete => |built| {
-                    body.text.deinit();
-                    const exchange_data = body.exchange;
-                    const headers = body.headers;
-                    self.state = .{ .finish_response = .{
-                        .exchange = exchange_data,
-                        .headers = headers,
-                        .body = built,
-                    } };
-                },
+                self.state = .{ .response_body_bytes = .{
+                    .exchange = exchange_data,
+                    .headers = built,
+                    .bytes = .init(self.allocator, exchange_data.body.items),
+                } };
             },
             .response_body_bytes => |*body| switch (try body.bytes.advance(fiber.workBudget())) {
                 .pending => {},
@@ -810,15 +742,6 @@ const RequestDriver = struct {
                 releases.releaseValue(release.headers);
                 self.beginHeaderCleanup(&release.build);
             },
-            .response_body_text => |*body| {
-                body.text.retire(releases);
-                const exchange_data = body.exchange;
-                const headers = body.headers;
-                self.state = .{ .cleanup_headers = .{
-                    .exchange = exchange_data,
-                    .headers = headers,
-                } };
-            },
             .response_body_bytes => |*body| {
                 body.bytes.retire(releases);
                 const exchange_data = body.exchange;
@@ -883,7 +806,6 @@ const RequestDriver = struct {
             .headers_dictionary_prepare,
             .headers_dictionary,
             .release_header_pairs,
-            .response_body_text,
             .response_body_bytes,
             .finish_response,
             .finish_dictionary,

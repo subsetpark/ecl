@@ -54,32 +54,32 @@ fn totalPrimitive(comptime operation: BinaryOp, comptime empty: i64) env.Primiti
 
 fn binaryDefinition(comptime operation: BinaryOp) env.BuiltinWord {
     return switch (operation) {
-        .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add. A char is its codepoint: `\\a 1 +` is `98`. Integer overflow is `` `overflow ``." },
-        .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract. A char is its codepoint: `\\b \\a -` is `1`. Integer overflow is `` `overflow ``." },
-        .mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply. Integer overflow is `` `overflow ``." },
-        .div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN)." },
-        .int_div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Checked integer division. Division by zero is `` `domain ``." },
-        .atan2 => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "y x -- z", .doc = "Two-argument arctangent; returns float." },
-        .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Exponentiation; returns float." },
-        .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "The lesser of two comparable atoms." },
-        .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "The greater of two comparable atoms." },
-        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Equality; numbers compare numerically across int and float, symbols by name, and a symbol equals no number. Whole-value equality is `match?`." },
-        .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Ascending comparison, producing 0/1 masks." },
-        .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Descending comparison, producing 0/1 masks." },
-        .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``." },
-        .bor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise or. See `band`." },
-        .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns." },
-        .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift the bit pattern left by `count` places, truncating bits shifted off the top rather than raising `` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is `` `domain ``." },
-        .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift the bit pattern right by `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr` produce `maxint`. A `count` outside `0..63` is `` `domain ``." },
-        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float is `` `type ``." },
-        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float is `` `type ``." },
-        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float is `` `type ``. With `band`, arithmetic modulo any power of two." },
-        .mod => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute remainder of `x` / `y`." },
-        .ne => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for inequality." },
-        .le => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for less-than-or-equal order." },
-        .ge => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for greater-than-or-equal order." },
-        .and_word => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compute boolean and over 0 and 1 values." },
-        .or_word => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compute boolean or over 0 and 1 values." },
+        .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Evaluate `x` + `y`" },
+        .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Evaluate `x` - `y`" },
+        .mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Evaluate `x` * `y`" },
+        .div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Evaluate `x` / `y`. Any nonzero number / 0 is signed inf; 0 / 0 is `` `domain ``" },
+        .int_div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Evaluate `x` / `y`, with a floored integer result." },
+        .atan2 => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "y x -- z", .doc = "Two-argument arctangent." },
+        .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Exponentiation." },
+        .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Evaluate the numeric minimum of `x` and `y`." },
+        .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Evaluate the numeric maximum of `x` and `y`." },
+        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Pervasively evaluate `x` = `y`." },
+        .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` < `y`." },
+        .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` > `y`." },
+        .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise and." },
+        .bor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise or." },
+        .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise exclusive or." },
+        .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift the bit pattern left by `count` places, truncating bits shifted off the top." },
+        .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift the bit pattern right by `count` places, filling zeros from the top." },
+        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``." },
+        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``." },
+        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``." },
+        .mod => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute the remainder of floored `x` / `y`, taking the sign of `y`." },
+        .ne => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` != `y`." },
+        .le => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` <= `y`." },
+        .ge => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate `x` >= `y`." },
+        .and_word => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate boolean `x` and `y`." },
+        .or_word => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Evaluate boolean `x` or `y`." },
     };
 }
 
@@ -99,18 +99,18 @@ pub fn binaryPrimitiveFor(comptime operation: BinaryOp) env.PrimitiveImpl {
 
 fn unaryDefinition(comptime operation: UnaryOp) env.BuiltinWord {
     return switch (operation) {
-        .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Square root. `` `domain `` on negative inputs (the result would be NaN)." },
-        .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round down; the result is int64, `` `overflow `` outside its range." },
-        .ceil => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round up; the result is int64, `` `overflow `` outside its range." },
-        .round => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round to nearest; the result is int64, `` `overflow `` outside its range." },
-        .exp => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Natural exponential; float transcendental." },
-        .log => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN)." },
-        .sin => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Sine; float transcendental." },
-        .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Cosine; float transcendental." },
-        .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "Invert 0/1 values." },
-        .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`." },
-        .neg => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Negate a numeric value." },
-        .abs => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return the absolute value of `x`." },
+        .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Square root." },
+        .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round down to the nearest integer." },
+        .ceil => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round up to the nearest integer." },
+        .round => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round to the nearest integer." },
+        .exp => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Evaluate e ^ `x`." },
+        .log => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Evaluate the natural logarithm of `x`." },
+        .sin => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Evaluate the sine of `x`." },
+        .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Evaluate the cosine of `x`." },
+        .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "Invert boolean `x`." },
+        .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Bitwise not." },
+        .neg => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Evaluate -`x`." },
+        .abs => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Evaluate the absolute value of `x`." },
     };
 }
 
@@ -1115,9 +1115,9 @@ fn integerDivision(left: Value, right: Value, remainder: bool) ScalarError!Value
     if (right.int == 0) return error.Domain;
     if (left.int == std.math.minInt(i64) and right.int == -1) return error.Overflow;
     return .{ .int = if (remainder)
-        @rem(left.int, right.int)
+        @mod(left.int, right.int)
     else
-        @divTrunc(left.int, right.int) };
+        @divFloor(left.int, right.int) };
 }
 
 fn power(left: Value, right: Value) ScalarError!Value {
@@ -1152,7 +1152,7 @@ fn minMax(left: Value, right: Value, choose_min: bool) ScalarError!Value {
 }
 
 fn comparison(left: Value, right: Value, operation: BinaryOp) ScalarError!Value {
-    // Equality is total: two symbols are equal when they name the same
+    // Equality is total: two symbols are equal when they denote the same
     // symbol, whatever occurrence metadata either carries, and a symbol
     // equals no number. Only the ordering words have nothing to say about a
     // symbol.
@@ -1687,8 +1687,8 @@ fn binaryKernel(
             return switch (operation) {
                 .bsl => @bitCast(@as(u64, @bitCast(x)) << @intCast(y)),
                 .bsr => @bitCast(@as(u64, @bitCast(x)) >> @intCast(y)),
-                .int_div => @divTrunc(x, y),
-                .mod => @rem(x, y),
+                .int_div => @divFloor(x, y),
+                .mod => @mod(x, y),
                 else => unreachable,
             };
         }
@@ -1709,8 +1709,8 @@ fn binaryKernel(
             return switch (operation) {
                 .bsl => @bitCast(@as(Pattern, @bitCast(x)) << @as(Count, @intCast(y))),
                 .bsr => @bitCast(@as(Pattern, @bitCast(x)) >> @as(Count, @intCast(y))),
-                .int_div => @divTrunc(x, y),
-                .mod => @rem(x, y),
+                .int_div => @divFloor(x, y),
+                .mod => @mod(x, y),
                 else => unreachable,
             };
         }
@@ -1890,7 +1890,7 @@ fn binaryKernel(
                         const fault = (wb == zeros) | ((wb == -ones) & (wa == least));
                         // A faulting lane divides by one instead.
                         const divisor = @select(i64, fault, ones, wb);
-                        const values = if (operation == .mod) @rem(wa, divisor) else @divTrunc(wa, divisor);
+                        const values = if (operation == .mod) @mod(wa, divisor) else @divFloor(wa, divisor);
                         return .{ .values = values, .faults = Vectors.mask(fault) };
                     },
                     else => unreachable,
@@ -2663,7 +2663,7 @@ pub const ScalarProgram = struct {
         left: Register,
         right: Register = 0,
         destination: Register,
-        /// The word and its position in the quotation, which a fault names.
+        /// The word and its position in the quotation, which a fault reports.
         word: u32,
         index: u32,
     };
@@ -3171,7 +3171,7 @@ fn inputPositions(comptime inputs: usize) [inputs]usize {
 /// stored into the result leaf, which may take over an input's buffer. A
 /// block that faults is replayed element by element, which meets the same
 /// first fault. The last operand is the code the program was compiled from,
-/// which a fault names a position in.
+/// which a fault reports a position in.
 fn ProgramLeafKernel(comptime inputs: usize, comptime kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     return struct {
@@ -3703,12 +3703,12 @@ fn reduceKernel(
             return result;
         }
 
-        /// A scan of `<>` over 0s and 1s from a 0 or 1 is a running parity,
+        /// A scan of `not=` over 0s and 1s from a 0 or 1 is a running parity,
         /// which eight positions take in one step: within a word each byte is
         /// the XOR of itself and the bytes before it, by three shifted XORs,
         /// and the parity carried in flips them all. A block holding any
         /// other value, or a start that is neither, takes the loop below,
-        /// where `<>` is a comparison and not an XOR.
+        /// where `not=` is a comparison and not an XOR.
         const scans_parity = scan and operation == .ne and accumulator_class == .integer and element_class == .byte;
 
         fn parityBlock(start: i64, items: []const u8, out: []u8) ?i64 {

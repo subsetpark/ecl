@@ -6,7 +6,7 @@
 # ROOT is the absolute build root; every other path is relativized beneath it
 # and read or written through the `'cwd` filesystem root the command line
 # grants, which is why the build runs this script from that directory. The
-# template names fragments as <!-- include:NAME -->. Generated fragments are
+# template refers to fragments as <!-- include:NAME -->. Generated fragments are
 # embedded two heading levels beneath their authored section. Assembly fails
 # before writing when an input cannot be read or a directive is malformed.
 
@@ -73,7 +73,7 @@
    "assembly template is missing an expected include directive" error.with-message
    assert
    current marker fragment str.replace)
-  call)
+  apply)
  cons
  fold
  dup "<!-- include:" str.contains? not
@@ -96,6 +96,6 @@
 
 args first args rest
 dup first "--check" match?
-(rest (|root arguments| root arguments assemble-spec root check-output) call)
-((|root arguments| root arguments assemble-spec write-output) call)
+(rest (|root arguments| root arguments assemble-spec root check-output) apply)
+((|root arguments| root arguments assemble-spec write-output) apply)
 if

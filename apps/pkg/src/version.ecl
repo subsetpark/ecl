@@ -27,7 +27,7 @@
  (string -- bool : "Return 1 for a decimal field with no leading zero except 0.")
  ([(digits? not) (pop 0)
    (len 1 =) (pop 1)
-   (first \0 <>)]
+   (first \0 not=)]
   cond) `numeric-field? defp
 
  ### defp identifier?
@@ -127,4 +127,115 @@
   (dup validate pair) each
   (keep-larger) fold1
   first) `max def
+
+ `pkg.test.support `t alias
+
+ ### defp trichotomy
+ (a b -- count : "Count the less-than and equality relations holding for a pair.")
+ (|a b|
+  a b pkg.version.less?
+  b a pkg.version.less? +
+  a b match? +) `trichotomy defp
+
+ ### defp row-of
+ (element corpus -- pairs : "Pair one element with a corpus.")
+ (|element corpus| corpus element (pair) cons each) `row-of defp
+
+ ### defp pairs-of
+ (corpus -- pairs : "Build the Cartesian square of a corpus.")
+ (|corpus| corpus corpus (row-of) cons each raze) `pairs-of defp
+
+ ### defp ascending-row
+ (index reference -- flags : "Compare one item to every later reference item.")
+ (|index reference|
+  reference index 1 + drop
+  reference index at
+  (swap pkg.version.less?) cons each) `ascending-row defp
+
+ ### defp ascending-flags
+ (reference -- flags : "Compare every earlier version with every later one.")
+ (|reference|
+  reference len range
+  reference (ascending-row) cons each raze) `ascending-flags defp
+
+ ### test ordering-laws
+ (-- : "Prove strict total ordering over generated and SemVer reference corpora.")
+ ([7 0] 24 4 rand.ints nip [8 3] reshape ((str) each "." str.join) each
+  dup ("-alpha.1" cat) each cat
+  dup distinct len 16 t.equal
+  dup pairs-of (apply trichotomy) each (1 =) all? 1 t.equal
+  (dup pkg.version.less?) each (0 =) all? 1 t.equal
+  ["1.0.0-alpha" "1.0.0-alpha.1" "1.0.0-alpha.beta"
+   "1.0.0-beta" "1.0.0-beta.2" "1.0.0-beta.11" "1.0.0-rc.1"
+   "1.0.0" "1.0.1" "1.1.0" "2.0.0"]
+  ascending-flags (1 =) all? 1 t.equal
+  ["1.0.0" "1.0.0-alpha"] ascending-flags (1 =) all? 0 t.equal)
+ `ordering-laws test
+
+ ### test grammar
+ (-- : "Accept canonical SemVer spellings and reject ambiguous or unsupported forms.")
+ (("1.0.0+build" "1.0.1" pkg.version.less?)
+  `domain
+  "build metadata"
+  t.raises-containing
+  ("1.01.0" "1.2.0" pkg.version.less?) `domain "leading zero" t.raises-containing
+  ("1.0.0-01" "1.2.0" pkg.version.less?)
+  `domain
+  "leading zero"
+  t.raises-containing
+  ("1.0" "1.2.0" pkg.version.less?)
+  `domain
+  "major.minor.patch"
+  t.raises-containing
+  ("1.0.0.0" "1.2.0" pkg.version.less?)
+  `domain
+  "major.minor.patch"
+  t.raises-containing
+  ("1.0.0-" "1.2.0" pkg.version.less?)
+  `domain
+  "prerelease identifier"
+  t.raises-containing
+  ("1.0.0-a..b" "1.2.0" pkg.version.less?)
+  `domain
+  "prerelease identifier"
+  t.raises-containing
+  ("1.0.0-a_b" "1.2.0" pkg.version.less?)
+  `domain
+  "prerelease identifier"
+  t.raises-containing
+  "1.0.0-a-b" "1.0.0-a-c" pkg.version.less? 1 t.equal)
+ `grammar test
+
+ ### test malformed-operands
+ (-- : "Classify malformed comparison operands rather than returning an ordering.")
+ ((5 "1.2.0" pkg.version.less?)
+  `type
+  "a package version is a string"
+  t.raises-containing
+  ("1.2.0" 5 pkg.version.less?)
+  `type
+  "a package version is a string"
+  t.raises-containing
+  ("1.2.0" "nope" pkg.version.less?) `domain t.raises)
+ `malformed-operands test
+
+ ### test maximum
+ (-- : "Return an input member that no other version exceeds.")
+ (["1.2.0" "1.5.0" "1.10.0" "1.5.0"] pkg.version.max "1.10.0" t.equal
+  ["1.0.0-rc.1" "1.0.0" "1.0.0-alpha"] pkg.version.max "1.0.0" t.equal
+  ["0.1.0"] pkg.version.max "0.1.0" t.equal
+  ["2.0.0" "1.9.9" "2.0.0-rc.1"] dup pkg.version.max
+  (|corpus max|
+   corpus max (swap pkg.version.less?) cons each (1 =) any? not 1 t.equal
+   corpus max (match?) cons each (1 =) any? 1 t.equal)
+  apply
+  ([] pkg.version.max) `shape "at least one version" t.raises-containing
+  (5 pkg.version.max) `type "list of version strings" t.raises-containing
+  (["9.0.0" "1.0"] pkg.version.max) `domain t.raises)
+ `maximum test
+
+ ### test documentation
+ (-- : "Require documentation for every package-version export.")
+ ((pkg.version.validate pkg.version.less? pkg.version.max) t.documented)
+ `documentation test
 ) `pkg.version @defm

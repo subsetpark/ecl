@@ -735,7 +735,7 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
     try runOk(
         &runtime,
         "(1 `alpha set 2 `private setp) `fuzzmod @defm " ++
-            "`fm `fuzzmod alias `fuzzmod (alpha) import 3 `fuzz-live set",
+            "`fuzzmod `fm alias `fuzzmod (alpha) import 3 `fuzz-live set",
     );
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {

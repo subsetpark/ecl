@@ -34,7 +34,7 @@ const programs = [_][]const u8{
     "(|a v| (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def " ++
         "(task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask",
     // Three senders race into one mailbox; cross-sender order is unspecified.
-    "(3 (task.receive) times 3 pack sort) @spawn dup task.address `box set " ++
+    "(3 (task.receive) times 3 pack dup grade at) @spawn dup task.address `box set " ++
         "(box 1 task.send) @spawn (box 2 task.send) @spawn (box 3 task.send) @spawn " ++
         "pop pop pop task.await",
     // A send races a receiver that exits: queued-then-discarded or refused as

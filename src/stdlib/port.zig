@@ -28,7 +28,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "endpoint", .effect = "source selector -- endpoint", .doc = "Borrow an attenuated endpoint supported by its source.", .primitive = endpoint },
     .{ .name = "send", .effect = "sender message --", .doc = "Atomically enqueue one bounded structured message, including an empty value.", .primitive = send },
     .{ .name = "receive", .effect = "receiver -- event", .doc = "Receive {kind message value value} or {kind eof}; one receiver may wait.", .primitive = receive },
-    .{ .name = "finish", .effect = "sender --", .doc = "Finish a message sender after admitted sends, so its receiver sees {kind eof}. Idempotent. Byte endpoints finish with fd.finish.", .primitive = finish },
+    .{ .name = "finish", .effect = "endpoint --", .doc = "Finish a writable endpoint after admitted writes or sends drain: a byte reader sees EOF, a message receiver {kind eof}. Idempotent; later writes or sends raise `io.", .primitive = finish },
     .{ .name = "cancel", .effect = "exchange --", .doc = "Request cancellation. Completion remains observable.", .primitive = cancel },
     .{ .name = "shutdown", .effect = "resource --", .doc = "Perform registered graceful shutdown and join cleanup. Unsupported resources raise `domain.", .primitive = shutdown },
     .{ .name = "close", .effect = "resource-or-exchange --", .doc = "Abort and join cleanup. Idempotent.", .primitive = close },
@@ -50,14 +50,14 @@ fn endpoint(fiber: *machine.Fiber) machine.MachineError!void {
     try fiber.pushOwned(item);
 }
 
-/// The byte-stream primitives are published as `fd.core`; `port` keeps the
+/// The byte-stream primitives belong to the `stream` module; `port` keeps the
 /// resource and exchange words. They live here because they share the
 /// endpoint and transfer machinery with the message words.
 pub fn read(fiber: *machine.Fiber) machine.MachineError!void {
     var maximum = try fiber.popValue();
     defer maximum.deinit();
     if (maximum.borrow() != .int) return fiber.typeError("a positive byte count");
-    if (maximum.borrow().int <= 0) return fiber.fail(.domain, "fd.read count must be positive");
+    if (maximum.borrow().int <= 0) return fiber.fail(.domain, "stream.read count must be positive");
     var item = try fiber.popValue();
     errdefer item.deinit();
     const backend = ReadBackend.fromValue(item.borrow()) orelse return fiber.typeError("a readable byte endpoint");
@@ -70,7 +70,7 @@ pub fn read(fiber: *machine.Fiber) machine.MachineError!void {
     fiber.adoptDriver(driver);
 }
 
-/// `fd.read-line`: the bytes through the next newline, read a transport
+/// `stream.read-line`: the bytes through the next newline, read a transport
 /// chunk at a time into the endpoint's read-ahead; what follows the newline
 /// stays there for the next read. At EOF the rest of the stream is the line,
 /// so `[]` means EOF and only EOF.
@@ -213,7 +213,7 @@ pub fn write(fiber: *machine.Fiber) machine.MachineError!void {
 const WriteDriver = transfer.WriteDriver(WriteBackend);
 const WriteBackend = struct {
     pub const WritePermit = *endpoints.WritePermit;
-    pub const invalid_byte_message = "fd.write contains a value outside 0...255";
+    pub const invalid_byte_message = "stream.write contains a value outside 0...255";
     pub fn write(_: WriteBackend, fiber: *machine.Fiber, permit: WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
         return switch (permit.write(buffer)) {
             .pending => .pending,

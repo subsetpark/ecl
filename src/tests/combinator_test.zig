@@ -329,8 +329,8 @@ test "combinators: finite iterations keep their words' bindings and still check 
         .{ .name = "zip-with fold scan", .source = "[1 2] [3 4] (+ 1 +) zip-with [1 2 3] 0 (+) fold [1 2 3] 0 (+) scan", .expected = "[5 7] 6 [1 3 6]" },
         .{ .name = "for and infra", .source = "(dup *) `sq def [1 2 3] (sq pop) for [1 2 3] (sq swap sq) infra", .expected = "[1 9 4]" },
         // The binding a call keeps is the one in effect when the call began.
-        .{ .name = "next call", .source = "(1) `k def [1 2] (pop k) each (2) `k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
-        .{ .name = "next infra call", .source = "(1) `k def [1 2] (pop k) infra (2) `k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
+        .{ .name = "next apply", .source = "(1) `k def [1 2] (pop k) each (2) `k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
+        .{ .name = "next infra apply", .source = "(1) `k def [1 2] (pop k) infra (2) `k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
         // A kept match still meets each row's operand classes.
         .{ .name = "kept match across classes", .source = "[[1 2 3] [4.5 5.5] [7]] ((+) fold1) each", .expected = "(6 10.0 7)" },
         // A body longer than one page of plan entries is planned throughout.
@@ -677,7 +677,7 @@ test "nested in-place applications finish in one unwind" {
         .{ .name = "bi", .source = "3 4 (+) (*) bi", .expected = "7 12" },
         .{ .name = "tri", .source = "3 (1 +) (2 *) (3 -) tri", .expected = "4 6 0" },
         .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
-        .{ .name = "locals body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
+        .{ .name = "locals body under dip", .source = "10 20 (|lo hi| hi lo - lo +) apply", .expected = "20" },
     });
 }
 
@@ -775,7 +775,7 @@ test "empty inline iterations remain cancellable and bounded-frame" {
         .name = "cancelled times",
         .source = "70000 () times",
         .kind = "cancelled",
-        // Observed where the empty iterations exhaust their fuel, which names
+        // Observed where the empty iterations exhaust their fuel, which reports
         // no word: the loop is between applications, not inside one.
         .message = "unit cancelled",
     });
@@ -806,7 +806,7 @@ test "combinators: body words resolve as in the caller" {
     // applications reaches the next one.
     try support.expectStacks(&.{
         .{ .name = "plain body", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
-        .{ .name = "nested application", .source = "[1 2 3] ((1 +) call dup *) each", .expected = "[4 9 16]" },
+        .{ .name = "nested application", .source = "[1 2 3] ((1 +) apply dup *) each", .expected = "[4 9 16]" },
         .{ .name = "locals body", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
         .{ .name = "redefinition between applications", .source = "(dup *) `sq def [1 2 3] (sq) each (pop 7) `sq def [1 2 3] (sq) each", .expected = "[1 4 9] [7 7 7]" },
     });
@@ -834,6 +834,29 @@ test "combinators: cached body words spend no kernel polls per element" {
     try std.testing.expect(runtime.lastPolls() <= count + count / 64 + 64);
 }
 
+test "slots: implicit locals bind up to the highest slot their list writes" {
+    try support.expectStacks(&.{
+        .{ .name = "read twice", .source = "[1 2 3] (.x .x *) each", .expected = "[1 4 9]" },
+        .{ .name = "two slots", .source = "3 4 (.y .x -) apply", .expected = "1" },
+        .{ .name = "three slots", .source = "1 2 3 (.z .y .x) apply", .expected = "3 2 1" },
+        // The highest slot sets the count; lower ones are bound unread.
+        .{ .name = "a gap binds the lower slot", .source = "1 2 (.y) apply", .expected = "2" },
+        .{ .name = "a wider gap", .source = "0 1 2 3 (.z 10 *) apply", .expected = "0 30" },
+        .{ .name = "a slot binder is a locals binder", .source = "(.y .x) (|x y| y x) match?", .expected = "1" },
+        // A slot belongs to the innermost list that writes it.
+        .{ .name = "a nested list's slots are its own", .source = "5 [1 2] (.y (.x 10 *) each .x) apply", .expected = "[10 20] 5" },
+        .{ .name = "slots nest inside a locals body", .source = "1 (|a| a (.x 2 *) apply) apply", .expected = "2" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "outside a list", .source = ".x", .kind = "parse" },
+        .{ .name = "inside a dict", .source = "{.x 1}", .kind = "parse" },
+        .{ .name = "beside a locals declaration", .source = "(|a| a .x)", .kind = "parse" },
+        .{ .name = "as a local name", .source = "(|.x| 1)", .kind = "parse" },
+        .{ .name = "quoted", .source = "(`.x)", .kind = "parse" },
+        .{ .name = "underflow blames the binding", .source = "1 (.y) apply", .kind = "underflow", .message = "local binding needs 2 stack values, but found 1" },
+    });
+}
+
 test "locals: the reserved backend words behave and blame as before" {
     // The reader lowers `|a b|` into single-form locals operations named
     // `_ll`, `_gl`, and `_dl`. The names stay reserved from every publication,
@@ -842,12 +865,12 @@ test "locals: the reserved backend words behave and blame as before" {
     // the blamed word on failure are what a program can observe.
     try support.expectStacks(&.{
         .{ .name = "read twice", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
-        .{ .name = "two names", .source = "3 4 (|a b| b a -) call", .expected = "1" },
-        .{ .name = "three names", .source = "1 2 3 (|a b c| c b a) call", .expected = "3 2 1" },
+        .{ .name = "two names", .source = "3 4 (|a b| b a -) apply", .expected = "1" },
+        .{ .name = "three names", .source = "1 2 3 (|a b c| c b a) apply", .expected = "3 2 1" },
         .{ .name = "definition applied per element", .source = "(|x| x 1 +) `inc def [1 2] (inc) each", .expected = "[2 3]" },
-        .{ .name = "sequential applications", .source = "1 (|x| x) call 2 (|y| y) call +", .expected = "3" },
+        .{ .name = "sequential applications", .source = "1 (|x| x) apply 2 (|y| y) apply +", .expected = "3" },
         .{ .name = "locals under zip-with", .source = "[1 2] [10 20] (|x y| y x -) zip-with", .expected = "[9 18]" },
-        .{ .name = "a list is one value", .source = "[] (|x| x) call", .expected = "()" },
+        .{ .name = "a list is one value", .source = "[] (|x| x) apply", .expected = "()" },
     });
     // Every read shares one word name; its index is what it says. Quotations
     // that read different locals are different values and different keys.
@@ -860,7 +883,7 @@ test "locals: the reserved backend words behave and blame as before" {
         // quote, and pushes itself where the drop would have run.
         .{ .name = "a stored operation keeps its operand", .source = "(|x| x) last wrap", .expected = "(1 `_dl)" },
         .{ .name = "a stored operation matches its source", .source = "(|x| x) last wrap (|x| x) 2 drop match?", .expected = "1" },
-        .{ .name = "a quoted drop after a final call is not the epilogue", .source = "0 (|y| (1 (2) call) (|x| x) last append call) call", .expected = "1 2 1 _dl" },
+        .{ .name = "a quoted drop after a final apply is not the epilogue", .source = "0 (|y| (1 (2) apply) (|x| x) last append apply) apply", .expected = "1 2 1 _dl" },
         .{
             .name = "different reads are separate keys",
             .source = "{} (|a b| a) 1 dict.put (|a b| b) 2 dict.put dup dict.keys len swap (|a b| a) at",
@@ -886,7 +909,7 @@ test "locals: the reserved backend words behave and blame as before" {
         },
         .{
             .name = "an anonymous binder blames the binding",
-            .source = "(|x| x) call",
+            .source = "(|x| x) apply",
             .kind = "underflow",
             .message = "local binding needs 1 stack value, but found 0",
         },
@@ -899,7 +922,7 @@ test "locals: the reserved backend words behave and blame as before" {
         .{ .name = "the backend names stay reserved", .source = "(|x| x) `_gl def", .kind = "domain", .word = "def" },
         .{ .name = "the names are not words a program can write", .source = "0 _gl", .kind = "undefined-word", .word = "_gl" },
     });
-    // The failing word appears once, and an anonymous binding names none.
+    // The failing word appears once, and an anonymous binding reports none.
     try support.expectStacks(&.{
         .{
             .name = "the owner is traced once",
@@ -908,7 +931,7 @@ test "locals: the reserved backend words behave and blame as before" {
         },
         .{
             .name = "an anonymous binding has no word",
-            .source = "((|x| x) call) @attempt `err at `word dict.core.has?",
+            .source = "((|x| x) apply) @attempt `err at `word dict.core.has?",
             .expected = "0",
         },
     });
@@ -939,7 +962,7 @@ test "locals: the backend words spend no kernel polls per element" {
 test "combinators: loops guards reductions and result materialization stay cancellable" {
     try expectCancelledAfterSetup("70001 range (pop ()) each", "cond", .automatic);
     try expectCancelledAfterSetup("70000 range", "(dup pop) each", .generic_only);
-    try expectCancelledAfterSetup("70000 range", "sort", .automatic);
+    try expectCancelledAfterSetup("70000 range", "dup grade at", .automatic);
     try expectCancelledAfterSetup("70000 range -1 =", "first-where", .automatic);
     try expectCancelledAfterSetup("70000 range", "-1 find", .automatic);
     try expectCancelledAfterSetup("70000 range", "0 (+) fold", .automatic);
@@ -1152,7 +1175,7 @@ test "bindings: a running task sees definitions made after its spawn" {
     try expectFreshStack("(20 clock.sleep 1 2 +) `work def (work) @spawn (pop pop 42) `+ def task.await", "{ok [42]}");
     // The last of several replacements is the one reached.
     try expectFreshStack("(1) `f def (20 clock.sleep f) `body def (body) @spawn (2) `f def (3) `f def (4) `f def task.await", "{ok [4]}");
-    // A task body naming an undefined word fails before running anything.
+    // A task body referring to an undefined word fails before running anything.
     try expectFreshStack("(missing-word) @spawn task.await `err at `kind at", "undefined-word");
 }
 

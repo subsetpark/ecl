@@ -264,7 +264,7 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
 
 /// Retag a solely-owned list. Legal only between representations whose
 /// elements occupy the same bytes, because the list's block is freed with a
-/// length recomputed from the element size the kind names.
+/// length recomputed from the element size the kind specifies.
 fn setUniqueListKind(list_header: *UniqueList, kind_value: HeapKind) void {
     const header: *UniqueHeader = @ptrCast(@alignCast(list_header));
     std.debug.assert(leafElementSize(uniqueImpl(header).kind()) == leafElementSize(kind_value));
@@ -603,7 +603,7 @@ pub const PortTransferError = error{
     OutOfMemory,
     /// The destination scope is closing, so it cannot accept the resource.
     ScopeClosing,
-    /// The scope named as the current owner does not hold this port.
+    /// The scope given as the current owner does not hold this port.
     NotOwner,
     /// The port is already closed, so there is no live resource to move.
     Closed,
@@ -1354,7 +1354,7 @@ fn portPrepareTransfer(
                 "; every port kind has to answer whether it can change owning unit");
     }
     // Each step's signature is checked by the adapter that takes its address:
-    // a payload whose steps do not match fails there, naming the step.
+    // a payload whose steps do not match fails there, identifying the step.
     return PortTransferAdapter(Payload).prepare;
 }
 
@@ -1437,7 +1437,7 @@ pub fn addressIdentity(header: *const value.AddressHandle) u64 {
     return addressStorage(header).identity;
 }
 
-/// The mailbox an address names, as an identity: two addresses of one
+/// The mailbox an address designates, as an identity: two addresses of one
 /// mailbox compare equal through it, and nothing else about the mailbox
 /// is visible here.
 pub fn addressTarget(header: *const value.AddressHandle) *anyopaque {
@@ -1800,7 +1800,7 @@ pub const ReleaseDomain = struct {
         advance_fn: ?*const fn (*ReleaseDomain, std.mem.Allocator, *anyopaque) bool = null,
     };
 
-    /// The bare list link of one parked allocation: something names that
+    /// The bare list link of one parked allocation: something refers to that
     /// allocation without holding a reference, so it must outlive the contents
     /// it owned.
     ///
@@ -2342,7 +2342,7 @@ pub const HostOwner = struct {
     /// Registers the archive that owns this root's code provenance, and is the
     /// receipt required to unregister it.
     ///
-    /// A receipt names one *issuance* independently of any owner address, so a copied or
+    /// A receipt identifies one *issuance* independently of any owner address, so a copied or
     /// stale one cannot detach the registration that replaced it. It is
     /// host-side on purpose: workers hold `ReleaseDomain`, which has no
     /// registration surface at all, and both operations belong to the quiescent
@@ -2387,7 +2387,7 @@ pub const HostOwner = struct {
     /// Detached before the archive's directory is torn down; headers retiring
     /// after this point simply keep their slots, which are about to be freed
     /// wholesale. Consumes the receipt, and does nothing for one that does not
-    /// name the current issuance.
+    /// identify the current issuance.
     pub fn detachCodeRetirement(
         self: *HostOwner,
         registration: *CodeRetirementRegistration,

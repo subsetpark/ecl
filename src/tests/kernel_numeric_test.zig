@@ -114,6 +114,27 @@ test "numeric: stored widths compute and fault as ints across blocks" {
     });
 }
 
+test "numeric: integer division floors and mod takes the divisor's sign" {
+    try helper.expectStacks(&.{
+        .{
+            .name = "scalar operands of every sign",
+            .source = "-7 2 div 7 -2 div -7 -2 div 7 2 div -7 2 mod 7 -2 mod -7 -2 mod 7 2 mod",
+            .expected = "-4 -4 3 3 1 -1 -1 1",
+        },
+        .{
+            .name = "elementwise operands of every sign",
+            .source = "[-7 7 -7 7] [2 -2 -2 2] div [-7 7 -7 7] [2 -2 -2 2] mod",
+            .expected = "[-4 -4 3 3] [1 -1 -1 1]",
+        },
+        .{
+            .name = "a wide array over a scalar divisor",
+            .source = "24 range 12 - 5 div 24 range 12 - -5 mod",
+            .expected = "[-3 -3 -2 -2 -2 -2 -2 -1 -1 -1 -1 -1 0 0 0 0 0 1 1 1 1 1 2 2] " ++
+                "[-2 -1 0 -4 -3 -2 -1 0 -4 -3 -2 -1 0 -4 -3 -2 -1 0 -4 -3 -2 -1 0 -4]",
+        },
+    });
+}
+
 test "numeric: transcendental non-finite edges" {
     try helper.expectStacks(&.{
         .{
@@ -426,15 +447,15 @@ test "kernel: bitwise words are pattern words over the integer bit pattern" {
 test "numeric: derived comparisons, negation, remainder, and totals" {
     try helper.expectStacks(&.{
         .{ .name = "negation and magnitude", .source = "-2 neg -0.0 neg [-2 3] abs", .expected = "2 0.0 [2 3]" },
-        .{ .name = "remainder", .source = "7 3 mod -7 3 mod", .expected = "1 -1" },
+        .{ .name = "remainder", .source = "7 3 mod -7 3 mod", .expected = "1 2" },
         .{
             .name = "comparisons and booleans",
-            .source = "[1 2] [1 3] <> 1 2 <= 2 1 >= [0 1] [1 1] and [0 1] [1 0] or",
+            .source = "[1 2] [1 3] not= 1 2 <= 2 1 >= [0 1] [1 1] and [0 1] [1 0] or",
             .expected = "[0 1] 1 1 [0 1] [1 1]",
         },
         .{
-            .name = "symbols compare by name under = and <>, whatever their occurrence",
-            .source = "`a `a = `a `b = `a `a <> `a 1 = 1 `a <> [`a 1] [a 2] = (`a) first `a = {k a} {k a} =",
+            .name = "symbols compare by name under = and not=, whatever their occurrence",
+            .source = "`a `a = `a `b = `a `a not= `a 1 = 1 `a not= [`a 1] [a 2] = (`a) first `a = {k a} {k a} =",
             .expected = "1 0 0 0 1 [1 0] 1 {k 1}",
         },
         .{
@@ -509,19 +530,19 @@ test "numeric: every binary word reduces and scans in order" {
     try helper.expectStacks(&.{
         .{
             .name = "inequality scans a mask to its running parity",
-            .source = "300 range 7 mod 0 = 0 (<>) scan 0 (+) fold " ++
-                "[1 0 1 1 0] 0 (<>) scan [1 0 1 1 0] 1 (<>) scan " ++
-                "[1 0 1 1 0] 0 (<>) fold [1 0 1 1 0] (<>) fold1",
+            .source = "300 range 7 mod 0 = 0 (not=) scan 0 (+) fold " ++
+                "[1 0 1 1 0] 0 (not=) scan [1 0 1 1 0] 1 (not=) scan " ++
+                "[1 0 1 1 0] 0 (not=) fold [1 0 1 1 0] (not=) fold1",
             .expected = "153 [1 1 0 1 1] [0 0 1 0 0] 1 1",
         },
         .{
             .name = "inequality compares the accumulator, whatever the operands",
-            .source = "[5 5 0 7] 5 (<>) scan [1.5 0 1] 0 (<>) scan \"ab\\\"c\\\"d\" \\\" = 0 (<>) scan",
+            .source = "[5 5 0 7] 5 (not=) scan [1.5 0 1] 0 (not=) scan \"ab\\\"c\\\"d\" \\\" = 0 (not=) scan",
             .expected = "[0 1 1 1] [1 1 0] [0 0 1 1 0 0]",
         },
         .{
             .name = "a parity scan feeds a chain of boolean words",
-            .source = "[1 0 1 1 0] 0 (<>) scan [1 1 1 1 1] and not",
+            .source = "[1 0 1 1 0] 0 (not=) scan [1 1 1 1 1] and not",
             .expected = "[0 0 1 0 0]",
         },
         .{

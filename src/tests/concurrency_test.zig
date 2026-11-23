@@ -141,7 +141,7 @@ test "concurrency: task identity rendering dict keys and cached await are observ
         &runtime,
         "pop `identity-task set " ++
             "identity-task type identity-task dup match? " ++
-            "identity-task 9 pair dict.from-flat identity-task dict.has?",
+            "identity-task 9 pair dict.from-kvs identity-task has?",
     );
     {
         var actual = try display(&runtime);
@@ -400,7 +400,7 @@ test "concurrency: large task results materialize across scheduler slices" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    try runOk(&runtime, "([1] 70000 take call) @spawn task.await `ok at len");
+    try runOk(&runtime, "([1] 70000 take apply) @spawn task.await `ok at len");
     var actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("70000", actual.bytes());
@@ -415,7 +415,7 @@ test "concurrency: @each failure cancellation reaches sibling descendants" {
         &runtime,
         "([([1] 70000 take sum pop missing) " ++
             "(((1) () while) @spawn pop (1) () while)] " ++
-            "(call) @each) @attempt pop",
+            "(apply) @each) @attempt pop",
     );
 }
 
@@ -469,7 +469,7 @@ test "concurrency: complete console calls do not interleave bytes" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &writer }), .default, .evaluate);
     defer runtime.deinit();
-    try runOk(&runtime, "[(\"aaaa\" io.prin 0) (\"bbbb\" io.prin 0)] (call) @each pop");
+    try runOk(&runtime, "[(\"aaaa\" io.prin 0) (\"bbbb\" io.prin 0)] (apply) @each pop");
     const written = writer.buffered();
     try std.testing.expect(std.mem.eql(u8, written, "aaaabbbb") or
         std.mem.eql(u8, written, "bbbbaaaa"));
@@ -484,16 +484,11 @@ test "concurrency: @each is a reflective prelude definition" {
     defer runtime.deinit();
     try runOk(
         &runtime,
-        "`@each doc len 0 > `@each which `@each see words",
+        "`@each doc len 0 > `@each see words",
     );
     var reflected = try display(&runtime);
     defer reflected.deinit();
     try std.testing.expectEqualStrings("1", reflected.bytes());
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        output.buffered(),
-        "@each -> @each def public (list (quotation: a -- b) -- results)\n",
-    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "@spawn") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "@each") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "task-join") == null);

@@ -21,30 +21,30 @@ const StackWindow = machine.StackWindow;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "call", .primitive = call, .effect = "quotation -- ...", .doc = "Run a quotation on the current stack. A data list pushes its elements." },
-        .{ .name = "if", .primitive = ifWord, .effect = "bool then else -- ...", .doc = "Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``." },
-        .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. Definitions, IO, and other non-stack effects from the condition survive; definition permission follows the invoking unit. Tail-call optimized." },
-        .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Explicit linear recursion. At each descent, run `predicate` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `base`. On 0, run `pre`, recurse from `pre`'s resulting stack, then run `post`. Definitions, IO, and other non-stack effects from the predicate survive restoration; definition permission follows the invoking unit. All four quotations run in the invoking application context and communicate through ambient stack state. The recursion runs in constant space: every level applies the same quotations, so the descents whose `post` is pending are a count." },
-        .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results. Inside `above` or `below`, a protected value taken from beneath their floor returns as the original it was, so protecting a value is not consuming it." },
-        .{ .name = "dip-n", .primitive = dipN, .effect = "... (q: ... -- ...) n -- ...", .doc = "Run a quotation beneath the top `n` stack values: `q` runs with them removed, then they are pushed back in their original order after its results. `n` must be a nonnegative int, or the word fails with `` `type `` or `` `domain `` before anything is removed. `0 dip-n` is `call`, and `1 dip-n` is `dip`." },
-        .{ .name = "above", .primitive = above, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed above its results, in their original order. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) above` is `3 1 2`, and `1 (dup) above` is `1 1 1`. A `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual. `(q) above` leaves the quotation's results beneath the restored values; `below` leaves them on top." },
-        .{ .name = "below", .primitive = below, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed below its results, in their original order: the stack is as it was, with the results on top. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) below` is `1 2 3`, and `1 2 3 ((+) dip) below` is `1 2 3 3`, since a `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual." },
-        .{ .name = "bi", .primitive = bi, .effect = "... p q -- ...", .doc = "Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s: a two-quotation `cleave`, with the same consumption rule." },
-        .{ .name = "tri", .primitive = tri, .effect = "... p q r -- ...", .doc = "Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`, with the same consumption rule." },
-        .{ .name = "cleave", .primitive = cleave, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations`, in order, to the stack as it was when the list was consumed. Each quotation consumes exactly what its words require, and its results are held aside, so every quotation starts from the same inputs and sees the stack beneath them rather than earlier results. Afterwards the inputs any quotation consumed are dropped and all the results are pushed in order. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list leaves the stack unchanged." },
-        .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized." },
-        .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Each test runs over a paging floor against the stack as it was when the clause list was consumed: it takes from the stack only what its words require. Only its top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded and what the test took is restored. The first true test selects its action; otherwise the final else runs, in either case from the original stack. Stack rollback does not roll back definitions, IO, or other non-stack effects performed by tests; definition permission follows the invoking unit." },
-        .{ .name = "each", .primitive = each, .effect = "collection (a -- b) -- collection", .doc = "For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``." },
-        .{ .name = "zip-with", .primitive = zipWith, .effect = "left right (a b -- c) -- list", .doc = "Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `cons` compositions." },
-        .{ .name = "for", .primitive = forWord, .effect = "collection (a --) --", .doc = "Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing." },
+        .{ .name = "apply", .primitive = call, .effect = "quotation -- ...", .doc = "Run `quotation` on the current stack." },
+        .{ .name = "if", .primitive = ifWord, .effect = "bool then else -- ...", .doc = "Run `then` when the condition is 1, `else` when it is 0." },
+        .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "Evaluate `cond` and then restore any consumed elements. If `cond` pushes 1, consume the boolean, evaluate `body` in place and loop. If `cond` pushes 0, consume the boolean and exit." },
+        .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Linear recursion. Evaluate `predicate` and then restore any consumed elements. If `predicate` pushes 1, consume the boolean and evaluate `base`. If `predicate` pushes 0, consume the boolean, evaluate `pre`, recurse from `pre`'s resulting stack, then evaluate `post`." },
+        .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: evaluate `q` with `x` removed, then push `x` on top of its results." },
+        .{ .name = "dip-n", .primitive = dipN, .effect = "... (q: ... -- ...) n -- ...", .doc = "Run a quotation beneath the top `n` stack values: evaluate `q` with them removed, then they push them back in their original order after its results." },
+        .{ .name = "above", .primitive = above, .effect = "... (q: ... -- ...) -- ...", .doc = "Evaluate `q`, then restore the values it consumed above its results, in their original order." },
+        .{ .name = "below", .primitive = below, .effect = "... (q: ... -- ...) -- ...", .doc = "Evaluate `q`, then restore the values it consumed below its results, in their original order." },
+        .{ .name = "bi", .primitive = bi, .effect = "... p q -- ...", .doc = "Apply `p` and `q` to the same view of the stack. Push `p`'s results, followed by `q`'s results." },
+        .{ .name = "tri", .primitive = tri, .effect = "... p q r -- ...", .doc = "Apply `p`, `q`, `r` to the same view of the stack. Push `p`'s results, followed by `q`'s results, followed by `r`'s." },
+        .{ .name = "cleave", .primitive = cleave, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations` to the same view of the stack. Push each quotation's results to the stack in order." },
+        .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Evaluate `quotation` `n` times." },
+        .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "Conditionally evaluate the first action in `clauses` whose predicate is true.\n\n`clauses` consists of an odd number of quotations; every odd quotation (except the last) is a predicate, and is directly followed by its associated action. If no predicate evaluates to true, then evaluate the last quotation (`else`). Each quotation runs against the same view of the stack." },
+        .{ .name = "each", .primitive = each, .effect = "collection (q: a -- b) -- collection", .doc = "Evaluate `q` against every element in `collection`, collecting the results of each application in order in a collection of the same type. When `collection` is a dict, then `a` is a value in `collection`, and it's mapped back to the same key in the result." },
+        .{ .name = "zip-with", .primitive = zipWith, .effect = "left right (q: a b -- c) -- list", .doc = "Conform `left` and `right`, and apply `q` to an element from each side, collecting the results in a list." },
+        .{ .name = "for", .primitive = forWord, .effect = "collection (a --) --", .doc = "Evaluate `q` against every element in `collection`. `q` must leave no results." },
         .{ .name = "fold", .primitive = fold, .effect = "list accumulator (acc a -- acc) -- accumulator", .doc = "Reduce left-to-right from the supplied accumulator." },
-        .{ .name = "fold1", .primitive = fold1, .effect = "list (acc a -- acc) -- value", .doc = "Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`." },
+        .{ .name = "fold1", .primitive = fold1, .effect = "list (acc a -- acc) -- value", .doc = "Reduce a nonempty list left to right from its first element." },
         .{ .name = "lex-cmp-with", .primitive = lexCmpWith, .effect = "left right (left-element right-element -- order) -- order", .doc = "Compare two lists lexicographically with a comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length." },
-        .{ .name = "scan", .primitive = scan, .effect = "list accumulator (acc a -- acc) -- list", .doc = "Like `fold` but returns every intermediate accumulator; same length as the input." },
-        .{ .name = "stencil", .primitive = stencil, .effect = "list width (window -- result) -- list", .doc = "Apply to each overlapping window of a positive int width, left-to-right. A width larger than the input returns `()` without applying the quotation; zero and negative widths are `` `domain ``. The result has `max(len-width+1, 0)` elements." },
-        .{ .name = "unfold", .primitive = unfold, .effect = "state (predicate: state -- bool) (step: state -- state item) -- state list", .doc = "Before every step, apply the predicate. When it returns 0, return the current state and all generated items. When it returns 1, apply the step, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`." },
-        .{ .name = "infra", .primitive = infra, .effect = "list (... -- ...) -- list", .doc = "Run the quotation with the list's elements as the entire substack; the substack that remains is the result list." },
-        .{ .name = "update", .primitive = update, .effect = "collection selector (value -- value) -- collection", .doc = "Apply an isolated quotation at the selected positions. A list collection's selector pervades with the same nested shape as `at` and is processed left to right, so repeated indices observe earlier updates. A dictionary selector is one whole-value key. The entire selector is validated before the quotation is first applied; an empty selector returns the list unchanged without applying it." },
+        .{ .name = "scan", .primitive = scan, .effect = "list accumulator (acc a -- acc) -- list", .doc = "Reduce left-to-right from the supplied accumulator. Return a list of the state of the accumulator after each reduction." },
+        .{ .name = "stencil", .primitive = stencil, .effect = "list width (q: window -- result) -- list", .doc = "Apply `q` to each overlapping window of a positive int width, left-to-right." },
+        .{ .name = "unfold", .primitive = unfold, .effect = "state (predicate: state -- bool) (step: state -- state item) -- state list", .doc = "Evaluate `predicate`; when it returns 0, return the current state and all generated items. When it returns 1, evaluate `step`, pushing `item` to `list`, and continue from the returned state." },
+        .{ .name = "infra", .primitive = infra, .effect = "list (q: ... -- ...) -- list", .doc = "Evaluate `q` with `list`'s elements as stack, and push the resulting stack as a list." },
+        .{ .name = "update", .primitive = update, .effect = "collection selector (q: value -- value) -- collection", .doc = "Apply `q` at the selected positions. A list collection's selector pervades with the same nested shape as `at` and is processed left to right, so repeated indices observe earlier updates. A dictionary selector is one whole-value key." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -122,7 +122,7 @@ fn SuspendedWork(comptime State: type) type {
     return struct {
         state: *State,
 
-        /// Names its word before it polls, so a cancellation is attributed to it.
+        /// Marks its word active before it polls, so a cancellation is attributed to it.
         pub const cancellation: machine.DriverCancellation = .own;
 
         pub fn advance(fiber: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
@@ -266,7 +266,7 @@ fn dip(fiber: *Fiber) MachineError!void {
 
 /// `x quotation cons dip` without the list: the value beneath `x` is
 /// protected and `x` stays on the stack for the quotation, as the first form
-/// of `(x quotation...)` would have pushed it. The `cons call` and `cons dip`
+/// of `(x quotation...)` would have pushed it. The `cons apply` and `cons dip`
 /// phrases in `idioms.zig` reach this.
 pub fn dipBelowHead(fiber: *Fiber) MachineError!void {
     var quotation = try fiber.popQuotation();
@@ -423,7 +423,7 @@ const DipControl = struct {
 const DipDriver = struct {
     control: heap.Owned(DipControl),
 
-    /// Names its word before it polls, so a cancellation is attributed to it.
+    /// Marks its word active before it polls, so a cancellation is attributed to it.
     pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *DipDriver) MachineError!machine.WorkProgress {
@@ -597,7 +597,7 @@ fn launchCleave(fiber: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!vo
 const CleaveDriver = struct {
     state: heap.Owned(*CleaveState),
 
-    /// Names its word before it polls, so a cancellation is attributed to it.
+    /// Marks its word active before it polls, so a cancellation is attributed to it.
     pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *CleaveDriver) MachineError!machine.WorkProgress {
@@ -1359,7 +1359,7 @@ const UpdateWorkDriver = struct {
         return position;
     }
 
-    /// Names its word before it polls, so a cancellation is attributed to it.
+    /// Marks its word active before it polls, so a cancellation is attributed to it.
     pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
@@ -1436,7 +1436,7 @@ const UpdateWorkDriver = struct {
                     .pending => {},
                     .complete => |found| {
                         if (found == null)
-                            return fiber.fail(.domain, "update could not find the dict key");
+                            return fiber.failMissingKey("update could not find the dict key", state.requested_key.?);
                         positions[state.position_index] = state.finder.?.borrow().foundIndex().?;
                         state.finder.?.deinit(fiber.releases, fiber.allocator);
                         state.finder = null;
@@ -1715,7 +1715,7 @@ const StencilBootstrapDriver = struct {
         }
     }
 
-    /// Names its word before it polls, so a cancellation is attributed to it.
+    /// Marks its word active before it polls, so a cancellation is attributed to it.
     pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(

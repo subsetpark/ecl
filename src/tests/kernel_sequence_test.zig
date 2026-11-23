@@ -171,27 +171,27 @@ test "sequence: a narrow leaf compares with an int it can and cannot hold" {
         "10 0 40 40 20 10",
     );
     try helper.expectStack(
-        "\"a,b,c\" 9 take dup \\, = swap dup 44 = swap dup 300 <> swap \\, swap =",
+        "\"a,b,c\" 9 take dup \\, = swap dup 44 = swap dup 300 not= swap \\, swap =",
         "[0 1 0 1 0 0 1 0 1] [0 1 0 1 0 0 1 0 1] [1 1 1 1 1 1 1 1 1] [0 1 0 1 0 0 1 0 1]",
     );
     try helper.expectStack("\"aλ,b\" 3 take dup \\, = swap dup \\λ = swap 70000 <", "[0 0 1] [0 1 0] [1 1 1]");
 }
 
-test "sequence: a scan of <> over a mask is its running parity, across blocks" {
+test "sequence: a scan of not= over a mask is its running parity, across blocks" {
     // 600 elements span three 256-element blocks, and 601 leaves a partial
     // word; the reference recomputes each parity from a running count.
     try helper.expectStack(
-        "600 range 7 mod 0 = dup 0 (<>) scan swap 0 (+) scan 2 mod = 1 (and) fold " ++
-            "601 range 3 mod 0 = dup 1 (<>) scan swap 0 (+) scan 1 + 2 mod = 1 (and) fold " ++
-            "[1 0 1 1 0] 0 (<>) scan [1 0 1 1 0] 1 (<>) scan [1 1 0] (<>) scan1",
+        "600 range 7 mod 0 = dup 0 (not=) scan swap 0 (+) scan 2 mod = 1 (and) fold " ++
+            "601 range 3 mod 0 = dup 1 (not=) scan swap 0 (+) scan 1 + 2 mod = 1 (and) fold " ++
+            "[1 0 1 1 0] 0 (not=) scan [1 0 1 1 0] 1 (not=) scan [1 1 0] (not=) scan1",
         "1 1 [1 1 0 1 1] [0 0 1 0 0] [1 0 0]",
     );
-    // `<>` compares; it is an XOR only over 0 and 1. A start or an element
+    // `not=` compares; it is an XOR only over 0 and 1. A start or an element
     // that is neither gives 1 wherever it differs.
     try helper.expectStack(
-        "[1 0 1] 5 (<>) scan [0 0 1 1 0 0 0 0 0 0 1 0] 600 take 599 0 put 300 1 put 7 (<>) scan 0 (+) fold " ++
-            "600 range 7 mod 0 = 2 * 0 (<>) scan 0 (+) fold " ++
-            "[1 1 1 1 1 1 1 1 1 0 2 1] 600 take 0 (<>) scan 0 (+) fold",
+        "[1 0 1] 5 (not=) scan [0 0 1 1 0 0 0 0 0 0 1 0] 600 take 599 0 put 300 1 put 7 (not=) scan 0 (+) fold " ++
+            "600 range 7 mod 0 = 2 * 0 (not=) scan 0 (+) fold " ++
+            "[1 1 1 1 1 1 1 1 1 0 2 1] 600 take 0 (not=) scan 0 (+) fold",
         "[1 1 0] 306 600 350",
     );
 }
@@ -204,7 +204,7 @@ test "sequence: boolean folds agree across blocks, over masks and ints" {
             "600 range 0 >= 1 (and) fold 600 range 599 < 1 (and) fold " ++
             "600 range 599 = 600 * 600 div 0 (or) fold 600 range 0 * 1 + 1 (and) fold " ++
             "600 range 0 * 1 (or) fold 600 range 0 >= 0 (and) fold " ++
-            "600 range 300 = (or) fold1 600 range 300 <> (and) fold1",
+            "600 range 300 = (or) fold1 600 range 300 not= (and) fold1",
         "1 0 1 0 1 1 1 0 1 0",
     );
     try helper.expectErrors(&.{
@@ -212,6 +212,23 @@ test "sequence: boolean folds agree across blocks, over masks and ints" {
         .{ .name = "and meets a later block's -1", .source = "600 range 599 = 0 swap - 1 (and) fold", .kind = "type", .word = "and" },
         .{ .name = "or refuses its seed over a mask", .source = "600 range 0 >= 5 (or) fold", .kind = "type", .word = "or" },
         .{ .name = "and refuses a byte that is not a boolean", .source = "600 range 255 mod 1 (and) fold", .kind = "type", .word = "and" },
+    });
+}
+
+test "sequence: has? and of are in? and at with their operands reversed" {
+    try helper.expectStack(
+        "[1 2 3] [2 4] has? [1 2 3] 2 has? [1 2 3] 9 has? " ++
+            "[2 0] [10 20 30] of 1 [10 20 30] of `b {a 1 b 2} of [0 2] \"cab\" of",
+        "[1 0] 1 0 [30 10] 20 2 \"cb\"",
+    );
+    // A dict haystack takes the needle as one whole key, as `at` does.
+    try helper.expectStack(
+        "{a 1} `a has? `b {a 1} in? {[1 2] 9} [1 2] has? [1 2] {[1 2] 9} in?",
+        "1 0 1 1",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "has? requires a list haystack", .source = "1 2 has?", .kind = "type", .word = "has?" },
+        .{ .name = "of reports an out-of-bounds index", .source = "5 [1 2 3] of", .kind = "domain", .word = "of" },
     });
 }
 
@@ -539,8 +556,8 @@ test "sequence: cons builds short spines in place and long ones through the copy
         .{ .name = "list head onto a quotation", .source = "(1 -) (dip) cons", .expected = "((1 -) dip)" },
         .{ .name = "symbol head enters as data", .source = "`w (dip) cons `w () cons", .expected = "(`w dip) (`w)" },
         .{ .name = "a symbol taken from code enters as data too", .source = "(w) first (dip) cons [`w] first (dip) cons", .expected = "(`w dip) (`w dip)" },
-        .{ .name = "the built quotation pushes the symbol", .source = "`w (dup) cons call", .expected = "w w" },
-        .{ .name = "execute runs a symbol the quotation pushes", .source = "5 `dup (execute 1) cons call", .expected = "5 5 1" },
+        .{ .name = "the built quotation pushes the symbol", .source = "`w (dup) cons apply", .expected = "w w" },
+        .{ .name = "execute runs a symbol the quotation pushes", .source = "5 `dup (execute 1) cons apply", .expected = "5 5 1" },
         .{ .name = "list head onto an empty list", .source = "[1] () cons [1] [] cons", .expected = "([1]) ([1])" },
         .{ .name = "list head onto a typed leaf", .source = "[0] [1 2 3] cons \"ab\" \"cd\" cons", .expected = "([0] 1 2 3) (\"ab\" \\c \\d)" },
         .{ .name = "dict head keeps the tail's elements", .source = "{a 1} [[2] [3]] cons", .expected = "({a 1} [2] [3])" },
@@ -551,24 +568,24 @@ test "sequence: cons builds short spines in place and long ones through the copy
     });
 }
 
-test "sequence: cons call and cons dip run the quotation without building it" {
+test "sequence: cons apply and cons dip run the quotation without building it" {
     try helper.expectStacks(&.{
-        .{ .name = "cons call runs the tail with the head on the stack", .source = "5 (1 +) cons call", .expected = "6" },
-        .{ .name = "cons call with a quotation head", .source = "1 2 3 (1 -) (dip) cons (dip) cons call", .expected = "0 2 3" },
-        .{ .name = "cons call onto a data list pushes every element", .source = "1 [2 3] cons call", .expected = "1 2 3" },
-        .{ .name = "cons call onto an empty list pushes the head", .source = "7 () cons call", .expected = "7" },
+        .{ .name = "cons apply runs the tail with the head on the stack", .source = "5 (1 +) cons apply", .expected = "6" },
+        .{ .name = "cons apply with a quotation head", .source = "1 2 3 (1 -) (dip) cons (dip) cons apply", .expected = "0 2 3" },
+        .{ .name = "cons apply onto a data list pushes every element", .source = "1 [2 3] cons apply", .expected = "1 2 3" },
+        .{ .name = "cons apply onto an empty list pushes the head", .source = "7 () cons apply", .expected = "7" },
         .{ .name = "cons dip protects the value beneath the head", .source = "1 2 3 (1 -) (dip) cons dip", .expected = "0 2 3" },
         .{ .name = "cons dip with an atom head", .source = "10 20 1 (+) cons dip", .expected = "11 20" },
-        .{ .name = "cons call with a symbol head", .source = "`w (dup) cons call", .expected = "w w" },
-        .{ .name = "cons call with a head taken from quoted code", .source = "[`w] first (dup) cons call", .expected = "w w" },
+        .{ .name = "cons apply with a symbol head", .source = "`w (dup) cons apply", .expected = "w w" },
+        .{ .name = "cons apply with a head taken from quoted code", .source = "[`w] first (dup) cons apply", .expected = "w w" },
         .{ .name = "cons dip with a symbol head", .source = "9 `w (dup) cons dip", .expected = "w w 9" },
-        .{ .name = "a shadowed call runs the words as written", .source = "(pop 42) `call def 1 (2) cons call", .expected = "42" },
-        .{ .name = "a definition's tail cons call", .source = "((2 *) cons call) `twice def 4 twice", .expected = "8" },
+        .{ .name = "a shadowed apply runs the words as written", .source = "(pop 42) `apply def 1 (2) cons apply", .expected = "42" },
+        .{ .name = "a definition's tail cons apply", .source = "((2 *) cons apply) `twice def 4 twice", .expected = "8" },
     });
     try helper.expectErrors(&.{
-        .{ .name = "cons call without a list keeps cons's error", .source = "1 2 cons call", .kind = "type", .word = "cons" },
+        .{ .name = "cons apply without a list keeps cons's error", .source = "1 2 cons apply", .kind = "type", .word = "cons" },
         .{ .name = "cons dip without a list keeps cons's error", .source = "1 2 3 cons dip", .kind = "type", .word = "cons" },
         .{ .name = "cons dip needs the protected value", .source = "1 (2) cons dip", .kind = "underflow", .word = "dip" },
-        .{ .name = "a fault in the quotation is the quotation's own", .source = "1 (pop pop) cons call", .kind = "underflow", .word = "pop" },
+        .{ .name = "a fault in the quotation is the quotation's own", .source = "1 (pop pop) cons apply", .kind = "underflow", .word = "pop" },
     });
 }

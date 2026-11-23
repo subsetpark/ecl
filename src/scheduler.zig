@@ -1160,12 +1160,12 @@ pub const TaskScope = struct {
     }
 
     /// This scope's identity, for the ownership comparisons ports and
-    /// resources make without naming the scope type.
+    /// resources make without referring to the scope type.
     pub fn identity(self: *TaskScope) *external.ScopeIdentity {
         return @ptrCast(self);
     }
 
-    /// The scope an identity names. Every identity is minted by `identity`,
+    /// The scope an identity denotes. Every identity is minted by `identity`,
     /// so this is its exact inverse.
     pub fn fromIdentity(scope: *external.ScopeIdentity) *TaskScope {
         return @ptrCast(@alignCast(scope));
@@ -1388,7 +1388,7 @@ const TaskCell = struct {
     cancellation: CancellationWork = .none,
     /// Created with the cell and closed when the fiber becomes terminal. The
     /// cell's reference is one of several: every address value holds its
-    /// own, which is why an address can outlive the task it names.
+    /// own, which is why an address can outlive the task it addresses.
     mailbox: *mailbox.Mailbox,
 
     pub fn destroy(allocator: std.mem.Allocator, self: *TaskCell) ?Value {
@@ -1526,7 +1526,7 @@ pub const SpawnSite = union(enum) {
 
 /// The scheduler learns only that a transfer refused. Which resource refused
 /// and why is recorded by the caller in its own transfer context, so the
-/// language-level error can name the port and the reason.
+/// language-level error can report the port and the reason.
 pub const ScopeTransferError = error{ OutOfMemory, Transfer };
 
 pub const SpawnRequest = struct {

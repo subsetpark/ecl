@@ -26,7 +26,6 @@
  `exact-fetch test
 
  ### def run
- (-- : "Require the acceptance registration and invoke the standard ECL test runner.")
- (tests len 1 = {kind user msg "fetch acceptance test was not registered"} assert
-  test.default.run) `run def
+ (-- : "Run only the fetch acceptance test; package modules carry their own tests.")
+ (`pkg.test.fetch pkg.test.support.run-module) `run def
 ) `pkg.test.fetch @defm

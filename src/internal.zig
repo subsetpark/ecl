@@ -104,7 +104,8 @@ test {
     _ = @import("tests/kernel_numeric_test.zig");
     _ = @import("tests/kernel_sequence_test.zig");
     _ = @import("tests/kernel_order_test.zig");
-    _ = @import("tests/kernel_dict_text_test.zig");
+    _ = @import("tests/kernel_dict_test.zig");
+    _ = @import("tests/kernel_text_test.zig");
     _ = @import("tests/combinator_test.zig");
     _ = @import("tests/prelude_test.zig");
     _ = @import("tests/definition_test.zig");
@@ -119,7 +120,7 @@ test {
     _ = @import("tests/module_body_test.zig");
     _ = @import("tests/stdlib_test.zig");
     _ = @import("tests/hostio_test.zig");
-    _ = @import("tests/archive_test.zig");
+    _ = @import("tests/tar_test.zig");
     _ = @import("tests/http_test.zig");
     _ = @import("tests/random_test.zig");
     _ = @import("tests/clock_test.zig");

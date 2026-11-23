@@ -161,7 +161,7 @@ pub const BinaryOp = enum {
             .min => "min",
             .max => "max",
             .eq => "=",
-            .ne => "<>",
+            .ne => "not=",
             .lt => "<",
             .gt => ">",
             .le => "<=",
@@ -216,9 +216,11 @@ pub const UnaryOp = enum {
 /// installer iterates.
 pub const SequenceOp = enum {
     at,
+    of,
     where,
     first_where,
     in_word,
+    has_word,
     raze,
     cat,
     take,
@@ -240,9 +242,11 @@ pub const SequenceOp = enum {
     pub fn spelling(self: SequenceOp) []const u8 {
         return switch (self) {
             .at => "at",
+            .of => "of",
             .where => "where",
             .first_where => "first-where",
             .in_word => "in?",
+            .has_word => "has?",
             .raze => "raze",
             .cat => "cat",
             .take => "take",
@@ -267,7 +271,6 @@ pub const SequenceOp = enum {
 pub const OrderOp = enum {
     cmp,
     grade,
-    sort,
     distinct,
     group,
     group_columns,
@@ -276,7 +279,6 @@ pub const OrderOp = enum {
         return switch (self) {
             .cmp => "cmp",
             .grade => "grade",
-            .sort => "sort",
             .distinct => "distinct",
             .group => "group",
             .group_columns => "group-columns",
@@ -284,15 +286,23 @@ pub const OrderOp = enum {
     }
 };
 
-pub const TextOp = enum {
+pub const DictOp = enum {
     put,
     del,
+
+    pub fn spelling(self: DictOp) []const u8 {
+        return switch (self) {
+            .put => "put",
+            .del => "del",
+        };
+    }
+};
+
+pub const TextOp = enum {
     str,
 
     pub fn spelling(self: TextOp) []const u8 {
         return switch (self) {
-            .put => "put",
-            .del => "del",
             .str => "str",
         };
     }
@@ -320,7 +330,7 @@ pub const RandomOp = enum {
 /// its output when it fails are this executor's, written once.
 ///
 /// `Spec` declares:
-/// - `arity`: how many values it reads. Each spec names exactly its own, so
+/// - `arity`: how many values it reads. Each spec declares exactly its own, so
 ///   no call carries an operand it does not use.
 /// - `Params`: what it needs besides its operands.
 /// - `Output`: the result being built; `retire(releases)` abandons it

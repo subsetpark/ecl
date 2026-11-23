@@ -49,14 +49,14 @@
   project recover
   project `directory at "ecl.pkg" fs.read-text
   project vendor location offline pkg.generation.start
-  update (synchronize-work) cons call) `synchronize-held defp
+  update (synchronize-work) cons apply) `synchronize-held defp
 
  ### defp synchronize-work
  (manifest-text work update -- :
   "Build against one observed manifest and one portable lock selection.")
  (|manifest-text work update|
   work manifest-text pkg.manifest.read update selection
-  manifest-text work pair (publish) cat call) `synchronize-work defp
+  manifest-text work pair (publish) cat apply) `synchronize-work defp
 
  ### defp publish
  (lock-text manifest-text work -- :

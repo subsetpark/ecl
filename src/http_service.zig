@@ -154,7 +154,8 @@ const Cell = struct {
         taken,
     } = .preparing,
     method: std.http.Method = .GET,
-    redirects: bool = false,
+    /// Replay a bodiless request at a 3xx `Location` within the hop limit.
+    follow_redirects: bool = true,
     io_finished: bool = false,
     fn scopeOwnership(self: *Cell) *external.Ownership {
         return &self.ownership;
@@ -264,6 +265,12 @@ const Cell = struct {
         defer scratch.free(redirect_storage);
         var redirect_space = redirect_storage;
         var redirects: usize = 0;
+        // Caller headers may carry credentials, so they go only to the
+        // origin the caller named. The first cross-origin hop drops them for
+        // the rest of the chain, and a hop from https to http is refused.
+        const origin_uri = uri;
+        var send_headers = true;
+        var secure = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         var method = self.method;
         var encoded: usize = 0;
         var decoded: usize = 0;
@@ -271,7 +278,7 @@ const Cell = struct {
         var header_fields: usize = 0;
         while (true) {
             if (self.cancelled.load(.acquire)) return error.Canceled;
-            var request = try client.request(method, uri, .{ .redirect_behavior = .unhandled, .extra_headers = extra });
+            var request = try client.request(method, uri, .{ .redirect_behavior = .unhandled, .extra_headers = if (send_headers) extra else &.{} });
             defer request.deinit();
             if (method.requestHasBody()) {
                 const payload = response.request.body orelse &.{};
@@ -286,7 +293,10 @@ const Cell = struct {
                 else => return err,
             };
             response.status = @backingInt(head.head.status);
-            const redirect = self.redirects and !method.requestHasBody() and head.head.status.class() == .redirect and head.head.status != .not_modified;
+            const status = head.head.status;
+            // A request with a body is never replayed; its 3xx is the response.
+            const redirect = self.follow_redirects and !method.requestHasBody() and
+                status.class() == .redirect and status != .not_modified;
             const status_end = std.mem.indexOf(u8, head.head.bytes, "\r\n") orelse return error.HttpHeadersInvalid;
             const field_bytes = head.head.bytes.len - status_end - 4;
             if (field_bytes > limits.header_bytes - header_bytes) return error.Overflow;
@@ -342,6 +352,10 @@ const Cell = struct {
                 return err;
             };
             if (next_uri) |next| {
+                const next_secure = std.ascii.eqlIgnoreCase(next.scheme, "https");
+                if (secure and !next_secure) return error.HttpRedirectDowngrade;
+                secure = next_secure;
+                if (!sameOrigin(origin_uri, next)) send_headers = false;
                 uri = next;
                 method = next_method;
                 redirects += 1;
@@ -349,6 +363,21 @@ const Cell = struct {
         }
     }
 };
+fn componentText(component: std.Uri.Component) []const u8 {
+    return switch (component) {
+        .raw, .percent_encoded => |text| text,
+    };
+}
+fn defaultPort(scheme: []const u8) u16 {
+    return if (std.ascii.eqlIgnoreCase(scheme, "https")) 443 else 80;
+}
+fn sameOrigin(a: std.Uri, b: std.Uri) bool {
+    if (!std.ascii.eqlIgnoreCase(a.scheme, b.scheme)) return false;
+    const a_host = if (a.host) |host| componentText(host) else return false;
+    const b_host = if (b.host) |host| componentText(host) else return false;
+    if (!std.ascii.eqlIgnoreCase(a_host, b_host)) return false;
+    return (a.port orelse defaultPort(a.scheme)) == (b.port orelse defaultPort(b.scheme));
+}
 fn blockingIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
@@ -358,11 +387,11 @@ pub const Request = opaque {
         return @ptrCast(@alignCast(self));
     }
     /// Always consumes input, including startup failure; retirement owns rollback.
-    pub fn start(self: *Request, input: Input, method: std.http.Method, redirects: bool, scope: *scheduler.TaskScope) !void {
+    pub fn start(self: *Request, input: Input, method: std.http.Method, follow_redirects: bool, scope: *scheduler.TaskScope) !void {
         const cell = self.state();
         cell.phase = .{ .active = .{ .request = input } };
         cell.method = method;
-        cell.redirects = redirects;
+        cell.follow_redirects = follow_redirects;
         try cell.group.start(.{scope}, Cell.prepare, Cell.run, Cell.rollback);
     }
     pub fn target(self: *Request) []const u8 {

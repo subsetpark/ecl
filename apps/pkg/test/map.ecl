@@ -5,7 +5,7 @@
  (match? {kind user msg "package map assertion failed"} assert) `equal defp
 
  ### setp manifest
- {format 2 name "project" version "0.1.0" sources ["src/**/*.ecl"] exports [] requires {}}
+ {format 2 name "project" version "0.1.0" sources ["src/**/*.ecl"] requires {}}
  `manifest setp
 
  ### setp graph

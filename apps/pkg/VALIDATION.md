@@ -13,10 +13,9 @@ The extraction was checked on Linux x86-64 with Zig 0.16.0:
   whole-tree analysis, public module-map validation, application dispatch, and
   fast public behavior.
 - `zig build test-e2e` and the focused loader suite, including lexical visibility,
-  private registrations, failed artifact publication, native artifacts,
+  unexported registrations, failed artifact publication, native artifacts,
   concurrent loading, local discovery, and malformed-map refusal.
-- `zig build test-pkg-app` and ReleaseSafe `test-pkg-contracts`,
-  `test-pkg-generation`, `test-pkg-application`, `test-pkg-git`, and `test-ecl`.
+- `zig build test-pkg-app`, `test-pkg-generation`, `test-pkg-application`, `test-pkg-git`, and `test-ecl`.
   Package assertions use ECL's built-in testing interfaces. Host fixtures own
   servers, repositories, temporary directories, and separate processes.
 - ReleaseSafe `test-git-extension` and `test-pkg-fetch`, including deterministic

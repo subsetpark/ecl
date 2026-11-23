@@ -321,7 +321,7 @@ const Server = struct {
         const program = try std.fmt.allocPrint(
             allocator,
             "{s} (l {s} (dup `path at [{s}" ++
-                "\"/close-listener\" (pop l net.close 204 http.response.new) " ++
+                "\"/close-listener\" (pop l port.shutdown 204 http.response.new) " ++
                 "\"/stop\" (pop srv task.cancel 204 http.response.new) " ++
                 "{s}] case) http.server.@serve) @spawn `srv set " ++
                 "srv task.await `err at dup `kind at swap `data {{}} dict.get `reason `none dict.get",
@@ -377,7 +377,7 @@ test "http server: a request is materialized with method target path query lower
     const server = try Server.start(&runtime, port, "", "{}",
         // Body: the request without its peer; header x-peer: the peer text.
         "\"/a/b\" (dup `peer at swap `peer del str {status 200 headers {} body \"\"} `body rolldown put " ++
-            "swap wrap \"x-peer\" swap pair dict.from-flat `headers swap put) ", not_found_default);
+            "swap wrap \"x-peer\" swap pair dict.from-kvs `headers swap put) ", not_found_default);
     defer server.deinit();
     const observed = try exchange(port, "GET /a/b?x=1&y=2 HTTP/1.1\r\nHost: h\r\nX-Multi: one\r\nX-Multi: two\r\nContent-Length: 3\r\n\r\nabc");
     try expectStatus(observed, "HTTP/1.1 200 OK");
@@ -516,7 +516,7 @@ test "http server: the read deadline answers 408 and closes" {
 const gate_prelude = "(l2 net.accept) @spawn `gate set";
 const gate_rows =
     "\"/slow\" (pop gate task.await pop {status 200 headers {} body \"slow\"}) " ++
-    "\"/probe\" (pop gate 0 task.await-for `ok dict.has? (\"terminal\") (\"active\") if {status 200 headers {} body \"\"} `body rolldown put) ";
+    "\"/probe\" (pop gate 0 task.await-for `ok has? (\"terminal\") (\"active\") if {status 200 headers {} body \"\"} `body rolldown put) ";
 
 test "http server: max-in-flight stops accepting until a request completes" {
     // One acceptor: the probe waits in the backlog behind the slow request and
@@ -698,8 +698,8 @@ test "http server: HTTP client and server progress together with one worker" {
         defer runtime.close();
         const port = try runtime.listen("l");
         const program = try std.fmt.allocPrint(allocator, "(l {{max-in-flight 1}} (pop 200 \"same Session\" http.response.text) http.server.@serve) @spawn `srv set " ++
-            "{{target \"http://127.0.0.1:{d}/hello\"}} http.get `body at " ++
-            "srv dup task.cancel task.await pop l net.close", .{port});
+            "{{method \"GET\" target \"http://127.0.0.1:{d}/hello\"}} http.send `body at chars " ++
+            "srv dup task.cancel task.await pop l port.shutdown", .{port});
         defer allocator.free(program);
         try runtime.run(program);
         try runtime.expectDisplay("\"same Session\"");

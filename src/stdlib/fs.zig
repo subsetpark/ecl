@@ -6,7 +6,7 @@
 //! per scheduler step. Reads, writes, copies, and listings advance in fixed
 //! quanta; mutation stages into a private sibling entry and publishes with one
 //! atomic namespace operation. The driver owns every handle, staging entry,
-//! and quota reservation until its bounded cleanup releases them.
+//! and live-operation admission until its bounded cleanup releases them.
 
 const std = @import("std");
 const driver_completion = @import("../driver_completion.zig");
@@ -35,7 +35,7 @@ pub const doc =
     \\explicitly open other host directories. All filesystem operations are available on each
     \\root, subject to operating-system permissions and runtime limits.
     \\
-    \\A path is a UTF-8 slash path in the canonical grammar: `.` names the root itself, and every
+    \\A path is a UTF-8 slash path in the canonical grammar: `.` denotes the root itself, and every
     \\other path is one or more nonempty components separated by exactly one `/`, with no `.`,
     \\`..`, or NUL component and no leading, trailing, or repeated separator. Backslash is an
     \\ordinary filename character. Paths are never normalized here; normalize with
@@ -65,7 +65,9 @@ pub const doc =
     \\
     \\Reads, writes, and copies are bounded by the transfer limit (1 GiB by default) and advance
     \\in 64 KiB quanta; listings are bounded by an entry count (100,000) and aggregate name bytes
-    \\(64 MiB); a Session runs at most 64 filesystem operations at once. Mutation stages complete
+    \\(64 MiB). A Session runs at most 64 path operations at once; further ones wait, cancellably,
+    \\in arrival order. Operations on an open writer, cursor, or stage, and a lock's contention,
+    \\hold no such slot. Mutation stages complete
     \\contents in a private sibling entry and publishes with one atomic namespace operation, so
     \\failure or cancellation before the commit leaves the destination unchanged. Staged contents
     \\are flushed to the device before publication, so a crash after the commit cannot leave an
@@ -76,9 +78,8 @@ pub const doc =
 ;
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "reserve", .effect = "root -- reservation", .doc = "Retain a selected directory root and one filesystem operation slot until joined closure. A reservation can be passed as a root; its derived operations share that slot and reject overlapping work with `` `overflow `` and reason `` `limit ``. Closure waits for admitted work. This supports compositions that must retain admission across inspection and publication.", .primitive = reserve },
-    .{ .name = "open-writer", .effect = "root path -- writer", .doc = "Open private storage for an absent regular file. The parent must exist and `.` is rejected. A writer is distinct from a directory. It retains root lifetime and operation admission until joined cleanup. Staging dependencies survive task transfer. Closing an uncommitted writer removes its private contents and publishes no destination.", .primitive = openWriter },
-    .{ .name = "open-reader", .effect = "root path -- fd", .doc = "Open a regular file, following a final link within the root, as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all` and the `io` readers, with no size limit: the stream is read a chunk at a time. The calling scope owns the file; `fd.close` closes it earlier and joins cleanup, and a read after either is `` `io ``. A directory is `` `is-directory ``; a non-regular object is `` `not-regular ``.", .primitive = openReader },
+    .{ .name = "open-writer", .effect = "root path -- writer", .doc = "Open private storage for an absent regular file. The parent must exist and `.` is rejected. A writer is distinct from a directory. It retains root lifetime until joined cleanup. Staging dependencies survive task transfer. Closing an uncommitted writer removes its private contents and publishes no destination.", .primitive = openWriter },
+    .{ .name = "open-reader", .effect = "root path -- stream", .doc = "Open a regular file, following a final link within the root, as a readable byte endpoint for `stream.read`, `stream.read-line`, `stream.read-all` and the `io` readers, with no size limit: the stream is read a chunk at a time. The calling scope owns the file; `port.close` closes it earlier and joins cleanup, and a read after either is `` `io ``. A directory is `` `is-directory ``; a non-regular object is `` `not-regular ``.", .primitive = openReader },
     .{ .name = "write-chunk", .effect = "writer bytes --", .doc = "Append at most 65536 integer bytes. The streaming transfer limit (1 GiB by default) covers the complete stream, including previous chunks. A failed or cancelled append after writer admission prevents later publication of partial contents; a validation failure before admission does not.", .primitive = writeChunk },
     .{ .name = "commit-file", .effect = "writer --", .doc = "Stop admission, flush the completed stream, and atomically publish its previously absent destination. Publication is serialized against cancellation. Success joins writer cleanup; failure retains unpublished private state for explicit or scope cleanup. No allocation is required after the publication permit is granted.", .primitive = commitFile },
     .{ .name = "open-list", .effect = "root path -- cursor", .doc = "Open a scope-owned incremental enumeration of a confined directory. The cursor is a port resource, distinct from a directory root. It owns its descriptor until `port.close` or scope exit. An enumeration opened through staging or its descendants also closes when staging seals.", .primitive = openList },
@@ -110,7 +111,6 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Operation = enum {
-    reserve,
     open_writer,
     open_reader,
     open_list,
@@ -158,16 +158,15 @@ const Operation = enum {
             .remove_tree => "remove-tree",
             .remove_file => "remove-file",
             .remove_dir => "remove-dir",
-            .reserve, .mkdirs, .lock, .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
+            .mkdirs, .lock, .stat, .lstat, .list, .mkdir, .copy, .rename => @tagName(self),
         };
     }
 
-    const Shape = enum { host, root, unary, payload, copy, rename };
+    const Shape = enum { host, unary, payload, copy, rename };
 
     fn shape(self: Operation) Shape {
         return switch (self) {
             .open_dir => .host,
-            .reserve => .root,
             .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text => .payload,
             .copy => .copy,
             .rename => .rename,
@@ -186,18 +185,15 @@ const Operation = enum {
         };
     }
 
-    /// Words that act on a child entry reject `.`, which names the root.
+    /// Words that act on a child entry reject `.`, which denotes the root.
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
             .open_writer, .stage_dir, .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_tree, .remove_file, .remove_dir => true,
-            .reserve, .open_list, .mkdirs, .open_dir, .child_dir, .open_reader, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
+            .open_list, .mkdirs, .open_dir, .child_dir, .open_reader, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
     }
 };
 
-fn reserve(fiber: *Fiber) MachineError!void {
-    return begin(fiber, .reserve);
-}
 fn openWriter(fiber: *Fiber) MachineError!void {
     return begin(fiber, .open_writer);
 }
@@ -529,7 +525,7 @@ const Payload = union(enum) {
 
 fn begin(fiber: *Fiber, operation: Operation) MachineError!void {
     const count: usize = switch (operation.shape()) {
-        .host, .root => 1,
+        .host => 1,
         .unary => 2,
         .payload, .rename => 3,
         .copy => 4,
@@ -539,13 +535,6 @@ fn begin(fiber: *Fiber, operation: Operation) MachineError!void {
     // it is read, and an arm that fails returns before reaching a read.
     var inputs: Inputs = undefined;
     switch (operation.shape()) {
-        .root => {
-            var root = try fiber.popValue();
-            errdefer root.deinit();
-            if (!validRoot(root.borrow())) return fiber.typeError("a root symbol or directory resource");
-            const path = try list.fromCodepoints(fiber.allocator, &.{'.'});
-            inputs = .{ .root = root.take(), .path = path };
-        },
         .host => {
             var path = try fiber.popValue();
             errdefer path.deinit();
@@ -738,7 +727,7 @@ const Driver = struct {
     payload: ?Payload = null,
     root: ?RootSelection = null,
     second_root: ?RootSelection = null,
-    slot: ?fsport.OperationSlot = null,
+    admission: fsport.Admission = .{},
     resolved: ?fsport.Resolved = null,
     second: ?fsport.Resolved = null,
     /// Listing storage handed from a build state to the value-release
@@ -976,17 +965,25 @@ const Driver = struct {
             if (second_class == .root) return self.fail(fiber, .invalid_path);
             if (self.operation == .rename and class == .root) return self.fail(fiber, .invalid_path);
         }
+        if (self.payload) |*payload| {
+            if (payload.slice().len > self.limits.max_transfer_bytes) return self.fail(fiber, .limit);
+        }
+        // Queued work holds no root lease, so waiting never delays a
+        // directory's closure. Re-entry after the wake repeats the checks
+        // above, which are pure.
+        switch (self.admission.poll(self.access)) {
+            .admitted => {},
+            .queued => |source| {
+                try fiber.park(.{ .external = source });
+                return .yielded;
+            },
+        }
         const root = try self.acquireRoot(fiber, self.inputs.root);
         self.root = root;
-        if (self.operation == .reserve) return self.publishReservation(fiber);
         if (self.inputs.second_root) |second_root_value| {
             const second_root = try self.acquireRoot(fiber, second_root_value);
             self.second_root = second_root;
         }
-        if (self.payload) |*payload| {
-            if (payload.slice().len > self.limits.max_transfer_bytes) return self.fail(fiber, .limit);
-        }
-        self.slot = fsport.reservePair(self.access, root, self.second_root) orelse return self.fail(fiber, .limit);
         if (class == .root) {
             self.resolved = .{ .directory = .{ .dir = root.dir(), .owned = false } };
             self.state = .act;
@@ -1073,9 +1070,9 @@ const Driver = struct {
     fn publishDirectory(self: *Driver, fiber: *Fiber, dir: std.Io.Dir) MachineError!driver_completion.Progress {
         const scope = fiber.scheduling().scope;
         const adoption = if (self.operation == .open_list)
-            directory.adoptEnumeration(self.access, scope, dir, self.inputs.root, if (self.root) |root| root.reservation() else null)
+            directory.adoptEnumeration(self.access, scope, dir, self.inputs.root)
         else
-            directory.adoptChild(self.access, scope, dir, self.inputs.root, if (self.root) |root| root.reservation() else null);
+            directory.adoptChild(self.access, scope, dir, self.inputs.root);
         const result = adoption catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),
@@ -1094,7 +1091,6 @@ const Driver = struct {
 
     fn act(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         return switch (self.operation) {
-            .reserve => unreachable,
             .open_writer => self.beginStage(fiber, .create),
             .stage_dir => self.stageDirectory(fiber),
             .mkdirs => self.makeDirectories(fiber),
@@ -1119,26 +1115,6 @@ const Driver = struct {
         };
     }
 
-    fn publishReservation(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
-        const root = self.root.?;
-        const ticket = if (root.reservation()) |existing| existing: {
-            existing.retain();
-            break :existing existing;
-        } else fsport.Reservation.create(self.access) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Limit => return self.fail(fiber, .limit),
-        };
-        defer ticket.release();
-        const scope = fiber.scheduling().scope;
-        const dir = root.dir().openDir(self.io, ".", .{ .iterate = true }) catch |err| return self.fail(fiber, fsport.reasonForError(err));
-        const result = directory.adoptChild(self.access, scope, dir, self.inputs.root, ticket) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),
-        };
-        self.state = .complete;
-        return .{ .output = result };
-    }
-
     fn stageDirectory(self: *Driver, fiber: *Fiber) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(fiber, self.resolved.?);
         const scope = fiber.scheduling().scope;
@@ -1146,7 +1122,7 @@ const Driver = struct {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return self.fail(fiber, fsport.reasonForError(err));
         };
-        const result = directory.adoptStage(self.access, scope, stage, self.inputs.root, self.root.?.reservation()) catch |err| switch (err) {
+        const result = directory.adoptStage(self.access, scope, stage, self.inputs.root) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return fiber.fail(.cancelled, "directory scope is closing"),
         };
@@ -1160,6 +1136,9 @@ const Driver = struct {
             .file => |file| file,
             .failed => |reason| return self.fail(fiber, reason),
         };
+        // Contention can last as long as another holder wants, and that
+        // holder may need a slot of its own before it releases the lock.
+        self.admission.release();
         self.state = .{ .waiting_lock = file };
         return .yielded;
     }
@@ -1590,11 +1569,9 @@ const Driver = struct {
         if (self.operation == .open_writer) {
             const root = self.root.?;
             self.root = null;
-            const slot = self.slot.?;
-            self.slot = null;
             const target = self.resolved.?;
             self.resolved = null;
-            const stream = try @import("../filesystem_stream.zig").Stream.create(self.access, root, slot, target, staged);
+            const stream = try @import("../filesystem_stream.zig").Stream.create(self.access, root, target, staged);
             const scope = fiber.scheduling().scope;
             const result = directory.adoptStream(self.access, scope, stream, self.inputs.root) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1821,7 +1798,7 @@ const Driver = struct {
         if (self.path) |path| allocator.free(path);
         if (self.second_path) |path| allocator.free(path);
         self.inputs.deinit(releases);
-        if (self.slot) |*slot| slot.release();
+        self.admission.release();
         return true;
     }
 };

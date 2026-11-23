@@ -8,7 +8,6 @@ const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const modules = @import("modules.zig");
 const poll = @import("poll.zig");
-const module_snapshot = @import("module_snapshot.zig");
 
 const Value = value.Value;
 const Fiber = machine.Fiber;
@@ -16,8 +15,8 @@ const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "tests", .primitive = discover, .effect = "-- descriptors", .doc = "Test-Session-only discovery of the tests of every current module, including root sources' private tests, sorted by module then test name and source identifier. Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``. File-private tests also include an integer `` `source `` identifier local to the test Session, distinguishing equal names in different files. Descriptors never contain executable bodies or authority handles. Aliases do not duplicate entries. Ordinary Sessions receive `` `domain ``." },
-        .{ .name = "@test", .primitive = invoke, .effect = "descriptor -- result", .doc = "Test-Session-only protected invocation. Validate a pure descriptor returned by `tests`, late-bind its module/name and optional source identifier to the current catalog, and run the body as a fresh isolated Unit under that registration's private home and durable state. Return exactly `{ok (values)}` or `{err error}`; a missing current test is a reified error. Ordinary Sessions receive `` `domain ``." },
+        .{ .name = "tests", .primitive = discover, .effect = "-- descriptors", .doc = "When in a test session, return a list of test descriptors for every test defined by all currently-registered modules, sorted by (module, test name). Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``." },
+        .{ .name = "@test", .primitive = invoke, .effect = "descriptor -- result", .doc = "When in a test session, execute the test described by `descriptor` in a new unit. Returns `{ok (values)}` or `{err error}`." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -27,7 +26,6 @@ const DescriptorKeys = struct {
     name: u32,
     effect: u32,
     doc: u32,
-    source: u32,
 
     fn init() error{OutOfMemory}!DescriptorKeys {
         return .{
@@ -35,14 +33,12 @@ const DescriptorKeys = struct {
             .name = try intern.intern("name"),
             .effect = try intern.intern("effect"),
             .doc = try intern.intern("doc"),
-            .source = try intern.intern("source"),
         };
     }
 };
 
 const Collected = struct {
     module: intern.ModuleName,
-    source: ?module_snapshot.ArtifactId,
     metadata: modules.ModuleTestMetadata,
 
     fn retain(self: Collected) void {
@@ -65,14 +61,12 @@ const CollectedComparator = struct {
         right_module: []const u8,
         left_name: []const u8,
         right_name: []const u8,
-        source_order: std.math.Order,
         phase: enum { module, name } = .module,
         index: usize = 0,
     };
 
     pub fn init(_: Context, left: Collected, right: Collected) Cursor {
         return .{
-            .source_order = std.math.order(if (left.source) |id| @as(i64, @backingInt(id)) else -1, if (right.source) |id| @as(i64, @backingInt(id)) else -1),
             .left_module = intern.get(intern.moduleId(left.module)),
             .right_module = intern.get(intern.moduleId(right.module)),
             .left_name = intern.get(intern.bindingId(left.metadata.name)),
@@ -88,7 +82,7 @@ const CollectedComparator = struct {
             if (cursor.index == shared) {
                 if (left.len != right.len)
                     return .{ .complete = if (left.len < right.len) .lt else .gt };
-                if (cursor.phase == .name) return .{ .complete = cursor.source_order };
+                if (cursor.phase == .name) return .{ .complete = .eq };
                 cursor.phase = .name;
                 cursor.index = 0;
                 continue;
@@ -111,7 +105,7 @@ fn descriptorValue(
     keys: DescriptorKeys,
     item: Collected,
 ) error{OutOfMemory}!Value {
-    var pairs: [5]dict.Pair = undefined;
+    var pairs: [4]dict.Pair = undefined;
     var count: usize = 0;
     pairs[count] = .{
         .{ .symbol = .{ .name = keys.module } },
@@ -123,10 +117,6 @@ fn descriptorValue(
         .{ .symbol = .{ .name = intern.bindingId(item.metadata.name) } },
     };
     count += 1;
-    if (item.source) |source| {
-        pairs[count] = .{ .{ .symbol = .{ .name = keys.source } }, .{ .int = @backingInt(source) } };
-        count += 1;
-    }
     if (item.metadata.effect) |effect| {
         pairs[count] = .{ .{ .symbol = .{ .name = keys.effect } }, .{ .list = effect.header() } };
         count += 1;
@@ -142,7 +132,7 @@ const DiscoveryDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
 
-    cursor: ?modules.TestSessionDiscoveryCursor,
+    cursor: ?modules.Registry.TestDiscoveryCursor,
     items: std.ArrayList(Collected) = .empty,
     values: ?heap.OwnedValueBuffer = null,
     sorter: ?CollectedSortCursor = null,
@@ -172,7 +162,7 @@ const DiscoveryDriver = struct {
                 .pending => _ = work.spend(),
                 .item => |found| {
                     try self.items.ensureUnusedCapacity(fiber.allocator, 1);
-                    const item = Collected{ .module = found.module, .source = found.source, .metadata = found.metadata };
+                    const item = Collected{ .module = found.module, .metadata = found.metadata };
                     item.retain();
                     self.items.appendAssumeCapacity(item);
                     _ = work.spend();
@@ -244,7 +234,6 @@ const InvocationDriver = struct {
     scan_index: usize = 0,
     module_id: ?u32 = null,
     name_id: ?u32 = null,
-    source_id: ?module_snapshot.ArtifactId = null,
     module_validation: ?intern.ModuleNameCursor = null,
     name_validation: ?intern.NamespaceCursor = null,
     module_name: ?intern.ModuleName = null,
@@ -268,7 +257,7 @@ const InvocationDriver = struct {
     }
 
     fn missingOutcome(fiber: *Fiber) error{OutOfMemory}!Value {
-        var failure = machine.EclErr.init(.domain, "test descriptor names no current test");
+        var failure = machine.EclErr.init(.domain, "test descriptor matches no current test");
         defer failure.retire(fiber.releases);
         const payload = try machine.errorValue(
             fiber.allocator,
@@ -350,9 +339,7 @@ const InvocationDriver = struct {
                     self.lookup = fiber.inherited.test_execution.?.lookupCursor(
                         self.module_name.?,
                         self.test_name.?,
-                        self.source_id,
                     );
-                    if (self.lookup == null) return .{ .output = try missingOutcome(fiber) };
                     continue;
                 },
             };
@@ -370,9 +357,6 @@ const InvocationDriver = struct {
                 } else if (key.symbol.name == self.keys.name) {
                     if (self.name_id != null or payload != .symbol) return invalid(fiber);
                     self.name_id = payload.symbol.name;
-                } else if (key.symbol.name == self.keys.source) {
-                    if (self.source_id != null or payload != .int or payload.int < 0 or payload.int > std.math.maxInt(u32)) return invalid(fiber);
-                    self.source_id = @fromBackingInt(@intCast(@as(u32, @intCast(payload.int))));
                 } else if (key.symbol.name != self.keys.effect and key.symbol.name != self.keys.doc) {
                     return invalid(fiber);
                 }

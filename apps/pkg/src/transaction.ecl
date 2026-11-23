@@ -22,8 +22,8 @@
  (record -- record : "Validate the closed recovery-record schema.")
  (|record|
   record type `dict match? require
-  record dict.keys (str) each sort
-  [format manifest lock-before map-before lock-after generation] (str) each sort match?
+  record dict.keys (str) each dup grade at
+  [format manifest lock-before map-before lock-after generation] (str) each dup grade at match?
   require
   record `format at 1 match? require
   record `manifest at str.str? require
@@ -54,7 +54,7 @@
   project "ecl.modules" snapshot record `map-before at record reference wrap expected
   project record generation-path "/ecl.lock" cat fs.read-text
   record `lock-after at match? require
-  project record generation-path validator call) `check defp
+  project record generation-path validator apply) `check defp
 
  ### def prepare
  (project generation lock-text validate-generation -- :

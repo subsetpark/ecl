@@ -40,7 +40,6 @@ chooses among minimum versions declared by reachable manifests.
  `name "my.proj"
  `version "0.1.0"
  `sources ["src/**/*.ecl"]
- `exports ["my.proj"]
  `requires
  {"statistics" {package "foo"
                  `version "1.2.0"
@@ -49,8 +48,8 @@ chooses among minimum versions declared by reachable manifests.
 ```
 
 `` `format `` is the integer `2`. `` `name `` is the package's canonical name, and
-`` `version `` is its version. `` `sources `` lists portable source-file globs, and
-`` `exports `` lists exact public module names. `` `requires `` maps consumer-local aliases to requirements.
+`` `version `` is its version. `` `sources `` lists portable source-file globs.
+`` `requires `` maps consumer-local aliases to requirements.
 
 A requirement contains exactly `` `package ``, `` `version ``, `` `source ``, and `` `hash ``.
 The version is a minimum. Sources are tagged dictionaries: an archive has
@@ -86,22 +85,11 @@ The source list contains distinct portable globs. Globs use relative
 segments. A glob may match no files; overlapping globs
 select a file only once. An empty source list is valid.
 
-Exports are distinct, exact, package-owned module names. Exporting a module
-does not export its dotted children. Each export must have one top-level
-literal declaration in the selected source files: a module-name symbol
-followed by `@defm`. A source file may export several modules, and every
-export maps to exactly one source file. File and directory names do not
+A package's exports are the modules its selected source files declare: each
+top-level literal declaration, a module-name symbol followed by `@defm`. Every
+declared module must be package-owned and declared in exactly one file. A
+source file may declare several modules. File and directory names do not
 determine module names.
 
-Other registrations in a selected file are private to that file. They may
-use unrelated names, including names computed at run time. Modules and their
-tests can use their defining file's private
-registrations. Other files cannot access those registrations, including files
-in the same package. Two files may independently register the same private
-name.
-
-Calling an exported module preserves the called code's defining-file
-visibility. Loading another file does not add its private registrations to
-the caller's environment. Module-authored quotations and module handles keep
-their defining-file context when passed elsewhere; passing such a value
-explicitly is distinct from making its private module name public.
+A file may register no other module: a computed or nested registration is
+`` `domain `` when it runs.

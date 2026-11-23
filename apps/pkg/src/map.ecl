@@ -3,7 +3,7 @@
 (
  ### defp direct
  (lock name -- visible : "Project only a consumer's direct dependency visibility.")
- (|lock name| lock `requires at name at dict.vals (`package at) each sort) `direct defp
+ (|lock name| lock `requires at name at dict.vals (`package at) each dup grade at) `direct defp
 
  ### defp dependency
  (name lock bundles -- scope : "Map the inspected ECL artifacts of one installed package.")
@@ -21,7 +21,7 @@
  (manifest lock bundles local-root -- map :
   "Build an inert map with live local sources and explicit dependencies.")
  (|manifest lock bundles local-root|
-  lock `packages at dict.keys sort
+  lock `packages at dict.keys dup grade at
   {} `lock lock put `bundles bundles put `scopes {} put (insert) fold `scopes at
   manifest `name at
   {artifacts []} `root local-root put `visible lock manifest `name at direct put

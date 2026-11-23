@@ -98,16 +98,6 @@ test "module registration: @defm validates its name before running the body" {
     });
     try expectEmptyStack(&runtime);
     try expectErrorContains(&runtime, "ghost.v", &.{"kind undefined-word"});
-
-    // A registry change during construction can still refuse publication after
-    // the body ran; the previous registration is untouched.
-    try expectOk(&runtime, "((1) `v def) `aliased @defm `short `aliased alias");
-    try expectErrorContains(&runtime, "((2) `v def) `short @defm", &.{
-        "kind domain",
-        "collides with an alias",
-    });
-    try expectEmptyStack(&runtime);
-    try expectStack(&runtime, "aliased.v", "1");
 }
 
 test "module registration: nested definitions and reloads publish through the registry" {
@@ -140,9 +130,6 @@ test "module registration: a documentation annotation documents the generation i
     try expectStack(&runtime, "(: \"Second.\") () `doc.m @defm `doc.m module-doc", "\"Second.\"");
     try expectOk(&runtime, "() `doc.m @defm");
     try expectErrorContains(&runtime, "`doc.m module-doc", &.{ "kind domain", "no documentation" });
-
-    // An alias reports its target's documentation.
-    try expectStack(&runtime, "`doc-short `doc.s alias `doc-short module-doc", "\"Single.\"");
 
     // Only an annotation is consumed: any other list beneath the operands
     // stays on the caller's stack.
@@ -188,7 +175,6 @@ test "module registration: invocation context comes from the called module" {
     const body = "(" ++
         "(1) `tick defp " ++
         "(tick) `bump def " ++
-        "(`bump which) `report def " ++
         "( -- n ) (1 2) `liar def " ++
         "(liar) `same-home def" ++
         ") ";
@@ -199,15 +185,7 @@ test "module registration: invocation context comes from the called module" {
     // regardless of which was registered last.
     try expectStack(&runtime, "left.bump left.bump right.bump", "1 1 1");
 
-    // Reflection reports the called module's spelling and generation.
-    try expectOk(&runtime, "right.report left.report");
-    try std.testing.expectEqualStrings(
-        "bump -> right.bump def public generation 1\n" ++
-            "bump -> left.bump def public generation 1\n",
-        output.written(),
-    );
-
-    // A declared effect is a cross-home contract, and its diagnostic names the
+    // A declared effect is a cross-home contract, and its diagnostic reports the
     // module that was called.
     try expectErrorContains(&runtime, "right.liar", &.{ "kind contract", "word right.liar" });
     try expectErrorContains(&runtime, "left.liar", &.{ "kind contract", "word left.liar" });
@@ -226,7 +204,7 @@ test "module registration: a diagnostic spells the same word its failure reports
 
     // A module-local word has no interned qualified spelling, so a message
     // renders one into a scratch buffer while the `word` field is interned
-    // separately. The two must never name *different* words: two modules may
+    // separately. The two must never refer to *different* words: two modules may
     // define the same local name, so the unqualified atom alone would not say
     // which one failed. A name long enough to exhaust the scratch is
     // the case that used to substitute it.
@@ -253,21 +231,9 @@ test "module registration: failures leave prior registrations atomic" {
     defer runtime.deinit();
 
     // A failing construction body publishes no name.
-    try expectErrorContains(&runtime, "((1 0 div) call ((2) `v def)) `broken @defm", &.{"kind domain"});
+    try expectErrorContains(&runtime, "((1 0 div) apply ((2) `v def)) `broken @defm", &.{"kind domain"});
     try expectEmptyStack(&runtime);
     try expectErrorContains(&runtime, "broken.v", &.{"kind undefined-word"});
-
-    // A refused publication leaves the prior directory entry, generation, and
-    // durable state exactly as they were.
-    try expectOk(&runtime, "((1) `bump def) `kept @defm");
-    try expectStack(&runtime, "kept.bump", "1");
-    try expectOk(&runtime, "`kept-alias `kept alias");
-    try expectErrorContains(&runtime, "((2) `bump def) `kept-alias @defm", &.{
-        "kind domain",
-        "collides with an alias",
-    });
-    try expectEmptyStack(&runtime);
-    try expectStack(&runtime, "kept.bump", "1");
 }
 
 test "module loader: observation and dispatch require the requested registration" {
@@ -301,7 +267,7 @@ test "module loader: observation and dispatch require the requested registration
     });
 
     // Observation is registration-driven because it is *symbol*-driven:
-    // `which`, `see`, and `doc` all consume a name, and a name is exactly what
+    // `see` and `doc` both consume a name, and a name is exactly what
     // a registration is. `see` renders the stored
     // body, which is how one binding kind stays observable without any
     // operation that lifts a body out of its home.
@@ -390,7 +356,7 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "`io error.new error.valid?", "1");
     try expectStack(&runtime, "[1] result.ok result.ok?", "1");
     try expectStack(&runtime, "\"ab\" str.upper", "\"AB\"");
-    try expectStack(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.height", "2");
+    try expectStack(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.rows len", "2");
     try expectStack(&runtime, "[7 0] 6 rand.int nip type", "int");
 }
 
@@ -403,30 +369,30 @@ test "module values: a pushed quotation resolves in the image it was written in"
     // rather than wherever the caller applies it. The session has no `k` at
     // all, which is what makes the label load-bearing here.
     try expectOk(&runtime, "((1) `k def ((k)) `q def) `holding @defm holding.q `held set");
-    try expectStack(&runtime, "held call", "1");
+    try expectStack(&runtime, "held apply", "1");
 }
 
-test "module values: an escaped quotation names the image it was written in" {
+test "module values: an escaped quotation refers to the image it was written in" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // A word written in a module body names that image. A quotation that
+    // A word written in a module body refers to that image. A quotation that
     // escaped it goes on meaning what it meant, for as long as anything still
     // holds the image -- redefinition reaches only future calls; existing code
     // retains its meaning.
     try expectOk(&runtime, "((1) `k def ((k)) `q def) `held-name @defm held-name.q `held set");
-    try expectStack(&runtime, "held call", "1");
+    try expectStack(&runtime, "held apply", "1");
 
     // Replacing the name publishes a new image. Fresh calls through the name
     // get the new code, which is the whole of what the REPL needs.
     try expectOk(&runtime, "((2) `k def ((k)) `q def) `held-name @defm");
-    try expectStack(&runtime, "held-name.q call", "2");
+    try expectStack(&runtime, "held-name.q apply", "2");
 
     // The quotation held from the replaced generation is not re-pointed to the
     // new image: the Session keeps the old image, so it goes on meaning what
     // it meant.
-    try expectStack(&runtime, "held call", "1");
+    try expectStack(&runtime, "held apply", "1");
 }
 
 test "module values: an escaped locals body keeps its replaced image" {
@@ -437,10 +403,10 @@ test "module values: an escaped locals body keeps its replaced image" {
 
     try expectOk(&runtime, "((1 +) `inc def ((|x| x inc)) `q def ((|x| x)) `r def) `lowered-owner @defm " ++
         "lowered-owner.q `held set lowered-owner.r `plain set");
-    try expectStack(&runtime, "7 held call", "8");
+    try expectStack(&runtime, "7 held apply", "8");
     try expectOk(&runtime, "((0) `q def) `lowered-owner @defm");
-    // The body's own word names the replaced image, which the Session keeps.
-    try expectStack(&runtime, "7 held call", "8");
-    // Locals alone name nothing in the image.
-    try expectStack(&runtime, "7 plain call", "7");
+    // The body's own word refers to the replaced image, which the Session keeps.
+    try expectStack(&runtime, "7 held apply", "8");
+    // Locals alone refer to nothing in the image.
+    try expectStack(&runtime, "7 plain apply", "7");
 }

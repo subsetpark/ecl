@@ -29,7 +29,7 @@ context Mailboxes.
 > The session root closes only at `exit` or session end, which this model
 > leaves outside its actions.
 >
-> A created task permanently names one attached unit and is owned either by
+> A created task permanently refers to one attached unit and is owned either by
 > the session root or by one other task. Its capability is an ECL value of the
 > task kind. No two task identities attach to the same unit or expose the same
 > capability value. `task-owner` is meaningful only for a task that is not
@@ -224,7 +224,7 @@ where
 > `Send` is the formal `task.send`: it creates one message addressed to an
 > active task. Sending to a task whose
 > attached unit is terminal fails and creates nothing; the surrounding
-> specification names that failure. Parking under pressure is outside the
+> specification specifies that failure. Parking under pressure is outside the
 > model.
 Mailboxes ~> Send @ target: Task, task-created? target, unit-active? (task-unit target).
 ---

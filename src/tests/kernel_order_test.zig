@@ -37,17 +37,6 @@ test "order: grouped reductions compose from nested selectors" {
     });
 }
 
-test "order: aggregate reducers are quotations that resolve normally" {
-    try helper.expectStack(
-        "(pop 999) `sum def {\"v\" [1 2]} [] " ++
-            "[[\"quoted\" \"v\" (sum)] [\"core\" \"v\" (core.sum)]] table.aggregate",
-        "{\"quoted\" [999] \"core\" [3]}",
-    );
-    try helper.expectErrors(&.{
-        .{ .name = "symbol reducer", .source = "{\"v\" [1 2]} [] [[\"s\" \"v\" `sum]] table.aggregate", .kind = "type", .word = "raise" },
-    });
-}
-
 test "order: cmp and grade share exact whole-value ordering" {
     try helper.expectStack(
         "1 1 cmp 1 2 cmp 2 1 cmp " ++
@@ -83,10 +72,10 @@ test "order: cmp leaves elements after the first difference unvisited" {
     try helper.expectStack("[1 a] [2 b] cmp [[0 a]] [[1 {}]] cmp", "-1 -1");
 }
 
-test "order: grade and sort order lists by cmp" {
+test "order: grade orders lists by cmp" {
     try helper.expectStack(
         "[[1 2] [1 1] [0 9 9] [1]] grade " ++
-            "[[\"b\" 1] [\"a\" 2] [\"a\" 1]] sort " ++
+            "[[\"b\" 1] [\"a\" 2] [\"a\" 1]] dup grade at " ++
             "[[2 1] [1 2] [2 1]] grade " ++
             "[[1 x]] grade",
         "[2 3 1 0] ((\"a\" 1) (\"a\" 2) (\"b\" 1)) [1 0 2] [0]",
@@ -234,13 +223,6 @@ test "order: grade handles large numeric char and generic inputs" {
     try helper.expectStack(source.items, expected.items);
 }
 
-test "order: sort agrees with grade then at including representation" {
-    try helper.expectStack(
-        "[2 1 2 1] sort [2 1 2 1] dup grade at",
-        "[1 1 2 2] [1 1 2 2]",
-    );
-}
-
 test "order: distinct keeps first values across hash collisions" {
     try helper.expectStack(
         "[9007199254740993 9007199254740992.0 9007199254740993] distinct",
@@ -279,16 +261,22 @@ test "order: distinct charges nested structural hash and equality work" {
     try std.testing.expect(runtime.lastPolls() >= 2);
 }
 
-test "order: sort is grade applied to its list" {
+test "order: dup grade at sorts as the unfused words do" {
+    // The same words fused and unfused: a quotation is not the word `at`,
+    // so `(at) call` runs the gather `grade` produced the permutation for.
     try helper.expectStack(
-        "[3 1 2] sort [] sort [\"b\" \"a\"] sort [0.1 -0.0 0.2] sort",
-        "[1 2 3] () (\"a\" \"b\") [-0.0 0.1 0.2]",
+        "[3 1 2] dup grade at [] dup grade at [\"b\" \"a\"] dup grade at [0.1 -0.0 0.2] dup grade at " ++
+            "[3 1 2] dup grade (at) apply [0.1 -0.0 0.2] dup grade (at) apply " ++
+            "[2 1 2 1] dup grade at [2 1 2 1] dup grade (at) apply",
+        "[1 2 3] () (\"a\" \"b\") [-0.0 0.1 0.2] [1 2 3] [-0.0 0.1 0.2] [1 1 2 2] [1 1 2 2]",
     );
+    // Two equal lists that are not one value gather through the other's grade.
+    try helper.expectStack("[3 1 2] [3 1 2] grade at [9 8 7] [3 1 2] grade at", "[1 2 3] [8 7 9]");
     try helper.expectError(.{
-        .name = "sort names itself for incomparable elements",
-        .source = "[1 \"x\"] sort",
+        .name = "dup grade at reports grade for incomparable elements",
+        .source = "[1 \"x\"] dup grade at",
         .kind = "type",
-        .word = "sort",
+        .word = "grade",
         .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
     });
 }

@@ -8,23 +8,22 @@
   "Run one descriptor, print its total result, and return 1 exactly on failure.")
  (|descriptor|
   descriptor @test descriptor pair
-  dup first `ok dict.has?
+  dup first `ok has?
   (1 at
    dup `module at swap `name at pair (chars) each
-   "ok {}.{}" str.format io.print
+   "ok {}.{}" str.format io.eprint
    0)
   (dup 1 at
    dup `module at swap `name at pair (chars) each
    "{}.{}" str.format
-   swap first pair "FAIL {}: {}" str.format io.print
+   swap first pair "FAIL {}: {}" str.format io.eprint
    1)
   if) `report defp
 
  ### def run
  (-- :
-  "Discover every module's tests and invoke them sequentially in deterministic module and name
-   order, printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures
-   and request process status 1 if any failed.")
+  "Discover every module's tests and invoke them sequentially, printing one `ok` or `FAIL` line to
+   stderr for every result. Exit with status code 1 if any test failed.")
  (tests (report) each sum
   dup 0 >
   (pop 1 exit)

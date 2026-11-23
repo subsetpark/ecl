@@ -32,7 +32,7 @@ A fuller specification adds arguments, a working directory, and environment:
 # "hello world\n"
 ```
 
-These examples require the named executables and directory to exist, and the
+These examples require the executables and directory they use to exist, and the
 host to permit the requested paths and capture bounds. Use `bytes` to encode
 text for stdin and `chars` to decode complete UTF-8 output. Arbitrary process
 output may not be valid UTF-8.

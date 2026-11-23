@@ -14,7 +14,7 @@ I/O runtime to report a programming defect.
 
 `git.snapshot [] port.open` creates a scope-owned resource. Start an exchange
 with `resource git.fetch request port.begin`, acquire its readable byte endpoint
-with `exchange git.output port.endpoint`, and consume `fd.read` until `[]`.
+with `exchange git.output port.endpoint`, and consume `stream.read` until `[]`.
 Then `exchange port.result` returns the resolved 40-character lowercase commit
 string. Close the exchange and resource through `port.close`. A streaming
 exchange requires a concurrent consumer; waiting for its result before consuming
@@ -31,7 +31,7 @@ The request is a dictionary with required fields:
 Optional `ca-file` selects an explicit trust file; empty uses libgit2's system
 trust roots (`/etc/ssl/cert.pem` on macOS). Certificate and hostname verification
 remain enabled. `scratch` selects an absolute directory under which the extension
-creates a private temporary repository, default `/tmp`. Neither field names an
+creates a private temporary repository, default `/tmp`. Neither field specifies an
 installation destination. Unknown request fields fail closed.
 
 The following positive integer limits can only lower their defaults:

@@ -8,7 +8,7 @@
 "1,a\n2,\"b,c\"" csv.parse
 # => (("1" "a") ("2" "b,c"))
 
-"id,name\n1,Ada\n2,Bob" csv.parse table.from-header-rows {"id" (int)} table.cast
+"id,name\n1,Ada\n2,Bob" csv.parse table.from-header-rows {"id" ((int) each)} dict.evolve
 # => {"id" [1 2] "name" ("Ada" "Bob")}
 ```
 

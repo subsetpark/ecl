@@ -423,6 +423,16 @@ fn headedInput(operation: ecl.idioms.PhraseOp, variant: Variant) []const u8 {
             .float => "9 1.5 (dup)",
             .failure => "9 1 (pop pop)",
         },
+        // The list and its `dup`, one value. `empty` grades nothing; the
+        // spine variant orders lists lexicographically; the failure variant
+        // has an incomparable pair, `grade`'s fault.
+        .grade_at => switch (variant) {
+            .atom => "[3 1 2 1] dup",
+            .empty => "[] dup",
+            .spine => "[[1 2] [1] [0 9]] dup",
+            .float => "[0.1 -0.0 0.2 -0.0] dup",
+            .failure => "[1 \"x\" 2] dup",
+        },
     };
 }
 
@@ -612,6 +622,29 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
     try expectPhraseHits("([1] \"a\" [2]) [1 0 3] where at", 0);
     // Symbols have no typed leaf, so a symbol list is a generic source too.
     try expectPhraseHits("[a b c] [1 0 1] where at", 0);
+}
+
+test "idioms: dup grade at sorts without building the permutation" {
+    for ([_][]const u8{
+        "[a c b a] dup grade at",
+        "\"hello\" dup grade at",
+        "\"hello\" bytes dup grade at",
+        "10000 range reverse dup grade at",
+        "[2.5 -0.0 0.0 -1.5] dup grade at",
+    }) |source| {
+        compareExecutions(source) catch |err| {
+            std.log.err("dup grade at differs for `{s}`", .{source});
+            return err;
+        };
+        try expectPhraseHits(source, 1);
+    }
+    // Only a list gathered through its own grade fuses: an equal list that is
+    // a different value, a different list, or a gather that is not the word
+    // `at` runs the words as written.
+    try expectPhraseHits("[3 1 2] [3 1 2] grade at", 0);
+    try expectPhraseHits("[9 8 7] [3 1 2] grade at", 0);
+    try expectPhraseHits("[3 1 2] dup grade (at) apply", 0);
+    try expectPhraseHits("(pop pop \"shadowed\") `at def [3 1 2] dup grade at", 0);
 }
 
 test "idioms: match stencil decides windows without building them" {
@@ -949,7 +982,7 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         "[1 2 3 4 5 6] [2 3] reshape sum",
         "[1.5 2.5 3.5 4.5] [2 2] reshape product",
         "[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each",
-        "([1 2 3 4 5 6] [2 3] reshape sum) call",
+        "([1 2 3 4 5 6] [2 3] reshape sum) apply",
         "([2 3] reshape sum) `columns def [1 2 3 4 5 6] columns",
         // Past one turn's budget the fold continues as a driver.
         "300000 range 1.5 + [3 100000] reshape sum",
@@ -962,9 +995,9 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         };
     }
     for (fused) |source| try expectPhraseHits(source, 1);
-    // `cons call` is itself a phrase, so the quotation it runs adds its
+    // `cons apply` is itself a phrase, so the quotation it runs adds its
     // own fused phrase: two hits.
-    const cons_source = "[2 3] ([1 2 3 4 5 6] swap reshape sum) cons call";
+    const cons_source = "[2 3] ([1 2 3 4 5 6] swap reshape sum) cons apply";
     try compareModesExactly(cons_source);
     try expectPhraseHits(cons_source, 2);
     try expectHits("[1 2 3 4 5 6] [2 3] reshape sum", 1);

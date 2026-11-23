@@ -147,7 +147,7 @@ pub const PagingFloor = struct {
 /// Makes `count` operands available across the innermost paging floor, when
 /// there is one: a returned original the count reaches is consumed now, and
 /// values the substack lacks are paged in from beneath. False when a hard
-/// floor leaves the count short; the caller names the failure.
+/// floor leaves the count short; the caller reports the failure.
 pub fn cover(fiber: *Fiber, count: usize) error{OutOfMemory}!bool {
     const floor = fiber.floor.paging orelse return false;
     std.debug.assert(floor.floor == fiber.floor.base);
@@ -412,7 +412,7 @@ pub const Region = struct {
                 } else {
                     // The region lies above the floor beneath, whose returned
                     // originals all sit below it, so only this floor's records
-                    // name slots in it.
+                    // refer to slots in it.
                     self.sweep = .from(returned[0]);
                     self.phase = .sweep;
                 }
@@ -458,7 +458,7 @@ pub const Region = struct {
                     const original = originals.pop().?;
                     try fiber.pushOwned(original.value);
                     // Beneath the region, the originals end up at the base
-                    // once rotated; the records name those slots now.
+                    // once rotated; the records refer to those slots now.
                     const position = if (self.placement == .below) self.base + index else fiber.stack.items.len - 1;
                     if (original.shared) try noteReturned(fiber, position);
                 }

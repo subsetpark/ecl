@@ -8,6 +8,7 @@ const equal = @import("equal.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
+const kernel_dict = @import("kernel_dict.zig");
 const kernel_flat = @import("kernel_flat.zig");
 const poll = @import("poll.zig");
 
@@ -26,27 +27,29 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 
 fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
-        .at => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- value", .doc = "Index a list or look up a dict key. Pervades over nested list selectors, preserving their shape, so an index vector selects: `[10 20 30] [2 0] at` is `[30 10]`. A dictionary key is always one whole value, including when that value is a list. A missing dict key is an error." },
-        .where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- indices", .doc = "Expand a list of nonnegative ints into each index replicated its count times. A 0/1 mask is the common case, yielding the positions of 1s: `[0 1 1 0] where` is `[1 2]`." },
-        .first_where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- index", .doc = "Return the first index with a positive count, or the count-list length when none exists; counts after the first hit are not inspected." },
-        .in_word => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- bool", .doc = "Membership. Pervades over the sought value — the left operand, never the list — down to its atoms; each atom is then tested by whole-value `match?` against the list's top-level elements, so the result takes the sought value's shape: `[2 5] [1 2 3] in?` is `[1 0]`. The list is only ever read one level deep, and a list operand is decomposed before any comparison, so `in?` cannot ask whether a sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, the results of two atom searches. Use `([1 1] match?) any?` for that." },
-        .raze => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Flatten one level. Flat-map is `each raze`." },
-        .cat => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- list", .doc = "Concatenate two lists." },
-        .take => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "The first `count` elements; a negative count takes from the end. When the magnitude exceeds the length, the data cycles." },
-        .drop => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "Remove `count` elements from the front, or from the end when negative. (The stack word is `pop`.)" },
-        .range => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "bound -- list", .doc = "The ints `[0 1 … bound-1]`; the bound must be a nonnegative int." },
-        .shape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- shape", .doc = "The dimensions of rectangular data; `` `shape `` error on ragged data (`len` is the word that works on anything)." },
-        .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Top-level list element count. Lists may be ragged. Dictionary entry count is provided by `dict.size`." },
-        .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Exchange the first two axes of a list of equally wide rows. Cells are preserved whole: strings, nested lists, dictionaries, and mixed values need not share a type or shape. Only the immediate row lengths must agree. Strings used as rows transpose their characters.\n\nAn empty list or a list containing no list items is unchanged. Rows that are all empty transpose to the empty list; it cannot retain the other axis. Mixing list rows with non-list items or unequal row lengths raises `` `shape ``. A non-list argument raises `` `type ``." },
-        .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle the data into the nested-list shape; a zero axis yields empty lists and drops the axes after it." },
-        .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into one piece per start index. Each piece runs from its start up to the next start, and the last runs to the end of the list; elements before the first start belong to no piece. Starts must be integers from zero through the length, in nondecreasing order, so equal starts give empty pieces. A start out of range or below its predecessor fails with `` `domain `` at that start's position. Strings cut into strings." },
-        .windows => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list width -- windows", .doc = "Return every overlapping window of a positive int width, left-to-right: `\"abcd\" 2 windows` is `(\"ab\" \"bc\" \"cd\")`. The result has `max(len-width+1, 0)` elements, so a width larger than the list gives `()`; zero and negative widths are `` `domain ``. Strings window into strings." },
-        .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate top-level element order left by a count, wrapping cyclically; a negative count rotates right, counts beyond the length wrap, and the empty list is returned unchanged. Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K composes it from an index permutation). The count must be an int." },
-        .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list; an empty list is `` `domain ``." },
-        .reverse => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return a list with its top-level element order reversed." },
-        .rest => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return all but the first element of a nonempty list." },
-        .find => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list needle -- index", .doc = "Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches." },
-        .cons => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- list", .doc = "Prepend `value` to the left end of `list` as data: when the list runs, it pushes `value`. A symbol therefore enters as a quoted occurrence rather than a word; `execute` runs a symbol a quotation pushes.\n\nEx:\n  3 (+) cons\n(3 +)\n  `w () cons\n(`w)" },
+        .at => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- value", .doc = "Index a list or look up a dict key. A list pervades over the selector; a dict takes it as one whole key." },
+        .of => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "key collection -- value", .doc = "`at` with its operands reversed: index a list or look up a dict key. A list pervades over the selector; a dict takes it as one whole key." },
+        .where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- indices", .doc = "For each element `e` at index `i` of `counts`: collect `e` copies of `i` into a list." },
+        .first_where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- index", .doc = "For each element `e` at index `i` of `counts`: return the first `i` where `e 0 >`. Return the length of `counts` otherwise." },
+        .in_word => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "needle haystack -- bool", .doc = "Return 1 if `needle` is in `haystack`. A list haystack pervades over `needle`; a dict haystack takes `needle` as one whole key." },
+        .has_word => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "haystack needle -- bool", .doc = "`in?` with its operands reversed: return 1 if `haystack` contains `needle`. A list haystack pervades over `needle`; a dict haystack takes `needle` as one whole key." },
+        .raze => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Flatten `list` one level." },
+        .cat => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- list", .doc = "Concatenate `left` and `right`." },
+        .take => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- result", .doc = "Return a list containing the first `count` elements of `list`, or the last `count` elements if `count` is negative. If `list len 0 >`, cycle the elements of `list`." },
+        .drop => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- result", .doc = "Remove the first `count` elements of `list`, or the last `count` if `count` is negative." },
+        .range => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "bound -- list", .doc = "Return the integer range from 0 to `bound`, exclusive." },
+        .shape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "vec -- shape", .doc = "Given a rectangular n-dimensional vector `vec`, return a list of `n` elements, where each element is the length of `vec` along the associated dimension." },
+        .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Return the length of `list`." },
+        .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "vec -- flipped", .doc = "Transpose rectangular vector `vec` along the diagonal." },
+        .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list new-shape -- vec", .doc = "Flatten `list` and reflow it such that `vec shape new-shape match?`" },
+        .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list indices -- pieces", .doc = "Split `list` into sublists starting at every element of `indices`." },
+        .windows => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list width -- sublists", .doc = "Generate every contiguous subsequence of `list` of width `width`." },
+        .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Shift the elements of `list` to the left by `count` places, wrapping the first `count` elements to the end." },
+        .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of `list`." },
+        .reverse => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- result", .doc = "Return `list` with its elements in reverse order." },
+        .rest => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- result", .doc = "Return all but the first element of `list`." },
+        .find => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "haystack needle -- index", .doc = "Return the index of the first element of `haystack` for which `needle match?` returns 1, or the list length when no element matches." },
+        .cons => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- result", .doc = "Prepend `value` to the left end of `list`." },
     };
 }
 
@@ -61,9 +64,11 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
 fn primitive(fiber: *Fiber, comptime operation: Op) MachineError!void {
     return switch (operation) {
         .at => atPrimitive(fiber),
+        .of => ofPrimitive(fiber),
         .where => wherePrimitive(fiber),
         .first_where => firstWherePrimitive(fiber),
         .in_word => inPrimitive(fiber),
+        .has_word => hasPrimitive(fiber),
         .raze => razePrimitive(fiber),
         .cat => catPrimitive(fiber),
         .take => takePrimitive(fiber),
@@ -90,6 +95,21 @@ fn atPrimitive(fiber: *Fiber) MachineError!void {
     defer index.deinit();
     var collection = try fiber.popValue();
     defer collection.deinit();
+    return indexInto(fiber, &collection, &index);
+}
+
+fn ofPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var collection = try fiber.popValue();
+    defer collection.deinit();
+    var index = try fiber.popValue();
+    defer index.deinit();
+    return indexInto(fiber, &collection, &index);
+}
+
+/// `at` and `of` share one kernel; the caller owns both operands and releases
+/// whichever this does not take.
+fn indexInto(fiber: *Fiber, collection: *heap.OwnedValue, index: *heap.OwnedValue) MachineError!void {
     // A typed index vector over a typed source is one gather: the result's
     // representation is the source's, known before the first read.
     if (index.borrow() == .list and
@@ -97,8 +117,8 @@ fn atPrimitive(fiber: *Fiber) MachineError!void {
     {
         if (try startTypedGather(
             fiber,
-            &collection,
-            &index,
+            collection,
+            index,
             @intCast(index.borrow().list.length()),
         )) return;
         if (collection.borrow() == .list and index.borrow().list.length() != 0) {
@@ -398,7 +418,7 @@ const DictAtDriver = struct {
             .pending => .stepped,
             .complete => |maybe_result| result: {
                 const found = maybe_result orelse
-                    return fiber.fail(.domain, "at could not find the dict key");
+                    return fiber.failMissingKey("at could not find the dict key", self.key.borrow());
                 heap.retainValue(found);
                 break :result .{ .output = found };
             },
@@ -890,8 +910,25 @@ fn inPrimitive(fiber: *Fiber) MachineError!void {
     defer collection.deinit();
     var needle = try fiber.popValue();
     defer needle.deinit();
-    if (collection.borrow() != .list) return fiber.typeError("a list haystack");
-    if (try startTypedMembership(fiber, &needle, &collection)) return;
+    return membership(fiber, &needle, &collection);
+}
+
+fn hasPrimitive(fiber: *Fiber) MachineError!void {
+    try fiber.require(2);
+    var needle = try fiber.popValue();
+    defer needle.deinit();
+    var collection = try fiber.popValue();
+    defer collection.deinit();
+    return membership(fiber, &needle, &collection);
+}
+
+/// `in?` and `has?` share one kernel; the caller owns both operands and
+/// releases whichever this does not take. A list haystack pervades over the
+/// needle; a dict haystack takes the needle as one whole key, as `at` does.
+fn membership(fiber: *Fiber, needle: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
+    if (collection.borrow() == .dict) return kernel_dict.hasKey(fiber, collection, needle);
+    if (collection.borrow() != .list) return fiber.typeError("a list or dict haystack");
+    if (try startTypedMembership(fiber, needle, collection)) return;
     const cursor = try MembershipCursor.init(
         fiber.releases,
         fiber.allocator,
@@ -3039,7 +3076,7 @@ const leaf_kinds = [_]value.HeapKind{
 /// The typed copy kernels. The result's representation is the one
 /// `list.ListProfile` joins the sources' into: their own when they share one,
 /// the wider when they differ only in width (bytes into ints, narrower
-/// characters into wider), each element widened as it is copied. Each names
+/// characters into wider), each element widened as it is copied. Each lists
 /// exactly its operands: one source for a contiguous, reversed, or cyclic
 /// copy, or for an atom placed before it; two for a concatenation, whose
 /// second is `other_kind`; a source and its index vector for a gather. For a
@@ -3201,7 +3238,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
 /// through the kernel executor (support.Kernel). Each start returns false
 /// without consuming anything when they do not, leaving a
 /// mixed-representation move to the generic path. The caller knows
-/// its copy's shape, so each shape has its own start and names exactly its
+/// its copy's shape, so each shape has its own start and lists exactly its
 /// operands.
 fn startTypedSlice(fiber: *Fiber, source_owner: *heap.OwnedValue, shape: CopyShape, length: usize) MachineError!bool {
     if (length == 0) return false;

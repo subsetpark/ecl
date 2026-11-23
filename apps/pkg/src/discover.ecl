@@ -8,7 +8,7 @@
  ### defp known?
  (state requirement -- bool : "Recognize an exact manifest already inspected for this resolution.")
  (|state requirement|
-  state `catalog at requirement `package at {} dict.get requirement `version at dict.has?) `known?
+  state `catalog at requirement `package at {} dict.get requirement `version at has?) `known?
  defp
 
  ### defp fetched

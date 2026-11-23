@@ -112,6 +112,7 @@ test "empty locals lowering rejects before acquiring storage" {
             &.{},
             .{},
             &diag,
+            true,
         ),
     );
     try std.testing.expectEqualStrings("a locals declaration must contain at least one name", diag.text());

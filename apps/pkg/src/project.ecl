@@ -54,19 +54,19 @@
  ### def cache-path
  (-- path : "Choose a shared download-cache path; an empty result disables this optimization.")
  ("ECL_CACHE" environment dup empty? (pop cache-xdg) when
-  dup empty? not (absolute) when) `cache-path def
+  dup empty? (absolute) unless) `cache-path def
 
  ### def open-created
  (path -- directory :
   "Create an explicitly selected absolute directory through confined operations.")
  (absolute "/" fs.open-dir
   (|path root| root path 1 drop dup empty? (pop ".") when fs.mkdirs root port.close
-   path fs.open-dir) call) `open-created def
+   path fs.open-dir) apply) `open-created def
 
  ### def generation-id
  (-- identifier :
   "Create a collision-resistant local generation name independent of portable locks.")
- (rand.entropy rand.entropy rand.entropy rand.entropy 4 pack str bytes archive.sha256)
+ (rand.entropy rand.entropy rand.entropy rand.entropy 4 pack str bytes hash.sha256)
  `generation-id def
 
  ### def temporary

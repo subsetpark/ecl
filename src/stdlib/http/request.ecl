@@ -1,12 +1,11 @@
 ### module http.request
 (: "Words over partial or complete request dictionaries. Recognized optional fields are `` `method
-    ``, `` `target ``, `` `path ``, `` `query ``, `` `headers ``, `` `body ``, `` `peer ``, and ``
-    `params ``. `http.server` handlers receive every field except `` `params ``, which
-    `http.server.route` may add; outbound `http.get` and `http.post` accept partial values and apply
-    their documented defaults, while `http.send` consumes a complete value. The words here build a
-    complete request, read absent headers/query/body using empty defaults, and return updated
-    copies; the original is never changed. A word given a malformed request dictionary, or a name
-    that is not a string, is `` `type ``.")
+    ``, `` `target ``, `` `path ``, `` `query ``, `` `headers ``, `` `body ``, `` `peer ``, ``
+    `params ``, and `` `follow-redirects ``. `http.server` handlers receive every field except ``
+    `params ``, which `http.server.route` may add, and `` `follow-redirects ``, which only
+    `http.send` reads. The words here build an outbound request, read absent headers/query/body
+    using empty defaults, and return updated copies; the original is never changed. A word given a
+    malformed request dictionary, or a name that is not a string, is `` `type ``.")
 (
  ### defp type-error
  (message -- error : "Build a `type error with the message.")
@@ -30,14 +29,6 @@
  (value -- bool : "Return 1 for a dict from ASCII-lowercased string names to lists of strings.")
  (dup type `dict match? (dict.pairs (header-pair?) all?) (pop 0) if) `headers? defp
 
- ### defp byte?
- (value -- bool : "Return 1 for an int in 0...255.")
- (dup type `int match? (dup 0 >= swap 255 <= and) (pop 0) if) `byte? defp
-
- ### defp bytes?
- (value -- bool : "Return 1 for a byte list.")
- (dup type `list match? ((byte?) all?) (pop 0) if) `bytes? defp
-
  ### defp params?
  (value -- bool : "Return 1 for a dict from string names to string values.")
  (dup type `dict match? (dup dict.keys (str.str?) all? swap dict.vals (str.str?) all? and) (pop 0)
@@ -45,21 +36,23 @@
 
  ### defp string-field?
  (name request -- bool : "Return 1 when an optional request field is absent or a string.")
- (swap dup2 dict.has? (at str.str?) (pop pop 1) if) `string-field? defp
+ (swap dup2 has? (at str.str?) (pop pop 1) if) `string-field? defp
 
  ### def valid?
  (value -- bool :
   "Return 1 for a partial or complete request dictionary containing only recognized fields: string
    `` `method ``, `` `target ``, `` `path ``, `` `query ``, and `` `peer ``; a `` `headers ``
-   dictionary from ASCII-lowercased string names to lists of strings; a byte-list `` `body ``; and a
-   `` `params `` dictionary from string names to string values. Every field is optional. Never
-   raises.")
+   dictionary from ASCII-lowercased string names to lists of strings; a byte-list `` `body ``; a ``
+   `params `` dictionary from string names to string values; and a 0 or 1 `` `follow-redirects ``.
+   Every field is optional. Never raises.")
  (dup type `dict match?
-  (dup dict.keys [method target path query headers body peer params] in? (1 match?) all?
+  (dup dict.keys [method target path query headers body peer params follow-redirects] in? (1 match?)
+   all?
    (dup [method target path query peer] swap (string-field?) cons all?
     over `headers {} dict.get headers? and
     over `body [] dict.get bytes? and
     over `params {} dict.get params? and
+    over `follow-redirects 1 dict.get dup 0 match? swap 1 match? or and
     nip)
    (pop 0)
    if)
@@ -75,26 +68,15 @@
  (value message -- value : "Return a string or raise `type with the message.")
  (|value message| value str.str? message type-error assert value) `checked-string defp
 
- ### defp split-target
- (target -- path query : "Split a request target at its first `?`; the query is empty when absent.")
- ("?" str.split
-  dup len 1 =
-  (first "")
-  (dup first swap rest "?" str.join)
-  if) `split-target defp
-
  ### def new
  (method target -- request :
-  "Return a request with the method and target, `` `path `` and `` `query `` split from the target
-   at its first `?` (`` `query `` `\"\"` when absent), `{}` headers, `[]` body, and `\"\"` peer. A
-   non-string method or target is `` `type ``.")
+  "Return an outbound request with the method, the target URL, `{}` headers, and `[]` body, ready
+   for `http.send`. The `` `path ``, `` `query ``, and `` `peer `` fields describe a received
+   request, so only `http.server` sets them. A non-string method or target is `` `type ``.")
  ("http.request.new expects a string target" checked-string
   swap "http.request.new expects a string method" checked-string swap
-  dup split-target
-  (|method target path query|
-   `method method `target target `path path `query query `headers {} `body [] `peer "" 14 pack
-   dict.from-flat)
-  call) `new def
+  (|method target| `method method `target target `headers {} `body [] 8 pack dict.from-kvs)
+  apply) `new def
 
  ### def header
  (request name -- values :
@@ -148,9 +130,9 @@
  ("http.request.param expects a string parameter name" checked-string
   (|request name|
    request checked `params {} dict.get
-   dup name dict.has? "http.request.param found no such route parameter" domain-error assert
+   dup name has? "http.request.param found no such route parameter" domain-error assert
    name at)
-  call) `param def
+  apply) `param def
 
  ### def text
  (request -- string :
@@ -176,7 +158,7 @@
    request checked `headers {} dict.get name () dict.get value cat
    request `headers {} dict.get name rolldown put
    request `headers rolldown put)
-  call) `with-header def
+  apply) `with-header def
 
  ### def with-body
  (request body -- request :
@@ -194,5 +176,5 @@
   swap "http.request.with-param expects a string parameter name" checked-string swap
   (|request name value| request checked `params {} dict.get name value put request `params rolldown
    put)
-  call) `with-param def
+  apply) `with-param def
 ) `http.request @defm

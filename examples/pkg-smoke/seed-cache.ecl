@@ -3,4 +3,4 @@
 ("0123456789abcdef" swap find) each
 dup len 2 div 2 pair reshape
 (|pair| pair first 16 * pair 1 at +) each
-(|bytes| pkg.project.cache-path bytes pkg.fetch.hash bytes pkg.cache.write) call
+(|bytes| pkg.project.cache-path bytes pkg.fetch.hash bytes pkg.cache.write) apply

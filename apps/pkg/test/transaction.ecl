@@ -30,14 +30,14 @@
   (|project|
    project generation fs.mkdirs
    project "ecl.pkg"
-   "{format 2 name \"project\" version \"0.1.0\" sources [] exports [] requires {}}\n"
+   "{format 2 name \"project\" version \"0.1.0\" sources [] requires {}}\n"
    fs.create-text
    project "ecl.lock" old-lock fs.create-text
    project "ecl.modules" old-map fs.create-text
    project generation "/ecl.lock" cat new-lock fs.create-text
    project generation "/validated" cat "accepted" fs.create-text
    project project ".ecl/mutation.lock" fs.lock)
-  call) `fixture defp
+  apply) `fixture defp
 
  ### defp prepare
  (project -- : "Persist the proposed generation before changing either root file.")
@@ -66,7 +66,7 @@
    project ".ecl/publication.ecl" fs.exists? 0 equal
    project generation "/ecl.lock" cat fs.read-text new-lock equal
    lock port.close project port.close)
-  cat call) `boundary defp
+  cat apply) `boundary defp
 
  ### test interruption-boundaries
  (-- : "Recovery is idempotent before publication, between root writes, and after activation.")
@@ -80,7 +80,7 @@
    project prepare project recover
    project new-lock generation pkg.layout.reference roots
    project ".ecl/publication.ecl" fs.exists? 0 equal
-   lock port.close project port.close) call) `initial-publication test
+   lock port.close project port.close) apply) `initial-publication test
 
  ### defp conflict
  (path -- : "Refuse edits to any transaction input without changing either root file.")
@@ -94,7 +94,7 @@
    project path fs.read-text "unrelated edit" equal
    project ".ecl/publication.ecl" fs.exists? 1 equal
    lock port.close project port.close)
-  cat call) `conflict defp
+  cat apply) `conflict defp
 
  ### test refuses-conflicts
  (-- :

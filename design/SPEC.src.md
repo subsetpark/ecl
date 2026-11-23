@@ -16,7 +16,7 @@ ECL has three distinct fields of conformance:
   modules, and tasks specified here.
 - An **ECL standard environment** is a conforming language implementation
   that also provides the vocabulary specified by [`STDLIB.md`](STDLIB.md).
-  When a named word is a semantic primitive of the language, this document is
+  When a word in that vocabulary is a semantic primitive of the language, this document is
   the authority for its spelling and behavior and `STDLIB.md` indexes that
   definition rather than restating it.
 - An **ECL distribution or toolchain** may additionally provide a command,
@@ -110,13 +110,15 @@ characters. An atom is classified whole-token, in this order:
      literal; NaN values do not exist (see Numbers).
 2. **Char** — `\` followed by one character (\a), one of the
    names `\space`, `\tab`, `\newline`, or `\u{...}` with one to six hex
-   digits naming a Unicode scalar value (surrogate halves and values above
+   digits denoting a Unicode scalar value (surrogate halves and values above
    U+10FFFF are parse errors).
 3. **Quote** — `` ` `` followed by a symbol. It reads as one quoted occurrence
    of that symbol, which run pushes the symbol: `` `foo `` and `(foo) first`
    push the same value. 
    `` ` `` is reserved token-initially and banned inside symbols.
-4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
+4. **Slot** — exactly `.x`, `.y`, or `.z`: an implicit local (see Forms).
+   Slots are not symbols and cannot be quoted.
+5. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
 
 **Symbols** are one or more segments joined by `.`. The last `.` in a symbol
@@ -147,7 +149,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
   enclosed forms. Symbols inside of list literals are *never evaluated*;  the
   forms `(foo)`, `` (`foo) ``, `[foo]` and `` [`foo] `` all produce
   values that evaluate as equal: one-element lists containing the symbol `foo`. 
-  (Critically, however, the semantics of `call` on the resulting lists are
+  (Critically, however, the semantics of `apply` on the resulting lists are
   different: unquoting `` (`foo) `` merely pushes the symbol to the stack,
   while unquoting `(foo)` executes the symbol.) 
   The pair choice is free per pair, and **pairs must match**:
@@ -159,9 +161,15 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 - Locals create temporary, quotation-internal bindings. Any word bound in the
   locals declaration can be used any number of times within the quotation.
   The first name receives the deepest consumed stack value and the last name
-  the top value, so `1 2 (|x y| x y -) call` is `-1`.
+  the top value, so `1 2 (|x y| x y -) apply` is `-1`.
   Locals do **not** exhibit lexical scoping: a local is not visible inside a
   nested quotation within the declaring body. 
+- Slots are implicit locals. A list whose top-level forms include a slot binds
+  as many values as its highest slot's position (`.x` 1, `.y` 2, `.z` 3), and
+  each slot pushes its value: `(.x .x *)` is `(|x| x x *)`, and `(.y 1 +)`
+  consumes two values and keeps the top one. A slot belongs to the innermost
+  list that contains it, so a nested list's slots are its own. A list may not
+  have both a locals declaration and slots at its top level.
 
 ## Values and external representations
 
@@ -224,6 +232,10 @@ produces a scalar boolean or boolean mask (see Pervasion). For example,
   and then by length; strings are lists of chars. Anything else, including
   cross-kind pairs, is a `` `type `` error, but two lists compare only through
   their first unequal element pair. `grade` orders by this ordering.
+- A dictionary has no entry order. Every enumeration of one dictionary value
+  (`dict.keys`, `dict.vals`, `dict.pairs`, `each`, printing) visits its
+  entries in the same unspecified order, so its keys and values correspond by
+  position.
 - Words that require a boolean reject every value outside the formally defined
   Boolean role, including other ints.
 
@@ -250,7 +262,7 @@ Reflection operations inspect binding metadata through separate mechanisms.
 Every word is resolved when it is reached, in the scope that occurrence was
 written in (see [Where a word resolves](#where-a-word-resolves)), against the current definitions and module
 registrations. This holds alike for top-level source, for definition bodies,
-and for every quotation applied at run time, by `call`, a combinator,
+and for every quotation applied at run time, by `apply`, a combinator,
 `@attempt`, or as a task's body. A quotation applied at run time is not checked
 before it runs: an unresolved word fails at that word, after the forms before
 it have run. Nested quotations and quoted words are data and resolve only when
@@ -278,8 +290,8 @@ before its module is sealed.
 A body running when a word it calls is replaced may run the old definition for
 earlier calls and the new one for later ones. There is no historical view: a
 unit, a task, and an `@attempt` see the definitions current as each word is
-reached. Explicit operations on names — `execute`, `doc`, `effect`, `which`,
-and `see` — resolve the supplied symbol in its own scope against the current
+reached. Explicit operations on names — `execute`, `doc`, `effect`, and
+`see` — resolve the supplied symbol in its own scope against the current
 definitions each time they run. 
 
 A word written in a module image resolves in that image, so code written in an
@@ -377,7 +389,7 @@ execution contexts:
 Three quotation-application behaviors exist:
 
 - **Inline**: the quotation runs on the current stack. The inline words
-  are `call`, `dip`, `dip2`, `dip-n`, `both`, `if`, `when`, `unless`,
+  are `apply`, `dip`, `dip2`, `dip-n`, `both`, `if`, `when`, `unless`,
   `case`, and `times`, and the action quotations of `cond`, `while`, and
   `linrec`.
 - **Paging**: the quotation runs on a substack that starts empty and takes
@@ -485,7 +497,7 @@ stdlib definition.
 Shadowing a core name is allowed but reported. When a `def`, `set`, or `import`
 at top level introduces a session name that is also a public core name, a
 warning is written to the diagnostic stream. Sealing a module whose definitions
-or imports include a public core name writes one warning per such name, naming
+or imports include a public core name writes one warning per such name, each identifying
 the module. Standard-library modules shadow core names deliberately and are not
 reported. The binding takes effect either way, and `core.` still reaches the
 core word.
@@ -494,7 +506,7 @@ Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
 first use. `@defm` with a standard-library module name is `` `domain ``, as is
-`alias` with one as either the alias or its target. A dotted name below one,
+`alias` with one as the alias name. A dotted name below one,
 such as `dict.extra`, is an ordinary module name.
 
 Every activation has a **current scope**. A word belonging to a module runs with
@@ -655,8 +667,9 @@ into those keys.
   unchanged, so the result is `\a`.
 - Arithmetic on int64 that overflows is an `` `overflow `` error — no wrapping, no
   promotion to float or bignum. Scalar and array arithmetic behave identically.
-- `/` is float division. `div` is checked integer division; its division by
-  zero is `` `domain ``.
+- `/` is float division. `div` is checked integer division, floored toward
+  negative infinity; `mod` is its remainder and takes the sign of the divisor,
+  so `x y div y * x y mod +` is `x`. Division by zero is `` `domain ``.
 - Float arithmetic follows IEEE 754, so a finite computation may produce
   `inf` or `-inf`: overflow (`1e308 10 *`), poles (`0 log` is `-inf`), and
   division of a nonzero number by zero (`1 0 /` is `inf`, `1 -0.0 /` is
@@ -722,7 +735,7 @@ new. Both reject a string that is not a valid symbol spelling as `` `domain ``.
 The interned name space grows only through reading source, `parse`, `intern`,
 and the module loaders; words that materialize values from external data
 produce strings, never symbols. A symbol built from a string is the same value
-as the symbol read from source, so `"dup" symbol wrap call` executes `dup`.
+as the symbol read from source, so `"dup" symbol wrap apply` executes `dup`.
 
 ## Modules
 
@@ -808,8 +821,12 @@ reference to any core word that's been shadowed in the current scope.
 
 Qualified names can be resolved and executed with `execute`.
 
-`alias` registers a short registry name; aliases and module names may not
-collide in either direction. `which` shows any name's resolution.
+``name `short alias`` binds `short` in the current scope as an alias of the
+module name `name`, as `def` binds a word: a module's alias belongs to its image
+and is legal only during construction, and a top-level alias belongs to the
+session. A qualified word written in that scope whose module part is exactly
+`short` refers to `name` instead, resolved at each call, so the alias follows
+reload. An alias is never a word or an export, and no other scope sees it.
 
 ### Tests
 
@@ -926,14 +943,14 @@ later read. One read may be pending per endpoint, and a read may leave bytes
 read ahead with the endpoint value. Writes from different tasks are served in
 the order they began, and each call's bytes stay contiguous.
 
-`fd.close` closes an endpoint that is its own resource, such as an open file.
+`port.close` closes an endpoint that is its own resource, such as an open file.
 Such an endpoint is owned as a port is. An endpoint borrowed from a port
 closes with that port.
 
-The standard streams `fd.in`, `fd.out`, and `fd.err` belong to the session
+The standard streams `stream.in`, `stream.out`, and `stream.err` belong to the session
 rather than to a task. Every task and the root share the same three values,
 nothing closes them, and `@give` does not move them. When standard input is
-the program source there is no input device, and `fd.in` raises `` `io ``.
+the program source there is no input device, and `stream.in` raises `` `io ``.
 
 #### Filesystem
 
@@ -947,7 +964,7 @@ atomically or leaves its destination unchanged.
 #### Processes
 
 The shipped `proc` module provides subprocess words. A process specification
-names an absolute executable path, an argument vector, an optional absolute
+carries an absolute executable path, an argument vector, an optional absolute
 working directory, and the child's complete environment. It never denotes a
 shell command and never searches `PATH`, and the child inherits no host
 environment variable the program did not pass.

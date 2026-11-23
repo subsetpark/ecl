@@ -1,59 +1,80 @@
-//! Host primitives behind the `str` module, published as `str.core`. `kind`
-//! reads a list's physical representation so `str.str?` can answer in
-//! constant time for the representation every string producer uses, and scan
-//! only a generic list, whose elements may be anything. `format`, `split`, and
-//! `join` are the text kernels `str` re-exports.
+//! Host primitives behind the `str` module, which imports them. `str?`
+//! answers in constant time for the representation every string producer
+//! uses, and scans only a generic list, whose elements may be anything.
+//! `format`, `split`, and `join` are the text kernels `str` re-exports.
 const env = @import("../env.zig");
-const dict_text = @import("../kernel_dict_text.zig");
-const intern = @import("../intern.zig");
+const text = @import("../kernel_text.zig");
+const heap = @import("../heap.zig");
+const list = @import("../list.zig");
 const machine = @import("../machine.zig");
 
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
+const Value = machine.Value;
 
 /// The module's documentation, which `module-doc` reflects.
 pub const doc =
     \\Host kernels behind the `str` module, which validates their operands and composes them into
-    \\its public words, and re-exports `format`, `split`, and `join`.
+    \\its public words, and re-exports `str?`, `format`, `split`, and `join`.
 ;
 
 pub const words = [_]env.BuiltinWord{
     .{
-        .name = "kind",
-        .effect = "value -- kind",
-        .doc = "`string for a list stored as characters, `generic for a list whose elements must be examined, `other for a value that cannot be a string.",
-        .primitive = kind,
+        .name = "str?",
+        .effect = "value -- bool",
+        .doc = "Return 1 when `value` is a list of chars.",
+        .primitive = isString,
     },
     .{
         .name = "format",
         .effect = "values template -- string",
-        .doc = "Interpolate positional `{}` placeholders. Strings contribute their contents; other values contribute canonical `str`. `{{` and `}}` emit literal braces.",
-        .primitive = dict_text.formatPrimitive,
+        .doc = "Interpolate positional `{}` placeholders. Strings are rendered verbatim; other values are rendered with `str`. User `{{` and `}}` to emit literal braces.",
+        .primitive = text.formatPrimitive,
     },
     .{
         .name = "split",
         .effect = "string separator -- parts",
-        .doc = "Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list.",
-        .primitive = dict_text.splitPrimitive,
+        .doc = "Split `string` at every occurrence of `separator`. When `separator` is \"\", then `parts` will be a list of single-codepoint strings.",
+        .primitive = text.splitPrimitive,
     },
     .{
         .name = "join",
         .effect = "strings separator -- string",
-        .doc = "Join a list of strings with a separator string.",
-        .primitive = dict_text.joinPrimitive,
+        .doc = "Join `strings` with `separator`.",
+        .primitive = text.joinPrimitive,
     },
 };
 
-fn kind(fiber: *Fiber) MachineError!void {
+fn isString(fiber: *Fiber) MachineError!void {
     var item = try fiber.popValue();
     defer item.deinit();
-    const spelling: []const u8 = switch (item.borrow()) {
-        .list => |header| if (header.length() == 0) "string" else switch (header.kind()) {
-            .leaf_char1, .leaf_char2, .leaf_char4 => "string",
-            .generic_spine => "generic",
-            .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => "other",
+    const answer = switch (item.borrow()) {
+        .list => |header| if (header.length() == 0) true else switch (header.kind()) {
+            .leaf_char1, .leaf_char2, .leaf_char4 => true,
+            .generic_spine => return fiber.startDriver(ScanDriver{ .collection = .init(item.take()) }),
+            .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => false,
         },
-        else => "other",
+        else => false,
     };
-    try fiber.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
+    try fiber.pushOwned(.{ .int = @intFromBool(answer) });
 }
+
+/// A generic list may hold chars, so its elements are examined one budget
+/// unit each until a non-char answers 0 or the end answers 1.
+const ScanDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    pub const inline_driver = true;
+    collection: heap.Owned(Value),
+    index: usize = 0,
+
+    pub fn advance(fiber: *Fiber, self: *ScanDriver) MachineError!machine.WorkProgress {
+        const collection = self.collection.borrow();
+        const count: usize = @intCast(collection.list.length());
+        const budget = fiber.workBudget();
+        while (self.index < count) : (self.index += 1) {
+            if (!budget.spend()) return .stepped;
+            if (list.atUnchecked(collection, self.index) != .char) return .{ .output = .{ .int = 0 } };
+        }
+        return .{ .output = .{ .int = 1 } };
+    }
+};

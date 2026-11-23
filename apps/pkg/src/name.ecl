@@ -56,7 +56,7 @@
   (1 drop "]" str.split dup len 2 =
    (|parts| parts first empty? not parts 1 at port-suffix? and) (pop 0) if)
   (dup ":" str.split first
-   (|authority host| host empty? not authority host len drop port-suffix? and) call)
+   (|authority host| host empty? not authority host len drop port-suffix? and) apply)
   if) `hostname? defp
 
  ### def url?
@@ -102,4 +102,61 @@
   (|neighbors| neighbors first neighbors 1 at related?)
   stencil
   (1 =) any?) `collides? def
+
+ `pkg.test.support `t alias
+
+ ### test ownership
+ (-- : "Recognize only a package's own name and dotted descendants.")
+ ("foo" "foo" pkg.name.owns? 1 t.equal
+  "foo" "foo.bar" pkg.name.owns? 1 t.equal
+  "foo" "foo.bar.baz" pkg.name.owns? 1 t.equal
+  "foo" "foobar" pkg.name.owns? 0 t.equal
+  "foo.bar" "foo" pkg.name.owns? 0 t.equal
+  "a.b" "a.b.c" pkg.name.owns? 1 t.equal
+  "a.b" "a.c" pkg.name.owns? 0 t.equal
+  (5 "foo" pkg.name.owns?) `type "two package names" t.raises-containing
+  ("foo" "Foo.Bar" pkg.name.owns?)
+  `domain
+  "lowercase segments"
+  t.raises-containing
+  ("foo" "foo..bar" pkg.name.owns?)
+  `domain
+  "lowercase segments"
+  t.raises-containing)
+ `ownership test
+
+ ### test url-hostnames
+ (-- : "Reject empty URL hosts while retaining ports, queries, and IPv6 literals.")
+ (("https://?query" "https://:443/path" "https:///path" "https://[]/path"
+   "https://[::1/path")
+  (pkg.name.url? 0 t.equal) for
+  ("https://example.com/path" "https://example.com:443/path"
+   "https://example.com?query" "https://[::1]/path" "https://[::1]:443/path")
+  (pkg.name.url? 1 t.equal) for
+  ({kind archive url "https://?query"} pkg.manifest.validate-source)
+  `domain "HTTPS" t.raises-containing
+  ("https://:443/path" pkg.fetch.archive) `domain "HTTPS" t.raises-containing)
+ `url-hostnames test
+
+ ### test url-ports
+ (-- : "Require an empty authority suffix or a colon followed by decimal port digits.")
+ (("https://[::1]suffix/path" "https://[::1]:abc/path"
+   "https://[::1]]/path" "https://[::1]:443:80/path"
+   "https://example.com:abc/path" "https://example.com:443:80/path"
+   "https://example.com:+443/path" "https://[::1]:٤٤٣/path")
+  (pkg.name.url? 0 t.equal) for
+  ("https://example.com:/path" "https://[::1]:/path"
+   "https://example.com:00443?query" "https://[::1]:00443?query")
+  (pkg.name.url? 1 t.equal) for
+  ({kind archive url "https://[::1]suffix/path"} pkg.manifest.validate-source)
+  `domain "HTTPS" t.raises-containing
+  ("https://example.com:abc/path" pkg.fetch.archive) `domain "HTTPS" t.raises-containing)
+ `url-ports test
+
+ ### test documentation
+ (-- : "Require documentation for every package-name export.")
+ ((pkg.name.valid? pkg.name.hash? pkg.name.url?
+   pkg.name.owns? pkg.name.collides?)
+  t.documented)
+ `documentation test
 ) `pkg.name @defm

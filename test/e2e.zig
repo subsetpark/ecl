@@ -50,7 +50,7 @@ test "e2e: proc direct execution preserves argv cwd environment and policy" {
     try result.expect(.{ .exit_code = 0, .stdout = "1 1 1\n", .stderr = "" });
 
     // The CLI's own environment still holds the probe, and `getenv` sees it,
-    // but a child receives only what its specification names.
+    // but a child receives only what its specification lists.
     const isolated = try std.fmt.allocPrint(
         allocator,
         "\"ECL_PROCESS_PROBE\" getenv " ++
@@ -197,7 +197,7 @@ test "e2e: proc run captures split output termination timeout and overflow" {
         allocator,
         "`proc (run) import {{executable \"{s}\" " ++
             "args (\"close-stdin\")}} `stdin [1] 200000 take pair " ++
-            "dict.from-flat dict.merge run",
+            "dict.from-kvs dict.merge run",
         .{process_exe},
     );
     defer allocator.free(broken_stdin);
@@ -228,11 +228,11 @@ test "e2e: proc write serializes at scheduler call arrival" {
     defer allocator.free(process_exe);
     const program = try std.fmt.allocPrint(
         allocator,
-        "`proc (spawn write close-input read-stdout wait) import " ++
+        "`proc (spawn stdin write read-stdout wait) import " ++
             "{{executable \"{s}\" args (\"first-byte\")}} spawn `p set " ++
             "[1] 200000 take `payload set " ++
             "(p payload write) @spawn `early set () @spawn task.await pop " ++
-            "p [2] write early task.await pop p close-input p 1 read-stdout [1] match? p wait pop",
+            "p [2] write early task.await pop p stdin port.finish p 1 read-stdout [1] match? p wait pop",
         .{process_exe},
     );
     defer allocator.free(program);
@@ -292,7 +292,7 @@ test "e2e: CLI net accept, read, write, and close round-trip over loopback" {
             build_options.ecl_exe,
             "{address \"127.0.0.1\" port 0} net.listen `l set " ++
                 "l net.local-address io.pp " ++
-                "l net.accept `c set c 4 net.read io.pp c \"pong\" bytes net.write c net.close",
+                "l net.accept `c set c 4 net.read io.pp c \"pong\" bytes net.write c port.shutdown",
         },
         .stdin = .ignore,
         .stdout = .pipe,
@@ -609,73 +609,32 @@ test "e2e: ecl test runs the default runner" {
     defer result.deinit();
     try result.expect(.{
         .exit_code = 1,
-        .stdout_contains = &.{
+        .stdout = "",
+        .stderr_contains = &.{
             "ok app.suite.first\n",
             "ok app.suite.second\n",
             "FAIL app.suite.third-fails: {err ",
             "ok app.suite.z-after\n",
         },
-        .stderr = "",
     });
 }
 
-test "e2e: tests retain file-private module visibility" {
+test "e2e: ecl test loads each source artifact once" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
-    // A helper constructed inside a quotation is not a discoverable
-    // declaration, so it is never exported: the file keeps it private.
+    // The first source loads the later source through an export. Preload must
+    // reuse that committed artifact rather than evaluate it again.
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "bar.ecl", .source = "(((42) `answer def) `baz @defm) call\n" ++
-            "((baz.answer 42 = {kind user} assert) `local test) `app.bar @defm\n" ++
-            "baz.answer 42 = {kind user} assert\n" },
-        .{ .path = "foo.ecl", .source = "(((baz.answer) @attempt `err at `kind at `undefined-word match? " ++
-            "{kind user} assert) `isolated test) `app.foo @defm\n" },
+        .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {kind user} assert\n" ++
+            "((app.public.answer 42 = {kind user} assert) `uses-public test) `consumer @defm\n" },
+        .{ .path = "z-public.ecl", .source = "\"loaded public\" io.print\n" ++
+            "((42) `answer def) `app.public @defm\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
     var result = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
     defer result.deinit();
-    try result.expect(.{ .exit_code = 0, .stdout = "ok app.bar.local\nok app.foo.isolated\n", .stderr = "" });
-    var script = try cli.runOptions(.{ .argv = &.{ exe, "bar.ecl" }, .cwd = .{ .dir = scratch.dir } });
-    defer script.deinit();
-    try script.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
-    var loaded = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "\"bar.ecl\" @load (baz.answer) @attempt `err at `kind at" },
-        .cwd = .{ .dir = scratch.dir },
-    });
-    defer loaded.deinit();
-    try loaded.expect(.{ .exit_code = 0, .stdout = "undefined-word\n", .stderr = "" });
-}
-
-test "e2e: ecl test discovers private-only sources and loads each artifact once" {
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    try writeTestProject(scratch.dir, &.{
-        // Both files construct inside quotations so nothing is discoverable:
-        // each `helper` and `suite` stays private to its own source.
-        .{ .path = "private.ecl", .source = "(((42) `answer def) `helper @defm) call\n" ++
-            "(((helper.answer 42 = {kind user} assert) `answer test) `suite @defm) call\n" },
-        .{ .path = "other.ecl", .source = "(((7) `answer def) `helper @defm) call\n" ++
-            "(((helper.answer 7 = {kind user} assert) `answer test) `suite @defm) call\n" },
-    });
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
-    var private = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
-    defer private.deinit();
-    try private.expect(.{ .exit_code = 0, .stdout = "ok suite.answer\nok suite.answer\n", .stderr = "" });
-
-    // The first source loads the later source through an export. Preload must
-    // reuse that committed artifact, including with overlapping source globs.
-    try writeTestProject(scratch.dir, &.{
-        .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {kind user} assert\n" ++
-            "(((helper.answer) @attempt `err at `kind at `undefined-word match? " ++
-            "{kind user} assert) `isolated test) `consumer @defm\n" },
-        .{ .path = "z-public.ecl", .source = "\"loaded public\" io.print\n" ++
-            "((42) `answer def) `app.public @defm\n" },
-    });
-    var mixed = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
-    defer mixed.deinit();
-    try mixed.expect(.{ .exit_code = 0, .stdout = "loaded public\nok consumer.isolated\nok suite.answer\nok suite.answer\n", .stderr = "" });
+    try result.expect(.{ .exit_code = 0, .stdout = "loaded public\n", .stderr = "ok consumer.uses-public\n" });
 }
 
 test "e2e: ecl test accepts a userland runner" {
@@ -692,7 +651,7 @@ test "e2e: ecl test accepts a userland runner" {
                 .path = "custom.ecl",
                 .source = "((args [\"chosen\"] match? {kind user} assert " ++
                     "tests dup len 1 = {kind user} assert " ++
-                    "first @test `ok dict.has? {kind user} assert " ++
+                    "first @test `ok has? {kind user} assert " ++
                     "\"custom\" io.print) `run def) `app.custom.runner @defm\n",
             },
         },
@@ -872,14 +831,12 @@ test "e2e: native extension discovery ABI and reflection acceptance" {
     var result = try runWithNativePath(&.{
         build_options.ecl_exe,
         "-e",
-        "41 sample.increment `sample.increment which `sample.increment see",
+        "41 sample.increment `sample.increment see",
     });
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout = "sample.increment -> sample.increment native public generation 1 " ++
-            "(n -- result) requires call, build-values, reschedule\n" ++
-            "(n -- result : \"Increment an integer.\") <native:sample.increment> requires call build-values\n" ++
+        .stdout = "(n -- result : \"Increment an integer.\") <native:sample.increment> requires call build-values\n" ++
             "reschedule\n42\n",
         .stderr = "",
     });
@@ -1239,15 +1196,12 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 `s setp ( -- n ) (s 2 +) `f def) `m @defm `m (f) import `m.f see `f which words",
+        "(40 `s setp ( -- n ) (s 2 +) `f def) `m @defm `m (f) import `m.f see words",
     });
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{
-            "(s 2 +)",
-            "f -> m.f def public generation 1 (-- n)",
-        },
+        .stdout_contains = &.{ "(s 2 +)", " f " },
         .stdout_excludes = &.{" s "},
         .stderr = "",
     });
@@ -1357,12 +1311,12 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "((-- value) 40 wrap `k def) `m @defm m.k `m.k which",
+        "((-- value) 40 wrap `k def) `m @defm m.k",
     });
     defer constant.deinit();
     try constant.expect(.{
         .exit_code = 0,
-        .stdout = "m.k -> m.k def public generation 1 (-- value)\n40\n",
+        .stdout = "40\n",
         .stderr = "",
     });
 
@@ -1666,8 +1620,8 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         .{ .name = "json", .imported = "`json (parse) import \"[1]\" parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
         .{
             .name = "table",
-            .imported = "`table (valid?) import {\"a\" [1]} valid? io.pp",
-            .qualified = "{\"a\" [1]} table.valid? io.pp",
+            .imported = "`table (table?) import {\"a\" [1]} table? io.pp",
+            .qualified = "{\"a\" [1]} table.table? io.pp",
         },
         .{
             .name = "time",
@@ -1676,8 +1630,8 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         },
         .{
             .name = "http",
-            .imported = "`http (get) import `get doc len 0 > io.pp",
-            .qualified = "`http.get doc len 0 > io.pp",
+            .imported = "`http (send) import `send doc len 0 > io.pp",
+            .qualified = "`http.send doc len 0 > io.pp",
         },
     };
     const used_output = [_][]const u8{
@@ -1714,14 +1668,14 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     // The network word reaches the network, and a refused connection is a
     // value-level error rather than a crash (DoD-31's non-network half).
     var refused = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "{target \"http://127.0.0.1:1/nope\"} http.get" },
+        .argv = &.{ "./ecl", "{method \"GET\" target \"http://127.0.0.1:1/nope\"} http.send" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
     defer refused.deinit();
     try refused.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "kind io", "word http.get", "path \"http://127.0.0.1:1/nope\"" },
+        .stderr_contains = &.{ "kind io", "word http.send", "path \"http://127.0.0.1:1/nope\"" },
     });
 }
 
@@ -1748,7 +1702,7 @@ test "e2e: stdin is data in -e mode and refuses to be read as program source" {
     });
 
     // A drained stream reads as empty, not as an error: `io.stdin` is
-    // `fd.in io.read`, and the device keeps answering.
+    // `stream.in io.read`, and the device keeps answering.
     var twice = try runWithInput(&.{ build_options.ecl_exe, "-e", "io.stdin pop io.stdin" }, "data");
     defer twice.deinit();
     try twice.expect(.{ .exit_code = 0, .stdout = "\"\"\n", .stderr = "" });
@@ -1761,29 +1715,29 @@ test "e2e: stdin is data in -e mode and refuses to be read as program source" {
     });
 }
 
-test "e2e: fd reads standard input as bytes and writes bytes to both streams" {
+test "e2e: stream reads standard input as bytes and writes bytes to both streams" {
     // A short read returns what is there, bytes that are not UTF-8 are
     // readable, and the drained stream reads as [] again and again.
     var binary = try runWithInput(
-        &.{ build_options.ecl_exe, "-e", "fd.in 2 fd.read io.pp fd.in fd.read-all io.pp fd.in fd.read-all io.pp" },
+        &.{ build_options.ecl_exe, "-e", "stream.in 2 stream.read io.pp stream.in stream.read-all io.pp stream.in stream.read-all io.pp" },
         "ab\xffz",
     );
     defer binary.deinit();
     try binary.expect(.{ .exit_code = 0, .stdout = "[97 98]\n[255 122]\n()\n", .stderr = "" });
 
     // Bytes reach the real descriptors unencoded, iodata in one run.
-    var written = try run(&.{ build_options.ecl_exe, "-e", "fd.out [72 105] fd.write fd.out ([10] [0 255]) fd.write fd.err [69 10] fd.write" });
+    var written = try run(&.{ build_options.ecl_exe, "-e", "stream.out [72 105] stream.write stream.out ([10] [0 255]) stream.write stream.err [69 10] stream.write" });
     defer written.deinit();
     try written.expect(.{ .exit_code = 0, .stdout = "Hi\n\x00\xff", .stderr = "E\n" });
 
     var text = try runWithInput(
-        &.{ build_options.ecl_exe, "-e", "fd.in io.lines io.pp fd.out (\"a\" \"b\") io.write fd.out \"c\" io.write-line io.stdin io.pp" },
+        &.{ build_options.ecl_exe, "-e", "stream.in io.lines io.pp stream.out (\"a\" \"b\") io.write stream.out \"c\" io.write-line io.stdin io.pp" },
         "one\ntwo\n",
     );
     defer text.deinit();
     try text.expect(.{ .exit_code = 0, .stdout = "(\"one\" \"two\")\nabc\n\"\"\n", .stderr = "" });
 
-    var as_source = try runWithInput(&.{build_options.ecl_exe}, "fd.in\n");
+    var as_source = try runWithInput(&.{build_options.ecl_exe}, "stream.in\n");
     defer as_source.deinit();
     try as_source.expect(.{
         .exit_code = 1,
@@ -1797,22 +1751,22 @@ test "e2e: line reads over standard input keep their newline and interleave with
     // where the chunk ended. The unterminated tail is the last line; [] and
     // "" follow at EOF.
     var lines = try runWithInput(
-        &.{ build_options.ecl_exe, "-e", "fd.in fd.read-line io.pp fd.in 2 fd.read io.pp fd.in io.read-line io.pp fd.in io.read-line io.pp fd.in io.read-line io.pp fd.in fd.read-line io.pp" },
+        &.{ build_options.ecl_exe, "-e", "stream.in stream.read-line io.pp stream.in 2 stream.read io.pp stream.in io.read-line io.pp stream.in io.read-line io.pp stream.in io.read-line io.pp stream.in stream.read-line io.pp" },
         "ab\ncdef\n\ngamma",
     );
     defer lines.deinit();
     try lines.expect(.{ .exit_code = 0, .stdout = "[97 98 10]\n[99 100]\n\"ef\\n\"\n\"\\n\"\n\"gamma\"\n[]\n", .stderr = "" });
 }
 
-test "e2e: concurrent fd writes stay contiguous" {
+test "e2e: concurrent stream writes stay contiguous" {
     // Each write is larger than one kernel quantum, so its chunks are
     // interleaved by the scheduler; the device's write turns keep every
     // call's bytes together.
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(3 (fd.out 70000 range 0 * 65 + fd.write) times {}) @spawn " ++
-            "(3 (fd.out 70000 range 0 * 66 + fd.write) times {}) @spawn " ++
+        "(3 (stream.out 70000 range 0 * 65 + stream.write) times {}) @spawn " ++
+            "(3 (stream.out 70000 range 0 * 66 + stream.write) times {}) @spawn " ++
             "task.await pop task.await pop",
     });
     defer result.deinit();

@@ -68,10 +68,8 @@
   "" "" str.contains? 1 equal
   "a" "" str.index-of 0 equal
   "" "" str.index-of 0 equal
-  ("hello" "zz" str.index-of)
-  `domain
-  "no occurrence"
-  raises-containing)
+  "hello" "zz" str.index-of 5 equal
+  "" "z" str.index-of 0 equal)
  `search test
 
  ### test construction
@@ -84,11 +82,13 @@
   "ab" 1 str.repeat "ab" equal
   "ab" 0 str.repeat "" equal
   "" 3 str.repeat "" equal
-  "7" 3 str.pad-left "  7" equal
-  "7" 3 str.pad-right "7  " equal
-  "abcd" 3 str.pad-left "abcd" equal
-  "abcd" 3 str.pad-right "abcd" equal
-  "" 2 str.pad-left "  " equal
+  "7" 3 \space str.pad-left "  7" equal
+  "7" 3 \space str.pad-right "7  " equal
+  "7" 3 \0 str.pad-left "007" equal
+  "ab" 4 \. str.pad-right "ab.." equal
+  "abcd" 3 \0 str.pad-left "abcd" equal
+  "abcd" 3 \0 str.pad-right "abcd" equal
+  "" 2 \space str.pad-left "  " equal
   ("ab" -1 str.repeat) `domain "nonnegative count" raises-containing)
  `construction test
 
@@ -124,13 +124,17 @@
   `type
   "string and an integer count"
   raises-containing
-  ("a" 2.5 str.pad-left)
+  ("a" 2.5 \0 str.pad-left)
   `type
-  "string and an integer width"
+  "string, an integer width, and a char"
   raises-containing
-  (5 2 str.pad-right)
+  (5 2 \0 str.pad-right)
   `type
-  "string and an integer width"
+  "string, an integer width, and a char"
+  raises-containing
+  ("a" 2 "0" str.pad-left)
+  `type
+  "string, an integer width, and a char"
   raises-containing)
  `validation test
 

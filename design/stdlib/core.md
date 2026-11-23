@@ -148,8 +148,8 @@ wrap (net.local-address `port at 0 >) @give task.await
 #### Examples
 
 ```ecl
-`archive exports
-# => (next-member open-tgz read-member sha256 unpack-tgz)
+`tar exports
+# => (read unpack)
 ```
 
 ### effect
@@ -206,6 +206,11 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```ecl
 [3 1 2] grade
 # => [1 2 0]
+```
+
+```ecl
+[3 1 2] dup grade at
+# => [1 2 3]
 ```
 
 ### group
@@ -325,15 +330,6 @@ wrap (net.local-address `port at 0 >) @give task.await
 # => [1 3 6 10]
 ```
 
-### sort
-
-#### Examples
-
-```ecl
-[3 1 2] sort
-# => [1 2 3]
-```
-
 ### stencil
 
 #### Examples
@@ -451,12 +447,12 @@ wrap (net.local-address `port at 0 >) @give task.await
 #### Examples
 
 ```ecl
-4 3 (+) cons call
+4 3 (+) cons apply
 # => 7
 ```
 
 ```ecl
-`w (dup) cons call
+`w (dup) cons apply
 # => w w
 ```
 

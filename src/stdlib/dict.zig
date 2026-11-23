@@ -1,4 +1,4 @@
-//! The host kernels behind the `dict` module, published as `dict.core`.
+//! The host kernels behind the `dict` module, which imports them.
 //!
 //! Representation observers and user-sized rebuilds reuse the host kernels;
 //! quotation-dependent `update` reuses the core combinator backend. The
@@ -11,7 +11,7 @@ const intern = @import("../intern.zig");
 const env = @import("../env.zig");
 const machine = @import("../machine.zig");
 const combinators = @import("../combinators.zig");
-const dict_kernels = @import("../kernel_dict_text.zig");
+const dict_kernels = @import("../kernel_dict.zig");
 const dict_storage = @import("../dict.zig");
 
 const Value = value.Value;
@@ -27,49 +27,49 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "at-or",
         .effect = "dict keys default -- values",
-        .doc = "Like `dict.at`, using `default` as a whole value for each missing key.",
+        .doc = "Return a list indexing into `dict` for each element of `keys`, replacing any missing keys with `default`.",
         .primitive = valuesAtOr,
     },
     .{
         .name = "size",
         .effect = "dict -- count",
-        .doc = "Return the dictionary's entry count.",
+        .doc = "Return the number of keys in `dict`.",
         .primitive = dict_kernels.sizeForModule,
     },
     .{
         .name = "keys",
         .effect = "dict -- keys",
-        .doc = "Return keys in insertion order.",
+        .doc = "Return a list of the keys in `dict`.",
         .primitive = dict_kernels.keysForModule,
     },
     .{
         .name = "vals",
         .effect = "dict -- values",
-        .doc = "Return values in insertion order.",
+        .doc = "Return a list of the `values` in `dict`.",
         .primitive = dict_kernels.valsForModule,
     },
     .{
         .name = "get",
         .effect = "dict key default -- value",
-        .doc = "The value of one whole-value key, or `default` when the dictionary has no such key. A non-dictionary is `` `type ``.",
+        .doc = "Return the value in `dict` at `key`, or `default` if `key` isn't present.",
         .primitive = get,
     },
     .{
         .name = "has?",
         .effect = "dict key -- bool",
-        .doc = "Whole-value key membership. Keys are inert and only absence is false: lookup machinery failures are errors, never converted to 0.",
+        .doc = "Return 1 if `key` is in `dict`.",
         .primitive = dict_kernels.hasForModule,
     },
     .{
         .name = "at",
         .effect = "dict keys -- values",
-        .doc = "Look up each top-level key in request order, preserving duplicates. An absent key is `` `domain ``. Strings and composite keys are whole values; the result has one element per requested key.",
+        .doc = "Return a list indexing into `dict` for each element of `keys`.",
         .primitive = valuesAt,
     },
     .{
         .name = "merge",
         .effect = "left right -- dict",
-        .doc = "Merge two dictionaries; right-hand values win. Existing left keys retain their positions and right-only keys append in right order. Key-aligned arithmetic remains pervasive `+` on dicts.",
+        .doc = "Merge `left` and `right`. For any key present in both `left` and `right`, `dict` will contain the value in `right`.",
         .primitive = dict_kernels.mergeForModule,
     },
     .{
@@ -79,45 +79,45 @@ pub const words = [_]env.BuiltinWord{
         .primitive = associate,
     },
     .{
-        .name = "from-flat",
-        .effect = "entries -- dict",
-        .doc = "Build a dictionary from one flat, even-length list by pairing adjacent entries without executing them. This is the runtime counterpart of the `{…}` literal: `` `total 3 4 + pair dict.from-flat `` is `{total 7}`. An odd entry count is `` `contract ``; duplicate keys are `` `domain ``.",
-        .primitive = fromFlat,
+        .name = "from-kvs",
+        .effect = "kvs -- dict",
+        .doc = "Build a dictionary from a list of key-values arranged like `[k v k v ...]`.",
+        .primitive = fromKvs,
     },
     .{
-        .name = "from-lists",
+        .name = "zip",
         .effect = "keys values -- dict",
-        .doc = "Build a dictionary from parallel conforming key and value lists. Unequal lengths are `` `shape ``; duplicate keys are `` `domain ``.",
-        .primitive = dict_kernels.fromListsForModule,
+        .doc = "Build a dictionary from key and value lists of equal length.",
+        .primitive = dict_kernels.zipForModule,
     },
     .{
         .name = "put",
         .effect = "dict key value -- dict",
-        .doc = "Assign one whole key and value. An existing key retains its position; a new key appends at the end.",
+        .doc = "Assign `key` to `value` in `dict`.",
         .primitive = dict_kernels.putForModule,
     },
     .{
         .name = "update",
-        .effect = "dict keys (value -- value) -- dict",
-        .doc = "Apply an isolated quotation to each whole top-level key without moving entries. Keys are processed in request order, so duplicates observe earlier updates. All keys are validated before the quotation is first applied; an absent key is `` `domain ``, and an empty key list returns the dictionary unchanged.",
+        .effect = "dict keys (q: value -- value) -- updated",
+        .doc = "Return `dict` where `q` has been applied to the values corresponding to each key in `keys`.",
         .primitive = combinators.updateDictKeysForModule,
     },
     .{
         .name = "take",
         .effect = "dict keys -- dict",
-        .doc = "Keep entries named by a key list, ignoring absent keys. Output follows dictionary order independently of the requested key-list order.",
+        .doc = "Return a dictionary containing only the entries in `dict` corresponding to `keys`.",
         .primitive = take,
     },
     .{
         .name = "del",
         .effect = "dict keys -- dict",
-        .doc = "Remove entries named by whole top-level keys, ignoring absent and duplicate keys and preserving retained dictionary order.",
+        .doc = "Return a dictionary containing the entries in `dict`, less those corresponding to `keys`.",
         .primitive = del,
     },
     .{
         .name = "merge-with",
-        .effect = "left right (key left-value right-value -- value) -- dict",
-        .doc = "Merge two dictionaries, resolving each shared key with the quotation. Existing left keys keep their positions; right-only keys append in right order.",
+        .effect = "left right (q: key left-value right-value -- value) -- dict",
+        .doc = "Merge `left` and `right`, resolving key collisions with `q`.",
         .primitive = mergeWith,
     },
 };
@@ -206,7 +206,7 @@ const DictLookupDriver = struct {
             switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |found| {
-                    self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return fiber.fail(.domain, "dict.at could not find the dict key"));
+                    self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return fiber.failMissingKey("dict.at could not find the dict key", list.atUnchecked(self.keys.borrow(), self.index)));
                     self.cursor.?.deinit(fiber.releases, fiber.allocator);
                     self.cursor = null;
                     self.index += 1;
@@ -254,13 +254,13 @@ const AssociateDriver = struct {
     }
 };
 
-fn fromFlat(fiber: *Fiber) MachineError!void {
+fn fromKvs(fiber: *Fiber) MachineError!void {
     var entries = try fiber.popValue();
     defer entries.deinit();
     if (entries.borrow() != .list) return fiber.typeError("a flat key/value list");
     const count: usize = @intCast(entries.borrow().list.length());
     if (count % 2 != 0) {
-        return fiber.fail(.contract, "dict.from-flat requires an even-length key/value list");
+        return fiber.fail(.contract, "dict.from-kvs requires an even-length key/value list");
     }
     const flat_pairs = try fiber.allocator.alloc(dict_storage.Pair, count / 2);
     try fiber.startDriver(FromFlatDriver{
@@ -290,7 +290,7 @@ const FromFlatDriver = struct {
         }
         return switch (try self.materializer.?.borrowMut().advance(fiber.workBudget())) {
             .pending => .stepped,
-            .duplicate_key => fiber.fail(.domain, "dict.from-flat received a duplicate key"),
+            .duplicate_key => fiber.fail(.domain, "dict.from-kvs received a duplicate key"),
             .complete => |dictionary| .{ .output = dictionary },
         };
     }
@@ -517,7 +517,7 @@ const MergeWithWorkDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     state: heap.Owned(*MergeWithState),
 
-    /// Names its word before it polls, so a cancellation is attributed to it.
+    /// Identifies its word before it polls, so a cancellation is attributed to it.
     pub const cancellation: machine.DriverCancellation = .own;
 
     pub fn advance(fiber: *Fiber, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {

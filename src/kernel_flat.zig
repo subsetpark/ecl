@@ -173,7 +173,7 @@ pub const CheckedStatus = enum { clean, faulted };
 /// that is also an operand holds the input at every position not yet stored.
 pub const Placement = enum { fresh, over_operands };
 
-/// How a checked vector range ended. `faulted` names the first position a
+/// How a checked vector range ended. `faulted` holds the first position a
 /// replay must scan, which is also the first whose operands are still the
 /// input's: the range start for a fresh output, and the first faulting vector
 /// for one written over its operands.

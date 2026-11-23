@@ -6,32 +6,26 @@
  (`domain error.new "package generation verification failed" error.with-message assert) `require
  defp
 
- ### defp member
- (state metadata -- state : "Compare one regular installed file with its sealed source archive.")
- (|state metadata|
-  metadata `kind at `file match?
-  state metadata pair (file) cat state () cons if) `member defp
+ ### defp check-member
+ (state member -- state : "Compare one regular installed file with its sealed source archive.")
+ (|state member|
+  member `kind at `file match?
+  state member pair (file) cat state () cons if) `check-member defp
 
  ### defp file
- (state metadata -- state : "Require a regular file and compare its exact bytes.")
- (|state metadata|
-  state `directory at metadata `path at fs.lstat
-  dup `kind at `file match? require `size at metadata `size at match? require
-  state `directory at metadata `path at fs.read-bytes
-  state `archive at 67108864 pkg.bundle.member-bytes match? require
-  state `files state `files at metadata `path at append put) `file defp
+ (state member -- state : "Require a regular file and compare its exact bytes.")
+ (|state member|
+  state `directory at member `path at fs.lstat
+  dup `kind at `file match? require `size at member `bytes at len match? require
+  state `directory at member `path at fs.read-bytes
+  member `bytes at match? require
+  state `files state `files at member `path at append put) `file defp
 
  ### defp archived-files
- (bytes directory -- paths :
-  "Check all archived files while reading member contents incrementally.")
+ (bytes directory -- paths : "Check every archived file against the installed tree.")
  (|bytes directory|
-  bytes archive.open-tgz
-  (|archive directory|
-   {files []} `archive archive put `directory directory put
-   archive archive.next-member
-   (dup dict.size 0 >) (member dup `archive at archive.next-member) while pop
-   `files at archive port.close)
-  directory swap cons call) `archived-files defp
+  bytes gzip.decompress tar.read {files []} `directory directory put (check-member) fold `files at)
+ `archived-files defp
 
  ### defp entry
  (state entry -- state : "Reject links and special objects while enumerating the installed tree.")
@@ -51,7 +45,7 @@
  (dup `pending at first
   (|state path|
    state `current path put `pending state `pending at 1 drop put
-   state `directory at path fs.open-list scan-directory) call) `directory defp
+   state `directory at path fs.open-list scan-directory) apply) `directory defp
 
  ### defp scan-directory
  (state cursor -- state : "Read each child without following links or retaining a bulk listing.")
@@ -69,14 +63,15 @@
  (bytes directory -- bundle : "Verify an installed package against its exact sealed source bytes.")
  (|bytes directory|
   bytes pkg.bundle.inspect
-  bytes directory archived-files sort directory installed-files sort match? require) `package def
+  bytes directory archived-files dup grade at directory installed-files dup grade at match? require)
+ `package def
 
  ### defp selected
  (state name -- state :
   "Verify one selected seal, identity, contents, and exported artifact mapping.")
  (|state name|
   state `lock at `packages at name at `hash at
-  state name pair (selected-hash) cat call) `selected defp
+  state name pair (selected-hash) cat apply) `selected defp
 
  ### defp selected-hash
  (hash state name -- state :
@@ -84,8 +79,8 @@
  (|hash state name|
   state `directory at "archives/" hash pkg.cache.filename cat fs.read-bytes hash pkg.fetch.checked
   state `directory at "packages/" name cat fs.child-dir
-  (|bytes directory| bytes directory package directory port.close) call
-  state name pair (record-bundle) cat call) `selected-hash defp
+  (|bytes directory| bytes directory package directory port.close) apply
+  state name pair (record-bundle) cat apply) `selected-hash defp
 
  ### defp record-bundle
  (bundle state name -- state : "Require the locked manifest and retain only inspected metadata.")
@@ -99,7 +94,7 @@
  (|project location|
   location pkg.layout.generation? require
   project `directory at location fs.child-dir
-  project location pair (opened) cat call) `generation def
+  project location pair (opened) cat apply) `generation def
 
  ### defp opened
  (directory project location -- :
@@ -107,13 +102,13 @@
  (|directory project location|
   directory "ecl.pkg" fs.read-text pkg.manifest.read
   directory "ecl.lock" fs.read-text pkg.resolution.read
-  directory project location 3 pack (snapshots) cat call
+  directory project location 3 pack (snapshots) cat apply
   directory port.close) `opened defp
 
  ### defp child
  (state entry -- state : "Require exactly the expected immediate child name and object kind.")
  (|state entry|
-  state `expected at entry `name at dict.has? require
+  state `expected at entry `name at has? require
   state `expected at entry `name at at entry `kind at match? require
   state `expected state `expected at entry `name at del put) `child defp
 
@@ -126,7 +121,7 @@
    {} `cursor cursor put `expected expected put cursor fs.next-entry
    (dup dict.size 0 >) (child dup `cursor at fs.next-entry) while pop
    `expected at dict.size 0 = require cursor port.close)
-  expected swap cons call) `children defp
+  expected swap cons apply) `children defp
 
  ### defp layout
  (directory lock -- : "Require the closed immutable generation layout and every selected seal.")
@@ -144,9 +139,9 @@
  (|manifest lock directory project location|
   lock manifest pkg.resolution.compatible pop
   directory lock layout
-  lock `packages at dict.keys sort
+  lock `packages at dict.keys dup grade at
   {bundles {}} `lock lock put `directory directory put (selected) fold `bundles at
-  manifest lock location 3 pack (expected-map) cat call
+  manifest lock location 3 pack (expected-map) cat apply
   dup directory "ecl.modules" fs.read-text pkg.data.read-one match? require
   project `path at location "/ecl.modules" cat pair path.join pkg.map.validate) `snapshots defp
 

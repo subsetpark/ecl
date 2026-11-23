@@ -16,7 +16,7 @@
       `\"\"` when the target has no `?`;
     - `` `headers `` is a dictionary from ASCII-lowercased header name to the list of its trimmed
       values in arrival order, so a repeated header keeps every value;
-    - `` `body `` is the exact byte list named by `Content-Length`, `[]` when the request has none;
+    - `` `body `` is the exact byte list `Content-Length` specifies, `[]` when the request has none;
       and
     - `` `peer `` is the peer's `address:port` formatted from `net.peer-address`, with an IPv6
       address in brackets.
@@ -27,9 +27,10 @@
     or a list of strings, written once per value in the given order and with the name as given; and
     a body that is a string, written as UTF-8, or a byte list. The names `content-length`,
     `connection`, and `transfer-encoding` are reserved in any letter case: the server writes
-    `Content-Length` and `Connection: close` itself, and a response naming one of them is `` `domain
-    ``. Header names must be nonempty HTTP tokens and values may not contain CR, LF, NUL, or a
-    control character other than tab, so a value built from request data cannot split the response.
+    `Content-Length` and `Connection: close` itself, and a response carrying one of them is ``
+    `domain ``. Header names must be nonempty HTTP tokens and values may not contain CR, LF, NUL, or
+    a control character other than tab, so a value built from request data cannot split the
+    response.
 
     Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is answered the same
     way, and only HTTP/1.1 requests must carry one `Host` header. A HEAD request is answered with
@@ -78,8 +79,8 @@
     and the ambient stack never crosses the boundary. A successful handler leaves exactly one value,
     and that value must satisfy `render-response`. Any other outcome — a raised error, an empty or
     multi-valued result, a malformed response — answers 500 and applies the `` `on-failure ``
-    quotation to the error dictionary (for a wrong result count, a `` `contract `` error naming the
-    observed count); the serving unit and every other in-flight request are unaffected. Every
+    quotation to the error dictionary (for a wrong result count, a `` `contract `` error reporting
+    the observed count); the serving unit and every other in-flight request are unaffected. Every
     response the server writes, whether the handler's or its own, is validated in full before any
     byte is written.
 
@@ -93,7 +94,7 @@
     backend closure as `` `io ``. Admission after closure raises `` `io ``. Either ending cancels
     and quiesces every acceptor, reader, and handler child by the ordinary scope rules and closes
     every connection those children own. The listener itself is untouched: `@serve` never calls
-    `net.close` on the listener it was given, which stays the caller's to close explicitly or
+    `port.shutdown` on the listener it was given, which stays the caller's to close explicitly or
     through its own scope and may be served again.")
 (
  ### setp crlf
@@ -105,7 +106,7 @@
  (status message -- : "Raise a `domain error whose data carries the response status.")
  (|status message|
   `domain error.new message error.with-message
-  `status status pair dict.from-flat error.with-data raise) `framing-error defp
+  `status status pair dict.from-kvs error.with-data raise) `framing-error defp
 
  ### defp domain-error
  (message -- error : "Build a `domain error with the message.")
@@ -142,10 +143,10 @@
   " " str.split
   dup len 3 = () (400 "malformed request line" framing-error) if
   dup 2 at supported-version? () (505 "unsupported HTTP version" framing-error) if
-  (|tokens| tokens 0 at tokens 1 at tokens 1 at split-target tokens 2 at) call
+  (|tokens| tokens 0 at tokens 1 at tokens 1 at split-target tokens 2 at) apply
   (|method target path query version|
-   `method method `target target `path path `query query `version version 10 pack dict.from-flat)
-  call) `parse-request-line def
+   `method method `target target `path path `query query `version version 10 pack dict.from-kvs)
+  apply) `parse-request-line def
 
  ### defp blank?
  (char -- bool : "Return 1 for a space or horizontal tab.")
@@ -156,14 +157,14 @@
   "Fold one `name: value` line into the dict of lowercased names to value lists.")
  (dup len 0 = (400 "malformed header line" framing-error) when
   dup first blank? (400 "obsolete line folding" framing-error) when
-  dup ":" str.contains? not (400 "malformed header line" framing-error) when
+  dup ":" str.contains? (400 "malformed header line" framing-error) unless
   dup ":" str.index-of
-  (|line index| line index take line index 1 + drop str.trim) call
-  swap dup str.lower swap dup str.trim match? not (400 "malformed header name" framing-error) when
+  (|line index| line index take line index 1 + drop str.trim) apply
+  swap dup str.lower swap dup str.trim match? (400 "malformed header name" framing-error) unless
   dup len 0 = (400 "malformed header name" framing-error) when
   dup (blank?) any? (400 "malformed header name" framing-error) when
   swap
-  (|headers name value| headers name value wrap value (append) cons dict.update-or) call)
+  (|headers name value| headers name value wrap value (append) cons dict.update-or) apply)
  `header-line defp
 
  ### def parse-headers
@@ -198,8 +199,8 @@
 
  ### def content-length
  (headers -- length :
-  "Return the request body length named by a headers dictionary as `parse-headers` builds it: `0`
-   when `content-length` is absent, otherwise the integer every occurrence spells, leading zeros
+  "Return the request body length specified by a headers dictionary as `parse-headers` builds it:
+   `0` when `content-length` is absent, otherwise the integer every occurrence spells, leading zeros
    allowed, so `{\"content-length\" (\"5\")}` is 5. A value that is not a nonempty string of decimal
    digits, or repeated values that differ, is `` `domain `` with `` `data {status 400} ``; a value
    too large for a 64-bit integer exceeds every body limit and is `` `domain `` with `` `data
@@ -308,7 +309,7 @@
  `checked-response defp
 
  ### defp header-lines
- (headers -- lines : "Render one `name: value` line per header value in dictionary order.")
+ (headers -- lines : "Render one `name: value` line per header value.")
  (dict.pairs
   (dup first swap 1 at dup str.str? (wrap) () if
    swap ": " cat (swap cat) cons each)
@@ -343,10 +344,10 @@
    response `body at body-bytes
    response `status at dup reason pair "HTTP/1.1 {} {}" str.format
    response `headers at header-lines cons
-   response `status at [204 304] in? not (over len wrap "Content-Length: {}" str.format append) when
+   response `status at [204 304] in? (over len wrap "Content-Length: {}" str.format append) unless
    "Connection: close" append "" append "" append
    crlf str.join bytes swap cat)
-  call) `render-response def
+  apply) `render-response def
 
  ### defp checked-route
  (row -- : "Validate one [method pattern handler] route row.")
@@ -361,7 +362,7 @@
  ### defp segment-ok?
  (pair -- bool : "Return 1 when a [path-segment pattern-segment] pair matches.")
  (dup first swap 1 at
-  (|actual expected| expected ":" str.starts? actual len 0 > and actual expected match? or) call)
+  (|actual expected| expected ":" str.starts? actual len 0 > and actual expected match? or) apply)
  `segment-ok? defp
 
  ### defp match-pattern
@@ -402,12 +403,12 @@
   (pop pop http.response.not-found)
   (over `method at over swap (|row method| row 0 at method match?) cons filter
    dup len 0 =
-   (pop (0 at) each ", " str.join "allow" swap wrap pair dict.from-flat
+   (pop (0 at) each ", " str.join "allow" swap wrap pair dict.from-kvs
     405 "method not allowed" http.response.text swap over `headers at swap dict.merge `headers swap
     put nip)
    (nip first over `path at over 1 at match-pattern nip
-    (|request row params| request `params params put row 2 at call)
-    call)
+    (|request row params| request `params params put row 2 at apply)
+    apply)
    if)
   if) `route def
 
@@ -517,7 +518,7 @@
 
  ### defp decode-head
  (bytes -- text : "Decode the head as UTF-8 text; undecodable bytes are a 400.")
- ((chars) cons @attempt dup `ok dict.has? (`ok at first)
+ ((chars) cons @attempt dup `ok has? (`ok at first)
   (pop 400 "malformed request head" framing-error) if) `decode-head defp
 
  ### defp read-body-step
@@ -544,7 +545,7 @@
   `headers headers
   `body body
   `peer connection net.peer-address peer-text
-  14 pack dict.from-flat) `build-request defp
+  14 pack dict.from-kvs) `build-request defp
 
  ### defp read-request
  (connection config -- request :
@@ -553,19 +554,19 @@
   connection config `max-header-bytes at read-head
   (|connection buffer index| connection buffer index 4 + drop buffer index take decode-head crlf
    str.split)
-  call
+  apply
   dup first parse-request-line swap rest parse-headers
   over `version at "HTTP/1.1" match?
-  (dup "host" () dict.get dup len 1 = swap (host-value?) all? and not
+  (dup "host" () dict.get dup len 1 = swap (host-value?) all? and
    (400 "an HTTP/1.1 request needs exactly one well-formed Host header" framing-error)
-   when)
+   unless)
   when
-  dup "transfer-encoding" dict.has? (411 "length required" framing-error) when
+  dup "transfer-encoding" has? (411 "length required" framing-error) when
   dup content-length
   dup config `max-body-bytes at > (413 "content too large" framing-error) when
   (|connection leftover request-line headers length|
    connection request-line headers connection leftover length read-body build-request)
-  call) `read-request defp
+  apply) `read-request defp
 
  ### defp answer
  (connection config status -- :
@@ -590,7 +591,7 @@
   "Validate and encode a response in full, then write it, without its body when the request was
    HEAD; a rejected response is reported and answered 500.")
  ((render-response) cons @attempt
-  dup `ok dict.has?
+  dup `ok has?
   (`ok at first swap (head-only) when nip net.write)
   (`err at nip fail-request)
   if) `write-response defp
@@ -612,7 +613,7 @@
  (connection config handler request -- :
   "Run the handler in a fresh unit and write its response; a HEAD request gets no body.")
  (dup `method at "HEAD" match? swap wrap rolldown cat @attempt
-  dup `ok dict.has?
+  dup `ok has?
   (`ok at handler-success)
   (`err at nip fail-request)
   if) `run-handler defp
@@ -632,7 +633,7 @@
  ### defp dispatch-read
  (connection config handler reader result -- :
   "Continue from the reader child's result or its failure.")
- (dup `ok dict.has?
+ (dup `ok has?
   (nip `ok at first run-handler)
   (`err at swap dup task.cancel task.await pop nip read-failure)
   if) `dispatch-read defp
@@ -653,9 +654,9 @@
    report any non-io failure through `on-failure.")
  (|connection config handler|
   connection config handler 3 pack (handle-connection) cat @attempt
-  connection net.close
+  connection port.shutdown
   config swap
-  dup `err dict.has?
+  dup `err has?
   (`err at dup `kind at `io match? (pop pop) (report) if)
   (pop pop)
   if) `serve-connection defp

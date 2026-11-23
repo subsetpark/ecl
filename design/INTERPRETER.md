@@ -213,15 +213,19 @@ A directory lease prevents closure while admitted work still uses its descriptor
 Successful and failed filesystem calls retain their result until their bounded
 cleanup cursor releases temporary handles and admission. The next call cannot
 observe quota occupied solely by its predecessor's queued cleanup. Filesystem
-and archive drivers share this completion protocol; abandoned execution hands
+drivers share this completion protocol; abandoned execution hands
 the same cursor to bounded retirement, including failed construction before
 resource publication.
 
-A reservation retains one quota slot across a composition. Derived roots retain
-that reservation; an operation claims its admission without reserving another
-slot. A two-root operation claims each distinct reservation once. An active
-claim owns its lifetime independently of the selecting root lease. Unrelated
-operations fail with the portable limit reason while admission is exhausted.
+Admission is a FIFO counting semaphore that waits rather than fails. A path
+operation queues past the limit, holding no lease while it waits, and a
+released slot passes directly to the oldest queued request, so no newcomer
+overtakes the queue. Only host work that runs to completion without waiting on
+another operation holds a slot: open writers, cursors, and stages hold none,
+and a lock gives its slot back before polling contention. No slot holder can
+therefore wait on a queued request, and the queue cannot deadlock. A queued
+request is its own readiness source; the scheduler ends that registration
+before the request resumes or retires.
 
 Directory descendants inherit staging dependencies independently of task
 ownership. Ordinary directory closure leaves independently acquired children
@@ -232,10 +236,10 @@ an admitted append prevents later publication. Publication is serialized with
 resource cancellation under the owning lifecycle lock. Successful publication
 needs no result allocation and cleanup cannot roll it back.
 
-Archive inspection and extraction share their validated parser. Extraction uses
-the same confined resolver, admission, and atomic publication primitives as
-filesystem drivers, retains its root through rollback, and materializes result
-paths before publication. Parsing, transfer, and cleanup remain bounded work.
+The tar parser holds no filesystem authority. Extraction is ECL over the parser
+and the public `fs` staging words, so atomic publication has exactly one
+implementation and the archive inherits its confinement, admission, and
+rollback rather than restating them. Parsing remains bounded work.
 
 Root-scope closure participates in the ordinary ready/retirement arbitration
 when a configured worker pool has not started. Cleanup never depends on lazily
@@ -249,14 +253,10 @@ materialization then owns that copy, so neither another reader nor closure can
 invalidate its bytes. Enumeration performs no directory-sized collection or
 cleanup, and its nominal resource type cannot be used as a directory root.
 
-Archive inspection publishes the shared parser's validated document directly
-into scope ownership. Resource metadata is allocated before a guarded scope
-publication consumes the document, so every failed publication leaves parser
-ownership intact. Its cleanup capability derives allocation and bounded
-retirement from the owning scheduler; closed identities retain no operational
-scheduler reference. Cursor operations copy at most one bounded path or content
-chunk under the lifetime lock. Result construction owns those copies independently
-of closure, and document retirement frees member paths one step at a time.
+Tar reading returns the shared parser's validated members as ordinary
+values and owns no resource after it completes. Each member's path and contents
+are copied in bounded steps; a partly built element belongs to the operation, so
+cancellation releases it with the rest of the document.
 
 Advisory locks share the fixed-handle resource lifetime with directory handles,
 while their nominal backend types keep lock values out of root acquisition.
@@ -363,7 +363,7 @@ cell (`cons`, the collectors of `each`, `zip-with`, `scan`, and `unfold`), the
 captures of a whole stack (`stack`, `infra`, and a unit's success outcome)
 apply it to each value, the dict materializer applies it to every key and
 value it stores, and a native that assembles a list of symbols for itself
-(`exports`, `stdlib`, `source.declarations`, an error's `trace`, `json.parse`)
+(`exports`, `source.declarations`, an error's `trace`, `json.parse`)
 applies it as it writes. Copies between lists carry each occurrence as written,
 and `effect` returns an annotation as written, since it is parsed text.
 Running a symbol a quotation pushes is `execute`'s job, so there is no word that inserts a
@@ -387,7 +387,9 @@ Locals declarations are the one general source lowering. `locals.zig` validates
 local names and rewrites local loads into private core operations over a
 Fiber-owned locals stack. A local may not cross into a nested quotation; source
 must use explicit quotation construction such as `cons` when it wants value
-capture.
+capture. Slots are a declaration the reader writes for itself: a list's slots
+lower as the names `.x` through its highest slot, and since no symbol is spelled
+that way, a slot cannot capture a word the body writes.
 
 The lowering produces ordinary forms consumed directly by the frame machine.
 This keeps the machine point-free and local lifetime visible: the lowered
@@ -400,7 +402,7 @@ word. The reader preserves source spans for the produced forms,
 keeping diagnostics anchored to the user's source.
 
 A binder's failure belongs to whoever wrote it, which the lowered operation
-cannot name. An activation therefore records the word whose body it runs,
+cannot identify. An activation therefore records the word whose body it runs,
 set only when dispatch enters that body. The trace word cannot serve: a tail
 position clears it, and an application may borrow a word for attribution.
 
@@ -513,7 +515,8 @@ leaves optimize storage and execution through the same machine.
 ### Dictionaries preserve insertion and ignore it for identity
 
 `dict.zig` stores parallel key, value, and cached-hash vectors. Iteration keeps
-insertion order. Equality and hashing treat a dictionary as an unordered
+insertion order as a representation choice; the language promises only that
+every enumeration of one dictionary value agrees. Equality and hashing treat a dictionary as an unordered
 mapping, so the dictionary hash combines entry hashes commutatively. Small
 dictionaries use linear search; larger ones add an index without changing the
 ordered vectors.
@@ -666,7 +669,7 @@ context.
 
 Scope ids are issued monotonically and never reused, because a word holds a
 bare id and no reference. Core and the session each have one id for the life of
-the `Env`; an image's id names its cell, which goes empty when an unpublished
+the `Env`; an image's id identifies its cell, which goes empty when an unpublished
 image is discarded, so resolving a word written there is a definite failure
 rather than a fallback.
 
@@ -677,11 +680,11 @@ callback, or a validated native callable — together with its effect,
 documentation, visibility, source slice, and module-local name. Nothing about
 it changes once it is sealed; replacing a name publishes a different
 definition. Construction reserves a definition before its body is validated,
-which is what lets a body name itself and a module group's members name one
+which is what lets a body refer to itself and a module group's members refer to one
 another; sealing installs the body. A reserved definition is reachable only
 from its construction owner, so it can be neither executed nor published.
 
-Construction is a typed boundary. A reserved definition can be named by
+Construction is a typed boundary. A reserved definition can be referred to by
 validation but is accepted by no execution, publication, or reflection path;
 only sealing yields a definition, so every holder of a definition holds sealed
 code. A module group validates against a construction directory of its own,
@@ -702,7 +705,7 @@ their image, and memory grows with reload history.
 
 The resolver resolves one word: by its link to a root, then the root's
 directory and core, or, for a dotted spelling, a module registration and its
-public entry; `core.` names core alone. A name alias is followed through the
+public entry; `core.` selects core alone. A name alias is followed through the
 same resolver, as the module holding it would resolve it; Brent's algorithm
 detects a cycle without bounding the length of an acyclic chain.
 
@@ -710,7 +713,7 @@ A construction validates each body with it, against one captured publication
 view, so a misspelled word fails the definition rather than its call. A
 construction's own members, and a definition's own name, resolve during
 validation before anything is published. Validation records nothing and holds
-nothing, so abandoning it is constant work. A word naming a module that is not
+nothing, so abandoning it is constant work. A word referring to a module that is not
 registered passes and resolves when it is reached, loading the module then:
 validation never loads a module, so a body pays only for the modules it calls.
 
@@ -725,17 +728,15 @@ resolver against the current view.
 ### One snapshot is the publication view
 
 The registry's directory snapshot is the Session's publication view. It maps
-module names to images, short names to module names, and the session's
-top-level names to definitions or aliases. A validation captures one snapshot
+module names to images and the session's top-level names to definitions,
+word aliases, and module aliases. A validation captures one snapshot
 and resolves every session and qualified name against it across scheduler
 turns, so it never checks a body against two publication states. Core's directory is
 fixed when core freezes and an image's when the image is sealed, so neither
 needs capturing.
 
-An alias that already names its requested target changes nothing: it completes
-without building or publishing a successor and without advancing the
-publication counter. Every other mutation — a top-level definition, an import,
-a registration, a reload, an alias — is one bounded cursor: snapshot the current directory, validate
+Every mutation — a top-level definition, an import, an alias, a registration,
+a reload — is one bounded cursor: snapshot the current directory, validate
 against it, build a successor with the edit applied, and publish it under the
 writer lock if the snapshot is still current; otherwise discard it and start
 over. Concurrent writers therefore cannot lose each other's updates. The
@@ -748,8 +749,7 @@ retires as its own owner, one per step. A discarded candidate takes the same
 path.
 
 Every publication also advances the Session's publication counter, which its
-main registry owns and each source-private registry shares. The counter is
-never reused and holds no snapshot; it only keys fibers' resolutions. It is
+registry owns. The counter is never reused and holds no snapshot; it only keys fibers' resolutions. It is
 per Session so that one Session's publications never change what another's
 fibers reuse, and so what a fiber allocates is a function of its own run.
 
@@ -770,14 +770,14 @@ resolutions, because core's directory changes without a publication.
 
 ### An execution site is the current root
 
-An activation runs in one root, and its `ExecutionSite` names it by that
+An activation runs in one root, and its `ExecutionSite` identifies it by that
 root's scope. The scope is where the activation's own definitions land. When
 it is a module image's root scope, the image is the module whose code is
 running, and the site derives it from the scope instead of carrying it: an
 activation cannot run in one module's scope as another module, or as none.
 
 A module word runs in its image's scope. Every other word runs at its caller's
-site unchanged, and a quotation applied as a value, by `call`, a combinator,
+site unchanged, and a quotation applied as a value, by `apply`, a combinator,
 `@attempt`, or a resumed load, runs in its caller's root without the caller's
 embedded registration trust. A task runs in its spawner's root; a protected
 test invocation runs as its module's image. A fiber records which of these
@@ -795,19 +795,17 @@ authority facts cross a boundary as one nominal value.
 
 ### A module is one group per generation
 
-A module image is created already named, by `@defm` or by a loader that has
-validated the name, and it learns its generation number when the registry
-publishes it. The name is part of the image's identity: registration consumes
+A module image is created with its name, by `@defm` or by a loader that has
+validated the name. The name is part of the image's identity: registration consumes
 the sealed image and publishes it under that name, so no image is ever
-registered under a second one. An alias maps a short name to a module name,
-never to an image. Whatever names running code, `*module*`, a diagnostic's
-qualified spelling, or the private home, reads it from the image. While its construction body runs, `def`, `defp`, `import`, and
-`importp` stage names in the image; nothing staged is visible, so the body
+registered under a second one. Whatever reports running code's module, `*module*`, a diagnostic's
+qualified spelling, or the private home, reads it from the image. While its construction body runs, `def`, `defp`, `import`,
+`importp`, and `alias` stage names in the image; nothing staged is visible, so the body
 cannot run a definition it has made. When the body completes, the module is
 sealed as one group: the staged names become the image's directory, a name
 staged twice fails construction, and every reserved body is validated against
 that directory and one captured view. A word written in the image resolves in the
-group, and so does a qualified name naming the module being sealed, when the
+group, and so does a qualified name referring to the module being sealed, when the
 group owns the occurrence or the alias that reached it: no registry entry
 exists for the group yet. A quotation injected from elsewhere was not written
 in the group, so its qualified names reach the registered module. Every body
@@ -837,9 +835,16 @@ resolver splits a dotted spelling and the module segment is exactly `core`, it
 looks the binding segment up in core directly, so `core.dup` reaches the
 primitive from a session or image that has shadowed `dup`. Core is not an image
 and gains no module lifecycle by being nameable: the registry refuses the exact
-name `core` for both module registration and alias publication, which is the
-single boundary that owns registry names, so no later registration can capture
-the qualifier.
+name `core`, which is the single boundary that owns registry names, so no later
+registration can capture the qualifier.
+
+A module alias is a scope entry, not a registry name. It maps a short name to a
+module name in the session's or an image's directory, beside definitions and
+word aliases, and is never a word or an export. The resolver consults it only
+for a qualified spelling whose module part is one segment, in the root the
+word was written in; core holds definitions alone, so a word written there goes
+straight to the registry. The alias stores the name, so every resolution
+reaches the target's current generation.
 
 ### Module visibility belongs to the defining source
 
@@ -857,8 +862,8 @@ the consuming schema owns export validation. Public inspection materializes
 results in bounded passes with ordinary driver retirement.
 
 The Session's snapshot consumes the validated map on successful construction;
-on failure the caller retains it. Each artifact owns one private registry,
-absolute source identity, and commitment state. Public exports are ordered by
+on failure the caller retains it. Each artifact owns its absolute source
+identity and commitment state. Public exports are ordered by
 nominal module-name ID for bounded membership checks. Lookup and local-source
 cursors advance by one export, edge, or artifact, retaining lexical context
 across scheduler suspension. Already-published modules pass the same visibility
@@ -875,8 +880,8 @@ search path or through the declaring artifact under a map, would be a load
 cycle. Instead it stages its aliases unchecked and records each name on the
 held lease. It does that through a claim that only a scan for that same owner
 can mint. The lease's frame lies below the importing driver, so the claim
-cannot outlive it. The load checks deferred names against the main registry
-after its declared modules and before it commits. It reads the main registry
+cannot outlive it. The load checks deferred names against the registry after
+its declared modules and before it commits. It reads the registry directly
 because an importer's own lookup cannot see an uncommitted artifact. Releasing
 the lease on any path discards the list. A nested load that deferred names
 onto an outer one has already committed if the outer load later fails.
@@ -890,9 +895,10 @@ its intended filename as the relative-path base; validation does not require
 or publish that file. The same validator handles file and stdin input, including
 the one-reference limit and inert discovery of live sources.
 
-Installed-application dispatch resolves a descriptor only from the executable's
-installation prefix, before Session construction. The descriptor selects the
-entry source and complete map; the startup directory remains the caller's.
+Installed-application dispatch looks only beneath the executable's installation
+prefix, before Session construction. An application directory's `main.ecl` and
+`ecl.modules` are the entry source and complete map; the startup directory
+remains the caller's.
 This keeps application resolution independent of project discovery without
 granting a separate execution mode or application-specific runtime authority.
 
@@ -902,20 +908,18 @@ rename after sealing the complete contents. Before commit, cancellation and
 failure leave staging owned by the driver for retirement; after commit, the
 destination owns the published contents and cancellation cannot undo it.
 
-The map separates source selection from exact public exports; the shared
-registry contains exported registrations while each file owns its private
-registrations. Private names therefore cannot collide across files or become
-visible through incidental loading.
+The map separates source selection from exact exports. A mapped file registers
+only the modules its artifact exports, so the Session's one registry holds
+every registration and no name has a second, file-local meaning.
 
 Module images retain their defining source identity independently of any
 registration name. Execution, module-value invocation, escaped quotations,
-and test bodies preserve that identity. Qualified lookup and import use one
-visibility cursor: the defining file's private registrations, followed by
-authorized public exports. Suspended loads retain the same lexical context
+and test bodies preserve that identity. Qualified lookup and import authorize
+public exports against it. Suspended loads retain the same lexical context
 through authorization and resumed dispatch.
 
-File identity, resolution scope, and the private registry are carried by one
-opaque source capability. The Session keeps it alive until execution stops;
+File identity and resolution scope are carried by one opaque source
+capability. The Session keeps it alive until execution stops;
 registry teardown uses the existing host-owned retirement protocol. Frame
 storage accommodates the lexical capability retained by a suspended load and
 the activation call site every evaluation and application frame carries,
@@ -923,7 +927,7 @@ with a 144-byte ceiling.
 
 ### Loading resumes a lookup
 
-Validation never loads. A word naming an unregistered module suspends the
+Validation never loads. A word referring to an unregistered module suspends the
 lookup that reaches it, or a primitive, while
 the loader searches the embedded standard-library manifest, the module map,
 source paths, or native artifacts according to `ENVIRONMENT.md`. The
@@ -937,10 +941,8 @@ names. Source-only requests and qualified requests share artifact loading
 leases and commit state, so discovering an already loaded source does not
 evaluate it again. A source with no exports commits after successful
 evaluation; sources with exports also verify their declared publications.
-Test authority spans the public registry and committed root sources' private
-registries. Private test descriptors carry a source identity resolved through
-that authority, so equal module and test names in different files invoke their
-own registrations without exposing private modules to ordinary lookup.
+Test authority spans the registry, so a test descriptor's module and test name
+identify its registration.
 
 ## 5. The frame machine
 
@@ -960,7 +962,7 @@ need more of the continuation than a primitive may have: opening a load or
 construction boundary, running a registering source in place of its caller,
 taking the pending failure and unwinding. Each reaches those operations
 through an opaque view of the Fiber (`Loading`, `Construction`, `Unwinding`)
-that only the machine mints. A work driver names the view it needs as the
+that only the machine mints. A work driver declares the view it needs as the
 first parameter of its `advance`; the public start paths hold only the Fiber
 and refuse such a driver at compile time, so a view is obtained only from the
 machine or from a driver already holding it.
@@ -1044,7 +1046,7 @@ The window is a nominal value derived from a real stack depth. A callback
 cannot pair an arbitrary base with a count, and a nested application that
 suspends carries the exact continuation it must resume.
 
-An application names how its quotation meets the stack beneath it: in place
+An application declares how its quotation meets the stack beneath it: in place
 on the caller's stack, isolated behind a hard floor, or over a paging floor.
 The three differ only in that floor, so they share one launch vocabulary,
 used when the application starts and for each quotation it applies next, and
@@ -1073,7 +1075,7 @@ boundary, an isolated application, or a paging one, keeps the floor beneath as
 one value, a hard depth or a paging floor, so a boundary or isolated
 application inside a paging floor blocks paging while it is open and restores
 it when it closes. A frame alternates its applications between a paging floor its
-context keeps in place and the caller's stack by naming the launch of each,
+context keeps in place and the caller's stack by specifying the launch of each,
 so a guard runs its tests and actions under one frame.
 
 ### Failure is a bounded machine transition
@@ -1319,7 +1321,7 @@ be recognized in one of those places and missed in another.
 
 A builtin can head a phrase continued by the words after it in the same code:
 `list [rows columns] reshape sum` folds the columns of the list's one buffer
-instead of building the rows `sum` would fold, and `x (q) cons call` or
+instead of building the rows `sum` would fold, and `x (q) cons apply` or
 `x (q) cons dip` runs `q` with `x` on the stack, as calling `(x q...)` would,
 without building that quotation. This holds for every head because `cons`
 stores its head as data: a symbol enters as a quoted occurrence, which the
@@ -1421,7 +1423,7 @@ timer infrastructure, and the effects of those decisions. `turn_core.zig` does
 the same for a fiber's turn: the budget charge, whether more work may start,
 whether a cancellable completion observes cancellation before handing
 execution onward, and what the Fiber does after a driver steps or yields,
-where every yield names whether the driver parked, waits on something outside
+where every yield states whether the driver parked, waits on something outside
 its own work, or is settling work that must not observe cancellation.
 
 This split makes invalid transitions visible to exhaustive switching and keeps
@@ -1530,7 +1532,7 @@ External readiness uses the same arbitration rather than a parallel scheduler.
 handles whose callbacks state ownership on registration, failed registration,
 wake loss, cancellation, and detach; a scope membership is the scheduler's own
 member node, the one consuming detach authority. Ports and resources compare
-owning scopes through an opaque scope identity and never name the scope type.
+owning scopes through an opaque scope identity and never refer to the scope type.
 A process pipe or terminal event may wake a Fiber, but scheduler code never
 imports process backend types. Detaching an
 external member first unlinks it, then releases every list, token, and
@@ -1805,7 +1807,7 @@ alive:
 - a directory or generation lease, or a validation's captured view;
 - a module generation pin, taken on an image before its directory is read;
 - an evaluation's hold on its definition, or a unit's resolutions, each of
-  which holds the definition it names; or
+  which holds the definition it refers to; or
 - a source slice that retains its backing allocation.
 
 Observation capabilities return metadata or pinned cursors. They do not expose
@@ -1851,7 +1853,7 @@ starts. `stdlib.zig` is a compile-time manifest of embedded
 source and host-backed modules. Embedded modules win before filesystem search,
 so a stray file cannot silently replace shipped code, and their names are
 reserved like `core`: only embedded loading registers them, so user code can
-neither replace nor alias one. That exemption belongs to embedded
+neither replace one nor bind an alias under its name. That exemption belongs to embedded
 code, not to its dynamic extent: a quotation a stdlib word applies runs with
 ordinary provenance. A qualified stdlib name therefore
 resolves to the same module from every scope, which is what lets prelude and
@@ -2009,7 +2011,7 @@ site. Malformed response values stay ordinary data; malformed wire output is
 unreachable.
 
 `fs` uses Session-owned filesystem authority and direct runtime drivers for
-bounded operations and joined resource cleanup. Archive extraction shares those
+bounded operations and joined resource cleanup. Tar extraction shares those
 filesystem facilities. `net` and `proc` are ECL modules over registered factory,
 operation, and endpoint capabilities. The bundled network descriptor uses the
 public native ABI and owns its immutable limits, socket state, and admission
