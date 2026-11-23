@@ -142,6 +142,26 @@ pub fn slotPosition(token: []const u8) ?u2 {
     return null;
 }
 
+/// A shuffle letter: an operand (`x y z`) or a quotation (`q r s`) at a
+/// position, 1 through 3. Quotations sit above every operand.
+pub const ShuffleLetter = struct { quotation: bool, position: u2 };
+
+pub fn shuffleLetter(byte: u8) ?ShuffleLetter {
+    return switch (byte) {
+        'x' => .{ .quotation = false, .position = 1 },
+        'y' => .{ .quotation = false, .position = 2 },
+        'z' => .{ .quotation = false, .position = 3 },
+        'q' => .{ .quotation = true, .position = 1 },
+        'r' => .{ .quotation = true, .position = 2 },
+        's' => .{ .quotation = true, .position = 3 },
+        else => null,
+    };
+}
+
+/// The local names a shuffle binds its quotations under; like the slot
+/// spellings, no symbol is spelled this way.
+pub const shuffle_quotation_spellings = [_][]const u8{ ".q", ".r", ".s" };
+
 /// The after portion of an effect is either all named slots or exactly this
 /// token, which declares a fixed before row and a variable after row.
 pub const row_token = "...";

@@ -1647,6 +1647,8 @@ const ParserCursor = struct {
         }
         if (closeKind(token.kind) != null) return self.closeContext(token);
         if (token.kind == .quoted) return self.beginQuote(token);
+        if (token.kind == .atom and std.mem.startsWith(u8, token.bytes, "!"))
+            return self.readShuffle(token);
         if (token.kind == .atom) if (lexer.slotPosition(token.bytes)) |position|
             return self.beginSlot(token, position);
         try self.beginScalar(token);
@@ -1663,6 +1665,77 @@ const ParserCursor = struct {
         context.slots = @max(context.slots, position);
         try self.beginScalar(token);
         self.state.scalar.atom.slot = true;
+    }
+    /// `!` followed by shuffle letters reads as the locals lowering of a
+    /// binder over its letters, spliced in place: `!xqx` is the body of
+    /// `(|x q| x q apply x)`. Operands push and quotations apply, so the
+    /// shuffle has only a before and an after.
+    ///
+    /// PROTOTYPE: the letters are scanned and lowered in one step, which is
+    /// linear in the token's length rather than bounded by the work budget.
+    fn readShuffle(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!void {
+        if (self.contexts.topPtr()) |context| if (context.locals == .unavailable) {
+            self.diag.setFmt(token.span, "shuffle `{s}` is not legal in a dict", .{token.bytes});
+            return error.Parse;
+        };
+        const letters = token.bytes[1..];
+        if (letters.len == 0) {
+            self.diag.set(token.span, "`!` must be followed by shuffle letters from `xyzqrs`");
+            return error.Parse;
+        }
+        var operands: usize = 0;
+        var quotations: usize = 0;
+        var applies: usize = 0;
+        for (letters) |byte| {
+            const letter = lexer.shuffleLetter(byte) orelse {
+                self.diag.setFmt(token.span, "shuffle `{s}` may use only the letters `xyzqrs`", .{token.bytes});
+                return error.Parse;
+            };
+            if (letter.quotation) {
+                quotations = @max(quotations, letter.position);
+                applies += 1;
+            } else operands = @max(operands, letter.position);
+        }
+        const names = try self.allocator.alloc(locals.Name, operands + quotations);
+        defer self.allocator.free(names);
+        var ids: [6]u32 = undefined;
+        for (lexer.slot_spellings[0..operands], 0..) |spelling, index| {
+            names[index] = .{ .bytes = spelling, .span = token.span };
+            ids[index] = try intern.intern(spelling);
+        }
+        for (lexer.shuffle_quotation_spellings[0..quotations], 0..) |spelling, index| {
+            names[operands + index] = .{ .bytes = spelling, .span = token.span };
+            ids[3 + index] = try intern.intern(spelling);
+        }
+        const apply_name = try intern.intern("apply");
+        const apply_link = if (self.symbol_linker) |linker| try linker.link(apply_name) else 0;
+        const body = try self.allocator.alloc(locals.SpannedValue, letters.len + applies);
+        defer self.allocator.free(body);
+        var index: usize = 0;
+        for (letters) |byte| {
+            const letter = lexer.shuffleLetter(byte).?;
+            const id = ids[@as(usize, letter.position - 1) + if (letter.quotation) @as(usize, 3) else 0];
+            body[index] = .{ .value = .{ .symbol = .{ .name = id, .slot = 0 } }, .span = token.span };
+            index += 1;
+            if (letter.quotation) {
+                body[index] = .{ .value = .{ .symbol = .{ .name = apply_name, .slot = apply_link } }, .span = token.span };
+                index += 1;
+            }
+        }
+        var lowerer = try locals.LowerCursor.init(self.allocator, self.releases, names, body, token.span, self.diag, false);
+        defer lowerer.deinit();
+        var lowered = while (true) switch (try lowerer.advance()) {
+            .pending => {},
+            .complete => |output| break output,
+        };
+        defer {
+            lowered.values.deinit();
+            self.allocator.free(lowered.forms);
+        }
+        for (lowered.forms) |form| {
+            heap.retainValue(form.value);
+            try self.appendOwned(form);
+        }
     }
     fn failSlot(self: *ParserCursor, token: Token, comptime message: []const u8) error{Parse} {
         self.diag.setFmt(token.span, "slot `{s}` " ++ message, .{token.bytes});
