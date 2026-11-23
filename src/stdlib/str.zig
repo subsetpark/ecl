@@ -34,7 +34,7 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "split",
         .effect = "string separator -- parts",
-        .doc = "Split `string` at every occurrence of `separator`. When `separator` is \"\", then `parts` will be a list of single-grapheme strings.",
+        .doc = "Split `string` at every occurrence of `separator`. When `separator` is \"\", then `parts` will be a list of single-codepoint strings.",
         .primitive = text.splitPrimitive,
     },
     .{

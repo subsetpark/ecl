@@ -38,7 +38,7 @@
   failure `data data put) `with-data def
 
  ### def kind?
- (error kind -- bool : "Set the `` ` ``kind field on `error` to `kind`.")
+ (error kind -- bool : "Return 1 when `error` has the given kind symbol.")
  (|failure kind|
   failure checked pop
   kind type `symbol match?

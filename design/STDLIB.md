@@ -206,7 +206,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 `( x -- integer )` — Round up to the nearest integer.
 
 ### char
-`( value -- chars )` — Convert a value to a char. Pervades, so its behaviour when applied to a list is equivalent to `chars`.
+`( value -- chars )` — Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, and a list of chars or codepoints becomes the string of those chars. An int or list element outside the Unicode scalar range is `domain`. Unlike `chars`, integers are codepoints, not UTF-8 bytes.
 
 #### Examples
 
@@ -448,7 +448,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 `( list (acc a -- acc) -- value )` — Reduce a nonempty list left to right from its first element.
 
 ### for
-`( collection (a --) -- )` — Evaluate `q` against every element in `collection` and discard any results.
+`( collection (a --) -- )` — Evaluate `q` against every element in `collection`. `q` must leave no results.
 
 ### getenv
 `( name -- value )` — Return the value of the variable `name` in the process environment.
@@ -1244,7 +1244,7 @@ Words for manipulating the conventional `error` dict.
 `( error kinds -- bool )` — Return 1 when `error`'s kind occurs in `kinds`.
 
 ### kind?
-`( error kind -- bool )` — Set the `` ` ``kind field on `error` to `kind`.
+`( error kind -- bool )` — Return 1 when `error` has the given kind symbol.
 
 ### with-data
 `( error data -- error )` — Validate both dictionaries and return the error with `` `data `` set to `data`.
@@ -1375,6 +1375,9 @@ Hostile-input-safe gzip decompression. Binary payloads are ordinary lists of int
 # => [97 98 99]
 ```
 
+### decompress-within
+`( bytes maximum -- bytes )` — Like `decompress`, with the payload limited to `maximum` bytes (itself at most 1,073,741,824) instead. The footer's declared size is checked against `maximum` before any output is allocated, so a small archive cannot cost more than `maximum`. A negative or over-limit `maximum` is `` `domain ``; a non-int `maximum` is `` `type ``.
+
 ## hash
 
 Exact content digests. Binary payloads are ordinary lists of integers in `0...255`.
@@ -1408,7 +1411,7 @@ Internal Session configuration defaults to 16 live requests, a 16 KiB target, 16
 ### send
 `( request -- response )` — Send a complete `http.request` value: string `` `method `` and `` `target `` URL fields are required. Optional fields:
 
--- `` `headers `` are sent once per value in list order -- `` `body `` is sent exactly for POST, PUT, or PATCH. -- `` `follow-redirects `` (default 1), when 1, will follow the `Location` of a 3xx response up to three times; otherwise the 3xx is returned.
+-- `` `headers `` are sent once per value in list order -- `` `body `` is sent exactly for POST, PUT, or PATCH. -- `` `follow-redirects `` (default 1), when 1, will follow the `Location` of a 3xx response up to three times; otherwise the 3xx is returned. Request `headers` are sent only to the origin the request names: a redirect to another scheme, host, or port drops them, and a redirect from HTTPS to HTTP fails.
 
 Return `{status int, headers dict, body bytes}`
 
@@ -2093,7 +2096,7 @@ Operations on strings.
 `( strings separator -- string )` — Join `strings` with `separator`.
 
 ### split
-`( string separator -- parts )` — Split `string` at every occurrence of `separator`. When `separator` is "", then `parts` will be a list of single-grapheme strings.
+`( string separator -- parts )` — Split `string` at every occurrence of `separator`. When `separator` is "", then `parts` will be a list of single-codepoint strings.
 
 #### Examples
 

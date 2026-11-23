@@ -24,7 +24,8 @@
    canonical relative path under a filesystem root or directory resource. Return normalized
    regular-file paths in archive order.")
  (|root destination bytes|
-  bytes tar.core.read root destination fs.stage-dir
+  bytes tar.core.read dup (`kind at `file match?) filter (`path at) each swap
+  root destination fs.stage-dir
   over over pair (publish) cat @attempt swap port.close result.or-raise pop
-  (`kind at `file match?) filter (`path at) each) `unpack def
+  pop) `unpack def
 ) `tar @defm

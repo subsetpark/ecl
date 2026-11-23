@@ -45,7 +45,7 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "send",
         .effect = "request -- response",
-        .doc = "Send a complete `http.request` value: string `` `method `` and `` `target `` URL fields are required. Optional fields:\n\n-- `` `headers `` are sent once per value in list order\n-- `` `body `` is sent exactly for POST, PUT, or PATCH.\n-- `` `follow-redirects `` (default 1), when 1, will follow the `Location` of a 3xx response up to three times; otherwise the 3xx is returned.\n\nReturn `{status int, headers dict, body bytes}`",
+        .doc = "Send a complete `http.request` value: string `` `method `` and `` `target `` URL fields are required. Optional fields:\n\n-- `` `headers `` are sent once per value in list order\n-- `` `body `` is sent exactly for POST, PUT, or PATCH.\n-- `` `follow-redirects `` (default 1), when 1, will follow the `Location` of a 3xx response up to three times; otherwise the 3xx is returned. Request `headers` are sent only to the origin the request names: a redirect to another scheme, host, or port drops them, and a redirect from HTTPS to HTTP fails.\n\nReturn `{status int, headers dict, body bytes}`",
         .primitive = send,
     },
 };

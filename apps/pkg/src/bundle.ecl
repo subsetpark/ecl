@@ -83,7 +83,7 @@
  ### def inspect
  (bytes -- bundle :
   "Validate a source-only archive and return its manifest and explicit artifact table.")
- (gzip.decompress tar.read dup scan-manifest
+ (134217728 gzip.decompress-within tar.read dup scan-manifest
   (|members manifest| members manifest scan-sources manifest inspected) apply) `inspect def
 
  ### defp inspected
