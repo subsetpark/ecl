@@ -82,7 +82,7 @@ const MapScratch = struct {
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.modules",
             .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-                "{path \"probe.ecl\" kind ecl exports [\"mapprobe\"]} " ++
+                "{path \"probe.ecl\" kind ecl exports [\"helper\" \"mapprobe\"]} " ++
                 "{path \"deferred.ecl\" kind ecl exports [\"deferprobe\" \"deferlater\"]}]}}}",
         });
         try directory.dir.writeFile(std.testing.io, .{
