@@ -31,8 +31,8 @@ const module_lookup = @import("module_lookup.zig");
 const load = @import("load.zig");
 const failure_driver = @import("failure.zig");
 const module_construction = @import("module_construction.zig");
-const paging_api = @import("paging.zig");
-const PagingFloor = paging_api.PagingFloor;
+const floor_api = @import("floor.zig");
+const SoftFloor = floor_api.SoftFloor;
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -674,7 +674,7 @@ const Boundary = struct {
     /// body that fails never reaches it, so unwinding restores this instead.
     locals_base: u32,
     /// The floor this boundary's was set over.
-    beneath: paging_api.Beneath,
+    beneath: floor_api.Beneath,
     previous_boundary: ?FrameIndex,
     word: intern.TraceWord,
     fn deinit(self: Boundary) void {
@@ -773,7 +773,7 @@ pub const ApplicationStep = union(enum) {
         seeded: u32,
         provenance: ApplicationProvenance = .boundary,
         /// How the quotation runs. One frame may launch differently each
-        /// time: a guard alternates its tests over a paging floor with its
+        /// time: a guard alternates its tests over a soft floor with its
         /// actions in place.
         launch: Launch,
     },
@@ -790,10 +790,10 @@ const Launch = union(enum) {
     in_place,
     /// Behind a hard floor at its seeded operands.
     isolated,
-    /// Over a paging floor the application's context owns and keeps in place
+    /// Over a soft floor the application's context owns and keeps in place
     /// until the application resumes, with the region above the lowered
     /// floor as its window.
-    paging: *PagingFloor,
+    measured: *SoftFloor,
 };
 /// Opaque, non-dereferenced capability for one live application frame. The
 /// Fiber encodes a process-unique nonce with the frame index and validates
@@ -964,10 +964,10 @@ pub fn typedApplication(
 const ApplicationMode = union(enum) {
     in_place: StackWindow,
     /// The floor the application's hard floor was set over.
-    isolated: paging_api.Beneath,
+    isolated: floor_api.Beneath,
     /// The floor lives in the combinator state the frame's context points to,
     /// which stays in place until the application resumes.
-    paging: *PagingFloor,
+    measured: *SoftFloor,
 };
 const ApplicationFrame = struct {
     context: *anyopaque,
@@ -987,8 +987,8 @@ const ApplicationFrame = struct {
         var selection = self.selection;
         selection.deinit(releases);
         switch (self.mode) {
-            // A paging floor's lists belong to the context that holds it.
-            .in_place, .isolated, .paging => {},
+            // A soft floor's lists belong to the context that holds it.
+            .in_place, .isolated, .measured => {},
         }
         self.deinit_fn(releases, allocator, self.context);
     }
@@ -1628,7 +1628,7 @@ pub const Fiber = struct {
     resolutions: WordResolutions = .{},
     entry_base: usize,
     /// How far down a word may reach, and what `require` compares against.
-    floor: paging_api.StackFloor = .{},
+    floor: floor_api.StackFloor = .{},
     boundary_index: ?FrameIndex = null,
     /// The innermost active source effect check. Effect-check frames form an
     /// intrusive chain so nested checks restore their predecessor exactly.
@@ -2080,12 +2080,12 @@ pub const Fiber = struct {
     fn deinitPoppedFrame(self: *Fiber, popped: Frame) void {
         var frame = popped;
         if (frame == .effect_check) frame.effect_check.restoreActive(self);
-        // An unwind pops a paging frame before it restores the boundary's
+        // An unwind pops a measured frame before it restores the boundary's
         // floor; nothing requires operands in between, but the pointer must
         // not outlive the state the frame's context owns.
-        if (frame == .application and frame.application.mode == .paging and
-            self.floor.paging == frame.application.mode.paging)
-            self.floor.restore(frame.application.mode.paging.beneath);
+        if (frame == .application and frame.application.mode == .measured and
+            self.floor.soft == frame.application.mode.measured)
+            self.floor.restore(frame.application.mode.measured.beneath);
         frame.deinit(self.releases, self.allocator);
     }
 
@@ -2617,12 +2617,12 @@ pub const Fiber = struct {
     }
     pub inline fn require(self: *Fiber, count: usize) MachineError!void {
         // One compare on the hot path: `guard` is the stack base unless the
-        // innermost paging floor has returned originals above it.
+        // innermost soft floor has returned originals above it.
         if (count > self.stack.items.len - self.floor.guard) return self.requireAcross(count);
     }
     noinline fn requireAcross(self: *Fiber, count: usize) MachineError!void {
         @branchHint(.cold);
-        if (!try paging_api.cover(self, count)) return self.failUnderflow(count);
+        if (!try floor_api.cover(self, count)) return self.failUnderflow(count);
     }
     noinline fn failUnderflow(self: *Fiber, count: usize) MachineError {
         @branchHint(.cold);
@@ -3262,7 +3262,7 @@ pub const Fiber = struct {
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = self.floor.beneath() },
-                .paging => |floor| .{ .paging = floor },
+                .measured => |floor| .{ .measured = floor },
             },
             .activation = activation,
             .selection = .{},
@@ -3273,7 +3273,7 @@ pub const Fiber = struct {
         switch (launch) {
             .in_place => {},
             .isolated => self.floor.set(base.base(), null),
-            .paging => |floor| self.floor.enter(floor, base.base()),
+            .measured => |floor| self.floor.enter(floor, base.base()),
         }
         if (select_initial) {
             const target = provenance_target.?;
@@ -3519,7 +3519,7 @@ pub const Fiber = struct {
             return self.readLocal(operand);
         }
         if (name == locals.load) {
-            if (operand > self.stack.items.len - self.floor.guard and !try paging_api.cover(self, operand))
+            if (operand > self.stack.items.len - self.floor.guard and !try floor_api.cover(self, operand))
                 return self.failBinding(operand);
             return self.bindLocals(operand);
         }
@@ -4604,9 +4604,9 @@ fn prepareEffectCheck(
         self.active_word = word;
         return self.fail(.domain, "module word has no effect declaration");
     };
-    // Inputs beneath a paging floor count: the word pages them in as
+    // Inputs beneath a soft floor count: the word admits them as
     // originals, like any operand check across the floor.
-    if (self.available() < declared.inputs) _ = try paging_api.cover(self, declared.inputs);
+    if (self.available() < declared.inputs) _ = try floor_api.cover(self, declared.inputs);
     const available: u32 = @intCast(self.available());
     if (available < declared.inputs) {
         self.active_word = word;
@@ -4655,12 +4655,12 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                     self.floor.restore(isolated);
                     break :blk .{ .isolated, window };
                 },
-                .paging => |floor| blk: {
+                .measured => |floor| blk: {
                     // The window is the region above the lowered floor; the
                     // driver's finalize reads it with the floor beneath active.
                     const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(floor.floor))));
                     self.floor.restore(floor.beneath);
-                    break :blk .{ .{ .paging = floor }, window };
+                    break :blk .{ .{ .measured = floor }, window };
                 },
             };
             if (comptime root_execution_metrics_enabled)
@@ -4700,7 +4700,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         );
                         return self.fail(.domain, "application suspension has no installed work");
                     };
-                    // A frame resumed over a paging floor suspends in place:
+                    // A frame resumed over a soft floor suspends in place:
                     // the floor beneath is active again, and the frame determines
                     // the launch of whatever it applies next.
                     if (launch == .isolated or
@@ -5054,7 +5054,7 @@ pub const Unwind = struct {
             boundary_index: FrameIndex,
             stack_base: usize,
             locals_base: usize,
-            beneath: paging_api.Beneath,
+            beneath: floor_api.Beneath,
             previous_boundary: ?FrameIndex,
         },
 
@@ -5076,7 +5076,7 @@ pub const Unwind = struct {
                 .caught => |caught| caught.stack_base,
             };
         }
-        fn beneath(self: Target) paging_api.Beneath {
+        fn beneath(self: Target) floor_api.Beneath {
             return switch (self) {
                 .uncaught => .{ .hard = 0 },
                 .caught => |caught| caught.beneath,
