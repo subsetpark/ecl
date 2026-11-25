@@ -1149,6 +1149,7 @@ pub fn build(b: *std.Build) void {
             "tests.kernel_sequence_test.",
             "tests.kernel_order_test.",
             "tests.combinator_test.",
+            "tests.flatten_test.",
             "tests.prelude_test.",
             "tests.definition_test.",
             "tests.formatter_test.",

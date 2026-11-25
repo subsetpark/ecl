@@ -648,6 +648,11 @@ pub fn isReservedBytes(name: []const u8) bool {
 pub const locals_load = "_ll";
 pub const locals_get = "_gl";
 pub const locals_drop = "_dl";
+/// The two operations only a flattened list holds: the guard at the start of
+/// a flattened phrase, and the publication check between the quotations of a
+/// flattened cleave or spread. No reader emits them.
+pub const locals_guard = "_fg";
+pub const locals_recheck = "_fc";
 
 /// The locals backend's interned names. Because they are reserved from every
 /// publication, in every scope they can only mean their core primitives, and
@@ -656,12 +661,16 @@ pub const LocalsWords = struct {
     load: u32,
     get: u32,
     drop: u32,
+    guard: u32,
+    recheck: u32,
 
     pub fn mint() error{OutOfMemory}!LocalsWords {
         return .{
             .load = try intern(locals_load),
             .get = try intern(locals_get),
             .drop = try intern(locals_drop),
+            .guard = try intern(locals_guard),
+            .recheck = try intern(locals_recheck),
         };
     }
 };
@@ -674,5 +683,7 @@ pub fn isReservedWordBytes(name: []const u8) bool {
     return isReservedBytes(name) or
         std.mem.eql(u8, name, locals_load) or
         std.mem.eql(u8, name, locals_get) or
-        std.mem.eql(u8, name, locals_drop);
+        std.mem.eql(u8, name, locals_drop) or
+        std.mem.eql(u8, name, locals_guard) or
+        std.mem.eql(u8, name, locals_recheck);
 }

@@ -107,6 +107,7 @@ test {
     _ = @import("tests/kernel_dict_test.zig");
     _ = @import("tests/kernel_text_test.zig");
     _ = @import("tests/combinator_test.zig");
+    _ = @import("tests/flatten_test.zig");
     _ = @import("tests/prelude_test.zig");
     _ = @import("tests/definition_test.zig");
     _ = @import("tests/formatter_test.zig");

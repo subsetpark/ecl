@@ -914,6 +914,7 @@ pub const Application = struct {
 
 const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 const stack_summary = @import("stack_summary.zig");
+const flatten = @import("flatten.zig");
 
 fn ApplicationAdapters(comptime Driver: type) type {
     return struct {
@@ -1700,6 +1701,8 @@ pub const Fiber = struct {
     resolutions: WordResolutions = .{},
     /// The stack summaries read for the quotations this fiber applied.
     summaries: stack_summary.Cache = .{},
+    /// What this fiber made of the code lists it ran.
+    flattened: flatten.Cache = .{},
     entry_base: usize,
     /// How far down a word may reach, and what `require` compares against.
     floor: floor_api.StackFloor = .{},
@@ -2189,6 +2192,9 @@ pub const Fiber = struct {
         }
         for (self.locals.items) |item| self.releases.releaseValue(item);
         self.locals.deinit(self.allocator);
+        // After every evaluation, frame, driver and failure that could hold a
+        // flattened list's code.
+        self.flattened.deinit(self.allocator, self.releases);
         self.lifetime.deinit(self.releases, self.allocator);
         self.* = undefined;
     }

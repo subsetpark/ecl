@@ -919,6 +919,12 @@ fn claimHeldList(handle: *ListHandle, references: u32) ?*UniqueList {
     return @ptrCast(@alignCast(unique));
 }
 
+/// Whether anything besides one holder refers to the list. A question for a
+/// holder deciding when to let go: the answer licenses no write to the list.
+pub fn heldElsewhere(handle: *ListHandle) bool {
+    return headerImpl(mutableHeader(handle)).rc.load(.acquire) != 1;
+}
+
 pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {
     const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
     return @ptrCast(@alignCast(unique));
