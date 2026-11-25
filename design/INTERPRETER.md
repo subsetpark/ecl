@@ -1371,7 +1371,11 @@ as the last following word's own.
 Numeric arithmetic has one compiled form, the scalar program: a run of numeric
 or char constants, stack words, and core numeric operations compiled to a
 straight-line function over registers, executed a block at a time through the
-typed kernels. Every numeric word reads a char as its codepoint, so a char
+typed kernels. Locals are registers under other names. A quotation literal
+that `apply`, `dip`, `above`, `below`, `bi`, `tri`, or `bracket` applies is
+compiled where the combinator stands, consuming and leaving what the paging
+floor would have counted, so the program holds its operations and no
+application; a fault inside one reports the quotation it was written in. Every numeric word reads a char as its codepoint, so a char
 input or constant is an int to the program; a char the program passes through
 unread remains a char. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or
 `scan` compiles whole, over the inputs the combinator seeds, and is observed as

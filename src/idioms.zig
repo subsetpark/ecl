@@ -658,14 +658,6 @@ const program_operations = blk: {
 /// they compile to register choices.
 const ProgramStackWord = enum { dup, swap, pop, over };
 
-/// One form a scalar program can hold.
-const ProgramForm = union(enum) {
-    constant: Value,
-    stack: ProgramStackWord,
-    /// A unary or binary numeric operation.
-    operation: Operation,
-};
-
 /// A word a scalar program may contain.
 const ProgramWord = union(enum) {
     stack: ProgramStackWord,
@@ -730,112 +722,302 @@ pub const Names = struct {
     }
 };
 
-/// What `form` is to a scalar program where it runs, or null when no program
-/// can hold it: a numeric or char constant, a stack word, or a numeric
-/// operation, each word bound as the program expects.
-fn programForm(fiber: *Fiber, form: Value) ?ProgramForm {
-    if (form != .symbol) return switch (form) {
-        .int, .float, .char => .{ .constant = form },
-        else => null,
+/// Compiles the quotation `code`, applied to `inputs` values, into a scalar
+/// program, or returns null when it is not one: every form must be a numeric
+/// or char constant, a stack word, a numeric operation, a lowered locals
+/// operation, a quotation literal, or a
+/// combinator applied to quotation literals, and the forms must leave exactly
+/// one value from their inputs. A quotation a combinator applies is compiled
+/// where the combinator stands, so the program holds its operations and no
+/// application. Operations keep the order they would run in, including one
+/// whose result is later popped, so a fault happens where the code's own
+/// would and reports the quotation it was written in.
+fn compileProgram(fiber: *Fiber, code: Value, inputs: u8) ?numeric.ScalarProgram {
+    var compiler: ProgramCompiler = .{ .fiber = fiber, .program = .{ .inputs = inputs, .registers = inputs } };
+    for (0..inputs) |input| compiler.stack[input] = .{ .register = @intCast(input) };
+    compiler.depth = inputs;
+    if (!compiler.body(code.list, 0)) return null;
+    // A quotation that computes nothing is no faster compiled.
+    if (compiler.depth != 1 or compiler.program.len == 0) return null;
+    compiler.program.result = switch (compiler.stack[0]) {
+        .register => |register| register,
+        .quotation => return null,
     };
-    const word = form.symbol;
-    // A quoted occurrence pushes a symbol, which no program register holds.
-    if (env.isQuoted(word.slot)) return null;
-    switch (fiber.environment.idiomNames().programWord(word.name) orelse return null) {
-        .stack => |stack_word| {
-            if (!wordMatches(fiber, word, null)) return null;
-            return .{ .stack = stack_word };
-        },
-        .operation => |operation| {
-            if (!wordMatches(fiber, word, operationPrimitive(operation))) return null;
-            return .{ .operation = operation };
-        },
-    }
+    return compiler.program;
 }
 
-/// Compiles the quotation `code`, applied to `inputs` values, into a scalar
-/// program, or returns null when it is not one: every form must be a
-/// `programForm`, and the forms must leave exactly one value from their
-/// inputs. Operations keep their order, including one whose result is later
-/// popped, so a fault happens where the code's own would.
-fn compileProgram(fiber: *Fiber, code: Value, inputs: u8) ?numeric.ScalarProgram {
+/// The stack a quotation would meet, as a scalar program sees it: each value
+/// is the register that holds it, or a quotation literal waiting for the
+/// combinator that applies it.
+const ProgramCompiler = struct {
     const Program = numeric.ScalarProgram;
-    var program: Program = .{ .inputs = inputs, .registers = inputs };
+    const Item = union(enum) { register: Program.Register, quotation: *value.ListHandle };
+    const Items = [Program.max_registers]Item;
+    /// Forms one compilation may visit across the quotations it descends
+    /// into, which bounds it by a constant rather than by the phrase.
+    const max_visited = 256;
+    /// How far a compilation descends through quotation literals.
+    const max_nesting = 8;
+    const max_locals = 16;
+
+    fiber: *Fiber,
+    program: Program,
     // SAFETY: only the first `depth` entries are read.
-    var stack: [Program.max_registers]Program.Register = undefined;
-    var depth: usize = inputs;
-    for (0..inputs) |input| stack[input] = @intCast(input);
-    for (0..@intCast(code.list.length())) |position| {
-        const form = list.atUnchecked(code, position);
-        switch (programForm(fiber, form) orelse return null) {
-            .constant => |constant| {
-                if (program.registers == Program.max_registers or depth == stack.len) return null;
-                program.constants[program.constant_count] = .{ .register = program.registers, .value = constant };
-                program.constant_count += 1;
-                stack[depth] = program.registers;
-                depth += 1;
-                program.registers += 1;
+    stack: Items = undefined,
+    depth: usize = 0,
+    /// The lowest depth any form has needed since a combinator last set it:
+    /// what the quotation it is compiling consumes lies above this.
+    low: usize = 0,
+    // SAFETY: only the first `bound` entries are read.
+    locals: [max_locals]Item = undefined,
+    bound: usize = 0,
+    visited: usize = 0,
+
+    /// Whether the top `count` values exist, noting that they were needed.
+    fn need(self: *ProgramCompiler, count: usize) bool {
+        if (self.depth < count) return false;
+        self.low = @min(self.low, self.depth - count);
+        return true;
+    }
+
+    fn push(self: *ProgramCompiler, item: Item) bool {
+        if (self.depth == self.stack.len) return false;
+        self.stack[self.depth] = item;
+        self.depth += 1;
+        return true;
+    }
+
+    fn pushAll(self: *ProgramCompiler, items: []const Item) bool {
+        if (items.len > self.stack.len - self.depth) return false;
+        @memcpy(self.stack[self.depth..][0..items.len], items);
+        self.depth += items.len;
+        return true;
+    }
+
+    /// Pops a quotation literal, the only thing a combinator can apply here.
+    fn quotation(self: *ProgramCompiler) ?*value.ListHandle {
+        if (!self.need(1)) return null;
+        self.depth -= 1;
+        return switch (self.stack[self.depth]) {
+            .quotation => |literal| literal,
+            .register => null,
+        };
+    }
+
+    fn register(self: *ProgramCompiler) ?Program.Register {
+        self.depth -= 1;
+        return switch (self.stack[self.depth]) {
+            .register => |held| held,
+            .quotation => null,
+        };
+    }
+
+    /// Compiles `code` where the stack stands. False when it is not a
+    /// program. Its locals are its own: it reads none of its caller's and
+    /// leaves none bound.
+    fn body(self: *ProgramCompiler, code: *value.ListHandle, nesting: usize) bool {
+        const length: usize = @intCast(code.length());
+        if (nesting > max_nesting) return false;
+        self.visited += length;
+        if (self.visited > max_visited) return false;
+        const outer = self.bound;
+        for (0..length) |position| {
+            const form = list.atUnchecked(.{ .list = code }, position);
+            const word = switch (form) {
+                .symbol => |reference| reference,
+                .list => |literal| {
+                    if (!self.push(.{ .quotation = literal })) return false;
+                    continue;
+                },
+                .int, .float, .char => {
+                    if (self.program.registers == Program.max_registers) return false;
+                    self.program.constants[self.program.constant_count] = .{ .register = self.program.registers, .value = form };
+                    self.program.constant_count += 1;
+                    if (!self.push(.{ .register = self.program.registers })) return false;
+                    self.program.registers += 1;
+                    continue;
+                },
+                else => return false,
+            };
+            // A quoted occurrence pushes a symbol, which no register holds.
+            if (env.isQuoted(word.slot)) return false;
+            if (env.localOperand(word.slot)) |operand| {
+                if (!self.local(word.name, operand, outer)) return false;
+                continue;
+            }
+            const known = self.fiber.environment.idiomNames().programWord(word.name) orelse {
+                if (!self.combinator(word, nesting)) return false;
+                continue;
+            };
+            switch (known) {
+                .stack => |stack_word| {
+                    if (!wordMatches(self.fiber, word, null)) return false;
+                    switch (stack_word) {
+                        .dup => if (!self.need(1) or !self.push(self.stack[self.depth - 1])) return false,
+                        .swap => {
+                            if (!self.need(2)) return false;
+                            std.mem.swap(Item, &self.stack[self.depth - 1], &self.stack[self.depth - 2]);
+                        },
+                        .pop => {
+                            if (!self.need(1)) return false;
+                            self.depth -= 1;
+                        },
+                        .over => if (!self.need(2) or !self.push(self.stack[self.depth - 2])) return false,
+                    }
+                },
+                .operation => |operation| {
+                    if (!wordMatches(self.fiber, word, operationPrimitive(operation))) return false;
+                    if (self.program.len == Program.max_instructions or self.program.registers == Program.max_registers) return false;
+                    self.program.instructions[self.program.len] = switch (operation) {
+                        .unary => |selected| unary: {
+                            if (!self.need(1)) return false;
+                            break :unary .{
+                                .operation = .{ .unary = selected },
+                                .left = self.register() orelse return false,
+                                .destination = self.program.registers,
+                                .word = word.name,
+                                .code = code,
+                                .index = @intCast(position),
+                            };
+                        },
+                        .binary => |selected| binary: {
+                            if (!self.need(2)) return false;
+                            const right = self.register() orelse return false;
+                            break :binary .{
+                                .operation = .{ .binary = selected },
+                                .left = self.register() orelse return false,
+                                .right = right,
+                                .destination = self.program.registers,
+                                .word = word.name,
+                                .code = code,
+                                .index = @intCast(position),
+                            };
+                        },
+                        else => unreachable,
+                    };
+                    self.program.len += 1;
+                    self.stack[self.depth] = .{ .register = self.program.registers };
+                    self.depth += 1;
+                    self.program.registers += 1;
+                },
+            }
+        }
+        return self.bound == outer;
+    }
+
+    /// One lowered locals operation of the body whose locals start at
+    /// `outer`: bind the top `operand` values, push local `operand`, or drop
+    /// `operand` locals. Stored as the runtime stores them, the top value
+    /// first, so a read counts back from the end.
+    fn local(self: *ProgramCompiler, name: u32, operand: u32, outer: usize) bool {
+        const words = self.fiber.environment.localsWords();
+        if (name == words.load) {
+            if (operand > max_locals - self.bound or !self.need(operand)) return false;
+            for (0..operand) |index| {
+                self.depth -= 1;
+                self.locals[self.bound + index] = self.stack[self.depth];
+            }
+            self.bound += operand;
+        } else if (name == words.get) {
+            if (operand >= self.bound - outer) return false;
+            return self.push(self.locals[self.bound - 1 - operand]);
+        } else if (name == words.drop) {
+            if (operand > self.bound - outer) return false;
+            self.bound -= operand;
+        } else return false;
+        return true;
+    }
+
+    /// A combinator applied to quotation literals, compiled as what it would
+    /// run. A quotation consumes what it needed from beneath where it started
+    /// and leaves what stands above that, which is how the paging floor
+    /// counts it.
+    fn combinator(self: *ProgramCompiler, word: value.Symbol, nesting: usize) bool {
+        if (!plainWord(word.slot)) return false;
+        const resolved = self.fiber.peekWord(word) orelse return false;
+        if (resolved.origin != .core) return false;
+        const primitive = switch (resolved.definition.code()) {
+            .builtin => |builtin| builtin,
+            else => return false,
+        };
+        switch (combinators.flow(primitive)) {
+            .declared, .branch => return false,
+            .apply => return self.body(self.quotation() orelse return false, nesting + 1),
+            .dip => {
+                const applied = self.quotation() orelse return false;
+                if (!self.need(1)) return false;
+                self.depth -= 1;
+                const protected = self.stack[self.depth];
+                return self.body(applied, nesting + 1) and self.push(protected);
             },
-            .stack => |stack_word| switch (stack_word) {
-                .dup => {
-                    if (depth < 1 or depth == stack.len) return null;
-                    stack[depth] = stack[depth - 1];
-                    depth += 1;
-                },
-                .swap => {
-                    if (depth < 2) return null;
-                    std.mem.swap(Program.Register, &stack[depth - 1], &stack[depth - 2]);
-                },
-                .pop => {
-                    if (depth < 1) return null;
-                    depth -= 1;
-                },
-                .over => {
-                    if (depth < 2 or depth == stack.len) return null;
-                    stack[depth] = stack[depth - 2];
-                    depth += 1;
-                },
-            },
-            .operation => |operation| {
-                if (program.len == Program.max_instructions or program.registers == Program.max_registers) return null;
-                program.instructions[program.len] = switch (operation) {
-                    .unary => |selected| unary: {
-                        if (depth < 1) return null;
-                        depth -= 1;
-                        break :unary .{
-                            .operation = .{ .unary = selected },
-                            .left = stack[depth],
-                            .destination = program.registers,
-                            .word = form.symbol.name,
-                            .index = @intCast(position),
-                        };
-                    },
-                    .binary => |selected| binary: {
-                        if (depth < 2) return null;
-                        depth -= 2;
-                        break :binary .{
-                            .operation = .{ .binary = selected },
-                            .left = stack[depth],
-                            .right = stack[depth + 1],
-                            .destination = program.registers,
-                            .word = form.symbol.name,
-                            .index = @intCast(position),
-                        };
-                    },
-                    else => unreachable,
+            .paging => |placement| {
+                const applied = self.quotation() orelse return false;
+                const before = self.stack;
+                const start = self.depth;
+                const beneath = self.low;
+                self.low = start;
+                if (!self.body(applied, nesting + 1)) return false;
+                const reached = self.low;
+                // SAFETY: only the first `count` are read.
+                var results: Items = undefined;
+                const count = self.depth - reached;
+                @memcpy(results[0..count], self.stack[reached..self.depth]);
+                self.depth = reached;
+                self.low = @min(beneath, reached);
+                const consumed = before[reached..start];
+                return switch (placement) {
+                    .above => self.pushAll(results[0..count]) and self.pushAll(consumed),
+                    .below => self.pushAll(consumed) and self.pushAll(results[0..count]),
                 };
-                program.len += 1;
-                stack[depth] = program.registers;
-                depth += 1;
-                program.registers += 1;
+            },
+            .cleave => |quotations| {
+                // SAFETY: the first `quotations` are written below.
+                var applied: [3]*value.ListHandle = undefined;
+                if (quotations > applied.len) return false;
+                for (0..quotations) |index| applied[quotations - 1 - index] = self.quotation() orelse return false;
+                const before = self.stack;
+                const start = self.depth;
+                const beneath = self.low;
+                // SAFETY: only the first `count` are read.
+                var results: Items = undefined;
+                var count: usize = 0;
+                var reached = start;
+                for (applied[0..quotations]) |each| {
+                    self.stack = before;
+                    self.depth = start;
+                    self.low = start;
+                    if (!self.body(each, nesting + 1)) return false;
+                    const left = self.depth - self.low;
+                    if (left > results.len - count) return false;
+                    @memcpy(results[count..][0..left], self.stack[self.low..self.depth]);
+                    count += left;
+                    reached = @min(reached, self.low);
+                }
+                self.stack = before;
+                self.depth = reached;
+                self.low = @min(beneath, reached);
+                return self.pushAll(results[0..count]);
+            },
+            .spread => |quotations| {
+                if (quotations != 2) return false;
+                const last = self.quotation() orelse return false;
+                const first = self.quotation() orelse return false;
+                const beneath = self.low;
+                self.low = self.depth;
+                if (!self.body(last, nesting + 1)) return false;
+                // SAFETY: only the first `count` are read.
+                var results: Items = undefined;
+                const count = self.depth - self.low;
+                @memcpy(results[0..count], self.stack[self.low..self.depth]);
+                // The first quotation takes from what the last left beneath.
+                self.depth = self.low;
+                if (!self.body(first, nesting + 1)) return false;
+                self.low = @min(beneath, self.low);
+                return self.pushAll(results[0..count]);
             },
         }
     }
-    // A quotation that computes nothing is no faster compiled.
-    if (depth != 1 or program.len == 0) return null;
-    program.result = stack[0];
-    return program;
-}
+};
 
 const OfferedProgram = struct {
     context: Context,

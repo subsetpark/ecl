@@ -935,6 +935,78 @@ test "combinators: cached body words spend no kernel polls per element" {
 
 test "slots: implicit locals bind up to the highest slot their list writes" {
     try support.expectStacks(&.{
+}
+
+test "programs: a body of combinators over literal quotations or of locals runs as the words would" {
+    const Case = struct { source: []const u8, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "[1 2 3] ((1 +) apply) each", .expected = "[2 3 4]" },
+        .{ .source = "[1 2 3] ((1 +) (2 *) bi +) each", .expected = "[4 7 10]" },
+        .{ .source = "[1 2 3] ((1 +) (2 *) (neg) tri + +) each", .expected = "[3 5 7]" },
+        .{ .source = "[1 2 3] (2 (1 +) dip *) each", .expected = "[4 6 8]" },
+        .{ .source = "[1 2 3] (2 (+) below + +) each", .expected = "[6 8 10]" },
+        .{ .source = "[1 2 3] (2 (-) above - -) each", .expected = "[0 0 0]" },
+        .{ .source = "[1 2 3] (3 (1 +) (2 *) bracket -) each", .expected = "[-4 -3 -2]" },
+        .{ .source = "[1 2 3] (2 ((+) (-) bi) (*) bi + +) each", .expected = "[4 8 12]" },
+        .{ .source = "[1 2 3] (2 (pop id) (+) bi -) each", .expected = "[-2 -2 -2]" },
+        .{ .source = "[1 2 3] (2 (over) (swap) bi + + + +) each", .expected = "[7 10 13]" },
+        .{ .source = "[1 2 3] (|a| a 1 + a 2 * +) each", .expected = "[4 7 10]" },
+        .{ .source = "[1 2 3] (|a| a (|b| b b *) apply a +) each", .expected = "[2 6 12]" },
+        .{ .source = "[1 2 3] ((|a| a 1 +) (|b| b 2 *) bi -) each", .expected = "[0 -1 -2]" },
+        .{ .source = "[1 2 3] [4 5 6] ((+) (-) bi *) zip-with", .expected = "[-15 -21 -27]" },
+        .{ .source = "[1 2 3] 0 (|sum x| sum x x * +) fold", .expected = "14" },
+        .{ .source = "[1 2 3] ((max) (min) bi -) fold1", .expected = "2" },
+        .{ .source = "[1 2 3] 0 ((+) apply) scan", .expected = "[1 3 6]" },
+        // Bodies no program holds: a branch, and a quotation not a literal.
+        .{ .source = "[1 2 3] (dup 2 > (10 +) (20 +) if) each", .expected = "[21 22 13]" },
+        .{ .source = "[1 2 3] ((1 +) dup bi +) each", .expected = "[4 6 8]" },
+    };
+    var automatic_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&automatic_heap);
+    var automatic_inputs = try runtime_fixture.Fixture.init();
+    defer automatic_inputs.deinit();
+    var automatic = try session.Session.init(automatic_heap.allocator(), &.{}, automatic_inputs.inputs(.{}), .default, .evaluate);
+    defer automatic.deinit();
+    var generic_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&generic_heap);
+    var generic_inputs = try runtime_fixture.Fixture.init();
+    defer generic_inputs.deinit();
+    var generic = try session.Session.init(generic_heap.allocator(), &.{}, generic_inputs.inputs(.{}), .default, .evaluate);
+    defer generic.deinit();
+    generic.setIdiomMode(.generic_only);
+    try expectStack(&automatic, "0", "0");
+    try expectStack(&generic, "0", "0");
+    var buffer: [256]u8 = undefined;
+    for (cases) |case| {
+        const source = try std.fmt.bufPrint(&buffer, "pop {s}", .{case.source});
+        try expectStack(&automatic, source, case.expected);
+        try expectStack(&generic, source, case.expected);
+    }
+    try support.expectErrors(&.{
+        .{ .name = "a fault in an applied quotation", .source = "[4 0 2] ((8 swap div) apply) each", .kind = "domain", .word = "div" },
+        .{ .name = "a fault in a cleave's second quotation", .source = "[4 0 2] ((1 +) (8 swap div) bi +) each", .kind = "domain", .word = "div" },
+        .{ .name = "a fault in a body with locals", .source = "[4 0 2] (|a| 8 a div) each", .kind = "domain", .word = "div" },
+        .{ .name = "a body that reaches beneath its element", .source = "[4 0 2] ((+) (-) bi *) each", .kind = "underflow", .word = "+" },
+    });
+}
+
+test "programs: a combinator body spends no kernel polls per word" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const count = 4096;
+    switch (try runtime.runUnit("<combinator-body>", "4096 range (|a| a (1 +) (2 *) bi +) each len")) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(runtime.lastPolls() <= count + count / 64 + 64);
         .{ .name = "read twice", .source = "[1 2 3] (.x .x *) each", .expected = "[1 4 9]" },
         .{ .name = "two slots", .source = "3 4 (.y .x -) apply", .expected = "1" },
         .{ .name = "three slots", .source = "1 2 3 (.z .y .x) apply", .expected = "3 2 1" },

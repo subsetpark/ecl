@@ -31,8 +31,9 @@ pub const Flow = union(enum) {
     dip,
     /// Runs one of two quotations.
     branch,
-    /// Runs its quotation and puts back what it consumed.
-    paging,
+    /// Runs its quotation and puts back what it consumed, above its results
+    /// or below them.
+    paging: enum { above, below },
     /// Runs this many quotations from the same inputs.
     cleave: usize,
     /// Runs this many quotations, each on its own inputs.
@@ -43,7 +44,8 @@ pub fn flow(primitive: env.PrimitiveImpl) Flow {
     if (primitive == &call) return .apply;
     if (primitive == &dip) return .dip;
     if (primitive == &ifWord) return .branch;
-    if (primitive == &above or primitive == &below) return .paging;
+    if (primitive == &above) return .{ .paging = .above };
+    if (primitive == &below) return .{ .paging = .below };
     if (primitive == &bi) return .{ .cleave = 2 };
     if (primitive == &tri) return .{ .cleave = 3 };
     if (primitive == &bracket) return .{ .spread = 2 };

@@ -2663,8 +2663,11 @@ pub const ScalarProgram = struct {
         left: Register,
         right: Register = 0,
         destination: Register,
-        /// The word and its position in the quotation, which a fault reports.
+        /// The word, the quotation it was written in, and its position
+        /// there, which a fault reports. The quotation is the compiled one
+        /// or a literal inside it, so the held phrase keeps it alive.
         word: u32,
+        code: *value.ListHandle,
         index: u32,
     };
 
@@ -3156,7 +3159,7 @@ fn programAt(
     inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
     var failed: u8 = 0;
     return program.run(registers, &failed) catch |fault|
-        failProgram(fiber, operands[inputs], program.instructions[failed], fault);
+        failProgram(fiber, program.instructions[failed], fault);
 }
 
 /// The positions `0..inputs`, every input a planned program may write its
@@ -3412,7 +3415,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
                 registers[1] = programElement(operands[0], params.start + position);
                 var failed: u8 = 0;
                 accumulator = program.run(&registers, &failed) catch |fault|
-                    return failProgram(fiber, operands[1], program.instructions[failed], fault);
+                    return failProgram(fiber, program.instructions[failed], fault);
                 if (scan) {
                     output.results[position] = accumulator;
                     profile = profile.add(accumulator);
@@ -3440,11 +3443,11 @@ fn ProgramReduceKernel(comptime scan: bool) type {
 
 /// Reports a program's fault as the faulting word would: that word active, at
 /// its position in the code, with the shared scalar diagnostic.
-fn failProgram(fiber: *Fiber, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
+fn failProgram(fiber: *Fiber, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
     @setEvalBranchQuota(10_000);
     fiber.active_word = .plain(instruction.word);
     const failure = scalarFailure(fiber, fault, null);
-    fiber.setFailureSite(phrase.list, instruction.index);
+    fiber.setFailureSite(instruction.code, instruction.index);
     return failure;
 }
 
