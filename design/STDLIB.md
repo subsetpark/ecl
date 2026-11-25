@@ -177,6 +177,9 @@ wrap (net.local-address `port at 0 >) @give task.await
 ### both
 `( x y q -- ... )` — Apply `q` to `x` and `y`.
 
+### bracket
+`( ... p q -- ... )` — Apply `q` to the inputs it takes from the top of the stack and `p` to the inputs it takes from what remains. Push `p`'s results, followed by `q`'s results, in place of everything they consumed. `q` runs first. `(p) (q) bracket` is `[(p) (q)] spread`.
+
 ### bsl
 `( x count -- y )` — Shift the bit pattern left by `count` places, truncating bits shifted off the top.
 

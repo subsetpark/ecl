@@ -35,6 +35,8 @@ pub const Flow = union(enum) {
     paging,
     /// Runs this many quotations from the same inputs.
     cleave: usize,
+    /// Runs this many quotations, each on its own inputs.
+    spread: usize,
 };
 
 pub fn flow(primitive: env.PrimitiveImpl) Flow {
@@ -44,6 +46,7 @@ pub fn flow(primitive: env.PrimitiveImpl) Flow {
     if (primitive == &above or primitive == &below) return .paging;
     if (primitive == &bi) return .{ .cleave = 2 };
     if (primitive == &tri) return .{ .cleave = 3 };
+    if (primitive == &bracket) return .{ .spread = 2 };
     return .declared;
 }
 
@@ -60,6 +63,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "bi", .primitive = bi, .effect = "... p q -- ...", .doc = "Apply `p` and `q` to the same view of the stack. Push `p`'s results, followed by `q`'s results." },
         .{ .name = "tri", .primitive = tri, .effect = "... p q r -- ...", .doc = "Apply `p`, `q`, `r` to the same view of the stack. Push `p`'s results, followed by `q`'s results, followed by `r`'s." },
         .{ .name = "cleave", .primitive = cleave, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations` to the same view of the stack. Push each quotation's results to the stack in order." },
+        .{ .name = "bracket", .primitive = bracket, .effect = "... p q -- ...", .doc = "Apply `q` to the inputs it takes from the top of the stack and `p` to the inputs it takes from what remains. Push `p`'s results, followed by `q`'s results, in place of everything they consumed. `q` runs first. `(p) (q) bracket` is `[(p) (q)] spread`." },
         .{ .name = "spread", .primitive = spread, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations` to its own inputs: the last takes what it needs from the top of the stack, the one before it from what remains, and so on. Push every quotation's results in the order of the quotations, in place of everything they consumed. The quotations run last to first." },
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Evaluate `quotation` `n` times." },
         .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "Conditionally evaluate the first action in `clauses` whose predicate is true.\n\n`clauses` consists of an odd number of quotations; every odd quotation (except the last) is a predicate, and is directly followed by its associated action. If no predicate evaluates to true, then evaluate the last quotation (`else`). Each quotation runs against the same view of the stack." },
@@ -573,14 +577,17 @@ fn spread(fiber: *Fiber) MachineError!void {
 /// what the ones after it left, so the inputs are theirs in order.
 const Sharing = enum { cleave, spread };
 fn bi(fiber: *Fiber) MachineError!void {
-    return cleaveFixed(fiber, 2);
+    return cleaveFixed(fiber, .cleave, 2);
 }
 fn tri(fiber: *Fiber) MachineError!void {
-    return cleaveFixed(fiber, 3);
+    return cleaveFixed(fiber, .cleave, 3);
 }
-/// `bi` and `tri` take their quotations straight off the stack, already
-/// validated, so no list is built and no validation phase runs.
-fn cleaveFixed(fiber: *Fiber, count: usize) MachineError!void {
+fn bracket(fiber: *Fiber) MachineError!void {
+    return cleaveFixed(fiber, .spread, 2);
+}
+/// `bi`, `tri`, and `bracket` take their quotations straight off the stack,
+/// already validated, so no list is built and no validation phase runs.
+fn cleaveFixed(fiber: *Fiber, sharing: Sharing, count: usize) MachineError!void {
     try fiber.require(count);
     var fixed: CleaveQuotations.Fixed = .{};
     errdefer fixed.retire(fiber.releases);
@@ -593,12 +600,12 @@ fn cleaveFixed(fiber: *Fiber, count: usize) MachineError!void {
     }
     fiber.discard(count);
     var counts: CountedCleave.Counts = .{};
-    if (try countedInputs(fiber, .cleave, &.{ .fixed = fixed }, &counts)) |inputs| {
+    if (try countedInputs(fiber, sharing, &.{ .fixed = fixed }, &counts)) |inputs| {
         const quotations: CleaveQuotations = .{ .fixed = fixed };
         fixed.count = 0;
-        return launchCountedCleave(fiber, .cleave, quotations, counts, inputs);
+        return launchCountedCleave(fiber, sharing, quotations, counts, inputs);
     }
-    return startCleave(fiber, .cleave, .{ .fixed = fixed }, .run);
+    return startCleave(fiber, sharing, .{ .fixed = fixed }, .run);
 }
 
 /// How many inputs the quotations consume together when every one has a

@@ -145,6 +145,16 @@ const Walk = struct {
                         }
                         break :cleave .{ .exact = total };
                     },
+                    .spread => |count| spread: {
+                        var total: Summary = .{ .consumed = 0, .produced = 0 };
+                        for (0..count) |_| {
+                            const inner = try self.operand(&stack, site, depth);
+                            if (inner != .exact) break :spread inner;
+                            total.consumed += inner.exact.consumed;
+                            total.produced += inner.exact.produced;
+                        }
+                        break :spread .{ .exact = total };
+                    },
                 },
             };
             if (applied != .exact) return applied;

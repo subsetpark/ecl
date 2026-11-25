@@ -341,6 +341,8 @@ test "spread: each quotation takes its own inputs, last to first" {
                 "5 6 ([(1 +) ([(0 <) (2 +) (2 +)] cond)] spread) above",
             .expected = "5 6 6 8 6 8 5 6 6 8 5 6",
         },
+        .{ .name = "bracket is the two-quotation spread", .source = "1 2 3 (+) (dup) bracket 1 2 3 (+) ([(0 <) (dup) (dup)] cond) bracket", .expected = "3 3 3 3 3 3" },
+        .{ .name = "a bracket inside a summarized quotation", .source = "1 2 3 ((+) (dup) bracket) (id) bi", .expected = "3 3 3 3" },
         .{ .name = "collecting and letting go are bounded work", .source = "20000 (1) times [(10000 (pop) times 7) (5000 (pop) times 8)] spread 5002 pack dup len swap -2 take", .expected = "5002 [7 8]" },
     });
     try support.expectErrors(&.{
@@ -349,6 +351,8 @@ test "spread: each quotation takes its own inputs, last to first" {
         .{ .name = "the last quotation runs first over the floor", .source = "1 2 [(len) ([(0 <) (first) (first)] cond)] spread", .kind = "type", .word = "first" },
         .{ .name = "a list holding a non-quotation", .source = "1 2 3 [(+) 5] spread", .kind = "type", .word = "spread" },
         .{ .name = "a non-list", .source = "1 2 3 5 spread", .kind = "type", .word = "spread" },
+        .{ .name = "bracket runs its second quotation first", .source = "1 2 (len) (first) bracket", .kind = "type", .word = "first" },
+        .{ .name = "bracket non-quotation", .source = "1 2 (+) 5 bracket", .kind = "type", .word = "bracket" },
     });
 }
 
