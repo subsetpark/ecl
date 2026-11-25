@@ -964,10 +964,18 @@ Three quotation-application behaviors exist:
   values, in their original order, above or below the quotation's results.
   `cleave`, `bi`, and `tri` run each quotation this way from the same
   inputs, hold its results aside, and finally drop the inputs any quotation
-  consumed. The test quotations of `cond`, `while`, and `linrec` run this
+  consumed. `spread` gives each quotation of a list its own inputs: the
+  quotations run last to first, each consuming from the top of what the ones
+  after it left, and their results replace everything consumed, in the order
+  of the quotations; `bracket` is the spread of two quotations taken from
+  the stack. The test quotations of `cond`, `while`, and `linrec` run this
   way too: a test may consume, rearrange, or add values; its top value must
   be a 0/1 boolean, and its complete result is discarded and the previous stack
-  state is restored before control continues. 
+  state is restored before control continues. That restore, like a cleave's
+  return to the same inputs, is the combinator not consuming: what the
+  quotation read is not its result. A word that puts values back, such as
+  `dip`, `above`, or `below`, is an ordinary stack operation and produces
+  them, so `[[f] dip]` presents the same effect as the shuffle it replaces.
 - **Isolated**: the quotation runs on a fresh substack per application,
   starting on its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,

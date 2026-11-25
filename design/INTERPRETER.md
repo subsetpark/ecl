@@ -1059,15 +1059,20 @@ consumption is the sum of what its words required, which is the stack effect
 it presents from outside. Every operand check compares against one guard
 depth. That depth is the floor unless a paged original has been returned to
 the substack; those are recorded by position and consumed by the first check
-that reaches them, so protecting a value is not consuming it. Restoring is
-not producing: a copy records whether the floor beneath holds the same value
-as an original, because it paged it for this floor or it was already one of
-its returned originals, and a restore puts such a value back as the floor
-beneath's returned original. One bounded finalize serves every paging word.
+that reaches them. Only an implicit restore returns originals: a guard
+test's or a cleave quotation's, where the combinator consumed nothing. A copy
+records whether the floor beneath holds the same value as an original,
+because it paged it for this floor or it was already one of its returned
+originals, and an implicit restore puts such a value back as the floor
+beneath's returned original. A word that puts values back (`dip`, `dip-n`,
+`above`, `below`) is an ordinary stack operation and produces them, so its
+effect under a paging floor is the effect of the shuffle it replaces. One
+bounded finalize serves every paging word.
 It sweeps the returned originals out of the region, places the region (kept
 beneath or above the restored originals, dropped for a guard's test,
 collected for a cleave), and pushes the originals back in order, in place on
-the stack. The guards therefore keep no checkpoint: a test takes what it
+the stack. A spread's quotation keeps what it consumed, so its region is
+collected and its originals are let go instead. The guards therefore keep no checkpoint: a test takes what it
 requires and the finalize gives it back. Paging floors nest by chaining
 through the floor beneath, and the hard floor beneath them all is where
 underflow still happens. Whatever sets a floor over another, whether a
@@ -1077,6 +1082,28 @@ application inside a paging floor blocks paging while it is open and restores
 it when it closes. A frame alternates its applications between a paging floor its
 context keeps in place and the caller's stack by specifying the launch of each,
 so a guard runs its tests and actions under one frame.
+
+A quotation's consumption can also be read before it runs. A stack summary
+is the exact count of values a quotation takes from beneath and leaves,
+composed from its words: a literal, a builtin whose declared effect is exact,
+a lowered locals operation, a source word's body, and a combinator applied to
+literal quotations under that combinator's own rule. Any other word has no
+summary: a word that reaches itself, a native word, and a word behind a checked module
+boundary, whose check reports the depth it found. So does any quotation or
+body past a constant size, so the walk is bounded by a constant and an absent
+summary is always a correct answer. A quotation's summary is read at the site
+it runs at and is not kept. A body's summary depends on what the body's own
+words resolve to, so it is recorded with the fiber's remembered resolution of
+the word and lasts exactly as long: a publication discards it, and a
+redefinition, of the word or of anything its body reaches, is read as
+redefined. It is an optimization and nothing observes it: what acts
+on one must leave the stack, the failures, and every enclosing floor's
+accounting as the paging floor would have. A cleave or spread whose
+quotations all have summaries, with their inputs in reach, runs each in place
+over copies of the inputs it consumes and removes the consumed inputs once at
+the end. The other
+paging words keep the floor, where reading a summary costs as much as the
+paging it would replace.
 
 ### Failure is a bounded machine transition
 

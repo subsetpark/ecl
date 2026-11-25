@@ -177,6 +177,9 @@ wrap (net.local-address `port at 0 >) @give task.await
 ### both
 `( x y q -- ... )` — Apply `q` to `x` and `y`.
 
+### bracket
+`( ... p q -- ... )` — Apply `q` to the inputs it takes from the top of the stack and `p` to the inputs it takes from what remains. Push `p`'s results, followed by `q`'s results, in place of everything they consumed. `q` runs first. `(p) (q) bracket` is `[(p) (q)] spread`.
+
 ### bsl
 `( x count -- y )` — Shift the bit pattern left by `count` places, truncating bits shifted off the top.
 
@@ -487,6 +490,9 @@ wrap (net.local-address `port at 0 >) @give task.await
 ### helper
 `( quotation -- quotation )` — Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`.
 
+### id
+`( x -- x )` — Return the top value unchanged. Inside a paging quotation it takes the value from beneath, so `(pop id)` selects the second value.
+
 ### if
 `( bool then else -- ... )` — Run `then` when the condition is 1, `else` when it is 0.
 
@@ -725,6 +731,9 @@ wrap (net.local-address `port at 0 >) @give task.await
 ### sin
 `( x -- y )` — Evaluate the sine of `x`.
 
+### spread
+`( ... quotations -- ... )` — Apply each quotation in `quotations` to its own inputs: the last takes what it needs from the top of the stack, the one before it from what remains, and so on. Push every quotation's results in the order of the quotations, in place of everything they consumed. The quotations run last to first.
+
 ### sqrt
 `( x -- y )` — Square root.
 
@@ -933,6 +942,9 @@ applications of `q`, until the result matches
 
 ### parse-one
 `( string -- x )` — Parse source text describing exactly one form.
+
+### retain
+`( ... counts -- ... )` — Keep each of the values beneath `counts` as many times as its count, in order: the first count applies to the deepest of them, and the values consumed are as many as `counts` holds. The stack form of `where at`.
 
 ### scan1
 `( list (q: acc a -- acc) -- list )` — Fold `q` over `list`, using the first element of `list` as the accumulator and returning a list of each successive accumulator value.

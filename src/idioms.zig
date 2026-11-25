@@ -664,24 +664,6 @@ const ProgramForm = union(enum) {
     stack: ProgramStackWord,
     /// A unary or binary numeric operation.
     operation: Operation,
-
-    /// How many program values the form reads, and how many it leaves.
-    fn effect(self: ProgramForm) struct { reads: usize, leaves: usize } {
-        return switch (self) {
-            .constant => .{ .reads = 0, .leaves = 1 },
-            .stack => |word| switch (word) {
-                .dup => .{ .reads = 1, .leaves = 2 },
-                .swap => .{ .reads = 2, .leaves = 2 },
-                .pop => .{ .reads = 1, .leaves = 0 },
-                .over => .{ .reads = 2, .leaves = 3 },
-            },
-            .operation => |operation| switch (operation) {
-                .unary => .{ .reads = 1, .leaves = 1 },
-                .binary => .{ .reads = 2, .leaves = 1 },
-                else => unreachable,
-            },
-        };
-    }
 };
 
 /// A word a scalar program may contain.

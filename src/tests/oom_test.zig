@@ -582,12 +582,17 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "(1 \"a\" 2) 2 windows pop " ++
             "\"abc\" 2 (\"bc\" match?) stencil pop " ++
             "1 (0 >) (dup 1 - swap) unfold pop pop " ++
-            // Paging floors: a page across the floor, a returned original,
+            // Paging floors: a page across the floor, a dip beneath it,
             // a guard's unpage, a counted dip, and the finalize's tail.
             "1 2 (+) above pop pop pop " ++
             "1 2 3 ((+) dip 5) below pop pop pop pop pop " ++
             "5 ([(0 <) (pop 1) (pop 2)] cond) below pop pop " ++
             "1 2 3 (10 +) 2 dip-n pop pop pop " ++
+            // A cleave over summarized quotations, which runs them in place.
+            "1 2 (+) (-) bi pop pop " ++
+            // A spread in place, and one over the paging floor.
+            "1 2 [(1 +) (1 +)] spread pop pop " ++
+            "1 2 [(1 +) ([(0 <) (1 +) (1 +)] cond)] spread pop pop " ++
             // Capture-shape recognition allocates on its own path (the fused
             // kernel) and on the rejected one (the generic frame machine);
             // both belong in the consolidated allocation-failure sweep.

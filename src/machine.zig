@@ -881,7 +881,7 @@ pub const ExecutionSite = struct {
     /// define. The value may have come from any caller, so it does not
     /// inherit embedded registration trust; a resumed load sets the
     /// provenance it registers under itself.
-    fn applied(self: ExecutionSite) ExecutionSite {
+    pub fn applied(self: ExecutionSite) ExecutionSite {
         return .{
             .scope = self.scope,
             .registration_provenance = self.registration_provenance.applied(),
@@ -3381,6 +3381,83 @@ pub const Fiber = struct {
         return try self.resolveFresh(word, true);
     }
 
+    /// What a stack summary reads of one word of code running at `site`:
+    /// the word's resolution there, remembered like any dispatch of it, so
+    /// the definition stays held for as long as the remembered entry does. A
+    /// summary reads its words before the quotation runs, which may be while
+    /// no evaluation is current.
+    pub fn summaryTarget(self: *Fiber, word: value.Symbol, site: ExecutionSite) error{OutOfMemory}!SummaryTarget {
+        if (binder.executableWord(.{ .symbol = word }) == null) return .none;
+        // Bootstrap remembers nothing, so nothing would hold the definition.
+        if (self.inherited.phase == .bootstrap) return .none;
+        const provenance = site.registration_provenance;
+        const key = WordResolutions.provenanceKey(provenance);
+        const definition = self.resolutions.find(word, self.inherited.registry.currentPublication(), key) orelse fresh: {
+            var context: binder.Context = .{
+                .environment = self.environment,
+                .view = self.inherited.registry.view(),
+                .module_access = self.module_access,
+                .registry = self.inherited.registry,
+                .project = self.inherited.module_snapshot,
+                .libraries = self.inherited.libraries(),
+                .provenance = provenance,
+            };
+            defer context.deinit();
+            var resolver = binder.Resolver.init(&context, word);
+            defer resolver.deinit();
+            const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+                .resolved => |resolved| resolved,
+                .missed => return .none,
+            };
+            try self.rememberResolution(word, context.view.publication, provenance, found);
+            // A publication since the lookup began means the entry is not
+            // under the current one, and nothing here holds the definition.
+            if (self.resolutions.find(word, self.inherited.registry.currentPublication(), key) != found) return .none;
+            break :fresh found;
+        };
+        // A call that crosses into a module checks the word's declared
+        // effect, and that check's failure reports the depth it found: only
+        // the call itself can say that.
+        const home = modules.definitionHome(definition);
+        if (home) |target| {
+            const crosses = target.scope(self.module_access) != site.scope;
+            if (crosses and definitionOrigin(definition, home) != .standard_library) return .none;
+        }
+        return switch (definition.code()) {
+            .native => .none,
+            .builtin => |primitive| .{ .builtin = .{ .primitive = primitive, .effect = definition.effect } },
+            .source => |executable| .{ .source = .{
+                .definition = definition,
+                .code = executable.code(),
+                .site = if (home) |target| .image(target, self.module_access, site.defining) else site,
+                .summary = self.resolutions.summary(word, self.inherited.registry.currentPublication(), key),
+            } },
+        };
+    }
+
+    /// Records the summary of `word`'s body as resolved at `site`.
+    pub fn recordSummary(
+        self: *Fiber,
+        word: value.Symbol,
+        site: ExecutionSite,
+        definition: *const env.Definition,
+        summary: WordResolutions.BodySummary,
+    ) void {
+        self.resolutions.setSummary(
+            word,
+            self.inherited.registry.currentPublication(),
+            WordResolutions.provenanceKey(site.registration_provenance),
+            definition,
+            summary,
+        );
+    }
+
+    /// The publication a summary's resolutions were all read under, when it
+    /// is still the current one at the end of the walk.
+    pub fn currentPublication(self: *const Fiber) u64 {
+        return self.inherited.registry.currentPublication();
+    }
+
     /// Resolves `word` against the current view in one call, remembering the
     /// result when `remember` is set. The definition is inspected before the
     /// lookup's lease is released, since a concurrent replacement may retire
@@ -4332,6 +4409,21 @@ pub const Reflected = struct {
 };
 
 /// What one definition is, as dispatch and recognition see it.
+/// One word as a stack summary reads it.
+pub const SummaryTarget = union(enum) {
+    /// Nothing a summary can read: unresolved, native, or behind a checked
+    /// module boundary.
+    none,
+    builtin: struct { primitive: env.PrimitiveImpl, effect: ?env.ValidatedEffect },
+    source: struct {
+        definition: *const env.Definition,
+        code: *Header,
+        /// Where the body runs: the caller's site, or the word's own image.
+        site: ExecutionSite,
+        summary: WordResolutions.BodySummary,
+    },
+};
+
 pub const PeekedWord = struct {
     definition: *env.Definition,
     trace_word: intern.TraceWord,

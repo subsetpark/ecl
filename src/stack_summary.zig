@@ -1,0 +1,297 @@
+//! What a quotation does to the stack, read from its words before it runs:
+//! how many values it takes from beneath and how many it leaves. A summary
+//! exists only when every word's effect is exact, so whatever acts on one may
+//! skip the dynamic accounting that would have found the same counts.
+const std = @import("std");
+const value = @import("value.zig");
+const heap = @import("heap.zig");
+const list = @import("list.zig");
+const env = @import("env.zig");
+const intern = @import("intern.zig");
+const machine = @import("machine.zig");
+const combinators = @import("combinators.zig");
+const prims = @import("prims.zig");
+
+const Header = value.ListHandle;
+const Fiber = machine.Fiber;
+
+pub const Summary = struct {
+    /// Values the quotation takes from beneath where it starts.
+    consumed: u32,
+    /// Values it leaves where those were.
+    produced: u32,
+};
+
+/// A quotation longer than this is not summarized.
+const max_forms = 16;
+/// A word body longer than this has no summary.
+const max_body_forms = 64;
+/// Forms one walk may visit across the quotations and word bodies it
+/// descends into, which bounds the walk by a constant rather than by the
+/// program. A walk that runs out records nothing, so a later one resumes
+/// from the bodies this one finished.
+const max_visited = 128;
+/// How far a walk descends through nested quotations and word bodies.
+const max_depth = 8;
+/// The most a summary may consume or leave.
+const max_values = 32;
+/// The most locals one quotation or body may hold bound at once.
+const max_locals = 16;
+
+/// The summary of a quotation about to run at `site`, or null when any word
+/// leaves the counts to run time: a word that does not resolve, a native
+/// word, a word behind a checked module boundary, a builtin whose
+/// effect holds a row and has no rule here, or a combinator whose quotation
+/// is not a literal.
+///
+/// A word's body is summarized once per resolution of the word and recorded
+/// with it, so the record lasts until a publication and a redefinition is
+/// read as redefined.
+pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{OutOfMemory}!?Summary {
+    if (quotation.length() > max_forms) return null;
+    var walk: Walk = .{ .fiber = fiber, .publication = fiber.currentPublication() };
+    const summary = switch (try walk.summarize(quotation, site, 0)) {
+        .exact => |summary| summary,
+        .none, .exhausted => return null,
+    };
+    // Words read under different publications say nothing together.
+    return if (fiber.currentPublication() == walk.publication) summary else null;
+}
+
+const Result = union(enum) {
+    exact: Summary,
+    /// Some word has no summary.
+    none,
+    /// The walk ran out before it could tell.
+    exhausted,
+};
+
+const Walk = struct {
+    fiber: *Fiber,
+    publication: u64,
+    visited: usize = 0,
+
+    fn summarize(self: *Walk, code: *Header, site: machine.ExecutionSite, depth: usize) error{OutOfMemory}!Result {
+        const length: usize = @intCast(code.length());
+        if (depth > max_depth) return .exhausted;
+        self.visited += length;
+        if (self.visited > max_visited) return .exhausted;
+        var stack: Abstract = .{};
+        for (0..length) |index| {
+            // Every path below that skips the fall-through check
+            // (`continue`) is covered by checking before the next form.
+            if (stack.reach > max_values or stack.height > max_values) return .none;
+            const word = switch (list.atUnchecked(.{ .list = code }, index)) {
+                .symbol => |reference| reference,
+                .list => |literal| {
+                    stack.push(literal);
+                    continue;
+                },
+                else => {
+                    stack.push(null);
+                    continue;
+                },
+            };
+            if (env.isQuoted(word.slot)) {
+                stack.push(null);
+                continue;
+            }
+            if (env.localOperand(word.slot)) |count_or_index| {
+                if (!stack.local(self.fiber.environment.localsWords(), word.name, count_or_index)) return .none;
+                continue;
+            }
+            const applied: Result = switch (try self.fiber.summaryTarget(word, site)) {
+                .none => .none,
+                .source => |source| try self.body(word, site, source),
+                // An exact declared effect says everything; only a builtin
+                // whose effect holds a row can have a rule of its own.
+                .builtin => |builtin| if (prims.unsummarizable(builtin.primitive))
+                    .none
+                else if (exact(builtin.effect)) |declared|
+                    (if (takesQuotation(builtin.effect.?)) Result.none else .{ .exact = declared })
+                else switch (combinators.flow(builtin.primitive)) {
+                    .declared => .none,
+                    .apply => try self.operand(&stack, site, depth),
+                    .dip => dip: {
+                        const inner = try self.operand(&stack, site, depth);
+                        if (inner != .exact) break :dip inner;
+                        stack.pop(1);
+                        stack.apply(inner.exact);
+                        stack.push(null);
+                        continue;
+                    },
+                    .branch => branch: {
+                        const otherwise = try self.operand(&stack, site, depth);
+                        if (otherwise != .exact) break :branch otherwise;
+                        const then = try self.operand(&stack, site, depth);
+                        if (then != .exact) break :branch then;
+                        stack.pop(1);
+                        // Which branch runs is data, so the counts are known
+                        // only when the branches agree.
+                        if (!std.meta.eql(then.exact, otherwise.exact)) break :branch .none;
+                        break :branch then;
+                    },
+                    // A paging word leaves its quotation's results and the
+                    // inputs it consumed.
+                    .paging => paging: {
+                        const inner = try self.operand(&stack, site, depth);
+                        if (inner != .exact) break :paging inner;
+                        break :paging .{ .exact = .{
+                            .consumed = inner.exact.consumed,
+                            .produced = inner.exact.produced + inner.exact.consumed,
+                        } };
+                    },
+                    .cleave => |count| cleave: {
+                        var total: Summary = .{ .consumed = 0, .produced = 0 };
+                        for (0..count) |_| {
+                            const inner = try self.operand(&stack, site, depth);
+                            if (inner != .exact) break :cleave inner;
+                            total.consumed = @max(total.consumed, inner.exact.consumed);
+                            total.produced += inner.exact.produced;
+                        }
+                        break :cleave .{ .exact = total };
+                    },
+                    .spread => |count| spread: {
+                        var total: Summary = .{ .consumed = 0, .produced = 0 };
+                        for (0..count) |_| {
+                            const inner = try self.operand(&stack, site, depth);
+                            if (inner != .exact) break :spread inner;
+                            total.consumed += inner.exact.consumed;
+                            total.produced += inner.exact.produced;
+                        }
+                        break :spread .{ .exact = total };
+                    },
+                },
+            };
+            if (applied != .exact) return applied;
+            stack.apply(applied.exact);
+            if (stack.reach > max_values or stack.height > max_values) return .none;
+        }
+        if (stack.reach > max_values or stack.height > max_values) return .none;
+        // A local left bound stays visible to the caller, which a summary
+        // cannot describe.
+        if (stack.bound != 0) return .none;
+        return .{ .exact = .{ .consumed = @intCast(stack.reach), .produced = @intCast(stack.height) } };
+    }
+
+    /// The summary of a source word's body, read from the word's remembered
+    /// resolution or walked and recorded there.
+    fn body(
+        self: *Walk,
+        word: value.Symbol,
+        site: machine.ExecutionSite,
+        source: @FieldType(machine.SummaryTarget, "source"),
+    ) error{OutOfMemory}!Result {
+        switch (source.summary) {
+            .exact => |counts| return .{ .exact = .{ .consumed = counts.consumed, .produced = counts.produced } },
+            .none, .reading => return .none,
+            .unread => {},
+        }
+        if (source.code.length() > max_body_forms) {
+            self.fiber.recordSummary(word, site, source.definition, .none);
+            return .none;
+        }
+        // The walk resolves more words, which may let go of this one's
+        // definition, so the body is held across it.
+        heap.incRef(source.code);
+        defer self.fiber.releases.releaseHeader(source.code);
+        self.fiber.recordSummary(word, site, source.definition, .reading);
+        const result = try self.summarize(source.code, source.site, 1);
+        self.fiber.recordSummary(word, site, source.definition, switch (result) {
+            .exact => |summary| .{ .exact = .{ .consumed = @intCast(summary.consumed), .produced = @intCast(summary.produced) } },
+            .none => .none,
+            .exhausted => .unread,
+        });
+        return result;
+    }
+
+    /// Whether a word's declared inputs include a quotation slot. Such a word
+    /// runs the quotation where no walk reads it, and that code may publish a
+    /// definition the summary rests on. Only the combinators with a rule of
+    /// their own are walked, and they do not reach here.
+    fn takesQuotation(effect: env.ValidatedEffect) bool {
+        const header = effect.header();
+        for (0..effect.inputs) |index| {
+            if (list.atUnchecked(.{ .list = header }, index) == .list) return true;
+        }
+        return false;
+    }
+
+    fn exact(declared: ?env.ValidatedEffect) ?Summary {
+        const effect = declared orelse return null;
+        if (effect.result_depth != .exact) return null;
+        return .{ .consumed = effect.inputs, .produced = effect.outputs };
+    }
+
+    /// The summary of the quotation on top of the abstract stack, which a
+    /// combinator is about to take: known only when it is a literal the
+    /// code pushed and nothing has moved since.
+    fn operand(self: *Walk, stack: *Abstract, site: machine.ExecutionSite, depth: usize) error{OutOfMemory}!Result {
+        const taken = stack.take() orelse return .none;
+        if (taken.length() > max_forms) return .none;
+        return self.summarize(taken, site.applied(), depth + 1);
+    }
+};
+
+/// The stack as a summary sees it: how far beneath its start the code has
+/// reached, how many values stand above that point, and which of those are
+/// list literals the code pushed.
+const Abstract = struct {
+    reach: usize = 0,
+    height: usize = 0,
+    // SAFETY: a slot is read only below `height`, and `push` writes every
+    // slot it raises `height` past.
+    literals: [max_values + 1]?*Header = undefined,
+    /// The locals this code has bound and not dropped. A quotation the code
+    /// applies binds its own.
+    bound: usize = 0,
+    // SAFETY: a slot is read only below `bound`, and binding writes every
+    // slot it raises `bound` past.
+    locals: [max_locals]?*Header = undefined,
+
+    /// One lowered locals operation: bind the top `operand` values, the
+    /// deepest first; push local `operand`; or drop `operand` locals. False
+    /// when the operation would fail where it runs, or binds more than a
+    /// summary follows.
+    fn local(self: *Abstract, words: intern.LocalsWords, name: u32, operand: u32) bool {
+        if (name == words.load) {
+            if (operand > max_locals - self.bound) return false;
+            // Stored as the runtime stores them: the top value first, so
+            // the deepest of the newest binding ends last and a read of
+            // local `n` counts back from the end.
+            for (0..operand) |index| self.locals[self.bound + index] = self.take();
+            self.bound += operand;
+        } else if (name == words.get) {
+            if (operand >= self.bound) return false;
+            self.push(self.locals[self.bound - 1 - operand]);
+        } else if (name == words.drop) {
+            if (operand > self.bound) return false;
+            self.bound -= operand;
+        } else return false;
+        return true;
+    }
+
+    fn push(self: *Abstract, literal: ?*Header) void {
+        if (self.height < self.literals.len) self.literals[self.height] = literal;
+        self.height += 1;
+    }
+    fn pop(self: *Abstract, count: usize) void {
+        if (count > self.height) {
+            self.reach += count - self.height;
+            self.height = 0;
+        } else self.height -= count;
+    }
+    /// Pops one value, returning it when it is a known literal.
+    fn take(self: *Abstract) ?*Header {
+        if (self.height == 0) {
+            self.reach += 1;
+            return null;
+        }
+        self.height -= 1;
+        return if (self.height < self.literals.len) self.literals[self.height] else null;
+    }
+    fn apply(self: *Abstract, summary: Summary) void {
+        self.pop(summary.consumed);
+        for (0..summary.produced) |_| self.push(null);
+    }
+};

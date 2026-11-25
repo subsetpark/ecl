@@ -27,6 +27,12 @@ fn bind(comptime mode: Mode) env.PrimitiveImpl {
     }.run;
 }
 
+/// Whether `primitive` binds a definition, which a stack summary cannot
+/// follow: later words may mean something else than when it was read.
+pub fn binds(primitive: env.PrimitiveImpl) bool {
+    return primitive == bind(.def) or primitive == bind(.defp) or primitive == bind(.test_declaration);
+}
+
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "def", .primitive = bind(.def), .effect = "... body name --", .doc = "Bind `name` to `body` in the current scope. Optionally, consume an annotation quotation below the body as binding metadata." },

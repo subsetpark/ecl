@@ -14,6 +14,12 @@ const Value = value.Value;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
+/// Whether `primitive` starts a task, whose code runs unseen and may
+/// change definitions.
+pub fn starts(primitive: env.PrimitiveImpl) bool {
+    return primitive == &spawn or primitive == &give;
+}
+
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@spawn", .primitive = spawn, .effect = "quotation -- task", .doc = "Create a new task and evaluate `quotation`." },

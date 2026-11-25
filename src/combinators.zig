@@ -8,6 +8,7 @@ const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const paging = @import("paging.zig");
+const stack_summary = @import("stack_summary.zig");
 const poll = @import("poll.zig");
 const support = @import("kernel_support.zig");
 
@@ -18,6 +19,36 @@ const MachineError = machine.MachineError;
 const Application = machine.Application;
 const ApplicationStep = machine.ApplicationStep;
 const StackWindow = machine.StackWindow;
+
+/// How a combinator's stack effect follows from the literal quotations it
+/// is given, for the words whose declared effect holds a row.
+pub const Flow = union(enum) {
+    /// No rule: the declared effect is all there is to read.
+    declared,
+    /// Runs its quotation where it stands.
+    apply,
+    /// Runs its quotation beneath one protected value.
+    dip,
+    /// Runs one of two quotations.
+    branch,
+    /// Runs its quotation and puts back what it consumed.
+    paging,
+    /// Runs this many quotations from the same inputs.
+    cleave: usize,
+    /// Runs this many quotations, each on its own inputs.
+    spread: usize,
+};
+
+pub fn flow(primitive: env.PrimitiveImpl) Flow {
+    if (primitive == &call) return .apply;
+    if (primitive == &dip) return .dip;
+    if (primitive == &ifWord) return .branch;
+    if (primitive == &above or primitive == &below) return .paging;
+    if (primitive == &bi) return .{ .cleave = 2 };
+    if (primitive == &tri) return .{ .cleave = 3 };
+    if (primitive == &bracket) return .{ .spread = 2 };
+    return .declared;
+}
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
@@ -32,6 +63,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "bi", .primitive = bi, .effect = "... p q -- ...", .doc = "Apply `p` and `q` to the same view of the stack. Push `p`'s results, followed by `q`'s results." },
         .{ .name = "tri", .primitive = tri, .effect = "... p q r -- ...", .doc = "Apply `p`, `q`, `r` to the same view of the stack. Push `p`'s results, followed by `q`'s results, followed by `r`'s." },
         .{ .name = "cleave", .primitive = cleave, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations` to the same view of the stack. Push each quotation's results to the stack in order." },
+        .{ .name = "bracket", .primitive = bracket, .effect = "... p q -- ...", .doc = "Apply `q` to the inputs it takes from the top of the stack and `p` to the inputs it takes from what remains. Push `p`'s results, followed by `q`'s results, in place of everything they consumed. `q` runs first. `(p) (q) bracket` is `[(p) (q)] spread`." },
+        .{ .name = "spread", .primitive = spread, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations` to its own inputs: the last takes what it needs from the top of the stack, the one before it from what remains, and so on. Push every quotation's results in the order of the quotations, in place of everything they consumed. The quotations run last to first." },
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Evaluate `quotation` `n` times." },
         .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "Conditionally evaluate the first action in `clauses` whose predicate is true.\n\n`clauses` consists of an odd number of quotations; every odd quotation (except the last) is a predicate, and is directly followed by its associated action. If no predicate evaluates to true, then evaluate the last quotation (`else`). Each quotation runs against the same view of the stack." },
         .{ .name = "each", .primitive = each, .effect = "collection (q: a -- b) -- collection", .doc = "Evaluate `q` against every element in `collection`, collecting the results of each application in order in a collection of the same type. When `collection` is a dict, then `a` is a value in `collection`, and it's mapped back to the same key in the result." },
@@ -259,8 +292,8 @@ fn times(fiber: *Fiber) MachineError!void {
 fn dip(fiber: *Fiber) MachineError!void {
     var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var protected = try paging.takeProtected(fiber);
-    defer protected.item.deinit();
+    var protected = try fiber.popValue();
+    defer protected.deinit();
     try startDip(fiber, &quotation, &protected);
 }
 
@@ -273,18 +306,17 @@ pub fn dipBelowHead(fiber: *Fiber) MachineError!void {
     defer quotation.deinit();
     var head = try fiber.popValue();
     defer head.deinit();
-    var protected = try paging.takeProtected(fiber);
-    defer protected.item.deinit();
+    var protected = try fiber.popValue();
+    defer protected.deinit();
     try fiber.pushOwned(head.take());
     try startDip(fiber, &quotation, &protected);
 }
 
-fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *paging.Protected) MachineError!void {
+fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *heap.OwnedValue) MachineError!void {
     const state = try fiber.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
-        .protected = .init(protected.item.take()),
-        .original = protected.original,
+        .protected = .init(protected.take()),
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
     };
@@ -294,8 +326,6 @@ fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *paging.Prote
 const DipState = struct {
     quotation: heap.Owned(*Header),
     protected: heap.Owned(Value),
-    /// Whether the value came across a paging floor, so it returns as one.
-    original: bool,
     site: machine.ExecutionSite,
     word: intern.TraceWord,
 
@@ -314,7 +344,7 @@ const DipState = struct {
     ) MachineError!?ApplicationStep {
         fiber.active_word = self.word;
         fiber.chargeContinuationStep();
-        try paging.returnProtected(fiber, self.protected.take(), self.original);
+        try fiber.pushOwned(self.protected.take());
         return null;
     }
 
@@ -330,24 +360,18 @@ fn dipN(fiber: *Fiber) MachineError!void {
     if (count_value.borrow() != .int) return fiber.typeError("an int count");
     if (count_value.borrow().int < 0) return fiber.fail(.domain, "dip-n count must be nonnegative");
     const count: usize = @intCast(count_value.borrow().int);
-    // Checked before the buffers are sized by it, and without paging.
+    // Checked before the buffer is sized by it, and without paging.
     try paging.requireReachable(fiber, count);
-    // Each allocation precedes taking the quotation, and a later failure
-    // retires the earlier ones: a struct literal would leak them.
-    var control = blk: {
-        var protected = heap.Owned(heap.OwnedValueBuffer).init(try .init(fiber.releases, count));
-        errdefer protected.deinit(fiber.releases, fiber.allocator);
-        var originals: std.DynamicBitSetUnmanaged = try .initEmpty(fiber.allocator, count);
-        errdefer originals.deinit(fiber.allocator);
-        break :blk heap.Owned(DipControl).init(.{
-            .quotation = .init(quotation.take().list),
-            .protected = protected,
-            .originals = originals,
-            .count = count,
-            .site = fiber.applicationSite(),
-            .word = fiber.active_word,
-        });
-    };
+    // The buffer is allocated before the quotation is taken: nothing after
+    // it can fail, so the struct literal cannot leak it.
+    const buffer = try heap.OwnedValueBuffer.init(fiber.releases, count);
+    var control = heap.Owned(DipControl).init(.{
+        .quotation = .init(quotation.take().list),
+        .protected = .init(buffer),
+        .count = count,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
+    });
     defer control.deinit(fiber.releases, fiber.allocator);
     switch (try control.borrowMut().advance(fiber)) {
         .finished => unreachable,
@@ -363,7 +387,7 @@ fn launchDipN(fiber: *Fiber, control: *heap.Owned(DipControl)) MachineError!void
 }
 
 /// `dip-n` takes its `count` protected values off the stack one at a time,
-/// each as `dip` would, runs the quotation, and returns them in their
+/// each as `dip` would, paging it across a paging floor, runs the quotation, and returns them in their
 /// original order. Both phases are user-sized and advance only as far as the
 /// turn's budget allows. The values are retained, so a symbol stays a value
 /// rather than becoming code.
@@ -371,8 +395,6 @@ const DipControl = struct {
     quotation: heap.Owned(*Header),
     /// The protected values, the top of the stack first.
     protected: heap.Owned(heap.OwnedValueBuffer),
-    /// Which of them are originals of a paging floor, by `protected` index.
-    originals: std.DynamicBitSetUnmanaged,
     count: usize,
     site: machine.ExecutionSite,
     word: intern.TraceWord,
@@ -387,9 +409,8 @@ const DipControl = struct {
             .take => {
                 const end = self.index + work.take(self.count - self.index);
                 while (self.index != end) : (self.index += 1) {
-                    var taken = try paging.takeProtected(fiber);
-                    self.protected.borrowMut().appendOwned(taken.item.take());
-                    if (taken.original) self.originals.set(self.index);
+                    var taken = try fiber.popValue();
+                    self.protected.borrowMut().appendOwned(taken.take());
                 }
                 if (self.index != self.count) return .pending;
                 self.phase = .run;
@@ -405,7 +426,7 @@ const DipControl = struct {
                     self.index -= 1;
                     const item = self.protected.borrow().values()[self.index];
                     heap.retainValue(item);
-                    try paging.returnProtected(fiber, item, self.originals.isSet(self.index));
+                    try fiber.pushOwned(item);
                 }
                 if (self.index != 0) return .pending;
                 return .finished;
@@ -414,7 +435,6 @@ const DipControl = struct {
     }
 
     pub fn retire(self: *DipControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        self.originals.deinit(allocator);
         self.protected.deinit(releases, allocator);
         self.quotation.deinit(releases, allocator);
     }
@@ -535,17 +555,39 @@ fn cleave(fiber: *Fiber) MachineError!void {
     var quotations = try fiber.popValue();
     defer quotations.deinit();
     if (quotations.borrow() != .list) return fiber.typeError("a list of quotations");
-    return startCleave(fiber, .{ .list = .init(quotations.take()) }, .validate);
+    var counts: CountedCleave.Counts = .{};
+    // Read through a borrowed view: the list moves only once a launch is chosen.
+    if (try countedInputs(fiber, .cleave, &.{ .list = .init(quotations.borrow()) }, &counts)) |inputs|
+        return launchCountedCleave(fiber, .cleave, .{ .list = .init(quotations.take()) }, counts, inputs);
+    return startCleave(fiber, .cleave, .{ .list = .init(quotations.take()) }, .validate);
 }
+fn spread(fiber: *Fiber) MachineError!void {
+    var quotations = try fiber.popValue();
+    defer quotations.deinit();
+    if (quotations.borrow() != .list) return fiber.typeError("a list of quotations");
+    var counts: CountedCleave.Counts = .{};
+    if (try countedInputs(fiber, .spread, &.{ .list = .init(quotations.borrow()) }, &counts)) |inputs|
+        return launchCountedCleave(fiber, .spread, .{ .list = .init(quotations.take()) }, counts, inputs);
+    return startCleave(fiber, .spread, .{ .list = .init(quotations.take()) }, .validate);
+}
+
+/// Which inputs each quotation of a list meets. A cleave runs every
+/// quotation from the same inputs, first to last, and consumes the most any
+/// one did. A spread runs them last to first, each consuming from the top of
+/// what the ones after it left, so the inputs are theirs in order.
+const Sharing = enum { cleave, spread };
 fn bi(fiber: *Fiber) MachineError!void {
-    return cleaveFixed(fiber, 2);
+    return cleaveFixed(fiber, .cleave, 2);
 }
 fn tri(fiber: *Fiber) MachineError!void {
-    return cleaveFixed(fiber, 3);
+    return cleaveFixed(fiber, .cleave, 3);
 }
-/// `bi` and `tri` take their quotations straight off the stack, already
-/// validated, so no list is built and no validation phase runs.
-fn cleaveFixed(fiber: *Fiber, count: usize) MachineError!void {
+fn bracket(fiber: *Fiber) MachineError!void {
+    return cleaveFixed(fiber, .spread, 2);
+}
+/// `bi`, `tri`, and `bracket` take their quotations straight off the stack,
+/// already validated, so no list is built and no validation phase runs.
+fn cleaveFixed(fiber: *Fiber, sharing: Sharing, count: usize) MachineError!void {
     try fiber.require(count);
     var fixed: CleaveQuotations.Fixed = .{};
     errdefer fixed.retire(fiber.releases);
@@ -557,10 +599,212 @@ fn cleaveFixed(fiber: *Fiber, count: usize) MachineError!void {
         fixed.count += 1;
     }
     fiber.discard(count);
-    return startCleave(fiber, .{ .fixed = fixed }, .run);
+    var counts: CountedCleave.Counts = .{};
+    if (try countedInputs(fiber, sharing, &.{ .fixed = fixed }, &counts)) |inputs| {
+        const quotations: CleaveQuotations = .{ .fixed = fixed };
+        fixed.count = 0;
+        return launchCountedCleave(fiber, sharing, quotations, counts, inputs);
+    }
+    return startCleave(fiber, sharing, .{ .fixed = fixed }, .run);
 }
+
+/// How many inputs the quotations consume together when every one has a
+/// summary and those inputs are in reach, with each quotation's own counts
+/// in `counts`. Null when the paging floor must find the counts or report
+/// the failure.
+fn countedInputs(
+    fiber: *Fiber,
+    sharing: Sharing,
+    quotations: *const CleaveQuotations,
+    counts: *CountedCleave.Counts,
+) MachineError!?usize {
+    const count = quotations.count();
+    if (count == 0 or count > counts.consumed.len) return null;
+    counts.publication = fiber.currentPublication();
+    var inputs: usize = 0;
+    for (0..count) |index| {
+        if (!quotations.isQuotation(index)) return null;
+        const summary = try stack_summary.of(fiber, fiber.applicationSite(), quotations.at(index)) orelse return null;
+        counts.consumed[index] = @intCast(summary.consumed);
+        counts.produced[index] = @intCast(summary.produced);
+        inputs = switch (sharing) {
+            .cleave => @max(inputs, summary.consumed),
+            .spread => inputs + summary.consumed,
+        };
+    }
+    // Counts read across a publication belong to no one definition set.
+    if (fiber.currentPublication() != counts.publication) return null;
+    return if (paging.reachable(fiber, inputs)) inputs else null;
+}
+
+/// Launches a cleave or spread whose quotations all have summaries. Owns
+/// `quotations` on every path.
+fn launchCountedCleave(
+    fiber: *Fiber,
+    sharing: Sharing,
+    quotations: CleaveQuotations,
+    counts: CountedCleave.Counts,
+    inputs: usize,
+) MachineError!void {
+    var owned_quotations = heap.Owned(CleaveQuotations).init(quotations);
+    // The word consumes its inputs, so any enclosing paging floor pages
+    // them now.
+    fiber.require(inputs) catch |err| {
+        owned_quotations.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
+    const state = fiber.allocator.create(CountedCleave) catch |err| {
+        owned_quotations.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
+    state.* = .{
+        .sharing = sharing,
+        .quotations = .init(owned_quotations.take()),
+        .counts = counts,
+        .inputs = inputs,
+        .base = fiber.stack.items.len,
+        .cursor = fiber.stack.items.len,
+        .expected = fiber.stack.items.len,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
+        .publication = counts.publication,
+    };
+    var owned = heap.Owned(*CountedCleave).init(state);
+    state.recheck(fiber) catch |err| {
+        owned.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
+    state.prepare(fiber) catch |err| {
+        owned.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
+    try fiber.beginApplication(owned.take().application(), .in_place);
+}
+
+/// A cleave or spread whose quotations all have summaries: each runs in
+/// place over copies of the inputs it consumes, its results accumulate above
+/// the inputs, and the consumed inputs are removed at the end. A spread's
+/// results accumulate last quotation first, so they are put in order then.
+const CountedCleave = struct {
+    sharing: Sharing,
+    quotations: heap.Owned(CleaveQuotations),
+    counts: Counts,
+    /// The most any quotation consumes.
+    inputs: usize,
+    /// The stack depth above the inputs: results accumulate from here.
+    base: usize,
+    /// The stack depth above the running quotation's inputs: `base` for a
+    /// cleave, and lower by each quotation a spread has run.
+    cursor: usize,
+    /// The stack depth the running quotation leaves, by its summary.
+    expected: usize,
+    site: machine.ExecutionSite,
+    word: intern.TraceWord,
+    next: usize = 0,
+    /// The publication the counts were read under.
+    publication: u64,
+
+    /// What each quotation consumes and leaves, by its index. A cleave of
+    /// more quotations than these hold runs over the paging floor.
+    const Counts = struct {
+        consumed: [8]u8 = @splat(0),
+        produced: [8]u8 = @splat(0),
+        /// The publication read before any summary was, which every count
+        /// here was read under.
+        publication: u64 = 0,
+    };
+
+    /// The index of the quotation running or next to run.
+    fn current(self: *const CountedCleave) usize {
+        return switch (self.sharing) {
+            .cleave => self.next,
+            .spread => self.quotations.borrow().count() - 1 - self.next,
+        };
+    }
+    fn application(self: *CountedCleave) Application {
+        return machine.typedApplication(self, self.quotations.borrow().at(self.current()), self.site, 0);
+    }
+    /// Counts read under an earlier publication say nothing about words
+    /// since redefined. After a publication, every quotation yet to run is
+    /// read again and the baseline moves only once all of them agree, so no
+    /// quotation runs on counts that were not read under the publication it
+    /// runs in. Stops rather than run on counts that no longer hold.
+    fn recheck(self: *CountedCleave, fiber: *Fiber) MachineError!void {
+        const now = fiber.currentPublication();
+        if (now == self.publication) return;
+        const total = self.quotations.borrow().count();
+        for (self.next..total) |step| {
+            const index = switch (self.sharing) {
+                .cleave => step,
+                .spread => total - 1 - step,
+            };
+            const again = try stack_summary.of(fiber, self.site, self.quotations.borrow().at(index));
+            const same = if (again) |summary|
+                summary.consumed == self.counts.consumed[index] and summary.produced == self.counts.produced[index]
+            else
+                false;
+            if (!same) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+        }
+        // A publication during the reads leaves them under two.
+        if (fiber.currentPublication() != now) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+        self.publication = now;
+    }
+    /// Copies the next quotation's inputs to the top of the stack.
+    fn prepare(self: *CountedCleave, fiber: *Fiber) error{OutOfMemory}!void {
+        const index = self.current();
+        self.expected += self.counts.produced[index];
+        try paging.copyInputs(fiber, self.cursor, self.counts.consumed[index]);
+        if (self.sharing == .spread) self.cursor -= self.counts.consumed[index];
+    }
+    /// Puts a spread's result segments, left last quotation first, in the
+    /// order of the quotations: the whole span reversed, then each segment.
+    /// A constant bounds every count here.
+    fn orderResults(self: *const CountedCleave, results: []Value) void {
+        std.mem.reverse(Value, results);
+        var start: usize = 0;
+        for (0..self.quotations.borrow().count()) |index| {
+            const length = self.counts.produced[index];
+            std.mem.reverse(Value, results[start..][0..length]);
+            start += length;
+        }
+    }
+
+    pub fn resumeApplication(
+        fiber: *Fiber,
+        self: *CountedCleave,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
+        // A publication while the quotation ran may have changed a word it
+        // called, so its counts cannot be trusted to describe what it did.
+        if (fiber.currentPublication() != self.publication)
+            return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+        // A summary that disagreed with what its quotation did would have
+        // been read from a wrong effect declaration.
+        std.debug.assert(fiber.stack.items.len == self.expected);
+        self.next += 1;
+        if (self.next == self.quotations.borrow().count()) {
+            const results = fiber.stack.items.len - self.base;
+            paging.dropBeneath(fiber, self.inputs, results);
+            if (self.sharing == .spread) self.orderResults(fiber.stack.items[fiber.stack.items.len - results ..]);
+            return null;
+        }
+        try self.recheck(fiber);
+        try self.prepare(fiber);
+        return .{ .apply = .{
+            .quotation = self.quotations.borrow().at(self.current()),
+            .seeded = 0,
+            .launch = .in_place,
+        } };
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
 fn startCleave(
     fiber: *Fiber,
+    sharing: Sharing,
     quotations: CleaveQuotations,
     phase: @FieldType(CleaveState, "phase"),
 ) MachineError!void {
@@ -570,8 +814,12 @@ fn startCleave(
         return err;
     };
     state.* = .{
+        .sharing = sharing,
         .quotations = .init(owned_quotations.take()),
-        .paged = .init(.init(.collected)),
+        .paged = .init(.init(switch (sharing) {
+            .cleave => .collected,
+            .spread => .taken,
+        })),
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
         .phase = phase,
@@ -664,6 +912,7 @@ const CleaveQuotations = union(enum) {
 /// turn's budget allows, and the inputs are retained values, so a symbol
 /// input stays a value rather than becoming code.
 const CleaveState = struct {
+    sharing: Sharing,
     quotations: heap.Owned(CleaveQuotations),
     paged: heap.Owned(paging.Region),
     site: machine.ExecutionSite,
@@ -683,8 +932,12 @@ const CleaveState = struct {
     fn count(self: *const CleaveState) usize {
         return self.quotations.borrow().count();
     }
+    /// A spread runs its quotations last to first.
     fn quotation(self: *const CleaveState) *Header {
-        return self.quotations.borrow().at(self.next);
+        return self.quotations.borrow().at(switch (self.sharing) {
+            .cleave => self.next,
+            .spread => self.count() - 1 - self.next,
+        });
     }
     fn application(self: *CleaveState, code: *Header) Application {
         return machine.typedApplication(self, code, self.site, 0);
@@ -710,7 +963,8 @@ const CleaveState = struct {
             .restored => {
                 const paged = self.paged.borrowMut();
                 if (!try paged.advance(fiber)) return false;
-                self.consumed = @max(self.consumed, paged.restored);
+                // A spread's quotation kept what it consumed.
+                if (self.sharing == .cleave) self.consumed = @max(self.consumed, paged.restored);
                 self.next += 1;
                 if (self.next != self.count()) {
                     self.phase = .run;
@@ -727,9 +981,16 @@ const CleaveState = struct {
                 self.phase = .push;
             },
             .push => {
+                // A spread gathered each region from its top down, last
+                // quotation first, so the results read back to front.
                 const results = self.paged.borrowMut().results.items();
                 const end = self.pushed + work_budget.take(results.len - self.pushed);
-                while (self.pushed != end) : (self.pushed += 1) try fiber.pushOwned(results[self.pushed]);
+                while (self.pushed != end) : (self.pushed += 1) try fiber.pushOwned(results[
+                    switch (self.sharing) {
+                        .cleave => self.pushed,
+                        .spread => results.len - 1 - self.pushed,
+                    }
+                ]);
                 if (self.pushed != results.len) return false;
                 self.paged.borrowMut().results.clearRetainingCapacity();
                 self.phase = .done;
