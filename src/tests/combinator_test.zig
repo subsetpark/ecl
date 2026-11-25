@@ -322,6 +322,36 @@ test "cleave: summarized and paging quotations agree" {
     });
 }
 
+// Each case runs once with quotations that have stack summaries and once
+// with a guard in one of them, which runs over the paging floor.
+test "spread: each quotation takes its own inputs, last to first" {
+    try support.expectStacks(&.{
+        .{ .name = "inputs in order, results in order", .source = "1 2 3 [(+) (dup)] spread 1 2 3 [(+) ([(0 <) (dup) (dup)] cond)] spread", .expected = "3 3 3 3 3 3" },
+        .{ .name = "one input each", .source = "10 20 30 [(1 +) (2 +) (3 +)] spread 10 20 30 [(1 +) ([(0 <) (2 +) (2 +)] cond) (3 +)] spread", .expected = "11 22 33 11 22 33" },
+        .{ .name = "a quotation that consumes nothing takes nothing", .source = "9 1 2 3 [(7) (+) (8 9)] spread", .expected = "9 1 7 5 8 9" },
+        .{ .name = "a value a guard read is consumed", .source = "9 1 2 3 [(7) (+) ([(0 <) (8 9) (8 9)] cond)] spread", .expected = "9 7 3 8 9" },
+        .{ .name = "quotations that leave nothing", .source = "1 2 3 [(pop) (pop)] spread 1 2 3 [([(0 <) (pop) (pop)] cond) (pop)] spread", .expected = "1 1" },
+        .{ .name = "several results each", .source = "1 2 3 4 [(swap) (swap)] spread 1 2 3 4 [([(0 <) (swap) (swap)] cond) (swap)] spread", .expected = "2 1 4 3 2 1 4 3" },
+        .{ .name = "empty quotations and an empty list", .source = "1 2 [() ()] spread 3 [] spread", .expected = "1 2 3" },
+        .{ .name = "locals", .source = "1 2 3 [(|a b| a b +) (|c| c c)] spread", .expected = "3 3 3" },
+        .{ .name = "more quotations than have counted slots", .source = "1 2 3 4 5 6 7 8 9 [(1 +) (1 +) (1 +) (1 +) (1 +) (1 +) (1 +) (1 +) (1 +)] spread", .expected = "2 3 4 5 6 7 8 9 10" },
+        .{
+            .name = "inside a paging word",
+            .source = "5 6 ([(1 +) (2 +)] spread) below 5 6 ([(1 +) (2 +)] spread) above " ++
+                "5 6 ([(1 +) ([(0 <) (2 +) (2 +)] cond)] spread) above",
+            .expected = "5 6 6 8 6 8 5 6 6 8 5 6",
+        },
+        .{ .name = "collecting and letting go are bounded work", .source = "20000 (1) times [(10000 (pop) times 7) (5000 (pop) times 8)] spread 5002 pack dup len swap -2 take", .expected = "5002 [7 8]" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "inputs out of reach fail in the quotation that lacks them", .source = "1 2 [(+) (+)] spread", .kind = "underflow", .word = "+" },
+        .{ .name = "the last quotation runs first", .source = "1 2 [(len) (first)] spread", .kind = "type", .word = "first" },
+        .{ .name = "the last quotation runs first over the floor", .source = "1 2 [(len) ([(0 <) (first) (first)] cond)] spread", .kind = "type", .word = "first" },
+        .{ .name = "a list holding a non-quotation", .source = "1 2 3 [(+) 5] spread", .kind = "type", .word = "spread" },
+        .{ .name = "a non-list", .source = "1 2 3 5 spread", .kind = "type", .word = "spread" },
+    });
+}
+
 test "selectors: id and retain keep values by position" {
     try support.expectStacks(&.{
         .{ .name = "id returns its input", .source = "1 id 2 (id) above", .expected = "1 2 2" },

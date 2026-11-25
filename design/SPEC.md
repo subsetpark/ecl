@@ -964,7 +964,10 @@ Three quotation-application behaviors exist:
   values, in their original order, above or below the quotation's results.
   `cleave`, `bi`, and `tri` run each quotation this way from the same
   inputs, hold its results aside, and finally drop the inputs any quotation
-  consumed. The test quotations of `cond`, `while`, and `linrec` run this
+  consumed. `spread` gives each quotation of a list its own inputs: the
+  quotations run last to first, each consuming from the top of what the ones
+  after it left, and their results replace everything consumed, in the order
+  of the quotations. The test quotations of `cond`, `while`, and `linrec` run this
   way too: a test may consume, rearrange, or add values; its top value must
   be a 0/1 boolean, and its complete result is discarded and the previous stack
   state is restored before control continues. That restore, like a cleave's

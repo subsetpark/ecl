@@ -728,6 +728,9 @@ wrap (net.local-address `port at 0 >) @give task.await
 ### sin
 `( x -- y )` — Evaluate the sine of `x`.
 
+### spread
+`( ... quotations -- ... )` — Apply each quotation in `quotations` to its own inputs: the last takes what it needs from the top of the stack, the one before it from what remains, and so on. Push every quotation's results in the order of the quotations, in place of everything they consumed. The quotations run last to first.
+
 ### sqrt
 `( x -- y )` — Square root.
 

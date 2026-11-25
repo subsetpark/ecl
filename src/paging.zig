@@ -357,6 +357,10 @@ pub const Placement = enum {
     /// The region moves into `results`, in stack order, for a cleave to put
     /// back once every quotation has run.
     collected,
+    /// The region moves into `results` from its top down, and the originals
+    /// are let go rather than restored: a spread's quotation keeps what it
+    /// consumed, and the quotation before it takes from what remains.
+    taken,
 
     /// Whether the restore is the combinator's own bookkeeping rather than a
     /// word putting values back: its originals were not consumed, so they
@@ -364,7 +368,7 @@ pub const Placement = enum {
     fn implicit(self: Placement) bool {
         return switch (self) {
             .above, .below => false,
-            .discarded, .collected => true,
+            .discarded, .collected, .taken => true,
         };
     }
 };
@@ -479,6 +483,12 @@ pub const Region = struct {
             .surface => {
                 const originals = &self.floor.originals;
                 const granted = work.take(originals.len());
+                if (self.placement == .taken) {
+                    for (0..granted) |_| fiber.releases.releaseValue(originals.pop().?.value);
+                    if (originals.len() != 0) return false;
+                    self.phase = .finished;
+                    continue;
+                }
                 for (0..granted) |_| {
                     const index = self.restored - originals.len();
                     const original = originals.pop().?;
@@ -514,6 +524,11 @@ pub const Region = struct {
             .above, .below => self.phase = .surface,
             .collected => {
                 self.spans[0] = .of(self.base, fiber.stack.items.len);
+                self.phase = .reverse;
+            },
+            // Gathered from the top down, so nothing is reversed first.
+            .taken => {
+                self.spans[0] = .of(fiber.stack.items.len, fiber.stack.items.len);
                 self.phase = .reverse;
             },
             .discarded => unreachable,

@@ -1071,7 +1071,8 @@ bounded finalize serves every paging word.
 It sweeps the returned originals out of the region, places the region (kept
 beneath or above the restored originals, dropped for a guard's test,
 collected for a cleave), and pushes the originals back in order, in place on
-the stack. The guards therefore keep no checkpoint: a test takes what it
+the stack. A spread's quotation keeps what it consumed, so its region is
+collected and its originals are let go instead. The guards therefore keep no checkpoint: a test takes what it
 requires and the finalize gives it back. Paging floors nest by chaining
 through the floor beneath, and the hard floor beneath them all is where
 underflow still happens. Whatever sets a floor over another, whether a
@@ -1097,9 +1098,10 @@ the word and lasts exactly as long: a publication discards it, and a
 redefinition, of the word or of anything its body reaches, is read as
 redefined. It is an optimization and nothing observes it: what acts
 on one must leave the stack, the failures, and every enclosing floor's
-accounting as the paging floor would have. A cleave whose quotations all have
-summaries, with their inputs in reach, runs each in place over copies of the
-inputs it consumes and removes the consumed inputs once at the end. The other
+accounting as the paging floor would have. A cleave or spread whose
+quotations all have summaries, with their inputs in reach, runs each in place
+over copies of the inputs it consumes and removes the consumed inputs once at
+the end. The other
 paging words keep the floor, where reading a summary costs as much as the
 paging it would replace.
 
