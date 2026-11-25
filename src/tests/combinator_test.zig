@@ -278,6 +278,31 @@ test "paging: above and below restore what the quotation consumed" {
     });
 }
 
+// A cleave whose quotations have exact stack summaries runs them in place;
+// one with a local, a guard, or branches that disagree runs over the paging
+// floor. Both must leave the same stack, so each case pairs or mixes them.
+test "cleave: summarized and paging quotations agree" {
+    try support.expectStacks(&.{
+        .{ .name = "builtins against locals", .source = "1 2 (+) (-) bi 1 2 (|a b| a b +) (|a b| a b -) bi", .expected = "3 -1 3 -1" },
+        .{ .name = "a dip against locals", .source = "1 2 3 ((+) dip) (+ +) bi 1 2 3 (|a b c| a b + c) (+ +) bi", .expected = "3 3 6 3 3 6" },
+        .{ .name = "branches that agree and branches that do not", .source = "1 2 (dup 0 > (10 +) (20 +) if) (id) bi 1 2 (dup 0 > (10 +) (pop pop 5) if) (id) bi", .expected = "1 12 2 1 12 2" },
+        .{ .name = "paging words inside a quotation", .source = "1 2 ((+) above) ((+) below) bi", .expected = "3 1 2 1 2 3" },
+        .{ .name = "a nested cleave", .source = "1 2 ((+) (-) bi *) (pop) bi", .expected = "-3" },
+        .{ .name = "a prelude word's body", .source = "1 2 ((dup *) both) (+) bi", .expected = "1 4 3" },
+        .{ .name = "three quotations", .source = "[1 2 3] (last) (first) (len) tri", .expected = "3 1 3" },
+        .{ .name = "inside a paging word", .source = "5 ((1 +) (2 *) bi) below 5 ((1 +) (2 *) bi) above", .expected = "5 6 10 6 10 5" },
+        .{ .name = "a list of eight quotations", .source = "1 2 3 4 5 6 7 8 9 (+) (-) (*) (pop) (dup) (swap) (over) (nip) 8 pack cleave", .expected = "1 2 3 4 5 6 7 17 -1 72 9 9 9 8 8 9 8 9" },
+        .{ .name = "a list of nine quotations", .source = "1 2 (+) (-) (*) (pop) (dup) (swap) (over) (nip) (id) 9 pack cleave", .expected = "3 -1 2 2 2 2 1 1 2 1 2 2" },
+        .{ .name = "a redefined word is read as redefined", .source = "(x y -- z) (pop pop 9) `over def 1 2 (over) (+) bi", .expected = "9 3" },
+        .{ .name = "a quotation that consumes more than one inline slot", .source = "1 2 3 4 5 6 (+ + + + +) (id) bi", .expected = "21 6" },
+        .{ .name = "a guard inside a quotation", .source = "1 2 ((0 >) (1 -) while) (id) bi", .expected = "1 0 2" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "inputs out of reach fail where the word runs", .source = "1 2 (+) (pop pop pop) bi", .kind = "underflow", .word = "pop" },
+        .{ .name = "a failure inside a summarized quotation", .source = "1 2 (+) (len) bi", .kind = "type", .word = "len" },
+    });
+}
+
 test "selectors: id and retain keep values by position" {
     try support.expectStacks(&.{
         .{ .name = "id returns its input", .source = "1 id 2 (id) above", .expected = "1 2 2" },

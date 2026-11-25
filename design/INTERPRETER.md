@@ -1082,6 +1082,22 @@ it when it closes. A frame alternates its applications between a paging floor it
 context keeps in place and the caller's stack by specifying the launch of each,
 so a guard runs its tests and actions under one frame.
 
+A quotation's consumption can also be read before it runs. A stack summary
+is the exact count of values a quotation takes from beneath and leaves,
+composed from its words: a literal, a builtin whose declared effect is exact,
+the body of a word with no home, and a combinator applied to literal
+quotations under that combinator's own rule. Any other word, and any
+quotation past a constant size, has no summary, so the walk is bounded by a
+constant and an absent summary is always a correct answer. A summary is read
+at the site the quotation runs at and is never kept, so a redefinition is
+read as redefined. It is an optimization and nothing observes it: what acts
+on one must leave the stack, the failures, and every enclosing floor's
+accounting as the paging floor would have. A cleave whose quotations all have
+summaries, with their inputs in reach, runs each in place over copies of the
+inputs it consumes and removes the consumed inputs once at the end. The other
+paging words keep the floor, where reading a summary costs as much as the
+paging it would replace.
+
 ### Failure is a bounded machine transition
 
 Language errors are ordinary dictionary values at observation boundaries, but

@@ -262,6 +262,29 @@ pub fn requireReachable(fiber: *Fiber, count: usize) MachineError!void {
     if (count > fiber.stack.items.len - fiber.floor.hard()) return fiber.failShort(count);
 }
 
+/// Whether `count` values lie above the hard floor.
+pub fn reachable(fiber: *const Fiber, count: usize) bool {
+    return count <= fiber.stack.items.len - fiber.floor.hard();
+}
+
+/// Pushes copies of the `count` values beneath stack depth `top`, in order:
+/// the inputs a counted quotation is about to consume.
+pub fn copyInputs(fiber: *Fiber, top: usize, count: usize) error{OutOfMemory}!void {
+    for (top - count..top) |position| try fiber.pushBorrowed(fiber.stack.items[position]);
+}
+
+/// Removes the `count` values beneath the top `kept` ones, closing the gap.
+/// Both counts come from a quotation's summary, which a constant bounds, so
+/// this is not user-sized work.
+pub fn dropBeneath(fiber: *Fiber, count: usize, kept: usize) void {
+    const items = fiber.stack.items;
+    const start = items.len - kept - count;
+    fiber.floor.noteShrink(start);
+    for (items[start..][0..count]) |item| fiber.releases.releaseValue(item);
+    std.mem.copyForwards(Value, items[start..][0..kept], items[start + count ..][0..kept]);
+    fiber.stack.items.len -= count;
+}
+
 /// One in-place reversal of the stack span `[lo, hi)`, advanced under a
 /// work budget. Swapping inward from both ends keeps every slot live between
 /// steps, so a fiber torn down mid-reversal releases each value once.

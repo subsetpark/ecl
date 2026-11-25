@@ -3381,6 +3381,41 @@ pub const Fiber = struct {
         return try self.resolveFresh(word, true);
     }
 
+    /// What a plain word resolves to for code running at `site`, remembered
+    /// like any dispatch of it there. A quotation's summary reads its words
+    /// this way before the quotation runs, which may be while no evaluation
+    /// is current.
+    pub fn resolveAt(self: *Fiber, word: value.Symbol, site: ExecutionSite) error{OutOfMemory}!?PeekedWord {
+        if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        const provenance = site.registration_provenance;
+        const remembers = self.inherited.phase != .bootstrap;
+        if (remembers) {
+            if (self.resolutions.find(
+                word,
+                self.inherited.registry.currentPublication(),
+                WordResolutions.provenanceKey(provenance),
+            )) |definition| return peeked(definition, word);
+        }
+        var context: binder.Context = .{
+            .environment = self.environment,
+            .view = self.inherited.registry.view(),
+            .module_access = self.module_access,
+            .registry = self.inherited.registry,
+            .project = self.inherited.module_snapshot,
+            .libraries = self.inherited.libraries(),
+            .provenance = provenance,
+        };
+        defer context.deinit();
+        var resolver = binder.Resolver.init(&context, word);
+        defer resolver.deinit();
+        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+            .resolved => |definition| definition,
+            .missed => return null,
+        };
+        try self.rememberResolution(word, context.view.publication, provenance, found);
+        return peeked(found, word);
+    }
+
     /// Resolves `word` against the current view in one call, remembering the
     /// result when `remember` is set. The definition is inspected before the
     /// lookup's lease is released, since a concurrent replacement may retire

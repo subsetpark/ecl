@@ -588,6 +588,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "1 2 3 ((+) dip 5) below pop pop pop pop pop " ++
             "5 ([(0 <) (pop 1) (pop 2)] cond) below pop pop " ++
             "1 2 3 (10 +) 2 dip-n pop pop pop " ++
+            // A cleave over summarized quotations, which runs them in place.
+            "1 2 (+) (-) bi pop pop " ++
             // Capture-shape recognition allocates on its own path (the fused
             // kernel) and on the rejected one (the generic frame machine);
             // both belong in the consolidated allocation-failure sweep.

@@ -8,6 +8,7 @@ const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const paging = @import("paging.zig");
+const stack_summary = @import("stack_summary.zig");
 const poll = @import("poll.zig");
 const support = @import("kernel_support.zig");
 
@@ -18,6 +19,33 @@ const MachineError = machine.MachineError;
 const Application = machine.Application;
 const ApplicationStep = machine.ApplicationStep;
 const StackWindow = machine.StackWindow;
+
+/// How a combinator's stack effect follows from the literal quotations it
+/// is given, for the words whose declared effect holds a row.
+pub const Flow = union(enum) {
+    /// No rule: the declared effect is all there is to read.
+    declared,
+    /// Runs its quotation where it stands.
+    apply,
+    /// Runs its quotation beneath one protected value.
+    dip,
+    /// Runs one of two quotations.
+    branch,
+    /// Runs its quotation and puts back what it consumed.
+    paging,
+    /// Runs this many quotations from the same inputs.
+    cleave: usize,
+};
+
+pub fn flow(primitive: env.PrimitiveImpl) Flow {
+    if (primitive == &call) return .apply;
+    if (primitive == &dip) return .dip;
+    if (primitive == &ifWord) return .branch;
+    if (primitive == &above or primitive == &below) return .paging;
+    if (primitive == &bi) return .{ .cleave = 2 };
+    if (primitive == &tri) return .{ .cleave = 3 };
+    return .declared;
+}
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
@@ -522,6 +550,10 @@ fn cleave(fiber: *Fiber) MachineError!void {
     var quotations = try fiber.popValue();
     defer quotations.deinit();
     if (quotations.borrow() != .list) return fiber.typeError("a list of quotations");
+    var counts: CountedCleave.Counts = .{};
+    // Read through a borrowed view: the list moves only once a launch is chosen.
+    if (try countedInputs(fiber, &.{ .list = .init(quotations.borrow()) }, &counts)) |inputs|
+        return launchCountedCleave(fiber, .{ .list = .init(quotations.take()) }, counts, inputs);
     return startCleave(fiber, .{ .list = .init(quotations.take()) }, .validate);
 }
 fn bi(fiber: *Fiber) MachineError!void {
@@ -544,8 +576,126 @@ fn cleaveFixed(fiber: *Fiber, count: usize) MachineError!void {
         fixed.count += 1;
     }
     fiber.discard(count);
+    var counts: CountedCleave.Counts = .{};
+    if (try countedInputs(fiber, &.{ .fixed = fixed }, &counts)) |inputs| {
+        const quotations: CleaveQuotations = .{ .fixed = fixed };
+        fixed.count = 0;
+        return launchCountedCleave(fiber, quotations, counts, inputs);
+    }
     return startCleave(fiber, .{ .fixed = fixed }, .run);
 }
+
+/// How many inputs a cleave consumes when every quotation has a summary and
+/// those inputs are in reach, with each quotation's own counts in `counts`.
+/// Null when the paging cleave must find the counts or report the failure.
+fn countedInputs(
+    fiber: *Fiber,
+    quotations: *const CleaveQuotations,
+    counts: *CountedCleave.Counts,
+) MachineError!?usize {
+    const count = quotations.count();
+    if (count == 0 or count > counts.consumed.len) return null;
+    var inputs: usize = 0;
+    for (0..count) |index| {
+        if (!quotations.isQuotation(index)) return null;
+        const summary = try stack_summary.of(fiber, fiber.applicationSite(), quotations.at(index)) orelse return null;
+        counts.consumed[index] = @intCast(summary.consumed);
+        counts.produced[index] = @intCast(summary.produced);
+        inputs = @max(inputs, summary.consumed);
+    }
+    return if (paging.reachable(fiber, inputs)) inputs else null;
+}
+
+/// Launches a cleave whose quotations all have summaries. Owns `quotations`
+/// on every path.
+fn launchCountedCleave(
+    fiber: *Fiber,
+    quotations: CleaveQuotations,
+    counts: CountedCleave.Counts,
+    inputs: usize,
+) MachineError!void {
+    var owned_quotations = heap.Owned(CleaveQuotations).init(quotations);
+    // The cleave consumes its inputs, so any enclosing paging floor pages
+    // them now.
+    fiber.require(inputs) catch |err| {
+        owned_quotations.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
+    const state = fiber.allocator.create(CountedCleave) catch |err| {
+        owned_quotations.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
+    state.* = .{
+        .quotations = .init(owned_quotations.take()),
+        .counts = counts,
+        .inputs = inputs,
+        .base = fiber.stack.items.len,
+        .expected = fiber.stack.items.len + counts.produced[0],
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
+    };
+    var owned = heap.Owned(*CountedCleave).init(state);
+    paging.copyInputs(fiber, state.base, counts.consumed[0]) catch |err| {
+        owned.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
+    try fiber.beginApplication(owned.take().application(), .in_place);
+}
+
+/// A cleave whose quotations all have summaries: each runs in place over
+/// copies of the inputs it consumes, its results accumulate above the
+/// inputs, and the inputs any quotation consumed are removed at the end.
+const CountedCleave = struct {
+    quotations: heap.Owned(CleaveQuotations),
+    counts: Counts,
+    /// The most any quotation consumes.
+    inputs: usize,
+    /// The stack depth above the inputs: results accumulate from here.
+    base: usize,
+    /// The stack depth the running quotation leaves, by its summary.
+    expected: usize,
+    site: machine.ExecutionSite,
+    word: intern.TraceWord,
+    next: usize = 0,
+
+    /// What each quotation consumes and leaves, by its index. A cleave of
+    /// more quotations than these hold runs over the paging floor.
+    const Counts = struct {
+        consumed: [8]u8 = @splat(0),
+        produced: [8]u8 = @splat(0),
+    };
+
+    fn application(self: *CountedCleave) Application {
+        return machine.typedApplication(self, self.quotations.borrow().at(self.next), self.site, 0);
+    }
+
+    pub fn resumeApplication(
+        fiber: *Fiber,
+        self: *CountedCleave,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        fiber.active_word = self.word;
+        fiber.chargeContinuationStep();
+        // A summary that disagreed with what its quotation did would have
+        // been read from a wrong effect declaration.
+        std.debug.assert(fiber.stack.items.len == self.expected);
+        self.next += 1;
+        if (self.next == self.quotations.borrow().count()) {
+            paging.dropBeneath(fiber, self.inputs, fiber.stack.items.len - self.base);
+            return null;
+        }
+        self.expected += self.counts.produced[self.next];
+        try paging.copyInputs(fiber, self.base, self.counts.consumed[self.next]);
+        return .{ .apply = .{
+            .quotation = self.quotations.borrow().at(self.next),
+            .seeded = 0,
+            .launch = .in_place,
+        } };
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
 fn startCleave(
     fiber: *Fiber,
     quotations: CleaveQuotations,
