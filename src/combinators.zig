@@ -7,7 +7,7 @@ const dict = @import("dict.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
-const paging = @import("paging.zig");
+const floor_api = @import("floor.zig");
 const stack_summary = @import("stack_summary.zig");
 const poll = @import("poll.zig");
 const support = @import("kernel_support.zig");
@@ -32,7 +32,7 @@ pub const Flow = union(enum) {
     /// Runs one of two quotations.
     branch,
     /// Runs its quotation and puts back what it consumed.
-    paging,
+    measured,
     /// Runs this many quotations from the same inputs.
     cleave: usize,
     /// Runs this many quotations, each on its own inputs.
@@ -43,7 +43,7 @@ pub fn flow(primitive: env.PrimitiveImpl) Flow {
     if (primitive == &call) return .apply;
     if (primitive == &dip) return .dip;
     if (primitive == &ifWord) return .branch;
-    if (primitive == &above or primitive == &below) return .paging;
+    if (primitive == &above or primitive == &below) return .measured;
     if (primitive == &bi) return .{ .cleave = 2 };
     if (primitive == &tri) return .{ .cleave = 3 };
     if (primitive == &bracket) return .{ .spread = 2 };
@@ -115,13 +115,13 @@ fn whileWord(fiber: *Fiber) MachineError!void {
     state.* = .{
         .condition = .init(condition.take().list),
         .body = .init(body.take().list),
-        .paged = .init(.init(.discarded)),
+        .measured = .init(.init(.discarded)),
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
         .provenance_target = provenance_target,
         .phase = .condition,
     };
-    try fiber.beginApplication(state.application(state.condition.borrow()), .{ .paging = &state.paged.borrowMut().floor });
+    try fiber.beginApplication(state.application(state.condition.borrow()), .{ .measured = &state.measured.borrowMut().floor });
 }
 
 fn selectedProvenance(target: ?*const machine.ApplicationProvenanceTarget) machine.ApplicationProvenance {
@@ -129,8 +129,8 @@ fn selectedProvenance(target: ?*const machine.ApplicationProvenanceTarget) machi
 }
 
 /// The boolean a test left for its guard.
-fn popTestResult(fiber: *Fiber, paged: *paging.Region) MachineError!bool {
-    var result = try paged.takeTestResult(fiber);
+fn popTestResult(fiber: *Fiber, region: *floor_api.Region) MachineError!bool {
+    var result = try region.takeTestResult(fiber);
     defer result.deinit();
     return boolValue(fiber, &result);
 }
@@ -168,15 +168,15 @@ fn SuspendedWork(comptime State: type) type {
 }
 
 /// One `while` loop's application state, alive for the whole loop under one
-/// frame. The condition runs over a paging floor, so it takes from the stack
+/// frame. The condition runs over a soft floor, so it takes from the stack
 /// only what its words require; its result is read, its region dropped, and
-/// what it paged restored, all as bounded work. The body then runs in place.
+/// what it admitted restored, all as bounded work. The body then runs in place.
 /// Only restore work the turn's budget cannot cover stands up a driver, under
 /// which the loop suspends until it is done.
 const WhileState = struct {
     condition: heap.Owned(*Header),
     body: heap.Owned(*Header),
-    paged: heap.Owned(paging.Region),
+    measured: heap.Owned(floor_api.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -188,12 +188,12 @@ const WhileState = struct {
     }
     fn conditionStep(self: *WhileState) ApplicationStep {
         self.phase = .condition;
-        const paged = self.paged.borrowMut();
-        paged.reset();
+        const region = self.measured.borrowMut();
+        region.reset();
         return .{ .apply = .{
             .quotation = self.condition.borrow(),
             .seeded = 0,
-            .launch = .{ .paging = &paged.floor },
+            .launch = .{ .measured = &region.floor },
         } };
     }
     fn bodyStep(self: *WhileState) ApplicationStep {
@@ -206,7 +206,7 @@ const WhileState = struct {
         } };
     }
     fn work(self: *WhileState, fiber: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(fiber);
+        return self.measured.borrowMut().advance(fiber);
     }
     fn resumeAfter(self: *WhileState, finished: @FieldType(WhileState, "phase")) ?ApplicationStep {
         return switch (finished) {
@@ -226,9 +226,9 @@ const WhileState = struct {
         fiber.chargeContinuationStep();
         switch (self.phase) {
             .condition => {
-                const paged = self.paged.borrowMut();
-                paged.base = window.base();
-                const selected = try popTestResult(fiber, paged);
+                const region = self.measured.borrowMut();
+                region.base = window.base();
+                const selected = try popTestResult(fiber, region);
                 return finishWork(WhileState, self, fiber, if (selected) .restored_true else .restored_false);
             },
             .body => return self.conditionStep(),
@@ -360,8 +360,8 @@ fn dipN(fiber: *Fiber) MachineError!void {
     if (count_value.borrow() != .int) return fiber.typeError("an int count");
     if (count_value.borrow().int < 0) return fiber.fail(.domain, "dip-n count must be nonnegative");
     const count: usize = @intCast(count_value.borrow().int);
-    // Checked before the buffer is sized by it, and without paging.
-    try paging.requireReachable(fiber, count);
+    // Checked before the buffer is sized by it, and without admitting any.
+    try floor_api.requireReachable(fiber, count);
     // The buffer is allocated before the quotation is taken: nothing after
     // it can fail, so the struct literal cannot leak it.
     const buffer = try heap.OwnedValueBuffer.init(fiber.releases, count);
@@ -387,7 +387,7 @@ fn launchDipN(fiber: *Fiber, control: *heap.Owned(DipControl)) MachineError!void
 }
 
 /// `dip-n` takes its `count` protected values off the stack one at a time,
-/// each as `dip` would, paging it across a paging floor, runs the quotation, and returns them in their
+/// each as `dip` would, admitting it across a soft floor, runs the quotation, and returns them in their
 /// original order. Both phases are user-sized and advance only as far as the
 /// turn's budget allows. The values are retained, so a symbol stays a value
 /// rather than becoming code.
@@ -496,44 +496,44 @@ const DipNState = struct {
 };
 
 fn above(fiber: *Fiber) MachineError!void {
-    return startPaged(fiber, .above);
+    return startMeasured(fiber, .above);
 }
 fn below(fiber: *Fiber) MachineError!void {
-    return startPaged(fiber, .below);
+    return startMeasured(fiber, .below);
 }
-fn startPaged(fiber: *Fiber, placement: paging.Placement) MachineError!void {
+fn startMeasured(fiber: *Fiber, placement: floor_api.Placement) MachineError!void {
     var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    const state = try fiber.allocator.create(PagedState);
+    const state = try fiber.allocator.create(MeasuredState);
     state.* = .{
         .quotation = .init(quotation.take().list),
-        .paged = .init(.init(placement)),
+        .measured = .init(.init(placement)),
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
     };
-    try fiber.beginApplication(state.application(), .{ .paging = &state.paged.borrowMut().floor });
+    try fiber.beginApplication(state.application(), .{ .measured = &state.measured.borrowMut().floor });
 }
 
-const PagedState = struct {
+const MeasuredState = struct {
     quotation: heap.Owned(*Header),
-    paged: heap.Owned(paging.Region),
+    measured: heap.Owned(floor_api.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     phase: enum { run, restored } = .run,
 
-    fn application(self: *PagedState) Application {
+    fn application(self: *MeasuredState) Application {
         return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
     }
-    fn work(self: *PagedState, fiber: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(fiber);
+    fn work(self: *MeasuredState, fiber: *Fiber) MachineError!bool {
+        return self.measured.borrowMut().advance(fiber);
     }
-    fn resumeAfter(_: *PagedState, _: @FieldType(PagedState, "phase")) ?ApplicationStep {
+    fn resumeAfter(_: *MeasuredState, _: @FieldType(MeasuredState, "phase")) ?ApplicationStep {
         return null;
     }
 
     pub fn resumeApplication(
         fiber: *Fiber,
-        self: *PagedState,
+        self: *MeasuredState,
         window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
@@ -541,8 +541,8 @@ const PagedState = struct {
         fiber.chargeContinuationStep();
         switch (self.phase) {
             .run => {
-                self.paged.borrowMut().base = window.base();
-                return finishWork(PagedState, self, fiber, .restored);
+                self.measured.borrowMut().base = window.base();
+                return finishWork(MeasuredState, self, fiber, .restored);
             },
             .restored => return null,
         }
@@ -610,7 +610,7 @@ fn cleaveFixed(fiber: *Fiber, sharing: Sharing, count: usize) MachineError!void 
 
 /// How many inputs the quotations consume together when every one has a
 /// summary and those inputs are in reach, with each quotation's own counts
-/// in `counts`. Null when the paging floor must find the counts or report
+/// in `counts`. Null when the soft floor must find the counts or report
 /// the failure.
 fn countedInputs(
     fiber: *Fiber,
@@ -634,7 +634,7 @@ fn countedInputs(
     }
     // Counts read across a publication belong to no one definition set.
     if (fiber.currentPublication() != counts.publication) return null;
-    return if (paging.reachable(fiber, inputs)) inputs else null;
+    return if (floor_api.reachable(fiber, inputs)) inputs else null;
 }
 
 /// Launches a cleave or spread whose quotations all have summaries. Owns
@@ -647,7 +647,7 @@ fn launchCountedCleave(
     inputs: usize,
 ) MachineError!void {
     var owned_quotations = heap.Owned(CleaveQuotations).init(quotations);
-    // The word consumes its inputs, so any enclosing paging floor pages
+    // The word consumes its inputs, so any enclosing soft floor admits
     // them now.
     fiber.require(inputs) catch |err| {
         owned_quotations.deinit(fiber.releases, fiber.allocator);
@@ -705,7 +705,7 @@ const CountedCleave = struct {
     publication: u64,
 
     /// What each quotation consumes and leaves, by its index. A cleave of
-    /// more quotations than these hold runs over the paging floor.
+    /// more quotations than these hold runs over the soft floor.
     const Counts = struct {
         consumed: [8]u8 = @splat(0),
         produced: [8]u8 = @splat(0),
@@ -753,7 +753,7 @@ const CountedCleave = struct {
     fn prepare(self: *CountedCleave, fiber: *Fiber) error{OutOfMemory}!void {
         const index = self.current();
         self.expected += self.counts.produced[index];
-        try paging.copyInputs(fiber, self.cursor, self.counts.consumed[index]);
+        try floor_api.copyInputs(fiber, self.cursor, self.counts.consumed[index]);
         if (self.sharing == .spread) self.cursor -= self.counts.consumed[index];
     }
     /// Puts a spread's result segments, left last quotation first, in the
@@ -787,7 +787,7 @@ const CountedCleave = struct {
         self.next += 1;
         if (self.next == self.quotations.borrow().count()) {
             const results = fiber.stack.items.len - self.base;
-            paging.dropBeneath(fiber, self.inputs, results);
+            floor_api.dropBeneath(fiber, self.inputs, results);
             if (self.sharing == .spread) self.orderResults(fiber.stack.items[fiber.stack.items.len - results ..]);
             return null;
         }
@@ -816,7 +816,7 @@ fn startCleave(
     state.* = .{
         .sharing = sharing,
         .quotations = .init(owned_quotations.take()),
-        .paged = .init(.init(switch (sharing) {
+        .measured = .init(.init(switch (sharing) {
             .cleave => .collected,
             .spread => .taken,
         })),
@@ -838,7 +838,7 @@ fn launchCleave(fiber: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!vo
     const state = owned.borrow();
     if (state.phase == .done) return owned.deinit(fiber.releases, fiber.allocator);
     state.running = true;
-    try fiber.beginApplication(owned.take().application(state.quotation()), .{ .paging = &state.paged.borrowMut().floor });
+    try fiber.beginApplication(owned.take().application(state.quotation()), .{ .measured = &state.measured.borrowMut().floor });
 }
 
 /// Finishes a cleave's validation when the turn ran out, then launches it.
@@ -903,9 +903,9 @@ const CleaveQuotations = union(enum) {
     }
 };
 
-/// A cleave validates every quotation and then runs each over a paging
+/// A cleave validates every quotation and then runs each over a soft
 /// floor above the inputs, so each consumes exactly what its words require.
-/// A quotation's results move into the control's buffer and its paged
+/// A quotation's results move into the control's buffer and its admitted
 /// inputs come back, so the next quotation starts from the same inputs; the
 /// inputs any quotation consumed are dropped at the end and the results put
 /// back in order. Each phase is user-sized and advances only as far as the
@@ -914,7 +914,7 @@ const CleaveQuotations = union(enum) {
 const CleaveState = struct {
     sharing: Sharing,
     quotations: heap.Owned(CleaveQuotations),
-    paged: heap.Owned(paging.Region),
+    measured: heap.Owned(floor_api.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     /// The most inputs any quotation consumed: consumption is a prefix from
@@ -961,10 +961,10 @@ const CleaveState = struct {
                 return true;
             },
             .restored => {
-                const paged = self.paged.borrowMut();
-                if (!try paged.advance(fiber)) return false;
+                const region = self.measured.borrowMut();
+                if (!try region.advance(fiber)) return false;
                 // A spread's quotation kept what it consumed.
-                if (self.sharing == .cleave) self.consumed = @max(self.consumed, paged.restored);
+                if (self.sharing == .cleave) self.consumed = @max(self.consumed, region.restored);
                 self.next += 1;
                 if (self.next != self.count()) {
                     self.phase = .run;
@@ -983,7 +983,7 @@ const CleaveState = struct {
             .push => {
                 // A spread gathered each region from its top down, last
                 // quotation first, so the results read back to front.
-                const results = self.paged.borrowMut().results.items();
+                const results = self.measured.borrowMut().results.items();
                 const end = self.pushed + work_budget.take(results.len - self.pushed);
                 while (self.pushed != end) : (self.pushed += 1) try fiber.pushOwned(results[
                     switch (self.sharing) {
@@ -992,7 +992,7 @@ const CleaveState = struct {
                     }
                 ]);
                 if (self.pushed != results.len) return false;
-                self.paged.borrowMut().results.clearRetainingCapacity();
+                self.measured.borrowMut().results.clearRetainingCapacity();
                 self.phase = .done;
                 return true;
             },
@@ -1003,12 +1003,12 @@ const CleaveState = struct {
         if (self.phase == .done) return null;
         std.debug.assert(self.phase == .run);
         self.running = true;
-        const paged = self.paged.borrowMut();
-        paged.reset();
+        const region = self.measured.borrowMut();
+        region.reset();
         return .{ .apply = .{
             .quotation = self.quotation(),
             .seeded = 0,
-            .launch = .{ .paging = &paged.floor },
+            .launch = .{ .measured = &region.floor },
         } };
     }
 
@@ -1022,7 +1022,7 @@ const CleaveState = struct {
         fiber.chargeContinuationStep();
         if (self.running) {
             self.running = false;
-            self.paged.borrowMut().base = window.base();
+            self.measured.borrowMut().base = window.base();
             self.phase = .restored;
             // `work` leaves its own progress in `phase`; `finishWork` would
             // reset it, so a suspension keeps it here.
@@ -1038,12 +1038,12 @@ const CleaveState = struct {
 };
 
 /// One `cond`'s application state, alive for the whole word under one frame.
-/// Each test runs over a paging floor, its result is read, its region
-/// dropped, and what it paged restored; the selected action then runs in
+/// Each test runs over a soft floor, its result is read, its region
+/// dropped, and what it admitted restored; the selected action then runs in
 /// place.
 const CondState = struct {
     clauses: heap.Owned(Value),
-    paged: heap.Owned(paging.Region),
+    measured: heap.Owned(floor_api.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -1063,7 +1063,7 @@ const CondState = struct {
         return launched;
     }
     fn work(self: *CondState, fiber: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(fiber);
+        return self.measured.borrowMut().advance(fiber);
     }
     /// The action a true test selected, the else when the tests ran out, or
     /// the next test.
@@ -1072,12 +1072,12 @@ const CondState = struct {
         self.pair_index += 2;
         if (self.pair_index + 1 >= self.count()) return self.actionStep(self.count() - 1);
         self.phase = .predicate;
-        const paged = self.paged.borrowMut();
-        paged.reset();
+        const region = self.measured.borrowMut();
+        region.reset();
         return .{ .apply = .{
             .quotation = self.clause(self.pair_index),
             .seeded = 0,
-            .launch = .{ .paging = &paged.floor },
+            .launch = .{ .measured = &region.floor },
         } };
     }
     fn actionStep(self: *CondState, index: usize) ApplicationStep {
@@ -1100,9 +1100,9 @@ const CondState = struct {
         fiber.chargeContinuationStep();
         switch (self.phase) {
             .predicate => {
-                const paged = self.paged.borrowMut();
-                paged.base = window.base();
-                self.selected = try popTestResult(fiber, paged);
+                const region = self.measured.borrowMut();
+                region.base = window.base();
+                self.selected = try popTestResult(fiber, region);
                 return finishWork(CondState, self, fiber, .restored);
             },
             // A `cond` action is the clause's whole result.
@@ -1153,7 +1153,7 @@ const CondDriver = struct {
         const state = try fiber.allocator.create(CondState);
         state.* = .{
             .clauses = .init(self.clauses.take()),
-            .paged = .init(.init(.discarded)),
+            .measured = .init(.init(.discarded)),
             .site = self.site,
             .word = self.word,
             .provenance_target = self.provenance_target,
@@ -1164,7 +1164,7 @@ const CondDriver = struct {
         if (count == 1) {
             try fiber.beginApplication(state.application(first), .in_place);
         } else {
-            try fiber.beginApplication(state.application(first), .{ .paging = &state.paged.borrowMut().floor });
+            try fiber.beginApplication(state.application(first), .{ .measured = &state.measured.borrowMut().floor });
         }
         return .detached;
     }
@@ -1175,14 +1175,14 @@ const CondDriver = struct {
 /// One `linrec`'s application state, alive for the whole recursion under one
 /// frame. Every level applies the same four quotations, so the recursion is
 /// a sequence `pre … pre base post … post` and the levels pending `post` are
-/// a count. Each predicate runs over a paging floor, its result is read, its
-/// region dropped, and what it paged restored; the branches run in place.
+/// a count. Each predicate runs over a soft floor, its result is read, its
+/// region dropped, and what it admitted restored; the branches run in place.
 const LinrecState = struct {
     predicate: heap.Owned(*Header),
     base: heap.Owned(*Header),
     pre: heap.Owned(*Header),
     post: heap.Owned(*Header),
-    paged: heap.Owned(paging.Region),
+    measured: heap.Owned(floor_api.Region),
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
@@ -1195,19 +1195,19 @@ const LinrecState = struct {
         return machine.typedApplication(self, self.predicate.borrow(), self.site, 0);
     }
     fn work(self: *LinrecState, fiber: *Fiber) MachineError!bool {
-        return self.paged.borrowMut().advance(fiber);
+        return self.measured.borrowMut().advance(fiber);
     }
     fn resumeAfter(self: *LinrecState, _: @FieldType(LinrecState, "phase")) ?ApplicationStep {
         return if (self.selected) self.branchStep(.base) else self.branchStep(.pre);
     }
     fn predicateStep(self: *LinrecState) ApplicationStep {
         self.phase = .predicate;
-        const paged = self.paged.borrowMut();
-        paged.reset();
+        const region = self.measured.borrowMut();
+        region.reset();
         return .{ .apply = .{
             .quotation = self.predicate.borrow(),
             .seeded = 0,
-            .launch = .{ .paging = &paged.floor },
+            .launch = .{ .measured = &region.floor },
         } };
     }
     fn branchStep(self: *LinrecState, branch: @FieldType(LinrecState, "phase")) ApplicationStep {
@@ -1235,9 +1235,9 @@ const LinrecState = struct {
         fiber.chargeContinuationStep();
         switch (self.phase) {
             .predicate => {
-                const paged = self.paged.borrowMut();
-                paged.base = window.base();
-                self.selected = try popTestResult(fiber, paged);
+                const region = self.measured.borrowMut();
+                region.base = window.base();
+                self.selected = try popTestResult(fiber, region);
                 return finishWork(LinrecState, self, fiber, .restored);
             },
             .restored => return self.resumeAfter(.restored),
@@ -1278,12 +1278,12 @@ fn linrec(fiber: *Fiber) MachineError!void {
         .base = .init(base.take().list),
         .pre = .init(pre.take().list),
         .post = .init(post.take().list),
-        .paged = .init(.init(.discarded)),
+        .measured = .init(.init(.discarded)),
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
         .provenance_target = provenance_target,
     };
-    try fiber.beginApplication(state.application(), .{ .paging = &state.paged.borrowMut().floor });
+    try fiber.beginApplication(state.application(), .{ .measured = &state.measured.borrowMut().floor });
 }
 
 const IterationKind = enum { each, zip_with, for_word, fold, scan, lex_cmp, infra };

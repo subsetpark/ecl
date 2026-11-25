@@ -26,7 +26,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
         .{ .name = "over", .primitive = over, .effect = "x y -- x y x", .doc = "Copy the value beneath the top of the stack onto the top." },
         .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },
-        .{ .name = "id", .primitive = identity, .effect = "x -- x", .doc = "Return the top value unchanged. Inside a paging quotation it takes the value from beneath, so `(pop id)` selects the second value." },
+        .{ .name = "id", .primitive = identity, .effect = "x -- x", .doc = "Return the top value unchanged. Inside a measured quotation it takes the value from beneath, so `(pop id)` selects the second value." },
         .{ .name = "nip", .primitive = nip, .effect = "x y -- y", .doc = "Discard the second value on the stack." },
         .{ .name = "dup2", .primitive = dup2, .effect = "x y -- x y x y", .doc = "Copy the top two stack values onto the top, preserving their order." },
         .{ .name = "rollup", .primitive = rollup, .effect = "x y z -- z x y", .doc = "Rotate the top three stack values upward." },
@@ -75,8 +75,8 @@ fn pop(fiber: *Fiber) MachineError!void {
     var item = try fiber.popValue();
     item.deinit();
 }
-/// Requires its operand without touching it: over a paging floor the check
-/// pages the value in, which is all the word does.
+/// Requires its operand without touching it: over a soft floor the check
+/// admits the value, which is all the word does.
 fn identity(fiber: *Fiber) MachineError!void {
     try fiber.require(1);
 }

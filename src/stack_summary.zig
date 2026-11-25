@@ -131,12 +131,12 @@ const Walk = struct {
                         if (!std.meta.eql(then.exact, otherwise.exact)) break :branch .none;
                         break :branch then;
                     },
-                    // A paging word leaves its quotation's results and the
+                    // A measured word leaves its quotation's results and the
                     // inputs it consumed.
-                    .paging => paging: {
+                    .measured => measured: {
                         const inner = try self.operand(&stack, site, depth);
-                        if (inner != .exact) break :paging inner;
-                        break :paging .{ .exact = .{
+                        if (inner != .exact) break :measured inner;
+                        break :measured .{ .exact = .{
                             .consumed = inner.exact.consumed,
                             .produced = inner.exact.produced + inner.exact.consumed,
                         } };

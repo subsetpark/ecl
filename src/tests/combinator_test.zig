@@ -222,7 +222,7 @@ test "combinators: contracts and conformability are structural errors" {
     });
 }
 
-test "paging: above and below restore what the quotation consumed" {
+test "measured: above and below restore what the quotation consumed" {
     try support.expectStacks(&.{
         .{ .name = "above restores consumed inputs above the results", .source = "1 2 (+) above 1 (dup) above", .expected = "3 1 2 1 1 1" },
         .{ .name = "below restores them beneath", .source = "1 2 (+) below 1 2 (swap) below", .expected = "1 2 3 1 2 2 1" },
@@ -239,7 +239,7 @@ test "paging: above and below restore what the quotation consumed" {
         .{ .name = "dip-n produces what it protects", .source = "1 2 3 ((+) dip 5 (2 *) 2 dip-n) below", .expected = "1 2 3 6 3 5" },
         .{ .name = "a nested restore is a product", .source = "5 ((1 +) below) below 1 2 ((+) above) above 1 2 ((+) above) below", .expected = "5 5 6 3 1 2 1 2 1 2 3 1 2" },
         .{
-            .name = "guards do not consume what a test paged",
+            .name = "guards do not consume what a test admitted",
             .source = "5 ([(0 <) (pop 1) (pop 2)] cond) below 5 ((0 >) (1 -) while) below " ++
                 "1 2 3 ((dup 2 =) (pop 100) (1 -) (+) linrec) below " ++
                 "5 ([(0 <) (1) (2)] cond) below 5 ((0 <) (1 -) while) below 5 ([(0 <) (1) (2)] cond) above",
@@ -260,7 +260,7 @@ test "paging: above and below restore what the quotation consumed" {
         },
         .{ .name = "locals bind across the floor", .source = "1 2 3 (|a b| a b +) below 1 2 3 (|a b| a b +) above", .expected = "1 2 3 5 1 5 2 3" },
         .{ .name = "a word's own substack is a hard floor", .source = "1 ((pop) @attempt) below result.ok?", .expected = "1 0" },
-        .{ .name = "paging and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
+        .{ .name = "admitting and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
         .{ .name = "rotating beneath the region is bounded work", .source = "20000 (1) times (10000 (pop) times 5) below 20001 pack dup len swap last", .expected = "20001 5" },
         .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((10000 (pop) times 0) (pop) while 7) below 20001 pack dup len swap last", .expected = "20001 7" },
         .{ .name = "a guard's restore is bounded work", .source = "20000 (1) times (10000 (pop) times 0) (pop) while 20000 pack len 20000 (1) times [(10000 (pop) times 0) (pop) (pop)] cond 19999 pack len", .expected = "20000 19999" },
@@ -271,8 +271,8 @@ test "paging: above and below restore what the quotation consumed" {
         .{ .name = "linrec runs in constant space", .source = "100000 (dup 0 =) (pop) (1 -) () linrec 20000 (dup 0 =) (pop 0) (1 -) (1 +) linrec", .expected = "20000" },
     });
     try support.expectErrors(&.{
-        .{ .name = "an isolated application beneath does not page", .source = "3 [1 2] ((+) each) below", .kind = "underflow", .word = "+" },
-        .{ .name = "the stack bottom does not page", .source = "(pop) below", .kind = "underflow", .word = "pop" },
+        .{ .name = "an isolated application beneath admits nothing", .source = "3 [1 2] ((+) each) below", .kind = "underflow", .word = "+" },
+        .{ .name = "the stack bottom admits nothing", .source = "(pop) below", .kind = "underflow", .word = "pop" },
         .{ .name = "above non-quotation", .source = "1 above", .kind = "type", .word = "above" },
         .{ .name = "below non-quotation", .source = "1 below", .kind = "type", .word = "below" },
     });
@@ -280,9 +280,9 @@ test "paging: above and below restore what the quotation consumed" {
 
 // A cleave whose quotations have exact stack summaries runs them in place;
 // one with a guard, branches that disagree, or a quotation taken from a
-// local runs over the paging floor. Both must leave the same stack, so the
+// local runs over the soft floor. Both must leave the same stack, so the
 // cases pair or mix them.
-test "cleave: summarized and paging quotations agree" {
+test "cleave: summarized and measured quotations agree" {
     try support.expectStacks(&.{
         .{ .name = "builtins against locals", .source = "1 2 (+) (-) bi 1 2 (|a b| a b +) (|a b| a b -) bi", .expected = "3 -1 3 -1" },
         .{ .name = "a dip against locals", .source = "1 2 3 ((+) dip) (+ +) bi 1 2 3 (|a b c| a b + c) (+ +) bi", .expected = "3 3 6 3 3 6" },
@@ -291,11 +291,11 @@ test "cleave: summarized and paging quotations agree" {
         .{ .name = "a quotation that binds its own locals inside one that does", .source = "1 2 (|a| (|b| b 1 +) apply a) (id) bi", .expected = "2 2 2" },
         .{ .name = "a session word written with locals", .source = "(|a b| a b +) `ladd def (|x| x x ladd) `dbl def 5 (dbl) (dbl dbl) bi", .expected = "10 20" },
         .{ .name = "branches that agree and branches that do not", .source = "1 2 (dup 0 > (10 +) (20 +) if) (id) bi 1 2 (dup 0 > (10 +) (pop pop 5) if) (id) bi", .expected = "1 12 2 1 12 2" },
-        .{ .name = "paging words inside a quotation", .source = "1 2 ((+) above) ((+) below) bi", .expected = "3 1 2 1 2 3" },
+        .{ .name = "measured words inside a quotation", .source = "1 2 ((+) above) ((+) below) bi", .expected = "3 1 2 1 2 3" },
         .{ .name = "a nested cleave", .source = "1 2 ((+) (-) bi *) (pop) bi", .expected = "-3" },
         .{ .name = "a prelude word's body", .source = "1 2 ((dup *) both) (+) bi", .expected = "1 4 3" },
         .{ .name = "three quotations", .source = "[1 2 3] (last) (first) (len) tri", .expected = "3 1 3" },
-        .{ .name = "inside a paging word", .source = "5 ((1 +) (2 *) bi) below 5 ((1 +) (2 *) bi) above", .expected = "5 6 10 6 10 5" },
+        .{ .name = "inside a measured word", .source = "5 ((1 +) (2 *) bi) below 5 ((1 +) (2 *) bi) above", .expected = "5 6 10 6 10 5" },
         .{ .name = "a list of eight quotations", .source = "1 2 3 4 5 6 7 8 9 (+) (-) (*) (pop) (dup) (swap) (over) (nip) 8 pack cleave", .expected = "1 2 3 4 5 6 7 17 -1 72 9 9 9 8 8 9 8 9" },
         .{ .name = "a list of nine quotations", .source = "1 2 (+) (-) (*) (pop) (dup) (swap) (over) (nip) (id) 9 pack cleave", .expected = "3 -1 2 2 2 2 1 1 2 1 2 2" },
         .{ .name = "a redefined word is read as redefined", .source = "(x y -- z) (pop pop 9) `over def 1 2 (over) (+) bi", .expected = "9 3" },
@@ -329,7 +329,7 @@ test "cleave: summarized and paging quotations agree" {
 }
 
 // Each case runs once with quotations that have stack summaries and once
-// with a guard in one of them, which runs over the paging floor.
+// with a guard in one of them, which runs over the soft floor.
 test "spread: each quotation takes its own inputs, last to first" {
     try support.expectStacks(&.{
         .{ .name = "inputs in order, results in order", .source = "1 2 3 [(+) (dup)] spread 1 2 3 [(+) ([(0 <) (dup) (dup)] cond)] spread", .expected = "3 3 3 3 3 3" },
@@ -342,7 +342,7 @@ test "spread: each quotation takes its own inputs, last to first" {
         .{ .name = "locals", .source = "1 2 3 [(|a b| a b +) (|c| c c)] spread", .expected = "3 3 3" },
         .{ .name = "more quotations than have counted slots", .source = "1 2 3 4 5 6 7 8 9 [(1 +) (1 +) (1 +) (1 +) (1 +) (1 +) (1 +) (1 +) (1 +)] spread", .expected = "2 3 4 5 6 7 8 9 10" },
         .{
-            .name = "inside a paging word",
+            .name = "inside a measured word",
             .source = "5 6 ([(1 +) (2 +)] spread) below 5 6 ([(1 +) (2 +)] spread) above " ++
                 "5 6 ([(1 +) ([(0 <) (2 +) (2 +)] cond)] spread) above",
             .expected = "5 6 6 8 6 8 5 6 6 8 5 6",
@@ -379,7 +379,7 @@ test "selectors: id and retain keep values by position" {
 test "combinators: dip-n protects a counted prefix" {
     try support.expectStacks(&.{
         .{ .name = "counted dips", .source = "1 2 3 (10 +) 2 dip-n 1 2 3 (1 +) 0 dip-n 1 2 3 (7) 3 dip-n", .expected = "11 2 3 1 2 4 7 1 2 3" },
-        .{ .name = "beneath a paging floor", .source = "1 2 3 ((10 *) 2 dip-n) below 0 1 2 3 ((+) 2 dip-n) below", .expected = "1 2 3 10 2 3 0 1 2 3 1 2 3" },
+        .{ .name = "beneath a soft floor", .source = "1 2 3 ((10 *) 2 dip-n) below 0 1 2 3 ((+) 2 dip-n) below", .expected = "1 2 3 10 2 3 0 1 2 3 1 2 3" },
         .{ .name = "a symbol stays a value", .source = "0 `m 1 (2 +) 2 dip-n", .expected = "2 m 1" },
         .{ .name = "a large count is bounded work", .source = "20000 (1) times (2) 20000 dip-n 20001 pack len", .expected = "20001" },
     });
@@ -554,15 +554,15 @@ test "inline times checkpointed guards and case prevalidate and select" {
     });
 }
 
-test "paged quotations keep their caller's right to define" {
-    // Paging restores the stack, not the environment: a definition made by a
-    // paged body, kept or discarded, survives.
+test "measured quotations keep their caller's right to define" {
+    // A measured application restores the stack, not the environment: a
+    // definition made by a measured body, kept or discarded, survives.
     try support.expectStacks(&.{
         .{ .name = "cond test", .source = "[(1 `guard-effect set 0) () (guard-effect)] cond", .expected = "1" },
         .{ .name = "while condition", .source = "0 (1 `while-guard-effect set 0) () while while-guard-effect", .expected = "0 1" },
         .{ .name = "linrec predicate", .source = "0 (7 `linrec-effect set 1) (pop linrec-effect) () () linrec", .expected = "7" },
-        .{ .name = "above", .source = "((1) `paged-above def) above paged-above", .expected = "1" },
-        .{ .name = "cleave", .source = "[((1) `paged-cleave def)] cleave paged-cleave", .expected = "1" },
+        .{ .name = "above", .source = "((1) `measured-above def) above measured-above", .expected = "1" },
+        .{ .name = "cleave", .source = "[((1) `measured-cleave def)] cleave measured-cleave", .expected = "1" },
         .{ .name = "bi binds one body to two names", .source = "(7) (`bi-left def) (`bi-right def) bi bi-left bi-right", .expected = "7 7" },
     });
 }
