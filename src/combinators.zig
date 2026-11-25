@@ -777,6 +777,10 @@ const CountedCleave = struct {
     ) MachineError!?ApplicationStep {
         fiber.active_word = self.word;
         fiber.chargeContinuationStep();
+        // A publication while the quotation ran may have changed a word it
+        // called, so its counts cannot be trusted to describe what it did.
+        if (fiber.currentPublication() != self.publication)
+            return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
         // A summary that disagreed with what its quotation did would have
         // been read from a wrong effect declaration.
         std.debug.assert(fiber.stack.items.len == self.expected);
