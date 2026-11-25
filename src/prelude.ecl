@@ -293,10 +293,3 @@ def
  (|b n| b wrap n take)
  if
  zip 0 (|acc p| acc p 1 at * p 0 at +) fold) `from-digits def
-
-### def retain
-(... counts -- ... :
- "Keep each of the values beneath `counts` as many times as its count, in order: the first count
-  applies to the deepest of them, and the values consumed are as many as `counts` holds. The stack
-  form of `where at`.")
-(|counts| counts len pack counts where at apply) `retain def

@@ -10,6 +10,7 @@ const lexer = @import("lexer.zig");
 const printer = @import("print.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
+const paging = @import("paging.zig");
 const module_prims = @import("module_prims.zig");
 const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
@@ -27,6 +28,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "over", .primitive = over, .effect = "x y -- x y x", .doc = "Copy the value beneath the top of the stack onto the top." },
         .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },
         .{ .name = "id", .primitive = identity, .effect = "x -- x", .doc = "Return the top value unchanged. Inside a paging quotation it takes the value from beneath, so `(pop id)` selects the second value." },
+        .{ .name = "retain", .primitive = retain, .effect = "... counts -- ...", .doc = "Keep each of the values beneath `counts` as many times as its count, in order: the first count applies to the deepest of them, and the values consumed are as many as `counts` holds. The stack form of `where at`." },
         .{ .name = "nip", .primitive = nip, .effect = "x y -- y", .doc = "Discard the second value on the stack." },
         .{ .name = "dup2", .primitive = dup2, .effect = "x y -- x y x y", .doc = "Copy the top two stack values onto the top, preserving their order." },
         .{ .name = "rollup", .primitive = rollup, .effect = "x y z -- z x y", .doc = "Rotate the top three stack values upward." },
@@ -80,6 +82,102 @@ fn pop(fiber: *Fiber) MachineError!void {
 fn identity(fiber: *Fiber) MachineError!void {
     try fiber.require(1);
 }
+/// `retain` checks its counts, takes one value per count off the stack, and
+/// pushes each back as many times as its count, the deepest first. All three
+/// passes are user-sized, so each advances only as far as the turn's budget
+/// allows; a mask the budget covers finishes where the word is invoked.
+fn retain(fiber: *Fiber) MachineError!void {
+    var counts = try fiber.popValue();
+    defer counts.deinit();
+    if (counts.borrow() != .list) return fiber.typeError("a list of counts");
+    const count: usize = @intCast(counts.borrow().list.length());
+    // Checked before the buffer is sized by it, and without paging.
+    try paging.requireReachable(fiber, count);
+    const buffer = try heap.OwnedValueBuffer.init(fiber.releases, count);
+    var state: RetainDriver = .{
+        .counts = .init(counts.take().list),
+        .taken = .init(buffer),
+        .count = count,
+        .word = fiber.active_word,
+    };
+    const finished = state.work(fiber) catch |err| {
+        heap.deinitDriverFields(fiber.releases, fiber.allocator, &state);
+        return err;
+    };
+    if (!finished) return fiber.startDriver(state);
+    heap.deinitDriverFields(fiber.releases, fiber.allocator, &state);
+}
+
+const RetainDriver = struct {
+    counts: heap.Owned(*value.ListHandle),
+    /// The values the counts apply to, the top of the stack first.
+    taken: heap.Owned(heap.OwnedValueBuffer),
+    count: usize,
+    word: intern.TraceWord,
+    index: usize = 0,
+    /// Copies of the value at `index` already pushed.
+    copies: usize = 0,
+    phase: enum { validate, take, keep } = .validate,
+
+    /// Marks its word active before it polls, so a cancellation is attributed to it.
+    pub const cancellation: machine.DriverCancellation = .own;
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    /// Whether the word has finished. Nothing is taken until every count has
+    /// been checked, so a bad count leaves the stack as it was.
+    fn work(self: *RetainDriver, fiber: *Fiber) MachineError!bool {
+        const budget = fiber.workBudget();
+        const counts: Value = .{ .list = self.counts.borrow() };
+        while (true) switch (self.phase) {
+            .validate => {
+                const end = self.index + budget.take(self.count - self.index);
+                while (self.index != end) : (self.index += 1) {
+                    const item = list.atUnchecked(counts, self.index);
+                    if (item != .int) return fiber.typeError("a list of int counts");
+                    if (item.int < 0) return fiber.fail(.domain, "retain counts must be nonnegative");
+                }
+                if (self.index != self.count) return false;
+                self.index = 0;
+                self.phase = .take;
+            },
+            .take => {
+                const end = self.index + budget.take(self.count - self.index);
+                while (self.index != end) : (self.index += 1) {
+                    var taken = try fiber.popValue();
+                    self.taken.borrowMut().appendOwned(taken.take());
+                }
+                if (self.index != self.count) return false;
+                self.index = 0;
+                self.phase = .keep;
+            },
+            .keep => {
+                while (self.index != self.count) {
+                    const wanted: usize = @intCast(list.atUnchecked(counts, self.index).int);
+                    const item = self.taken.borrow().values()[self.count - 1 - self.index];
+                    const granted = budget.take(wanted - self.copies);
+                    for (0..granted) |_| {
+                        heap.retainValue(item);
+                        try fiber.pushOwned(item);
+                    }
+                    self.copies += granted;
+                    if (self.copies != wanted) return false;
+                    // Moving to the next value costs a unit of its own, so a
+                    // mask of zeros is bounded like any other.
+                    if (budget.take(1) == 0) return false;
+                    self.copies = 0;
+                    self.index += 1;
+                }
+                return true;
+            },
+        };
+    }
+
+    pub fn advance(fiber: *Fiber, self: *RetainDriver) MachineError!machine.WorkProgress {
+        fiber.active_word = self.word;
+        try fiber.pollKernel();
+        return if (try self.work(fiber)) .completed else .stepped;
+    }
+};
 fn nip(fiber: *Fiber) MachineError!void {
     try fiber.require(2);
     try swap(fiber);

@@ -369,10 +369,14 @@ test "selectors: id and retain keep values by position" {
         .{ .name = "retain keeps by count, deepest first", .source = "`x `y `z [1 0 2] retain", .expected = "x z z" },
         .{ .name = "retain consumes as many values as it has counts", .source = "9 1 2 [0 1] retain 5 [] retain", .expected = "9 2 5" },
         .{ .name = "retain selects beneath a cleave", .source = "1 2 3 ([1 0 1] retain) (+ +) bi", .expected = "1 3 6" },
+        .{ .name = "retain past one turn's budget, by count and by mask", .source = "7 [70000] retain 70000 range 2 mod retain 35000 pack sum", .expected = "245000" },
+        .{ .name = "retain over a mixed list of counts", .source = "`x `y (2 1) retain", .expected = "x x y" },
     });
     try support.expectErrors(&.{
-        .{ .name = "retain negative count", .source = "1 2 [1 -1] retain", .kind = "domain", .word = "where" },
-        .{ .name = "retain non-list counts", .source = "1 `a retain", .kind = "type", .word = "len" },
+        .{ .name = "retain negative count", .source = "1 2 [1 -1] retain", .kind = "domain", .word = "retain" },
+        .{ .name = "retain a non-int count, leaving the stack", .source = "1 2 (1 `a) retain", .kind = "type", .word = "retain" },
+        .{ .name = "retain more counts than values", .source = "1 [1 1] retain", .kind = "underflow", .word = "retain" },
+        .{ .name = "retain non-list counts", .source = "1 `a retain", .kind = "type", .word = "retain" },
     });
 }
 
@@ -933,10 +937,6 @@ test "combinators: cached body words spend no kernel polls per element" {
     try std.testing.expect(runtime.lastPolls() <= count + count / 64 + 64);
 }
 
-test "slots: implicit locals bind up to the highest slot their list writes" {
-    try support.expectStacks(&.{
-}
-
 test "programs: a body of combinators over literal quotations or of locals runs as the words would" {
     const Case = struct { source: []const u8, expected: []const u8 };
     const cases = [_]Case{
@@ -1007,6 +1007,10 @@ test "programs: a combinator body spends no kernel polls per word" {
         .incomplete => return error.TestUnexpectedResult,
     }
     try std.testing.expect(runtime.lastPolls() <= count + count / 64 + 64);
+}
+
+test "slots: implicit locals bind up to the highest slot their list writes" {
+    try support.expectStacks(&.{
         .{ .name = "read twice", .source = "[1 2 3] (.x .x *) each", .expected = "[1 4 9]" },
         .{ .name = "two slots", .source = "3 4 (.y .x -) apply", .expected = "1" },
         .{ .name = "three slots", .source = "1 2 3 (.z .y .x) apply", .expected = "3 2 1" },
