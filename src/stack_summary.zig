@@ -108,7 +108,7 @@ const Walk = struct {
                 .builtin => |builtin| if (prims.unsummarizable(builtin.primitive))
                     .none
                 else if (exact(builtin.effect)) |declared|
-                    .{ .exact = declared }
+                    (if (takesQuotation(builtin.effect.?)) Result.none else .{ .exact = declared })
                 else switch (combinators.flow(builtin.primitive)) {
                     .declared => .none,
                     .apply => try self.operand(&stack, site, depth),
@@ -200,6 +200,18 @@ const Walk = struct {
             .exhausted => .unread,
         });
         return result;
+    }
+
+    /// Whether a word's declared inputs include a quotation slot. Such a word
+    /// runs the quotation where no walk reads it, and that code may publish a
+    /// definition the summary rests on. Only the combinators with a rule of
+    /// their own are walked, and they do not reach here.
+    fn takesQuotation(effect: env.ValidatedEffect) bool {
+        const header = effect.header();
+        for (0..effect.inputs) |index| {
+            if (list.atUnchecked(.{ .list = header }, index) == .list) return true;
+        }
+        return false;
     }
 
     fn exact(declared: ?env.ValidatedEffect) ?Summary {
