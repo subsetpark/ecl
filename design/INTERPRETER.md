@@ -1107,6 +1107,37 @@ the end. The other
 measured words keep the floor, where reading a summary costs as much as the
 admitting it would replace.
 
+### A list may run flattened
+
+A quotation literal that reaches a core combinator directly is not a value
+anything else can see, so applying it and running its forms where the
+combinator stands compute the same thing. The first time a fiber enters a code
+list at a site it rewrites the phrases of this kind into one flattened list and
+remembers it for the publication, in a table of constant size beside its
+resolutions and summaries; later entries run the flattened list. The words
+inside an expanded quotation stay ordinary forms and resolve when they are
+reached. Core is built with every list as written.
+
+Flattening is an optimization and nothing observes it. Three things carry
+that:
+
+- Each flattened phrase begins with a guard. When the list was flattened under
+  an earlier publication, when the values the expansion takes for itself are
+  not in reach, or when a tail application is owed the evaluation's tail
+  authority, the guard runs the phrase as it was written and passes over the
+  expansion. A guard therefore never fails; whatever the written phrase would
+  have reported is what is reported.
+- Beside the flattened list is a record of where each form was written. Every
+  position the machine reports from a running list is read through it, so a
+  failure, a call site and a source name are the written quotation's.
+- A flattened list keeps running after a form that ended every list it was
+  written in, where the evaluations of those lists would have been exhausted
+  and handed their activation on. Suspended there it lends its activation and
+  is traced under no word, so a failure's trace holds the words it would have.
+
+A record lasts as long as its flattened list is held: by the table, or by an
+evaluation still running it after the table has moved on.
+
 ### Failure is a bounded machine transition
 
 Language errors are ordinary dictionary values at observation boundaries, but
