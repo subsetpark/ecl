@@ -664,6 +664,7 @@ fn launchCountedCleave(
         .expected = fiber.stack.items.len,
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
+        .publication = fiber.currentPublication(),
     };
     var owned = heap.Owned(*CountedCleave).init(state);
     state.prepare(fiber) catch |err| {
@@ -693,6 +694,8 @@ const CountedCleave = struct {
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     next: usize = 0,
+    /// The publication the counts were read under.
+    publication: u64,
 
     /// What each quotation consumes and leaves, by its index. A cleave of
     /// more quotations than these hold runs over the paging floor.
@@ -748,6 +751,19 @@ const CountedCleave = struct {
             paging.dropBeneath(fiber, self.inputs, results);
             if (self.sharing == .spread) self.orderResults(fiber.stack.items[fiber.stack.items.len - results ..]);
             return null;
+        }
+        // Counts read under an earlier publication say nothing about words
+        // since redefined: read the next quotation again, and stop rather
+        // than run it on counts that no longer hold.
+        if (fiber.currentPublication() != self.publication) {
+            const index = self.current();
+            const again = try stack_summary.of(fiber, self.site, self.quotations.borrow().at(index));
+            const same = if (again) |summary|
+                summary.consumed == self.counts.consumed[index] and summary.produced == self.counts.produced[index]
+            else
+                false;
+            if (!same) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+            self.publication = fiber.currentPublication();
         }
         try self.prepare(fiber);
         return .{ .apply = .{

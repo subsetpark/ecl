@@ -78,6 +78,9 @@ const Walk = struct {
         if (self.visited > max_visited) return .exhausted;
         var stack: Abstract = .{};
         for (0..length) |index| {
+            // Every path below that skips the fall-through check
+            // (`continue`) is covered by checking before the next form.
+            if (stack.reach > max_values or stack.height > max_values) return .none;
             const word = switch (list.atUnchecked(.{ .list = code }, index)) {
                 .symbol => |reference| reference,
                 .list => |literal| {
@@ -164,6 +167,7 @@ const Walk = struct {
             stack.apply(applied.exact);
             if (stack.reach > max_values or stack.height > max_values) return .none;
         }
+        if (stack.reach > max_values or stack.height > max_values) return .none;
         return .{ .exact = .{ .consumed = @intCast(stack.reach), .produced = @intCast(stack.height) } };
     }
 
