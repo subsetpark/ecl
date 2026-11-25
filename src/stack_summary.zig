@@ -4,8 +4,10 @@
 //! skip the dynamic accounting that would have found the same counts.
 const std = @import("std");
 const value = @import("value.zig");
+const heap = @import("heap.zig");
 const list = @import("list.zig");
 const env = @import("env.zig");
+const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const combinators = @import("combinators.zig");
 
@@ -21,40 +23,61 @@ pub const Summary = struct {
 
 /// A quotation longer than this is not summarized.
 const max_forms = 16;
-/// Forms one summary may visit across the quotations and word bodies it
+/// A word body longer than this has no summary.
+const max_body_forms = 64;
+/// Forms one walk may visit across the quotations and word bodies it
 /// descends into, which bounds the walk by a constant rather than by the
-/// program.
-const max_visited = 48;
-/// How far a summary descends through nested quotations and word bodies.
-const max_depth = 3;
+/// program. A walk that runs out records nothing, so a later one resumes
+/// from the bodies this one finished.
+const max_visited = 128;
+/// How far a walk descends through nested quotations and word bodies.
+const max_depth = 8;
 /// The most a summary may consume or leave.
 const max_values = 32;
+/// The most locals one quotation or body may hold bound at once.
+const max_locals = 16;
 
 /// The summary of a quotation about to run at `site`, or null when any word
-/// leaves the counts to run time: a local, a word that does not resolve to a
-/// static definition, a native word, a builtin whose effect holds a row and
-/// has no rule here, or a combinator whose quotation is not a literal.
+/// leaves the counts to run time: a word that does not resolve, a native
+/// word, a word behind a checked module boundary, a builtin whose
+/// effect holds a row and has no rule here, or a combinator whose quotation
+/// is not a literal.
+///
+/// A word's body is summarized once per resolution of the word and recorded
+/// with it, so the record lasts until a publication and a redefinition is
+/// read as redefined.
 pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{OutOfMemory}!?Summary {
-    var walk: Walk = .{ .fiber = fiber, .site = site };
-    return walk.summarize(quotation, 0);
+    if (quotation.length() > max_forms) return null;
+    var walk: Walk = .{ .fiber = fiber, .publication = fiber.currentPublication() };
+    const summary = switch (try walk.summarize(quotation, site, 0)) {
+        .exact => |summary| summary,
+        .none, .exhausted => return null,
+    };
+    // Words read under different publications say nothing together.
+    return if (fiber.currentPublication() == walk.publication) summary else null;
 }
+
+const Result = union(enum) {
+    exact: Summary,
+    /// Some word has no summary.
+    none,
+    /// The walk ran out before it could tell.
+    exhausted,
+};
 
 const Walk = struct {
     fiber: *Fiber,
-    /// Where the quotation runs. A quotation a combinator applies inside it
-    /// and a homeless word's body run at the same site.
-    site: machine.ExecutionSite,
+    publication: u64,
     visited: usize = 0,
 
-    fn summarize(self: *Walk, quotation: *Header, depth: usize) error{OutOfMemory}!?Summary {
-        const length: usize = @intCast(quotation.length());
-        if (length > max_forms or depth > max_depth) return null;
+    fn summarize(self: *Walk, code: *Header, site: machine.ExecutionSite, depth: usize) error{OutOfMemory}!Result {
+        const length: usize = @intCast(code.length());
+        if (depth > max_depth) return .exhausted;
         self.visited += length;
-        if (self.visited > max_visited) return null;
+        if (self.visited > max_visited) return .exhausted;
         var stack: Abstract = .{};
         for (0..length) |index| {
-            const form = list.atUnchecked(.{ .list = quotation }, index);
-            const word = switch (form) {
+            const word = switch (list.atUnchecked(.{ .list = code }, index)) {
                 .symbol => |reference| reference,
                 .list => |literal| {
                     stack.push(literal);
@@ -69,85 +92,153 @@ const Walk = struct {
                 stack.push(null);
                 continue;
             }
-            if (env.wordTarget(word.slot) == .local) return null;
-            const resolved = try self.fiber.resolveAt(word, self.site) orelse return null;
-            const definition = resolved.definition;
-            const applied: Summary = switch (definition.code()) {
-                .native => return null,
-                // A word with no home has no effect boundary, so its body
-                // meets the stack as if written where the word is.
-                .source => |executable| if (definition.home != null)
-                    return null
-                else
-                    try self.summarize(executable.code(), depth + 1) orelse return null,
+            if (env.localOperand(word.slot)) |count_or_index| {
+                if (!stack.local(self.fiber.environment.localsWords(), word.name, count_or_index)) return .none;
+                continue;
+            }
+            const applied: Result = switch (try self.fiber.summaryTarget(word, site)) {
+                .none => .none,
+                .source => |source| try self.body(word, site, source),
                 // An exact declared effect says everything; only a builtin
                 // whose effect holds a row can have a rule of its own.
-                .builtin => |primitive| if (exact(definition)) |declared| declared else switch (combinators.flow(primitive)) {
-                    .declared => return null,
-                    .apply => try self.operand(&stack, depth) orelse return null,
-                    .dip => {
-                        const inner = try self.operand(&stack, depth) orelse return null;
+                .builtin => |builtin| if (exact(builtin.effect)) |declared|
+                    .{ .exact = declared }
+                else switch (combinators.flow(builtin.primitive)) {
+                    .declared => .none,
+                    .apply => try self.operand(&stack, site, depth),
+                    .dip => dip: {
+                        const inner = try self.operand(&stack, site, depth);
+                        if (inner != .exact) break :dip inner;
                         stack.pop(1);
-                        stack.apply(inner);
+                        stack.apply(inner.exact);
                         stack.push(null);
                         continue;
                     },
                     .branch => branch: {
-                        const otherwise = try self.operand(&stack, depth) orelse return null;
-                        const then = try self.operand(&stack, depth) orelse return null;
+                        const otherwise = try self.operand(&stack, site, depth);
+                        if (otherwise != .exact) break :branch otherwise;
+                        const then = try self.operand(&stack, site, depth);
+                        if (then != .exact) break :branch then;
                         stack.pop(1);
                         // Which branch runs is data, so the counts are known
                         // only when the branches agree.
-                        if (!std.meta.eql(then, otherwise)) return null;
+                        if (!std.meta.eql(then.exact, otherwise.exact)) break :branch .none;
                         break :branch then;
                     },
                     // A paging word leaves its quotation's results and the
                     // inputs it consumed.
                     .paging => paging: {
-                        const inner = try self.operand(&stack, depth) orelse return null;
-                        break :paging .{ .consumed = inner.consumed, .produced = inner.produced + inner.consumed };
+                        const inner = try self.operand(&stack, site, depth);
+                        if (inner != .exact) break :paging inner;
+                        break :paging .{ .exact = .{
+                            .consumed = inner.exact.consumed,
+                            .produced = inner.exact.produced + inner.exact.consumed,
+                        } };
                     },
                     .cleave => |count| cleave: {
                         var total: Summary = .{ .consumed = 0, .produced = 0 };
                         for (0..count) |_| {
-                            const inner = try self.operand(&stack, depth) orelse return null;
-                            total.consumed = @max(total.consumed, inner.consumed);
-                            total.produced += inner.produced;
+                            const inner = try self.operand(&stack, site, depth);
+                            if (inner != .exact) break :cleave inner;
+                            total.consumed = @max(total.consumed, inner.exact.consumed);
+                            total.produced += inner.exact.produced;
                         }
-                        break :cleave total;
+                        break :cleave .{ .exact = total };
                     },
                 },
             };
-            stack.apply(applied);
-            if (stack.reach > max_values or stack.height > max_values) return null;
+            if (applied != .exact) return applied;
+            stack.apply(applied.exact);
+            if (stack.reach > max_values or stack.height > max_values) return .none;
         }
-        return .{ .consumed = @intCast(stack.reach), .produced = @intCast(stack.height) };
+        return .{ .exact = .{ .consumed = @intCast(stack.reach), .produced = @intCast(stack.height) } };
     }
 
-    fn exact(definition: *const env.Definition) ?Summary {
-        const effect = definition.effect orelse return null;
+    /// The summary of a source word's body, read from the word's remembered
+    /// resolution or walked and recorded there.
+    fn body(
+        self: *Walk,
+        word: value.Symbol,
+        site: machine.ExecutionSite,
+        source: @FieldType(machine.SummaryTarget, "source"),
+    ) error{OutOfMemory}!Result {
+        switch (source.summary) {
+            .exact => |counts| return .{ .exact = .{ .consumed = counts.consumed, .produced = counts.produced } },
+            .none, .reading => return .none,
+            .unread => {},
+        }
+        if (source.code.length() > max_body_forms) {
+            self.fiber.recordSummary(word, site, source.definition, .none);
+            return .none;
+        }
+        // The walk resolves more words, which may let go of this one's
+        // definition, so the body is held across it.
+        heap.incRef(source.code);
+        defer self.fiber.releases.releaseHeader(source.code);
+        self.fiber.recordSummary(word, site, source.definition, .reading);
+        const result = try self.summarize(source.code, source.site, 1);
+        self.fiber.recordSummary(word, site, source.definition, switch (result) {
+            .exact => |summary| .{ .exact = .{ .consumed = @intCast(summary.consumed), .produced = @intCast(summary.produced) } },
+            .none => .none,
+            .exhausted => .unread,
+        });
+        return result;
+    }
+
+    fn exact(declared: ?env.ValidatedEffect) ?Summary {
+        const effect = declared orelse return null;
         if (effect.result_depth != .exact) return null;
         return .{ .consumed = effect.inputs, .produced = effect.outputs };
     }
 
     /// The summary of the quotation on top of the abstract stack, which a
     /// combinator is about to take: known only when it is a literal the
-    /// quotation pushed and nothing has moved since.
-    fn operand(self: *Walk, stack: *Abstract, depth: usize) error{OutOfMemory}!?Summary {
-        const taken = stack.take() orelse return null;
-        return self.summarize(taken, depth + 1);
+    /// code pushed and nothing has moved since.
+    fn operand(self: *Walk, stack: *Abstract, site: machine.ExecutionSite, depth: usize) error{OutOfMemory}!Result {
+        const taken = stack.take() orelse return .none;
+        if (taken.length() > max_forms) return .none;
+        return self.summarize(taken, site.applied(), depth + 1);
     }
 };
 
-/// The stack as a summary sees it: how far beneath its start the quotation
-/// has reached, how many values stand above that point, and which of those
-/// are list literals the quotation pushed.
+/// The stack as a summary sees it: how far beneath its start the code has
+/// reached, how many values stand above that point, and which of those are
+/// list literals the code pushed.
 const Abstract = struct {
     reach: usize = 0,
     height: usize = 0,
     // SAFETY: a slot is read only below `height`, and `push` writes every
     // slot it raises `height` past.
     literals: [max_values + 1]?*Header = undefined,
+    /// The locals this code has bound and not dropped. A quotation the code
+    /// applies binds its own.
+    bound: usize = 0,
+    // SAFETY: a slot is read only below `bound`, and binding writes every
+    // slot it raises `bound` past.
+    locals: [max_locals]?*Header = undefined,
+
+    /// One lowered locals operation: bind the top `operand` values, the
+    /// deepest first; push local `operand`; or drop `operand` locals. False
+    /// when the operation would fail where it runs, or binds more than a
+    /// summary follows.
+    fn local(self: *Abstract, words: intern.LocalsWords, name: u32, operand: u32) bool {
+        if (name == words.load) {
+            if (operand > max_locals - self.bound) return false;
+            var index: usize = operand;
+            while (index != 0) {
+                index -= 1;
+                self.locals[self.bound + index] = self.take();
+            }
+            self.bound += operand;
+        } else if (name == words.get) {
+            if (operand >= self.bound) return false;
+            self.push(self.locals[operand]);
+        } else if (name == words.drop) {
+            if (operand > self.bound) return false;
+            self.bound -= operand;
+        } else return false;
+        return true;
+    }
 
     fn push(self: *Abstract, literal: ?*Header) void {
         if (self.height < self.literals.len) self.literals[self.height] = literal;

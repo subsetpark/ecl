@@ -25,6 +25,20 @@ pub const WordResolutions = struct {
         word: value.Symbol,
         provenance: u64,
         definition: *env.Definition,
+        /// The stack summary of the definition's body as resolved here. It
+        /// depends on what the body's own words resolve to, which is fixed
+        /// for as long as the entry is.
+        summary: BodySummary = .unread,
+    };
+
+    /// What is known of a source definition's stack summary.
+    pub const BodySummary = union(enum) {
+        unread,
+        /// A walk of the body is in progress: a word that reaches itself
+        /// has no summary.
+        reading,
+        none,
+        exact: struct { consumed: u8, produced: u8 },
     };
     entries: []?Entry = &.{},
     /// How many entries are present, for the load bound.
@@ -44,6 +58,38 @@ pub const WordResolutions = struct {
         while (self.entries[index]) |entry| : (index = (index + 1) & mask) {
             if (entry.word.name == word.name and entry.word.slot == word.slot and entry.provenance == provenance)
                 return entry.definition;
+        }
+        return null;
+    }
+
+    /// The summary recorded for `word`'s resolution, `.unread` when the word
+    /// has no entry.
+    pub fn summary(self: *const WordResolutions, word: value.Symbol, publication: u64, provenance: u64) BodySummary {
+        const found = self.held(word, publication, provenance) orelse return .unread;
+        return found.summary;
+    }
+
+    /// Records a summary for `word`'s resolution to `definition`, if that
+    /// resolution is still held: a walk may have outlived the entry.
+    pub fn setSummary(
+        self: *WordResolutions,
+        word: value.Symbol,
+        publication: u64,
+        provenance: u64,
+        definition: *const env.Definition,
+        recorded: BodySummary,
+    ) void {
+        const found = self.held(word, publication, provenance) orelse return;
+        if (found.definition == definition) found.summary = recorded;
+    }
+
+    fn held(self: *const WordResolutions, word: value.Symbol, publication: u64, provenance: u64) ?*Entry {
+        if (self.publication != publication or self.entries.len == 0) return null;
+        const mask = self.entries.len - 1;
+        var index = self.home(word.name);
+        while (self.entries[index]) |*slot| : (index = (index + 1) & mask) {
+            if (slot.word.name == word.name and slot.word.slot == word.slot and slot.provenance == provenance)
+                return slot;
         }
         return null;
     }

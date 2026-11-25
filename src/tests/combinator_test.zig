@@ -279,12 +279,17 @@ test "paging: above and below restore what the quotation consumed" {
 }
 
 // A cleave whose quotations have exact stack summaries runs them in place;
-// one with a local, a guard, or branches that disagree runs over the paging
-// floor. Both must leave the same stack, so each case pairs or mixes them.
+// one with a guard, branches that disagree, or a quotation taken from a
+// local runs over the paging floor. Both must leave the same stack, so the
+// cases pair or mix them.
 test "cleave: summarized and paging quotations agree" {
     try support.expectStacks(&.{
         .{ .name = "builtins against locals", .source = "1 2 (+) (-) bi 1 2 (|a b| a b +) (|a b| a b -) bi", .expected = "3 -1 3 -1" },
         .{ .name = "a dip against locals", .source = "1 2 3 ((+) dip) (+ +) bi 1 2 3 (|a b c| a b + c) (+ +) bi", .expected = "3 3 6 3 3 6" },
+        .{ .name = "locals that are bound and unused, repeated, or implicit", .source = "1 2 (|a b|) (id) bi 1 2 (|a| a a) (.x .y +) bi", .expected = "2 2 2 3" },
+        .{ .name = "a quotation applied from a local", .source = "1 (2 +) (|q| 1 q apply) (pop) bi", .expected = "1 3" },
+        .{ .name = "a quotation that binds its own locals inside one that does", .source = "1 2 (|a| (|b| b 1 +) apply a) (id) bi", .expected = "2 2 2" },
+        .{ .name = "a session word written with locals", .source = "(|a b| a b +) `ladd def (|x| x x ladd) `dbl def 5 (dbl) (dbl dbl) bi", .expected = "10 20" },
         .{ .name = "branches that agree and branches that do not", .source = "1 2 (dup 0 > (10 +) (20 +) if) (id) bi 1 2 (dup 0 > (10 +) (pop pop 5) if) (id) bi", .expected = "1 12 2 1 12 2" },
         .{ .name = "paging words inside a quotation", .source = "1 2 ((+) above) ((+) below) bi", .expected = "3 1 2 1 2 3" },
         .{ .name = "a nested cleave", .source = "1 2 ((+) (-) bi *) (pop) bi", .expected = "-3" },
@@ -296,10 +301,24 @@ test "cleave: summarized and paging quotations agree" {
         .{ .name = "a redefined word is read as redefined", .source = "(x y -- z) (pop pop 9) `over def 1 2 (over) (+) bi", .expected = "9 3" },
         .{ .name = "a quotation that consumes more than one inline slot", .source = "1 2 3 4 5 6 (+ + + + +) (id) bi", .expected = "21 6" },
         .{ .name = "a guard inside a quotation", .source = "1 2 ((0 >) (1 -) while) (id) bi", .expected = "1 0 2" },
+        .{ .name = "a session word, with and without a declared effect", .source = "(1 +) `inc def (x -- y) (2 +) `inc2 def 5 (inc) (inc2 inc) bi", .expected = "6 8" },
+        .{ .name = "a session word through another", .source = "(+) `add def (add add) `add3 def 1 2 3 (add3) (add) bi", .expected = "6 5" },
+        .{ .name = "a redefinition is read on the next call", .source = "(1 +) `f def 5 (f) (id) bi (dup) `f def 5 (f) (id) bi (pop) `f def 5 6 (f) (id) bi", .expected = "6 5 5 5 5 5 6" },
+        .{ .name = "a redefined callee changes its caller", .source = "(1 +) `inc def (inc inc) `twice def 5 (twice) (id) bi (pop pop 0) `inc def 1 2 3 (twice) (id) bi", .expected = "7 5 0 3" },
+        .{ .name = "a word that reaches itself", .source = "(dup 0 > (1 - down) () if) `down def 3 (down) (id) bi", .expected = "0 3" },
+        .{ .name = "a session word with a combinator in its body", .source = "((+) dip) `under def 1 2 3 (under) (+ +) bi", .expected = "3 3 6" },
+        .{
+            .name = "module words, across the boundary and within it",
+            .source = "((x -- y) (1 +) `inc def (x -- y) (inc inc) `inc2 def (x -- a b) ((inc) (inc2) bi) `pair def) `m @defm " ++
+                "5 (m.inc) (m.inc2) bi 5 m.pair",
+            .expected = "6 7 6 7",
+        },
     });
     try support.expectErrors(&.{
         .{ .name = "inputs out of reach fail where the word runs", .source = "1 2 (+) (pop pop pop) bi", .kind = "underflow", .word = "pop" },
         .{ .name = "a failure inside a summarized quotation", .source = "1 2 (+) (len) bi", .kind = "type", .word = "len" },
+        .{ .name = "a module word that breaks its declared effect", .source = "((x -- y) (pop) `wrong def) `m @defm 1 2 (m.wrong) (id) bi", .kind = "contract", .word = "m.wrong" },
+        .{ .name = "a word undefined when its caller runs", .source = "(nope) `bad def 1 (bad) (id) bi", .kind = "undefined-word", .word = "nope" },
     });
 }
 
