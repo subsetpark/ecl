@@ -81,9 +81,10 @@ pub const Cache = struct {
         /// Null for an empty place.
         quotation: ?*Header = null,
         /// The root the quotation ran in, which decides whether a module
-        /// word it calls is behind a checked boundary. A scope outlives
-        /// every publication it is current in.
-        scope: ?*const env.Scope = null,
+        /// word it calls is behind a checked boundary. Held by serial, not
+        /// address: a scope released unpublished frees its address for the
+        /// next one, and the entry holds no reference to keep it.
+        scope: u64 = 0,
         provenance: u64 = 0,
         exact: bool = false,
         consumed: u8 = 0,
@@ -104,7 +105,7 @@ pub const Cache = struct {
     pub inline fn find(self: *const Cache, quotation: *const Header, site: machine.ExecutionSite, publication: u64) ?Known {
         if (self.publication != publication or self.entries.len == 0) return null;
         const entry = &self.entries[place(quotation)];
-        if (entry.quotation != quotation or entry.scope != site.scope or
+        if (entry.quotation != quotation or entry.scope != site.scope.serial or
             entry.provenance != WordResolutions.provenanceKey(site.registration_provenance)) return null;
         return .{ .summary = if (entry.exact) .{ .consumed = entry.consumed, .produced = entry.produced } else null };
     }
@@ -133,7 +134,7 @@ pub const Cache = struct {
         heap.incRef(quotation);
         entry.* = .{
             .quotation = quotation,
-            .scope = site.scope,
+            .scope = site.scope.serial,
             .provenance = WordResolutions.provenanceKey(site.registration_provenance),
             .exact = summary != null,
             .consumed = if (summary) |found| @intCast(found.consumed) else 0,
