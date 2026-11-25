@@ -930,7 +930,7 @@ const ProgramCompiler = struct {
 
     /// A combinator applied to quotation literals, compiled as what it would
     /// run. A quotation consumes what it needed from beneath where it started
-    /// and leaves what stands above that, which is how the paging floor
+    /// and leaves what stands above that, which is how the soft floor
     /// counts it.
     fn combinator(self: *ProgramCompiler, word: value.Symbol, nesting: usize) bool {
         if (!plainWord(word.slot)) return false;
@@ -950,7 +950,7 @@ const ProgramCompiler = struct {
                 const protected = self.stack[self.depth];
                 return self.body(applied, nesting + 1) and self.push(protected);
             },
-            .paging => |placement| {
+            .measured => |placement| {
                 const applied = self.quotation() orelse return false;
                 const before = self.stack;
                 const start = self.depth;

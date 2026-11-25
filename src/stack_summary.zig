@@ -11,6 +11,7 @@ const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const combinators = @import("combinators.zig");
 const prims = @import("prims.zig");
+const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
@@ -45,18 +46,115 @@ const max_locals = 16;
 /// is not a literal.
 ///
 /// A word's body is summarized once per resolution of the word and recorded
-/// with it, so the record lasts until a publication and a redefinition is
-/// read as redefined.
+/// with it, and a quotation's answer is remembered by the fiber, so either
+/// lasts until a publication and a redefinition is read as redefined.
 pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{OutOfMemory}!?Summary {
     if (quotation.length() > max_forms) return null;
-    var walk: Walk = .{ .fiber = fiber, .publication = fiber.currentPublication() };
-    const summary = switch (try walk.summarize(quotation, site, 0)) {
+    const publication = fiber.currentPublication();
+    if (fiber.summaries.find(quotation, site, publication)) |known| return known.summary;
+    var walk: Walk = .{ .fiber = fiber, .publication = publication };
+    const summary: ?Summary = switch (try walk.summarize(quotation, site, 0)) {
         .exact => |summary| summary,
-        .none, .exhausted => return null,
+        .none => null,
+        // A later walk resumes from the bodies this one finished, so the
+        // answer is not yet known.
+        .exhausted => return null,
     };
     // Words read under different publications say nothing together.
-    return if (fiber.currentPublication() == walk.publication) summary else null;
+    if (fiber.currentPublication() != publication) return null;
+    try fiber.summaries.remember(fiber.allocator, fiber.releases, quotation, site, publication, summary);
+    return summary;
 }
+
+/// What a fiber has read of the quotations it applied, all in one
+/// publication: a quotation applied again at the same site is answered
+/// without a walk. An entry holds its quotation, so the address it is found
+/// by stays that quotation's.
+///
+/// One entry per place and a fixed number of places: a quotation that lands
+/// on an occupied place replaces what was there, so the fiber holds at most
+/// `capacity` quotations it would otherwise have let go, and every operation
+/// is bounded by that constant.
+pub const Cache = struct {
+    const capacity = 64;
+    const Entry = struct {
+        /// Null for an empty place.
+        quotation: ?*Header = null,
+        /// The root the quotation ran in, which decides whether a module
+        /// word it calls is behind a checked boundary. Held by serial, not
+        /// address: a scope released unpublished frees its address for the
+        /// next one, and the entry holds no reference to keep it.
+        scope: u64 = 0,
+        provenance: u64 = 0,
+        exact: bool = false,
+        consumed: u8 = 0,
+        produced: u8 = 0,
+    };
+
+    pub const Known = struct { summary: ?Summary };
+
+    entries: []Entry = &.{},
+    /// The publication every present entry was read in.
+    publication: u64 = 0,
+
+    fn place(quotation: *const Header) usize {
+        return @intCast((@as(u64, @intFromPtr(quotation)) >> 4) *% 0x9E3779B97F4A7C15 >> (64 - std.math.log2(capacity)));
+    }
+
+    /// What was read of `quotation` at `site` in `publication`, if anything.
+    pub inline fn find(self: *const Cache, quotation: *const Header, site: machine.ExecutionSite, publication: u64) ?Known {
+        if (self.publication != publication or self.entries.len == 0) return null;
+        const entry = &self.entries[place(quotation)];
+        if (entry.quotation != quotation or entry.scope != site.scope.serial or
+            entry.provenance != WordResolutions.provenanceKey(site.registration_provenance)) return null;
+        return .{ .summary = if (entry.exact) .{ .consumed = entry.consumed, .produced = entry.produced } else null };
+    }
+
+    /// Records what a walk in `publication` found, null for no summary.
+    pub fn remember(
+        self: *Cache,
+        allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
+        quotation: *Header,
+        site: machine.ExecutionSite,
+        publication: u64,
+        summary: ?Summary,
+    ) error{OutOfMemory}!void {
+        if (self.entries.len == 0) {
+            const entries = try allocator.alloc(Entry, capacity);
+            @memset(entries, .{});
+            self.entries = entries;
+        }
+        if (self.publication != publication) {
+            self.clear(releases);
+            self.publication = publication;
+        }
+        const entry = &self.entries[place(quotation)];
+        if (entry.quotation) |held| releases.releaseHeader(held);
+        heap.incRef(quotation);
+        entry.* = .{
+            .quotation = quotation,
+            .scope = site.scope.serial,
+            .provenance = WordResolutions.provenanceKey(site.registration_provenance),
+            .exact = summary != null,
+            .consumed = if (summary) |found| @intCast(found.consumed) else 0,
+            .produced = if (summary) |found| @intCast(found.produced) else 0,
+        };
+    }
+
+    fn clear(self: *Cache, releases: *heap.ReleaseDomain) void {
+        for (self.entries) |*entry| if (entry.quotation) |held| {
+            releases.releaseHeader(held);
+            entry.quotation = null;
+        };
+    }
+
+    pub fn deinit(self: *Cache, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
+        self.clear(releases);
+        if (self.entries.len != 0) allocator.free(self.entries);
+        self.* = .{};
+    }
+};
 
 const Result = union(enum) {
     exact: Summary,
@@ -131,12 +229,12 @@ const Walk = struct {
                         if (!std.meta.eql(then.exact, otherwise.exact)) break :branch .none;
                         break :branch then;
                     },
-                    // A paging word leaves its quotation's results and the
+                    // A measured word leaves its quotation's results and the
                     // inputs it consumed.
-                    .paging => paging: {
+                    .measured => measured: {
                         const inner = try self.operand(&stack, site, depth);
-                        if (inner != .exact) break :paging inner;
-                        break :paging .{ .exact = .{
+                        if (inner != .exact) break :measured inner;
+                        break :measured .{ .exact = .{
                             .consumed = inner.exact.consumed,
                             .produced = inner.exact.produced + inner.exact.consumed,
                         } };
@@ -196,6 +294,8 @@ const Walk = struct {
         heap.incRef(source.code);
         defer self.fiber.releases.releaseHeader(source.code);
         self.fiber.recordSummary(word, site, source.definition, .reading);
+        // A walk that fails leaves the body unread, not mid-read forever.
+        errdefer self.fiber.recordSummary(word, site, source.definition, .unread);
         const result = try self.summarize(source.code, source.site, 1);
         self.fiber.recordSummary(word, site, source.definition, switch (result) {
             .exact => |summary| .{ .exact = .{ .consumed = @intCast(summary.consumed), .produced = @intCast(summary.produced) } },

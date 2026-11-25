@@ -491,7 +491,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 `( quotation -- quotation )` — Mark a quotation read from source as a helper body and return it. A word defined with a helper body reports a failure inside it at the place that called the word, as an assertion does: `(body) helper `name def`. Every word still appears in `trace`.
 
 ### id
-`( x -- x )` — Return the top value unchanged. Inside a paging quotation it takes the value from beneath, so `(pop id)` selects the second value.
+`( x -- x )` — Return the top value unchanged. Inside a measured quotation it takes the value from beneath, so `(pop id)` selects the second value.
 
 ### if
 `( bool then else -- ... )` — Run `then` when the condition is 1, `else` when it is 0.

@@ -10,7 +10,7 @@ const lexer = @import("lexer.zig");
 const printer = @import("print.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
-const paging = @import("paging.zig");
+const floor = @import("floor.zig");
 const module_prims = @import("module_prims.zig");
 const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
@@ -27,7 +27,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
         .{ .name = "over", .primitive = over, .effect = "x y -- x y x", .doc = "Copy the value beneath the top of the stack onto the top." },
         .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },
-        .{ .name = "id", .primitive = identity, .effect = "x -- x", .doc = "Return the top value unchanged. Inside a paging quotation it takes the value from beneath, so `(pop id)` selects the second value." },
+        .{ .name = "id", .primitive = identity, .effect = "x -- x", .doc = "Return the top value unchanged. Inside a measured quotation it takes the value from beneath, so `(pop id)` selects the second value." },
         .{ .name = "retain", .primitive = retain, .effect = "... counts -- ...", .doc = "Keep each of the values beneath `counts` as many times as its count, in order: the first count applies to the deepest of them, and the values consumed are as many as `counts` holds. The stack form of `where at`." },
         .{ .name = "nip", .primitive = nip, .effect = "x y -- y", .doc = "Discard the second value on the stack." },
         .{ .name = "dup2", .primitive = dup2, .effect = "x y -- x y x y", .doc = "Copy the top two stack values onto the top, preserving their order." },
@@ -77,8 +77,8 @@ fn pop(fiber: *Fiber) MachineError!void {
     var item = try fiber.popValue();
     item.deinit();
 }
-/// Requires its operand without touching it: over a paging floor the check
-/// pages the value in, which is all the word does.
+/// Requires its operand without touching it: over a soft floor the check
+/// admits the value, which is all the word does.
 fn identity(fiber: *Fiber) MachineError!void {
     try fiber.require(1);
 }
@@ -92,7 +92,7 @@ fn retain(fiber: *Fiber) MachineError!void {
     if (counts.borrow() != .list) return fiber.typeError("a list of counts");
     const count: usize = @intCast(counts.borrow().list.length());
     // Checked before the buffer is sized by it, and without paging.
-    try paging.requireReachable(fiber, count);
+    try floor.requireReachable(fiber, count);
     const buffer = try heap.OwnedValueBuffer.init(fiber.releases, count);
     var state: RetainDriver = .{
         .counts = .init(counts.take().list),

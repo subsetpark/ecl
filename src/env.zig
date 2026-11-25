@@ -788,6 +788,12 @@ pub const Scope = struct {
     label_cell: std.atomic.Value(?*ScopeCell) = .init(null),
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: ?RetireCursor.State = null,
+    /// Names this scope for as long as the process runs, which its address
+    /// does not: a scope freed unpublished leaves its address to the next one.
+    /// A cache that outlives a scope keys on this, never on the pointer.
+    serial: u64,
+
+    var next_serial: std.atomic.Value(u64) = .init(1);
 
     /// The id of a module root's cell, or `.none` if it has never minted one.
     pub fn cellId(self: *const Scope) ScopeId {
@@ -873,7 +879,11 @@ pub const Scope = struct {
     };
 
     fn direct(allocator: std.mem.Allocator, storage: ScopeStorage) Scope {
-        return .{ .allocator = allocator, .storage = storage };
+        return .{
+            .allocator = allocator,
+            .storage = storage,
+            .serial = next_serial.fetchAdd(1, .monotonic),
+        };
     }
 
     /// A module image's root. The scope carries no name; the image that embeds

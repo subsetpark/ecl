@@ -958,9 +958,9 @@ Three quotation-application behaviors exist:
   are `apply`, `dip`, `dip2`, `dip-n`, `both`, `if`, `when`, `unless`,
   `case`, and `times`, and the action quotations of `cond`, `while`, and
   `linrec`.
-- **Paging**: the quotation runs on a substack that starts empty and takes
-  operands from beneath as its words need them, so what it consumed is
-  exactly what its words required. `above` and `below` then restore those
+- **Measured**: the quotation runs on a substack that starts empty and takes
+  operands from beneath as its words need them, so what it consumed, its
+  footprint, is exactly what its words required. `above` and `below` then restore those
   values, in their original order, above or below the quotation's results.
   `cleave`, `bi`, and `tri` run each quotation this way from the same
   inputs, hold its results aside, and finally drop the inputs any quotation
@@ -997,7 +997,7 @@ predicate true  -> base
 predicate false -> pre; linrec; post
 ```
 
-At every descent, `predicate` runs over a paging floor as the application
+At every descent, `predicate` runs measured, as the application
 contexts above describe. Its top result must be 0 or 1. On 1, `base` runs from
 the restored state. On 0, `pre` runs from the restored state, the recursive
 descent begins from `pre`'s resulting stack, and `post` runs after that descent

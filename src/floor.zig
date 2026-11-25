@@ -1,5 +1,5 @@
 //! The operand stack's floor: how far down a word may reach. A boundary or an
-//! isolated application sets a hard floor; a paging application sets one that
+//! isolated application sets a hard floor; a measured application sets one that
 //! lowers on demand and puts back afterwards what its quotation only looked
 //! at. Everything that reads or moves the floor lives here.
 const std = @import("std");
@@ -13,39 +13,39 @@ const MachineError = machine.MachineError;
 
 /// A fiber's current floor. `guard` is what an operand check compares
 /// against: the base, or one past the highest returned original of the
-/// innermost paging floor. It is never above the stack depth, and every
+/// innermost soft floor. It is never above the stack depth, and every
 /// change to the floor goes through `set`.
 pub const StackFloor = struct {
     base: usize = 0,
-    /// The innermost paging floor, when the current floor is one; its
+    /// The innermost soft floor, when the current floor is one; its
     /// `floor` then equals `base`.
-    paging: ?*PagingFloor = null,
+    soft: ?*SoftFloor = null,
     guard: usize = 0,
 
     /// The floor an application or boundary sets or restores, and whether it
-    /// is a paging one. `guard` follows.
-    pub fn set(self: *StackFloor, base: usize, paging: ?*PagingFloor) void {
+    /// is a soft one. `guard` follows.
+    pub fn set(self: *StackFloor, base: usize, soft: ?*SoftFloor) void {
         self.base = base;
-        self.paging = paging;
-        self.guard = if (paging) |floor| floor.watermark() else base;
+        self.soft = soft;
+        self.guard = if (soft) |floor| floor.watermark() else base;
     }
 
     /// The current floor as something `restore` can put back.
     pub fn beneath(self: *const StackFloor) Beneath {
-        return if (self.paging) |outer| .{ .paging = outer } else .{ .hard = self.base };
+        return if (self.soft) |outer| .{ .soft = outer } else .{ .hard = self.base };
     }
 
     /// Puts back a floor that an application or boundary set another over.
     pub fn restore(self: *StackFloor, saved: Beneath) void {
         switch (saved) {
             .hard => |base| self.set(base, null),
-            .paging => |outer| self.set(outer.floor, outer),
+            .soft => |outer| self.set(outer.floor, outer),
         }
     }
 
-    /// Makes `floor` the innermost paging floor at `base`, over whatever
+    /// Makes `floor` the innermost soft floor at `base`, over whatever
     /// floor is current; `restore(floor.beneath)` undoes it.
-    pub fn enter(self: *StackFloor, floor: *PagingFloor, base: usize) void {
+    pub fn enter(self: *StackFloor, floor: *SoftFloor, base: usize) void {
         floor.floor = base;
         floor.beneath = self.beneath();
         self.set(base, floor);
@@ -55,30 +55,30 @@ pub const StackFloor = struct {
     /// returned original at or above it.
     pub fn noteShrink(self: *StackFloor, depth: usize) void {
         if (depth >= self.guard) return;
-        const floor = self.paging.?;
+        const floor = self.soft.?;
         floor.dropReturnedFrom(depth);
         self.guard = floor.watermark();
     }
 
-    /// The hard floor beneath every paging floor: where underflow happens.
+    /// The hard floor beneath every soft floor: where underflow happens.
     fn hard(self: *const StackFloor) usize {
-        var floor = self.paging orelse return self.base;
+        var floor = self.soft orelse return self.base;
         while (true) switch (floor.beneath) {
             .hard => |base| return base,
-            .paging => |outer| floor = outer,
+            .soft => |outer| floor = outer,
         };
     }
 };
 
-/// The floor beneath the current one: a hard floor at a depth, or a paging
-/// floor, whose depth is read when it is restored because a paging floor
+/// The floor beneath the current one: a hard floor at a depth, or a soft
+/// floor, whose depth is read when it is restored because a soft floor
 /// moves. Whatever sets a floor over another keeps one of these.
 pub const Beneath = union(enum) {
     hard: usize,
-    paging: *PagingFloor,
+    soft: *SoftFloor,
 };
 
-/// The floor of a paging application: its quotation runs on a substack that
+/// The floor of a measured application: its quotation runs on a substack that
 /// starts empty and takes operands from beneath on demand. When a word needs
 /// more operands than the substack holds, the fiber retains a copy of each
 /// missing value in `originals` and lowers the floor to include it, so the
@@ -87,19 +87,19 @@ pub const Beneath = union(enum) {
 ///
 /// An implicit restore is not producing. A guard test or a cleave
 /// quotation consumes nothing on behalf of its combinator, so a value it
-/// paged that this floor holds as an original too goes back as the same
+/// admitted that this floor holds as an original too goes back as the same
 /// original, recorded here by its position until a later word requires it.
 /// A finalize sweeps the recorded values out before it restores its own
 /// copies. A word that puts values back, such as `dip`, `above`, or
 /// `below`, is an ordinary stack operation: what it puts back it produces.
-pub const PagingFloor = struct {
+pub const SoftFloor = struct {
     /// This application's floor: the fiber's floor base while it is the
-    /// innermost paging floor.
+    /// innermost soft floor.
     floor: usize = 0,
     /// The floor this one was entered over.
     beneath: Beneath = .{ .hard = 0 },
-    /// Retained copies of the paged values, the one nearest the entry first.
-    /// A few live inline, so a small quotation pages without allocating.
+    /// Retained copies of the admitted values, the one nearest the entry first.
+    /// A few live inline, so a small quotation admits them without allocating.
     originals: heap.InlineList(Original, 4, .{ .value = .{ .int = 0 }, .shared = false }) = .empty,
     /// Positions of returned originals in the substack, ascending.
     returned: std.ArrayList(u32) = .empty,
@@ -111,44 +111,44 @@ pub const PagingFloor = struct {
         shared: bool,
     };
 
-    fn beneathFloor(self: *const PagingFloor) usize {
+    fn beneathFloor(self: *const SoftFloor) usize {
         return switch (self.beneath) {
             .hard => |base| base,
-            .paging => |outer| outer.floor,
+            .soft => |outer| outer.floor,
         };
     }
     /// The depth an operand check compares against while this floor is
     /// innermost: one past the highest returned original, or the floor
     /// itself.
-    fn watermark(self: *const PagingFloor) usize {
+    fn watermark(self: *const SoftFloor) usize {
         if (self.returned.items.len == 0) return self.floor;
         return @as(usize, self.returned.items[self.returned.items.len - 1]) + 1;
     }
     /// Every returned original at or above `position` is consumed now.
-    fn dropReturnedFrom(self: *PagingFloor, position: usize) void {
+    fn dropReturnedFrom(self: *SoftFloor, position: usize) void {
         while (self.returned.items.len != 0 and self.returned.items[self.returned.items.len - 1] >= position)
             _ = self.returned.pop();
     }
     /// Whether `position` is a returned original, consuming its record.
-    fn takeReturnedAt(self: *PagingFloor, position: usize) bool {
+    fn takeReturnedAt(self: *SoftFloor, position: usize) bool {
         if (self.returned.items.len == 0) return false;
         if (self.returned.items[self.returned.items.len - 1] != position) return false;
         _ = self.returned.pop();
         return true;
     }
-    fn retire(self: *PagingFloor, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+    fn retire(self: *SoftFloor, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         for (self.originals.items()) |original| releases.releaseValue(original.value);
         self.originals.deinit(allocator);
         self.returned.deinit(allocator);
     }
 };
 
-/// Makes `count` operands available across the innermost paging floor, when
+/// Makes `count` operands available across the innermost soft floor, when
 /// there is one: a returned original the count reaches is consumed now, and
-/// values the substack lacks are paged in from beneath. False when a hard
+/// values the substack lacks are admitted from beneath. False when a hard
 /// floor leaves the count short; the caller reports the failure.
 pub fn cover(fiber: *Fiber, count: usize) error{OutOfMemory}!bool {
-    const floor = fiber.floor.paging orelse return false;
+    const floor = fiber.floor.soft orelse return false;
     std.debug.assert(floor.floor == fiber.floor.base);
     const held = fiber.stack.items.len - fiber.floor.base;
     if (count <= held) {
@@ -156,14 +156,14 @@ pub fn cover(fiber: *Fiber, count: usize) error{OutOfMemory}!bool {
         fiber.floor.guard = floor.watermark();
         return true;
     }
-    return page(fiber, floor, count - held);
+    return admit(fiber, floor, count - held);
 }
 
-/// Pages `needed` values across `innermost`, and across each enclosing
-/// paging floor whose region cannot cover them, so every floor the values
+/// Admits `needed` values across `innermost`, and across each enclosing
+/// soft floor whose region cannot cover them, so every floor the values
 /// crossed accounts for them. Nothing changes when a hard floor leaves the
 /// count short. The copies are bounded by the requiring word's arity.
-fn page(fiber: *Fiber, innermost: *PagingFloor, needed: usize) error{OutOfMemory}!bool {
+fn admit(fiber: *Fiber, innermost: *SoftFloor, needed: usize) error{OutOfMemory}!bool {
     var floor = innermost;
     var deficit = needed;
     while (true) {
@@ -172,7 +172,7 @@ fn page(fiber: *Fiber, innermost: *PagingFloor, needed: usize) error{OutOfMemory
         if (deficit <= held) break;
         switch (floor.beneath) {
             .hard => return false,
-            .paging => |outer| {
+            .soft => |outer| {
                 deficit -= held;
                 floor = outer;
             },
@@ -183,11 +183,11 @@ fn page(fiber: *Fiber, innermost: *PagingFloor, needed: usize) error{OutOfMemory
     while (true) {
         const held = floor.floor - floor.beneathFloor();
         // The floor beneath holds a value as an original too when it lies
-        // beneath that floor, which the next round pages it across, or when
+        // beneath that floor, which the next round admits it across, or when
         // it is one of that floor's returned originals.
-        const outer: ?*PagingFloor = switch (floor.beneath) {
+        const outer: ?*SoftFloor = switch (floor.beneath) {
             .hard => null,
-            .paging => |outer| outer,
+            .soft => |outer| outer,
         };
         var records: usize = if (outer) |enclosing| enclosing.returned.items.len else 0;
         for (1..deficit + 1) |offset| {
@@ -209,12 +209,12 @@ fn page(fiber: *Fiber, innermost: *PagingFloor, needed: usize) error{OutOfMemory
         floor.dropReturnedFrom(innermost.floor);
         if (deficit <= held) break;
         deficit -= held;
-        floor = floor.beneath.paging;
+        floor = floor.beneath.soft;
     }
-    // Enclosing floors that paged nothing may still hold returned originals
+    // Enclosing floors that admitted nothing may still hold returned originals
     // inside the region the innermost floor now covers.
-    while (floor.beneath == .paging) {
-        floor = floor.beneath.paging;
+    while (floor.beneath == .soft) {
+        floor = floor.beneath.soft;
         floor.dropReturnedFrom(innermost.floor);
     }
     fiber.floor.set(innermost.floor, innermost);
@@ -222,15 +222,15 @@ fn page(fiber: *Fiber, innermost: *PagingFloor, needed: usize) error{OutOfMemory
 }
 
 /// A value taken from the top of the stack, and whether it is an original of
-/// the innermost paging floor.
+/// the innermost soft floor.
 const Taken = struct { item: heap.OwnedValue, original: bool };
 
 /// Pops the top operand, reporting whether it is an original of the
-/// innermost paging floor: paged in just now for this purpose, or returned
+/// innermost soft floor: admitted just now for this purpose, or returned
 /// by an implicit restore.
 fn takeOriginal(fiber: *Fiber) MachineError!Taken {
     var original = false;
-    if (fiber.floor.paging) |floor| {
+    if (fiber.floor.soft) |floor| {
         const depth = fiber.stack.items.len;
         if (depth == fiber.floor.base) {
             if (!try cover(fiber, 1)) return fiber.failShort(1);
@@ -244,20 +244,20 @@ fn takeOriginal(fiber: *Fiber) MachineError!Taken {
 }
 
 /// Records the value at `position` as a returned original of the innermost
-/// paging floor, when there is one: a value put back that the floor holds as
+/// soft floor, when there is one: a value put back that the floor holds as
 /// an original too, so the first operand check that reaches it consumes it
 /// and a restore sweeps it out. Positions are recorded ascending, above every
 /// record the floor holds.
 fn noteReturned(fiber: *Fiber, position: usize) error{OutOfMemory}!void {
-    const floor = fiber.floor.paging orelse return;
+    const floor = fiber.floor.soft orelse return;
     std.debug.assert(position >= floor.watermark());
     try floor.returned.append(fiber.allocator, @intCast(position));
     fiber.floor.guard = position + 1;
 }
 
 /// Fails as an operand check would unless `count` values lie above the hard
-/// floor, without paging any of them, so a word that takes a user-sized
-/// count can page them one at a time.
+/// floor, without admitting any of them, so a word that takes a user-sized
+/// count can take them one at a time.
 pub fn requireReachable(fiber: *Fiber, count: usize) MachineError!void {
     if (count > fiber.stack.items.len - fiber.floor.hard()) return fiber.failShort(count);
 }
@@ -345,7 +345,7 @@ const StackSweep = struct {
     }
 };
 
-/// What becomes of the region a paged quotation leaves.
+/// What becomes of the region a measured quotation leaves.
 pub const Placement = enum {
     /// The restored originals go on top of the region.
     above,
@@ -373,9 +373,9 @@ pub const Placement = enum {
     }
 };
 
-/// A quotation run over a paging floor, and the bounded phases that put the
+/// A quotation run over a soft floor, and the bounded phases that put the
 /// stack back together once it returns: originals an inner implicit restore
-/// returned are swept to the top of the region and dropped, the region is placed, and the paged
+/// returned are swept to the top of the region and dropped, the region is placed, and the admitted
 /// originals come back in their original order. Each phase is user-sized and
 /// advances only as far as the turn's budget allows, and no phase takes a
 /// live value off the stack except to release it or to collect it.
@@ -386,8 +386,8 @@ pub const Placement = enum {
 /// produce it. `above` and `below` produce what they restore.
 pub const Region = struct {
     placement: Placement,
-    /// What `Fiber.beginPagingApplication` runs the quotation over.
-    floor: PagingFloor = .{},
+    /// What `Fiber.beginApplication` runs the quotation over.
+    floor: SoftFloor = .{},
     /// What a collected region held, in stack order.
     results: heap.InlineList(Value, 4, .{ .int = 0 }) = .empty,
     /// The region's base: the floor as the quotation left it.
@@ -416,7 +416,7 @@ pub const Region = struct {
 
     /// The value a test left on top of its region. A test that left nothing
     /// took its result from beneath, like any operand its words required: the
-    /// value is paged now, so the restore gives it back.
+    /// value is admitted now, so the restore gives it back.
     pub fn takeTestResult(self: *Region, fiber: *Fiber) MachineError!heap.OwnedValue {
         if (fiber.stack.items.len != self.base) return fiber.popValue();
         try self.floor.originals.ensureUnusedCapacity(fiber.allocator, 1);

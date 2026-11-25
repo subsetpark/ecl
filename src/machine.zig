@@ -31,8 +31,8 @@ const module_lookup = @import("module_lookup.zig");
 const load = @import("load.zig");
 const failure_driver = @import("failure.zig");
 const module_construction = @import("module_construction.zig");
-const paging_api = @import("paging.zig");
-const PagingFloor = paging_api.PagingFloor;
+const floor_api = @import("floor.zig");
+const SoftFloor = floor_api.SoftFloor;
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -674,7 +674,7 @@ const Boundary = struct {
     /// body that fails never reaches it, so unwinding restores this instead.
     locals_base: u32,
     /// The floor this boundary's was set over.
-    beneath: paging_api.Beneath,
+    beneath: floor_api.Beneath,
     previous_boundary: ?FrameIndex,
     word: intern.TraceWord,
     fn deinit(self: Boundary) void {
@@ -773,7 +773,7 @@ pub const ApplicationStep = union(enum) {
         seeded: u32,
         provenance: ApplicationProvenance = .boundary,
         /// How the quotation runs. One frame may launch differently each
-        /// time: a guard alternates its tests over a paging floor with its
+        /// time: a guard alternates its tests over a soft floor with its
         /// actions in place.
         launch: Launch,
     },
@@ -790,10 +790,10 @@ const Launch = union(enum) {
     in_place,
     /// Behind a hard floor at its seeded operands.
     isolated,
-    /// Over a paging floor the application's context owns and keeps in place
+    /// Over a soft floor the application's context owns and keeps in place
     /// until the application resumes, with the region above the lowered
     /// floor as its window.
-    paging: *PagingFloor,
+    measured: *SoftFloor,
 };
 /// Opaque, non-dereferenced capability for one live application frame. The
 /// Fiber encodes a process-unique nonce with the frame index and validates
@@ -913,6 +913,7 @@ pub const Application = struct {
 };
 
 const WordResolutions = @import("word_resolutions.zig").WordResolutions;
+const stack_summary = @import("stack_summary.zig");
 
 fn ApplicationAdapters(comptime Driver: type) type {
     return struct {
@@ -934,6 +935,75 @@ fn ApplicationAdapters(comptime Driver: type) type {
             const driver: *Driver = @ptrCast(@alignCast(raw));
             heap.destroyDriver(releases, allocator, driver);
         }
+
+        /// Teardown for state `houseApplication` placed: the same field
+        /// ownership, then the slot freed or the allocation destroyed.
+        fn deinitHoused(
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+            raw: *anyopaque,
+        ) void {
+            const driver: *Driver = @ptrCast(@alignCast(raw));
+            heap.deinitDriverFields(releases, allocator, driver);
+            const housing: *ApplicationHousing(Driver) = @fieldParentPtr("driver", driver);
+            if (housing.vacancy) |busy| busy.* = false else allocator.destroy(housing);
+        }
+    };
+}
+
+/// An application's state where `houseApplication` put it: in one of the
+/// fiber's slots, or in an allocation when every slot is taken. Which one is
+/// recorded beside the state, so its teardown needs no fiber.
+fn ApplicationHousing(comptime Driver: type) type {
+    return struct {
+        /// The occupancy flag of the slot this state lives in, cleared to
+        /// free it; null when the state has an allocation of its own.
+        vacancy: ?*bool,
+        driver: Driver,
+    };
+}
+
+/// Opt-in fiber storage for application state. A driver declares
+/// `housed_application` to be constructed in a fiber slot instead of the
+/// allocator, and is then launched only through the handle `houseApplication`
+/// returns. The declaration is checked here, so a driver that outgrows a
+/// slot or stops owning its fields fails the build.
+///
+/// An application holds its slot for as long as its quotations run, and
+/// applications nest, so there are a few slots and no promise of one:
+/// correctness never depends on a slot being free, only the allocation does.
+fn housedApplicationCapable(comptime Driver: type) bool {
+    if (!@hasDecl(Driver, "housed_application")) return false;
+    if (heap.validateDriverOwnership(Driver) != .fields)
+        @compileError(@typeName(Driver) ++ " housed application storage requires field ownership");
+    const Housing = ApplicationHousing(Driver);
+    if (@sizeOf(Housing) > Fiber.application_slot_len)
+        @compileError(std.fmt.comptimePrint("{s} ({d} bytes housed) exceeds the fiber application slot ({d} bytes)", .{ @typeName(Driver), @sizeOf(Housing), Fiber.application_slot_len }));
+    if (@alignOf(Housing) > Fiber.application_slot_align)
+        @compileError(@typeName(Driver) ++ " exceeds the fiber application slot alignment");
+    return true;
+}
+
+/// The handle to a housed application's state. Opaque, so the only way to
+/// hold one is to have housed the state.
+pub fn HousedApplication(comptime Driver: type) type {
+    return opaque {
+        const Self = @This();
+
+        /// The application of `quotation` this state resumes after. It owns
+        /// the state from here.
+        pub fn application(self: *Self, quotation: *Header, site: ExecutionSite, seeded: u32) Application {
+            const housing: *ApplicationHousing(Driver) = @ptrCast(@alignCast(self));
+            return .{
+                .quotation = quotation,
+                .context = @ptrCast(&housing.driver),
+                .resume_fn = ApplicationAdapters(Driver).run,
+                .deinit_fn = ApplicationAdapters(Driver).deinitHoused,
+                .site = site,
+                .seeded = seeded,
+                .provenance = .boundary,
+            };
+        }
     };
 }
 
@@ -950,6 +1020,8 @@ pub fn typedApplication(
     };
     if (pointer.size != .one) @compileError("application driver must be a single-item pointer");
     const Driver = pointer.child;
+    if (@hasDecl(Driver, "housed_application"))
+        @compileError(@typeName(Driver) ++ " is launched through the handle houseApplication returns");
     const adapters = ApplicationAdapters(Driver);
     return .{
         .quotation = quotation,
@@ -964,10 +1036,10 @@ pub fn typedApplication(
 const ApplicationMode = union(enum) {
     in_place: StackWindow,
     /// The floor the application's hard floor was set over.
-    isolated: paging_api.Beneath,
+    isolated: floor_api.Beneath,
     /// The floor lives in the combinator state the frame's context points to,
     /// which stays in place until the application resumes.
-    paging: *PagingFloor,
+    measured: *SoftFloor,
 };
 const ApplicationFrame = struct {
     context: *anyopaque,
@@ -987,8 +1059,8 @@ const ApplicationFrame = struct {
         var selection = self.selection;
         selection.deinit(releases);
         switch (self.mode) {
-            // A paging floor's lists belong to the context that holds it.
-            .in_place, .isolated, .paging => {},
+            // A soft floor's lists belong to the context that holds it.
+            .in_place, .isolated, .measured => {},
         }
         self.deinit_fn(releases, allocator, self.context);
     }
@@ -1626,9 +1698,11 @@ pub const Fiber = struct {
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
     /// What this fiber's code resolved its words to.
     resolutions: WordResolutions = .{},
+    /// The stack summaries read for the quotations this fiber applied.
+    summaries: stack_summary.Cache = .{},
     entry_base: usize,
     /// How far down a word may reach, and what `require` compares against.
-    floor: paging_api.StackFloor = .{},
+    floor: floor_api.StackFloor = .{},
     boundary_index: ?FrameIndex = null,
     /// The innermost active source effect check. Effect-check frames form an
     /// intrusive chain so nested checks restore their predecessor exactly.
@@ -1654,6 +1728,9 @@ pub const Fiber = struct {
     /// being free — only the allocation does.
     driver_slot: [driver_slot_len]u8 align(driver_slot_align),
     driver_slot_busy: bool = false,
+    /// Storage for the state of applications that opt in. See
+    /// `housedApplicationCapable`.
+    application_slots: [application_slot_count]ApplicationSlot,
     /// Locals. The declared names live here for the length of the
     /// quotation body that introduced them, never on the operand stack, so a
     /// body's declared stack effect describes its operands alone and an
@@ -1691,6 +1768,10 @@ pub const Fiber = struct {
             // goes through `acquireInlineDriver`, which writes the whole
             // driver before the pointer escapes.
             .driver_slot = undefined,
+            // SAFETY: storage only. A slot's `busy` flag is the only thing
+            // that says state lives there, and `houseApplication` writes the
+            // whole state before the pointer escapes.
+            .application_slots = @splat(.{ .bytes = undefined }),
         };
     }
 
@@ -2034,6 +2115,40 @@ pub const Fiber = struct {
     const driver_slot_len = 736;
     const driver_slot_align = 16;
 
+    /// Sized to the application states that opt in, checked by
+    /// `housedApplicationCapable`.
+    const application_slot_len = 224;
+    const application_slot_align = 8;
+    const application_slot_count = 4;
+    const ApplicationSlot = struct {
+        busy: bool = false,
+        bytes: [application_slot_len]u8 align(application_slot_align),
+    };
+
+    /// Gives `initial` a place to live for the length of its application:
+    /// a free slot, or an allocation when none is free. Consuming: a failed
+    /// allocation retires the state.
+    pub fn houseApplication(self: *Fiber, initial: anytype) error{OutOfMemory}!*HousedApplication(@TypeOf(initial)) {
+        const Driver = @TypeOf(initial);
+        if (comptime !housedApplicationCapable(Driver))
+            @compileError(@typeName(Driver) ++ " does not declare housed_application");
+        const Housing = ApplicationHousing(Driver);
+        for (&self.application_slots) |*slot| {
+            if (slot.busy) continue;
+            slot.busy = true;
+            const housing: *Housing = @ptrCast(@alignCast(&slot.bytes));
+            housing.* = .{ .vacancy = &slot.busy, .driver = initial };
+            return @ptrCast(housing);
+        }
+        var pending = initial;
+        const housing = self.allocator.create(Housing) catch |err| {
+            heap.deinitDriverFields(self.releases, self.allocator, &pending);
+            return err;
+        };
+        housing.* = .{ .vacancy = null, .driver = pending };
+        return @ptrCast(housing);
+    }
+
     fn acquireInlineDriver(self: *Fiber, comptime Driver: type) ?*Driver {
         if (self.driver_slot_busy) return null;
         self.driver_slot_busy = true;
@@ -2051,6 +2166,7 @@ pub const Fiber = struct {
 
     pub fn deinit(self: *Fiber) void {
         self.resolutions.deinit(self.allocator, self.releases);
+        self.summaries.deinit(self.allocator, self.releases);
         if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
         self.frames.deinit(self.allocator);
@@ -2080,12 +2196,12 @@ pub const Fiber = struct {
     fn deinitPoppedFrame(self: *Fiber, popped: Frame) void {
         var frame = popped;
         if (frame == .effect_check) frame.effect_check.restoreActive(self);
-        // An unwind pops a paging frame before it restores the boundary's
+        // An unwind pops a measured frame before it restores the boundary's
         // floor; nothing requires operands in between, but the pointer must
         // not outlive the state the frame's context owns.
-        if (frame == .application and frame.application.mode == .paging and
-            self.floor.paging == frame.application.mode.paging)
-            self.floor.restore(frame.application.mode.paging.beneath);
+        if (frame == .application and frame.application.mode == .measured and
+            self.floor.soft == frame.application.mode.measured)
+            self.floor.restore(frame.application.mode.measured.beneath);
         frame.deinit(self.releases, self.allocator);
     }
 
@@ -2617,12 +2733,12 @@ pub const Fiber = struct {
     }
     pub inline fn require(self: *Fiber, count: usize) MachineError!void {
         // One compare on the hot path: `guard` is the stack base unless the
-        // innermost paging floor has returned originals above it.
+        // innermost soft floor has returned originals above it.
         if (count > self.stack.items.len - self.floor.guard) return self.requireAcross(count);
     }
     noinline fn requireAcross(self: *Fiber, count: usize) MachineError!void {
         @branchHint(.cold);
-        if (!try paging_api.cover(self, count)) return self.failUnderflow(count);
+        if (!try floor_api.cover(self, count)) return self.failUnderflow(count);
     }
     noinline fn failUnderflow(self: *Fiber, count: usize) MachineError {
         @branchHint(.cold);
@@ -3254,7 +3370,14 @@ pub const Fiber = struct {
         // releases it with the rest of the frame.
         const lent = activation.borrowed();
         const application_index: ApplicationFrameIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.frames.items.len))));
-        var continuation = OwnedFrame.init(.{ .application = .{
+        // Built in place, as `pushCurrent` builds an evaluation's: a frame
+        // assembled apart is copied whole into the array.
+        const frame_slot = self.frames.addOne(self.allocator) catch {
+            activation.release(self.releases);
+            application.discard(self.releases, self.allocator);
+            return error.OutOfMemory;
+        };
+        frame_slot.* = .{ .application = .{
             .context = application.context,
             .resume_fn = application.resume_fn,
             .deinit_fn = application.deinit_fn,
@@ -3262,18 +3385,17 @@ pub const Fiber = struct {
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = self.floor.beneath() },
-                .paging => |floor| .{ .paging = floor },
+                .measured => |floor| .{ .measured = floor },
             },
             .activation = activation,
             .selection = .{},
             .plan = application.plan,
-        } });
-        defer continuation.deinit(self.releases, self.allocator);
-        try self.appendFrame(&continuation);
+        } };
+        self.noteFrameDepth();
         switch (launch) {
             .in_place => {},
             .isolated => self.floor.set(base.base(), null),
-            .paging => |floor| self.floor.enter(floor, base.base()),
+            .measured => |floor| self.floor.enter(floor, base.base()),
         }
         if (select_initial) {
             const target = provenance_target.?;
@@ -3519,7 +3641,7 @@ pub const Fiber = struct {
             return self.readLocal(operand);
         }
         if (name == locals.load) {
-            if (operand > self.stack.items.len - self.floor.guard and !try paging_api.cover(self, operand))
+            if (operand > self.stack.items.len - self.floor.guard and !try floor_api.cover(self, operand))
                 return self.failBinding(operand);
             return self.bindLocals(operand);
         }
@@ -4604,9 +4726,9 @@ fn prepareEffectCheck(
         self.active_word = word;
         return self.fail(.domain, "module word has no effect declaration");
     };
-    // Inputs beneath a paging floor count: the word pages them in as
+    // Inputs beneath a soft floor count: the word admits them as
     // originals, like any operand check across the floor.
-    if (self.available() < declared.inputs) _ = try paging_api.cover(self, declared.inputs);
+    if (self.available() < declared.inputs) _ = try floor_api.cover(self, declared.inputs);
     const available: u32 = @intCast(self.available());
     if (available < declared.inputs) {
         self.active_word = word;
@@ -4655,12 +4777,12 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                     self.floor.restore(isolated);
                     break :blk .{ .isolated, window };
                 },
-                .paging => |floor| blk: {
+                .measured => |floor| blk: {
                     // The window is the region above the lowered floor; the
                     // driver's finalize reads it with the floor beneath active.
                     const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(floor.floor))));
                     self.floor.restore(floor.beneath);
-                    break :blk .{ .{ .paging = floor }, window };
+                    break :blk .{ .{ .measured = floor }, window };
                 },
             };
             if (comptime root_execution_metrics_enabled)
@@ -4700,7 +4822,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         );
                         return self.fail(.domain, "application suspension has no installed work");
                     };
-                    // A frame resumed over a paging floor suspends in place:
+                    // A frame resumed over a soft floor suspends in place:
                     // the floor beneath is active again, and the frame determines
                     // the launch of whatever it applies next.
                     if (launch == .isolated or
@@ -5054,7 +5176,7 @@ pub const Unwind = struct {
             boundary_index: FrameIndex,
             stack_base: usize,
             locals_base: usize,
-            beneath: paging_api.Beneath,
+            beneath: floor_api.Beneath,
             previous_boundary: ?FrameIndex,
         },
 
@@ -5076,7 +5198,7 @@ pub const Unwind = struct {
                 .caught => |caught| caught.stack_base,
             };
         }
-        fn beneath(self: Target) paging_api.Beneath {
+        fn beneath(self: Target) floor_api.Beneath {
             return switch (self) {
                 .uncaught => .{ .hard = 0 },
                 .caught => |caught| caught.beneath,
