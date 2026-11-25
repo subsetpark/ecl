@@ -168,6 +168,9 @@ const Walk = struct {
             if (stack.reach > max_values or stack.height > max_values) return .none;
         }
         if (stack.reach > max_values or stack.height > max_values) return .none;
+        // A local left bound stays visible to the caller, which a summary
+        // cannot describe.
+        if (stack.bound != 0) return .none;
         return .{ .exact = .{ .consumed = @intCast(stack.reach), .produced = @intCast(stack.height) } };
     }
 

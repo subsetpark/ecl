@@ -309,6 +309,8 @@ test "cleave: summarized and paging quotations agree" {
         .{ .name = "a module documentation quotation consumed by @defm", .source = "((: \"doc\") () `m @defm) () bi", .expected = "" },
         .{ .name = "locals bound twice, then partly dropped", .source = "((1) (2 3)) (|a|) 1 take cat (|b| b apply) -1 drop cat (|a b|) 1 drop cat `f def (f) () bi", .expected = "1" },
         .{ .name = "a definition replaced through a quotation-taking word", .source = "(id) `f def 1 ([0] (pop (1 (id) times) `f def) for) (f) bi", .expected = "1" },
+        .{ .name = "a definition changed in the first of three quotations", .source = "(id) `f def 5 6 (((pop) `f def) @attempt pop) (f) (f) tri", .expected = "5" },
+        .{ .name = "a body that leaves a local bound", .source = "((pop)) (|b|) 1 take cat `leak def (()) (|a| leak a apply) cat `f def 42 (f) () bi", .expected = "" },
         .{ .name = "a word that reaches itself", .source = "(dup 0 > (1 - down) () if) `down def 3 (down) (id) bi", .expected = "0 3" },
         .{ .name = "a session word with a combinator in its body", .source = "((+) dip) `under def 1 2 3 (under) (+ +) bi", .expected = "3 3 6" },
         .{

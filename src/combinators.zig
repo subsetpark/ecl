@@ -620,6 +620,7 @@ fn countedInputs(
 ) MachineError!?usize {
     const count = quotations.count();
     if (count == 0 or count > counts.consumed.len) return null;
+    counts.publication = fiber.currentPublication();
     var inputs: usize = 0;
     for (0..count) |index| {
         if (!quotations.isQuotation(index)) return null;
@@ -631,6 +632,8 @@ fn countedInputs(
             .spread => inputs + summary.consumed,
         };
     }
+    // Counts read across a publication belong to no one definition set.
+    if (fiber.currentPublication() != counts.publication) return null;
     return if (paging.reachable(fiber, inputs)) inputs else null;
 }
 
@@ -664,9 +667,13 @@ fn launchCountedCleave(
         .expected = fiber.stack.items.len,
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
-        .publication = fiber.currentPublication(),
+        .publication = counts.publication,
     };
     var owned = heap.Owned(*CountedCleave).init(state);
+    state.recheck(fiber) catch |err| {
+        owned.deinit(fiber.releases, fiber.allocator);
+        return err;
+    };
     state.prepare(fiber) catch |err| {
         owned.deinit(fiber.releases, fiber.allocator);
         return err;
@@ -702,6 +709,9 @@ const CountedCleave = struct {
     const Counts = struct {
         consumed: [8]u8 = @splat(0),
         produced: [8]u8 = @splat(0),
+        /// The publication read before any summary was, which every count
+        /// here was read under.
+        publication: u64 = 0,
     };
 
     /// The index of the quotation running or next to run.
@@ -713,6 +723,31 @@ const CountedCleave = struct {
     }
     fn application(self: *CountedCleave) Application {
         return machine.typedApplication(self, self.quotations.borrow().at(self.current()), self.site, 0);
+    }
+    /// Counts read under an earlier publication say nothing about words
+    /// since redefined. After a publication, every quotation yet to run is
+    /// read again and the baseline moves only once all of them agree, so no
+    /// quotation runs on counts that were not read under the publication it
+    /// runs in. Stops rather than run on counts that no longer hold.
+    fn recheck(self: *CountedCleave, fiber: *Fiber) MachineError!void {
+        const now = fiber.currentPublication();
+        if (now == self.publication) return;
+        const total = self.quotations.borrow().count();
+        for (self.next..total) |step| {
+            const index = switch (self.sharing) {
+                .cleave => step,
+                .spread => total - 1 - step,
+            };
+            const again = try stack_summary.of(fiber, self.site, self.quotations.borrow().at(index));
+            const same = if (again) |summary|
+                summary.consumed == self.counts.consumed[index] and summary.produced == self.counts.produced[index]
+            else
+                false;
+            if (!same) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+        }
+        // A publication during the reads leaves them under two.
+        if (fiber.currentPublication() != now) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+        self.publication = now;
     }
     /// Copies the next quotation's inputs to the top of the stack.
     fn prepare(self: *CountedCleave, fiber: *Fiber) error{OutOfMemory}!void {
@@ -752,19 +787,7 @@ const CountedCleave = struct {
             if (self.sharing == .spread) self.orderResults(fiber.stack.items[fiber.stack.items.len - results ..]);
             return null;
         }
-        // Counts read under an earlier publication say nothing about words
-        // since redefined: read the next quotation again, and stop rather
-        // than run it on counts that no longer hold.
-        if (fiber.currentPublication() != self.publication) {
-            const index = self.current();
-            const again = try stack_summary.of(fiber, self.site, self.quotations.borrow().at(index));
-            const same = if (again) |summary|
-                summary.consumed == self.counts.consumed[index] and summary.produced == self.counts.produced[index]
-            else
-                false;
-            if (!same) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
-            self.publication = fiber.currentPublication();
-        }
+        try self.recheck(fiber);
         try self.prepare(fiber);
         return .{ .apply = .{
             .quotation = self.quotations.borrow().at(self.current()),
