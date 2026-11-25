@@ -590,6 +590,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "1 2 3 (10 +) 2 dip-n pop pop pop " ++
             // A cleave over summarized quotations, which runs them in place.
             "1 2 (+) (-) bi pop pop " ++
+            // Nested deeper than a fiber keeps cleave state in place, so the
+            // innermost allocates its own.
+            "1 (((((id) (id) bi pop) (id) bi pop) (id) bi pop) (id) bi pop) (id) bi pop pop " ++
             // A spread in place, and one over the soft floor.
             "1 2 [(1 +) (1 +)] spread pop pop " ++
             "1 2 [(1 +) ([(0 <) (1 +) (1 +)] cond)] spread pop pop " ++

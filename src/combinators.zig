@@ -653,11 +653,7 @@ fn launchCountedCleave(
         owned_quotations.deinit(fiber.releases, fiber.allocator);
         return err;
     };
-    const state = fiber.allocator.create(CountedCleave) catch |err| {
-        owned_quotations.deinit(fiber.releases, fiber.allocator);
-        return err;
-    };
-    state.* = .{
+    var state: CountedCleave = .{
         .sharing = sharing,
         .quotations = .init(owned_quotations.take()),
         .counts = counts,
@@ -669,16 +665,18 @@ fn launchCountedCleave(
         .word = fiber.active_word,
         .publication = counts.publication,
     };
-    var owned = heap.Owned(*CountedCleave).init(state);
     state.recheck(fiber) catch |err| {
-        owned.deinit(fiber.releases, fiber.allocator);
+        heap.deinitDriverFields(fiber.releases, fiber.allocator, &state);
         return err;
     };
     state.prepare(fiber) catch |err| {
-        owned.deinit(fiber.releases, fiber.allocator);
+        heap.deinitDriverFields(fiber.releases, fiber.allocator, &state);
         return err;
     };
-    try fiber.beginApplication(owned.take().application(), .in_place);
+    const first = state.quotations.borrow().at(state.current());
+    const site = state.site;
+    const housed = try fiber.houseApplication(state);
+    try fiber.beginApplication(housed.application(first, site, 0), .in_place);
 }
 
 /// A cleave or spread whose quotations all have summaries: each runs in
@@ -720,9 +718,6 @@ const CountedCleave = struct {
             .cleave => self.next,
             .spread => self.quotations.borrow().count() - 1 - self.next,
         };
-    }
-    fn application(self: *CountedCleave) Application {
-        return machine.typedApplication(self, self.quotations.borrow().at(self.current()), self.site, 0);
     }
     /// Counts read under an earlier publication say nothing about words
     /// since redefined. After a publication, every quotation yet to run is
@@ -801,6 +796,9 @@ const CountedCleave = struct {
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
+    /// Lives for one word's quotations and is small, so it takes a fiber
+    /// slot when one is free.
+    pub const housed_application = true;
 };
 fn startCleave(
     fiber: *Fiber,
