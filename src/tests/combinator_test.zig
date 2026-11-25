@@ -312,6 +312,9 @@ test "cleave: summarized and measured quotations agree" {
         .{ .name = "a definition changed in the first of three quotations", .source = "(id) `f def 5 6 (((pop) `f def) @attempt pop) (f) (f) tri", .expected = "5" },
         .{ .name = "a body that leaves a local bound", .source = "((pop)) (|b|) 1 take cat `leak def (()) (|a| leak a apply) cat `f def 42 (f) () bi", .expected = "" },
         .{ .name = "a word that reaches itself", .source = "(dup 0 > (1 - down) () if) `down def 3 (down) (id) bi", .expected = "0 3" },
+        .{ .name = "one quotation applied again after its word is redefined", .source = "(1 +) `f def 5 6 2 ((f) (id) bi (dup) `f def) times", .expected = "5 7 6 6 6" },
+        .{ .name = "more nested cleaves than a fiber keeps in place", .source = "1 (((((id) (id) bi pop) (id) bi pop) (id) bi pop) (id) bi pop) (id) bi", .expected = "1 1" },
+        .{ .name = "a quotation with no summary applied again", .source = "1 2 2 (1 2 (+) (dup 0 > (pop) (dup) if) bi pop) times", .expected = "1 2" },
         .{ .name = "a session word with a combinator in its body", .source = "((+) dip) `under def 1 2 3 (under) (+ +) bi", .expected = "3 3 6" },
         .{
             .name = "module words, across the boundary and within it",

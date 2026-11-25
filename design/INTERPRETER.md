@@ -1092,12 +1092,13 @@ literal quotations under that combinator's own rule. Any other word has no
 summary: a word that reaches itself, a native word, and a word behind a checked module
 boundary, whose check reports the depth it found. So does any quotation or
 body past a constant size, so the walk is bounded by a constant and an absent
-summary is always a correct answer. A quotation's summary is read at the site
-it runs at and is not kept. A body's summary depends on what the body's own
-words resolve to, so it is recorded with the fiber's remembered resolution of
-the word and lasts exactly as long: a publication discards it, and a
-redefinition, of the word or of anything its body reaches, is read as
-redefined. It is an optimization and nothing observes it: what acts
+summary is always a correct answer. A summary depends on what the words it
+read resolve to, so nothing keeps one past a publication, and a redefinition,
+of a word or of anything its body reaches, is read as redefined. A body's
+summary is recorded with the fiber's remembered resolution of the word. A
+quotation's is remembered by the fiber for the site it ran at, in a table of
+constant size whose entries hold their quotations: a fiber may keep that many
+quotations alive that it would otherwise have let go. It is an optimization and nothing observes it: what acts
 on one must leave the stack, the failures, and every enclosing floor's
 accounting as the soft floor would have. A cleave or spread whose
 quotations all have summaries, with their inputs in reach, runs each in place

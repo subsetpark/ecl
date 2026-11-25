@@ -913,6 +913,7 @@ pub const Application = struct {
 };
 
 const WordResolutions = @import("word_resolutions.zig").WordResolutions;
+const stack_summary = @import("stack_summary.zig");
 
 fn ApplicationAdapters(comptime Driver: type) type {
     return struct {
@@ -934,6 +935,75 @@ fn ApplicationAdapters(comptime Driver: type) type {
             const driver: *Driver = @ptrCast(@alignCast(raw));
             heap.destroyDriver(releases, allocator, driver);
         }
+
+        /// Teardown for state `houseApplication` placed: the same field
+        /// ownership, then the slot freed or the allocation destroyed.
+        fn deinitHoused(
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+            raw: *anyopaque,
+        ) void {
+            const driver: *Driver = @ptrCast(@alignCast(raw));
+            heap.deinitDriverFields(releases, allocator, driver);
+            const housing: *ApplicationHousing(Driver) = @fieldParentPtr("driver", driver);
+            if (housing.vacancy) |busy| busy.* = false else allocator.destroy(housing);
+        }
+    };
+}
+
+/// An application's state where `houseApplication` put it: in one of the
+/// fiber's slots, or in an allocation when every slot is taken. Which one is
+/// recorded beside the state, so its teardown needs no fiber.
+fn ApplicationHousing(comptime Driver: type) type {
+    return struct {
+        /// The occupancy flag of the slot this state lives in, cleared to
+        /// free it; null when the state has an allocation of its own.
+        vacancy: ?*bool,
+        driver: Driver,
+    };
+}
+
+/// Opt-in fiber storage for application state. A driver declares
+/// `housed_application` to be constructed in a fiber slot instead of the
+/// allocator, and is then launched only through the handle `houseApplication`
+/// returns. The declaration is checked here, so a driver that outgrows a
+/// slot or stops owning its fields fails the build.
+///
+/// An application holds its slot for as long as its quotations run, and
+/// applications nest, so there are a few slots and no promise of one:
+/// correctness never depends on a slot being free, only the allocation does.
+fn housedApplicationCapable(comptime Driver: type) bool {
+    if (!@hasDecl(Driver, "housed_application")) return false;
+    if (heap.validateDriverOwnership(Driver) != .fields)
+        @compileError(@typeName(Driver) ++ " housed application storage requires field ownership");
+    const Housing = ApplicationHousing(Driver);
+    if (@sizeOf(Housing) > Fiber.application_slot_len)
+        @compileError(std.fmt.comptimePrint("{s} ({d} bytes housed) exceeds the fiber application slot ({d} bytes)", .{ @typeName(Driver), @sizeOf(Housing), Fiber.application_slot_len }));
+    if (@alignOf(Housing) > Fiber.application_slot_align)
+        @compileError(@typeName(Driver) ++ " exceeds the fiber application slot alignment");
+    return true;
+}
+
+/// The handle to a housed application's state. Opaque, so the only way to
+/// hold one is to have housed the state.
+pub fn HousedApplication(comptime Driver: type) type {
+    return opaque {
+        const Self = @This();
+
+        /// The application of `quotation` this state resumes after. It owns
+        /// the state from here.
+        pub fn application(self: *Self, quotation: *Header, site: ExecutionSite, seeded: u32) Application {
+            const housing: *ApplicationHousing(Driver) = @ptrCast(@alignCast(self));
+            return .{
+                .quotation = quotation,
+                .context = @ptrCast(&housing.driver),
+                .resume_fn = ApplicationAdapters(Driver).run,
+                .deinit_fn = ApplicationAdapters(Driver).deinitHoused,
+                .site = site,
+                .seeded = seeded,
+                .provenance = .boundary,
+            };
+        }
     };
 }
 
@@ -950,6 +1020,8 @@ pub fn typedApplication(
     };
     if (pointer.size != .one) @compileError("application driver must be a single-item pointer");
     const Driver = pointer.child;
+    if (@hasDecl(Driver, "housed_application"))
+        @compileError(@typeName(Driver) ++ " is launched through the handle houseApplication returns");
     const adapters = ApplicationAdapters(Driver);
     return .{
         .quotation = quotation,
@@ -1626,6 +1698,8 @@ pub const Fiber = struct {
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
     /// What this fiber's code resolved its words to.
     resolutions: WordResolutions = .{},
+    /// The stack summaries read for the quotations this fiber applied.
+    summaries: stack_summary.Cache = .{},
     entry_base: usize,
     /// How far down a word may reach, and what `require` compares against.
     floor: floor_api.StackFloor = .{},
@@ -1654,6 +1728,9 @@ pub const Fiber = struct {
     /// being free — only the allocation does.
     driver_slot: [driver_slot_len]u8 align(driver_slot_align),
     driver_slot_busy: bool = false,
+    /// Storage for the state of applications that opt in. See
+    /// `housedApplicationCapable`.
+    application_slots: [application_slot_count]ApplicationSlot,
     /// Locals. The declared names live here for the length of the
     /// quotation body that introduced them, never on the operand stack, so a
     /// body's declared stack effect describes its operands alone and an
@@ -1691,6 +1768,10 @@ pub const Fiber = struct {
             // goes through `acquireInlineDriver`, which writes the whole
             // driver before the pointer escapes.
             .driver_slot = undefined,
+            // SAFETY: storage only. A slot's `busy` flag is the only thing
+            // that says state lives there, and `houseApplication` writes the
+            // whole state before the pointer escapes.
+            .application_slots = @splat(.{ .bytes = undefined }),
         };
     }
 
@@ -2034,6 +2115,40 @@ pub const Fiber = struct {
     const driver_slot_len = 736;
     const driver_slot_align = 16;
 
+    /// Sized to the application states that opt in, checked by
+    /// `housedApplicationCapable`.
+    const application_slot_len = 224;
+    const application_slot_align = 8;
+    const application_slot_count = 4;
+    const ApplicationSlot = struct {
+        busy: bool = false,
+        bytes: [application_slot_len]u8 align(application_slot_align),
+    };
+
+    /// Gives `initial` a place to live for the length of its application:
+    /// a free slot, or an allocation when none is free. Consuming: a failed
+    /// allocation retires the state.
+    pub fn houseApplication(self: *Fiber, initial: anytype) error{OutOfMemory}!*HousedApplication(@TypeOf(initial)) {
+        const Driver = @TypeOf(initial);
+        if (comptime !housedApplicationCapable(Driver))
+            @compileError(@typeName(Driver) ++ " does not declare housed_application");
+        const Housing = ApplicationHousing(Driver);
+        for (&self.application_slots) |*slot| {
+            if (slot.busy) continue;
+            slot.busy = true;
+            const housing: *Housing = @ptrCast(@alignCast(&slot.bytes));
+            housing.* = .{ .vacancy = &slot.busy, .driver = initial };
+            return @ptrCast(housing);
+        }
+        var pending = initial;
+        const housing = self.allocator.create(Housing) catch |err| {
+            heap.deinitDriverFields(self.releases, self.allocator, &pending);
+            return err;
+        };
+        housing.* = .{ .vacancy = null, .driver = pending };
+        return @ptrCast(housing);
+    }
+
     fn acquireInlineDriver(self: *Fiber, comptime Driver: type) ?*Driver {
         if (self.driver_slot_busy) return null;
         self.driver_slot_busy = true;
@@ -2051,6 +2166,7 @@ pub const Fiber = struct {
 
     pub fn deinit(self: *Fiber) void {
         self.resolutions.deinit(self.allocator, self.releases);
+        self.summaries.deinit(self.allocator, self.releases);
         if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
         self.frames.deinit(self.allocator);
@@ -3254,7 +3370,14 @@ pub const Fiber = struct {
         // releases it with the rest of the frame.
         const lent = activation.borrowed();
         const application_index: ApplicationFrameIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.frames.items.len))));
-        var continuation = OwnedFrame.init(.{ .application = .{
+        // Built in place, as `pushCurrent` builds an evaluation's: a frame
+        // assembled apart is copied whole into the array.
+        const frame_slot = self.frames.addOne(self.allocator) catch {
+            activation.release(self.releases);
+            application.discard(self.releases, self.allocator);
+            return error.OutOfMemory;
+        };
+        frame_slot.* = .{ .application = .{
             .context = application.context,
             .resume_fn = application.resume_fn,
             .deinit_fn = application.deinit_fn,
@@ -3267,9 +3390,8 @@ pub const Fiber = struct {
             .activation = activation,
             .selection = .{},
             .plan = application.plan,
-        } });
-        defer continuation.deinit(self.releases, self.allocator);
-        try self.appendFrame(&continuation);
+        } };
+        self.noteFrameDepth();
         switch (launch) {
             .in_place => {},
             .isolated => self.floor.set(base.base(), null),
