@@ -35,6 +35,13 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     };
     try core.installBuiltins(&definitions);
 }
+/// Whether `primitive` changes definitions or takes more than its declared
+/// inputs, so a stack summary cannot rest on its effect.
+pub fn reshapesWords(primitive: env.PrimitiveImpl) bool {
+    return definition_prims.binds(primitive) or primitive == &defmWord or primitive == &load or
+        primitive == importAs(.public) or primitive == importAs(.private) or primitive == &aliasModule;
+}
+
 /// The one module constructor. The name is validated before the body runs, so
 /// a name that could never be published costs no evaluation and no effect.
 /// Only a registry change during construction can still refuse publication.

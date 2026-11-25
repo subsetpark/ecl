@@ -10,6 +10,7 @@ const env = @import("env.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const combinators = @import("combinators.zig");
+const prims = @import("prims.zig");
 
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
@@ -101,7 +102,9 @@ const Walk = struct {
                 .source => |source| try self.body(word, site, source),
                 // An exact declared effect says everything; only a builtin
                 // whose effect holds a row can have a rule of its own.
-                .builtin => |builtin| if (exact(builtin.effect)) |declared|
+                .builtin => |builtin| if (prims.unsummarizable(builtin.primitive))
+                    .none
+                else if (exact(builtin.effect)) |declared|
                     .{ .exact = declared }
                 else switch (combinators.flow(builtin.primitive)) {
                     .declared => .none,
@@ -234,15 +237,14 @@ const Abstract = struct {
     fn local(self: *Abstract, words: intern.LocalsWords, name: u32, operand: u32) bool {
         if (name == words.load) {
             if (operand > max_locals - self.bound) return false;
-            var index: usize = operand;
-            while (index != 0) {
-                index -= 1;
-                self.locals[self.bound + index] = self.take();
-            }
+            // Stored as the runtime stores them: the top value first, so
+            // the deepest of the newest binding ends last and a read of
+            // local `n` counts back from the end.
+            for (0..operand) |index| self.locals[self.bound + index] = self.take();
             self.bound += operand;
         } else if (name == words.get) {
             if (operand >= self.bound) return false;
-            self.push(self.locals[operand]);
+            self.push(self.locals[self.bound - 1 - operand]);
         } else if (name == words.drop) {
             if (operand > self.bound) return false;
             self.bound -= operand;

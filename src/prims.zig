@@ -893,6 +893,13 @@ fn ConversionEachDriver(comptime target: NumericParseTarget) type {
     };
 }
 
+/// Whether `primitive` runs code a stack summary cannot see or changes
+/// definitions, so no summary may rest on its declared effect: the words
+/// the summary read could mean something else by the time they run.
+pub fn unsummarizable(primitive: env.PrimitiveImpl) bool {
+    return primitive == &attempt or module_prims.reshapesWords(primitive) or task_prims.starts(primitive);
+}
+
 fn attempt(fiber: *Fiber) MachineError!void {
     var body = try fiber.popQuotation();
     try fiber.attemptOwned(body.take().list);
