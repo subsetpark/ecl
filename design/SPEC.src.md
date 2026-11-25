@@ -401,7 +401,11 @@ Three quotation-application behaviors exist:
   consumed. The test quotations of `cond`, `while`, and `linrec` run this
   way too: a test may consume, rearrange, or add values; its top value must
   be a 0/1 boolean, and its complete result is discarded and the previous stack
-  state is restored before control continues. 
+  state is restored before control continues. That restore, like a cleave's
+  return to the same inputs, is the combinator not consuming: what the
+  quotation read is not its result. A word that puts values back, such as
+  `dip`, `above`, or `below`, is an ordinary stack operation and produces
+  them, so `[[f] dip]` presents the same effect as the shuffle it replaces.
 - **Isolated**: the quotation runs on a fresh substack per application,
   starting on its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,

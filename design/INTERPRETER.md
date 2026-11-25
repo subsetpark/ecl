@@ -1059,11 +1059,15 @@ consumption is the sum of what its words required, which is the stack effect
 it presents from outside. Every operand check compares against one guard
 depth. That depth is the floor unless a paged original has been returned to
 the substack; those are recorded by position and consumed by the first check
-that reaches them, so protecting a value is not consuming it. Restoring is
-not producing: a copy records whether the floor beneath holds the same value
-as an original, because it paged it for this floor or it was already one of
-its returned originals, and a restore puts such a value back as the floor
-beneath's returned original. One bounded finalize serves every paging word.
+that reaches them. Only an implicit restore returns originals: a guard
+test's or a cleave quotation's, where the combinator consumed nothing. A copy
+records whether the floor beneath holds the same value as an original,
+because it paged it for this floor or it was already one of its returned
+originals, and an implicit restore puts such a value back as the floor
+beneath's returned original. A word that puts values back (`dip`, `dip-n`,
+`above`, `below`) is an ordinary stack operation and produces them, so its
+effect under a paging floor is the effect of the shuffle it replaces. One
+bounded finalize serves every paging word.
 It sweeps the returned originals out of the region, places the region (kept
 beneath or above the restored originals, dropped for a guard's test,
 collected for a cleave), and pushes the originals back in order, in place on

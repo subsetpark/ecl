@@ -230,13 +230,14 @@ test "paging: above and below restore what the quotation consumed" {
         .{ .name = "a quotation that consumes nothing", .source = "(7) above 1 (8) below", .expected = "7 1 8" },
         .{ .name = "consumption is what the words required", .source = "1 2 (over pop) below 1 2 3 (2 (pop) times) above", .expected = "1 2 1 2 1 2 3" },
         .{
-            .name = "dip protects without consuming",
+            .name = "dip produces what it protects",
             .source = "1 2 3 ((+) dip) below 1 2 3 ((+) dip) above 0 1 2 3 (((+) dip) dip) below 1 2 3 ((+) dip pop) below",
-            .expected = "1 2 3 3 3 1 2 3 0 1 2 3 1 1 2 3 3",
+            .expected = "1 2 3 3 3 3 3 1 2 3 0 1 2 3 1 2 3 1 2 3 3",
         },
-        .{ .name = "a returned original a later word requires is consumed", .source = "1 2 3 ((+) dip swap) below", .expected = "1 2 3 3 3" },
-        .{ .name = "dip-n returns originals as originals", .source = "1 2 3 ((+) dip 5 (2 *) 2 dip-n) below", .expected = "1 2 3 6 5" },
-        .{ .name = "a nested restore is not a product", .source = "5 ((1 +) below) below 1 2 ((+) above) above 1 2 ((+) above) below", .expected = "5 6 3 1 2 1 2 3" },
+        .{ .name = "dip behaves as the shuffle it replaces", .source = "1 2 ((dup) dip) above 1 2 (over swap) above 1 2 ((dup) dip) (over swap) bi", .expected = "1 1 2 1 2 1 1 2 1 2 1 1 2 1 1 2" },
+        .{ .name = "a dip selects beneath a cleave", .source = "1 2 3 ((swap nip) dip) (+ +) bi", .expected = "1 3 6" },
+        .{ .name = "dip-n produces what it protects", .source = "1 2 3 ((+) dip 5 (2 *) 2 dip-n) below", .expected = "1 2 3 6 3 5" },
+        .{ .name = "a nested restore is a product", .source = "5 ((1 +) below) below 1 2 ((+) above) above 1 2 ((+) above) below", .expected = "5 5 6 3 1 2 1 2 1 2 3 1 2" },
         .{
             .name = "guards do not consume what a test paged",
             .source = "5 ([(0 <) (pop 1) (pop 2)] cond) below 5 ((0 >) (1 -) while) below " ++
@@ -250,7 +251,7 @@ test "paging: above and below restore what the quotation consumed" {
             .name = "a declared-effect module word counts inputs beneath the floor",
             .source = "((a -- b) (1 +) `inc def (a b -- c) (+) `add def (a -- bool) (0 <) `below0 def) `m @defm " ++
                 "5 (m.inc) below 1 2 (m.add) below 1 2 (m.add) above 1 2 3 ((m.inc) dip) below",
-            .expected = "5 6 1 2 3 3 1 2 1 2 3 3",
+            .expected = "5 6 1 2 3 3 1 2 1 2 3 3 3",
         },
         .{
             .name = "a cond test that is a declared-effect module word reads beneath the floor",
@@ -261,7 +262,7 @@ test "paging: above and below restore what the quotation consumed" {
         .{ .name = "a word's own substack is a hard floor", .source = "1 ((pop) @attempt) below result.ok?", .expected = "1 0" },
         .{ .name = "paging and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
         .{ .name = "rotating beneath the region is bounded work", .source = "20000 (1) times (10000 (pop) times 5) below 20001 pack dup len swap last", .expected = "20001 5" },
-        .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((7) 10000 dip-n) below 20001 pack dup len swap last", .expected = "20001 7" },
+        .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((10000 (pop) times 0) (pop) while 7) below 20001 pack dup len swap last", .expected = "20001 7" },
         .{ .name = "a guard's restore is bounded work", .source = "20000 (1) times (10000 (pop) times 0) (pop) while 20000 pack len 20000 (1) times [(10000 (pop) times 0) (pop) (pop)] cond 19999 pack len", .expected = "20000 19999" },
         .{ .name = "originals and results outgrow their inline slots", .source = "1 2 3 4 5 6 [(+ + + + +) (1 2 3 4 5 6)] cleave 1 2 3 4 5 6 (+ + + + +) above", .expected = "21 1 2 3 4 5 6 21 1 2 3 4 5 6" },
         .{ .name = "a cleave resumes after a suspended restore", .source = "70000 (1) times [(70000 (pop) times) (7)] cleave", .expected = "7" },
@@ -277,10 +278,24 @@ test "paging: above and below restore what the quotation consumed" {
     });
 }
 
+test "selectors: id and retain keep values by position" {
+    try support.expectStacks(&.{
+        .{ .name = "id returns its input", .source = "1 id 2 (id) above", .expected = "1 2 2" },
+        .{ .name = "id selects beneath a cleave", .source = "1 2 (pop id) (id) bi", .expected = "1 2" },
+        .{ .name = "retain keeps by count, deepest first", .source = "`x `y `z [1 0 2] retain", .expected = "x z z" },
+        .{ .name = "retain consumes as many values as it has counts", .source = "9 1 2 [0 1] retain 5 [] retain", .expected = "9 2 5" },
+        .{ .name = "retain selects beneath a cleave", .source = "1 2 3 ([1 0 1] retain) (+ +) bi", .expected = "1 3 6" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "retain negative count", .source = "1 2 [1 -1] retain", .kind = "domain", .word = "where" },
+        .{ .name = "retain non-list counts", .source = "1 `a retain", .kind = "type", .word = "len" },
+    });
+}
+
 test "combinators: dip-n protects a counted prefix" {
     try support.expectStacks(&.{
         .{ .name = "counted dips", .source = "1 2 3 (10 +) 2 dip-n 1 2 3 (1 +) 0 dip-n 1 2 3 (7) 3 dip-n", .expected = "11 2 3 1 2 4 7 1 2 3" },
-        .{ .name = "beneath a paging floor", .source = "1 2 3 ((10 *) 2 dip-n) below 0 1 2 3 ((+) 2 dip-n) below", .expected = "1 2 3 10 0 1 2 3 1" },
+        .{ .name = "beneath a paging floor", .source = "1 2 3 ((10 *) 2 dip-n) below 0 1 2 3 ((+) 2 dip-n) below", .expected = "1 2 3 10 2 3 0 1 2 3 1 2 3" },
         .{ .name = "a symbol stays a value", .source = "0 `m 1 (2 +) 2 dip-n", .expected = "2 m 1" },
         .{ .name = "a large count is bounded work", .source = "20000 (1) times (2) 20000 dip-n 20001 pack len", .expected = "20001" },
     });

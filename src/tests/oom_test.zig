@@ -582,7 +582,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "(1 \"a\" 2) 2 windows pop " ++
             "\"abc\" 2 (\"bc\" match?) stencil pop " ++
             "1 (0 >) (dup 1 - swap) unfold pop pop " ++
-            // Paging floors: a page across the floor, a returned original,
+            // Paging floors: a page across the floor, a dip beneath it,
             // a guard's unpage, a counted dip, and the finalize's tail.
             "1 2 (+) above pop pop pop " ++
             "1 2 3 ((+) dip 5) below pop pop pop pop pop " ++

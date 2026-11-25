@@ -85,13 +85,13 @@ pub const Beneath = union(enum) {
 /// quotation consumes exactly what its words required: the stack effect it
 /// presents as a black box. Underflow remains the hard floor's beneath.
 ///
-/// Restoring is not producing. A value `dip` took aside straight from
-/// across the floor returns as the same original, recorded here by its
-/// position until a later word requires it, and so does a value an inner
-/// restore puts back that this floor holds as an original too: one it paged
-/// for the inner floor, or one `dip` had returned to it. A finalize sweeps
-/// the recorded values out before it restores its own copies, so a word
-/// that only looked at a value beneath the floor did not produce it.
+/// An implicit restore is not producing. A guard test or a cleave
+/// quotation consumes nothing on behalf of its combinator, so a value it
+/// paged that this floor holds as an original too goes back as the same
+/// original, recorded here by its position until a later word requires it.
+/// A finalize sweeps the recorded values out before it restores its own
+/// copies. A word that puts values back, such as `dip`, `above`, or
+/// `below`, is an ordinary stack operation: what it puts back it produces.
 pub const PagingFloor = struct {
     /// This application's floor: the fiber's floor base while it is the
     /// innermost paging floor.
@@ -129,8 +129,7 @@ pub const PagingFloor = struct {
         while (self.returned.items.len != 0 and self.returned.items[self.returned.items.len - 1] >= position)
             _ = self.returned.pop();
     }
-    /// Whether `position` is a returned original: the slot `dip` is about to
-    /// take, which then stays an original through its next return.
+    /// Whether `position` is a returned original, consuming its record.
     fn takeReturnedAt(self: *PagingFloor, position: usize) bool {
         if (self.returned.items.len == 0) return false;
         if (self.returned.items[self.returned.items.len - 1] != position) return false;
@@ -222,14 +221,14 @@ fn page(fiber: *Fiber, innermost: *PagingFloor, needed: usize) error{OutOfMemory
     return true;
 }
 
-/// A value held aside from the stack, and whether it is an original of the
-/// innermost paging floor.
-pub const Protected = struct { item: heap.OwnedValue, original: bool };
+/// A value taken from the top of the stack, and whether it is an original of
+/// the innermost paging floor.
+const Taken = struct { item: heap.OwnedValue, original: bool };
 
-/// Pops the top operand for `dip` to hold aside, reporting whether it is an
-/// original of the innermost paging floor: paged in just now for this
-/// purpose, or returned by an inner `dip`. `returnProtected` puts it back.
-pub fn takeProtected(fiber: *Fiber) MachineError!Protected {
+/// Pops the top operand, reporting whether it is an original of the
+/// innermost paging floor: paged in just now for this purpose, or returned
+/// by an implicit restore.
+fn takeOriginal(fiber: *Fiber) MachineError!Taken {
     var original = false;
     if (fiber.floor.paging) |floor| {
         const depth = fiber.stack.items.len;
@@ -242,13 +241,6 @@ pub fn takeProtected(fiber: *Fiber) MachineError!Protected {
         }
     }
     return .{ .item = try fiber.popValue(), .original = original };
-}
-
-/// Consumes `item`, recording it as a returned original when `dip` took it
-/// as one and the same paging floor is still innermost.
-pub fn returnProtected(fiber: *Fiber, item: Value, original: bool) error{OutOfMemory}!void {
-    try fiber.pushOwned(item);
-    if (original) try noteReturned(fiber, fiber.stack.items.len - 1);
 }
 
 /// Records the value at `position` as a returned original of the innermost
@@ -264,8 +256,8 @@ fn noteReturned(fiber: *Fiber, position: usize) error{OutOfMemory}!void {
 }
 
 /// Fails as an operand check would unless `count` values lie above the hard
-/// floor, without paging any of them: `takeProtected` must still find which
-/// are originals.
+/// floor, without paging any of them, so a word that takes a user-sized
+/// count can page them one at a time.
 pub fn requireReachable(fiber: *Fiber, count: usize) MachineError!void {
     if (count > fiber.stack.items.len - fiber.floor.hard()) return fiber.failShort(count);
 }
@@ -342,18 +334,29 @@ pub const Placement = enum {
     /// The region moves into `results`, in stack order, for a cleave to put
     /// back once every quotation has run.
     collected,
+
+    /// Whether the restore is the combinator's own bookkeeping rather than a
+    /// word putting values back: its originals were not consumed, so they
+    /// are not produced either.
+    fn implicit(self: Placement) bool {
+        return switch (self) {
+            .above, .below => false,
+            .discarded, .collected => true,
+        };
+    }
 };
 
 /// A quotation run over a paging floor, and the bounded phases that put the
-/// stack back together once it returns: originals a `dip` returned are swept
-/// to the top of the region and dropped, the region is placed, and the paged
+/// stack back together once it returns: originals an inner implicit restore
+/// returned are swept to the top of the region and dropped, the region is placed, and the paged
 /// originals come back in their original order. Each phase is user-sized and
 /// advances only as far as the turn's budget allows, and no phase takes a
 /// live value off the stack except to release it or to collect it.
 ///
-/// A restored original the floor beneath holds too goes back as that
-/// floor's returned original, so restoring is never producing: a word that
-/// only looked at a value beneath the floor did not produce it.
+/// When the restore is implicit, a restored original the floor beneath holds
+/// too goes back as that floor's returned original, so a guard test or a
+/// cleave quotation that only looked at a value beneath the floor did not
+/// produce it. `above` and `below` produce what they restore.
 pub const Region = struct {
     placement: Placement,
     /// What `Fiber.beginPagingApplication` runs the quotation over.
@@ -390,7 +393,7 @@ pub const Region = struct {
     pub fn takeTestResult(self: *Region, fiber: *Fiber) MachineError!heap.OwnedValue {
         if (fiber.stack.items.len != self.base) return fiber.popValue();
         try self.floor.originals.ensureUnusedCapacity(fiber.allocator, 1);
-        const taken = try takeProtected(fiber);
+        const taken = try takeOriginal(fiber);
         heap.retainValue(taken.item.borrow());
         self.floor.originals.appendAssumeCapacity(.{ .value = taken.item.borrow(), .shared = taken.original });
         self.base -= 1;
@@ -460,7 +463,7 @@ pub const Region = struct {
                     // Beneath the region, the originals end up at the base
                     // once rotated; the records refer to those slots now.
                     const position = if (self.placement == .below) self.base + index else fiber.stack.items.len - 1;
-                    if (original.shared) try noteReturned(fiber, position);
+                    if (original.shared and self.placement.implicit()) try noteReturned(fiber, position);
                 }
                 if (originals.len() != 0) return false;
                 if (self.placement != .below) {

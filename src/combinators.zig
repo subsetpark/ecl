@@ -259,8 +259,8 @@ fn times(fiber: *Fiber) MachineError!void {
 fn dip(fiber: *Fiber) MachineError!void {
     var quotation = try fiber.popQuotation();
     defer quotation.deinit();
-    var protected = try paging.takeProtected(fiber);
-    defer protected.item.deinit();
+    var protected = try fiber.popValue();
+    defer protected.deinit();
     try startDip(fiber, &quotation, &protected);
 }
 
@@ -273,18 +273,17 @@ pub fn dipBelowHead(fiber: *Fiber) MachineError!void {
     defer quotation.deinit();
     var head = try fiber.popValue();
     defer head.deinit();
-    var protected = try paging.takeProtected(fiber);
-    defer protected.item.deinit();
+    var protected = try fiber.popValue();
+    defer protected.deinit();
     try fiber.pushOwned(head.take());
     try startDip(fiber, &quotation, &protected);
 }
 
-fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *paging.Protected) MachineError!void {
+fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *heap.OwnedValue) MachineError!void {
     const state = try fiber.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
-        .protected = .init(protected.item.take()),
-        .original = protected.original,
+        .protected = .init(protected.take()),
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
     };
@@ -294,8 +293,6 @@ fn startDip(fiber: *Fiber, quotation: *heap.OwnedValue, protected: *paging.Prote
 const DipState = struct {
     quotation: heap.Owned(*Header),
     protected: heap.Owned(Value),
-    /// Whether the value came across a paging floor, so it returns as one.
-    original: bool,
     site: machine.ExecutionSite,
     word: intern.TraceWord,
 
@@ -314,7 +311,7 @@ const DipState = struct {
     ) MachineError!?ApplicationStep {
         fiber.active_word = self.word;
         fiber.chargeContinuationStep();
-        try paging.returnProtected(fiber, self.protected.take(), self.original);
+        try fiber.pushOwned(self.protected.take());
         return null;
     }
 
@@ -330,24 +327,18 @@ fn dipN(fiber: *Fiber) MachineError!void {
     if (count_value.borrow() != .int) return fiber.typeError("an int count");
     if (count_value.borrow().int < 0) return fiber.fail(.domain, "dip-n count must be nonnegative");
     const count: usize = @intCast(count_value.borrow().int);
-    // Checked before the buffers are sized by it, and without paging.
+    // Checked before the buffer is sized by it, and without paging.
     try paging.requireReachable(fiber, count);
-    // Each allocation precedes taking the quotation, and a later failure
-    // retires the earlier ones: a struct literal would leak them.
-    var control = blk: {
-        var protected = heap.Owned(heap.OwnedValueBuffer).init(try .init(fiber.releases, count));
-        errdefer protected.deinit(fiber.releases, fiber.allocator);
-        var originals: std.DynamicBitSetUnmanaged = try .initEmpty(fiber.allocator, count);
-        errdefer originals.deinit(fiber.allocator);
-        break :blk heap.Owned(DipControl).init(.{
-            .quotation = .init(quotation.take().list),
-            .protected = protected,
-            .originals = originals,
-            .count = count,
-            .site = fiber.applicationSite(),
-            .word = fiber.active_word,
-        });
-    };
+    // The buffer is allocated before the quotation is taken: nothing after
+    // it can fail, so the struct literal cannot leak it.
+    const buffer = try heap.OwnedValueBuffer.init(fiber.releases, count);
+    var control = heap.Owned(DipControl).init(.{
+        .quotation = .init(quotation.take().list),
+        .protected = .init(buffer),
+        .count = count,
+        .site = fiber.applicationSite(),
+        .word = fiber.active_word,
+    });
     defer control.deinit(fiber.releases, fiber.allocator);
     switch (try control.borrowMut().advance(fiber)) {
         .finished => unreachable,
@@ -363,7 +354,7 @@ fn launchDipN(fiber: *Fiber, control: *heap.Owned(DipControl)) MachineError!void
 }
 
 /// `dip-n` takes its `count` protected values off the stack one at a time,
-/// each as `dip` would, runs the quotation, and returns them in their
+/// each as `dip` would, paging it across a paging floor, runs the quotation, and returns them in their
 /// original order. Both phases are user-sized and advance only as far as the
 /// turn's budget allows. The values are retained, so a symbol stays a value
 /// rather than becoming code.
@@ -371,8 +362,6 @@ const DipControl = struct {
     quotation: heap.Owned(*Header),
     /// The protected values, the top of the stack first.
     protected: heap.Owned(heap.OwnedValueBuffer),
-    /// Which of them are originals of a paging floor, by `protected` index.
-    originals: std.DynamicBitSetUnmanaged,
     count: usize,
     site: machine.ExecutionSite,
     word: intern.TraceWord,
@@ -387,9 +376,8 @@ const DipControl = struct {
             .take => {
                 const end = self.index + work.take(self.count - self.index);
                 while (self.index != end) : (self.index += 1) {
-                    var taken = try paging.takeProtected(fiber);
-                    self.protected.borrowMut().appendOwned(taken.item.take());
-                    if (taken.original) self.originals.set(self.index);
+                    var taken = try fiber.popValue();
+                    self.protected.borrowMut().appendOwned(taken.take());
                 }
                 if (self.index != self.count) return .pending;
                 self.phase = .run;
@@ -405,7 +393,7 @@ const DipControl = struct {
                     self.index -= 1;
                     const item = self.protected.borrow().values()[self.index];
                     heap.retainValue(item);
-                    try paging.returnProtected(fiber, item, self.originals.isSet(self.index));
+                    try fiber.pushOwned(item);
                 }
                 if (self.index != 0) return .pending;
                 return .finished;
@@ -414,7 +402,6 @@ const DipControl = struct {
     }
 
     pub fn retire(self: *DipControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        self.originals.deinit(allocator);
         self.protected.deinit(releases, allocator);
         self.quotation.deinit(releases, allocator);
     }
