@@ -163,6 +163,9 @@ pub const Cache = struct {
     /// that lost its place to another is found by the search and takes the
     /// place back.
     by_code: [capacity]?*Flattened = @splat(null),
+    /// The record last asked for: one evaluation's guards ask for the same
+    /// one, so most asks end here.
+    last: ?*Flattened = null,
     waiting: ?*Flattened = null,
     /// Lists found to have nothing to flatten in `plain_publication`, by
     /// address alone and not held. An address that has passed to another
@@ -212,7 +215,14 @@ pub const Cache = struct {
 
     /// The record that owns the flattened list `code`, if it is one. The
     /// search is over the table's places and the waiting chain, both bounded.
-    pub fn record(self: *Cache, code: *const Header) ?*Flattened {
+    pub inline fn record(self: *Cache, code: *const Header) ?*Flattened {
+        if (self.last) |flattened| if (flattened.code == code) return flattened;
+        const found = self.search(code);
+        if (found != null) self.last = found;
+        return found;
+    }
+
+    fn search(self: *Cache, code: *const Header) ?*Flattened {
         const slot = &self.by_code[place(code)];
         if (slot.*) |flattened| if (flattened.code == code) return flattened;
         for (self.entries) |entry| if (entry.record) |flattened| if (flattened.code == code) {
@@ -298,6 +308,7 @@ pub const Cache = struct {
             link.* = flattened.retired;
             const slot = &self.by_code[place(flattened.code)];
             if (slot.* == flattened) slot.* = null;
+            if (self.last == flattened) self.last = null;
             flattened.destroy(allocator, releases);
         }
     }
