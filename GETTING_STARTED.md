@@ -338,6 +338,28 @@ ecl> task.await
 ecl>
 ```
 
+### Message-Passing
+
+Inter-task communication is accomplished via message-passing. Calling
+`task.address` on any task handle will return its *address*, and calling
+`task.send` on an address will push a message to the *mailbox* at that address. 
+
+Conversely, calling `task.receive` inside of a task will pop a message from the
+mailbox. 
+
+Here's a trivial example:
+
+```
+ecl> (task.receive wrap "Got {} in mailbox." str.format io.print) @spawn
+<task:12>
+ecl> task.address 100 task.send
+ecl> Got 100 in mailbox.
+
+ecl>
+```
+
+Thus we have the scaffolding for communication between long-lived processes.
+
 ## Combinators
 
 ECL provides a robust inventory of so-called _combinators_---words which take
@@ -399,3 +421,226 @@ As can be seen in the quoted program, bound locals can then be pushed to the
 stack wherever they're needed, once again saving the programmer from having to
 mentally model stack operations whenever a value needs to be either reused or
 deferred until later in a quotation.
+
+### Locals Slots
+
+There is a shorthand for binding stack values to names when the actual names
+are less important. The words `.x`, `.y`, `.z` bind the up-to-three top values
+without having to be explicitly introduced:
+
+```
+ecl> [2 10 20] (.x sum .x len /) apply
+10.666666666666666
+```
+
+# Dealing With the Stack
+
+Here is a "stack-native" way to calculate the intersection of two arrays:
+
+```ecl
+(x y -- i)
+(over has? where at) `inter def
+```
+
+We can step through it:
+
+1. `over` copies `x` to the top of the stack. Its shape is `(x y -- x y x)`.
+2. `has?` returns a mask over `y`, where `1` corresponds to every value that's
+   also in `x`. It consumes `y x`: the `y` that we started with and the `x`
+   that was copied in step 1.
+3. `where` converts that big mask into a list of indices.
+4. `at` uses the list of indices to index into the original `x`.
+
+The entire program is a single function-composion chain; every word is applied
+to the stack left by the word before it. Steps 2—4 are an efficient and
+idiomatic—in the idiom of array programming—way to say "every element of `x`
+that's in `y`."
+
+But while the program lacks any elaborate application patterns, it's hard to
+say that its straight-line *application structure* translates to a straight
+*dataflow* line. Step one consists of the same stack-shuffling as we
+encountered earlier: the manipulation of the values of the operand stack, not
+through computation of values, but by swapping their order, duplicating them,
+or removing them, in order to get them into the "right shape" that's expected
+by the later elements of the program.
+
+This is, for many, an unintuitive, fiddly, and clumsy thing to have to think
+about. The words `has? where at` require both that the stack be shaped a
+certain way before they run, and that the stack be shaped a certain way *as*
+they run; the programmer must then reason backwards from those requirements to
+the set of operations that go from the unmanipulated program arguments to the
+required shape. In this case, the actual acrobatics required are modest—a
+single shuffling word—but the type of reasoning required to arrive at them
+might reasonably be considered awkward, error-prone, and rather beside the
+point of the program itself.
+
+There is thus a tension inherent in any concatenative stack language, like ECL:
+the basic syntax and semantics of the language mean that function composition
+and pointfree application are essentially the *natural* style; at the same
+time, the raw material that enables those surface qualities can itself be
+unpleasant to deal with directly.
+
+ECL offers two supplementary approaches to compensate for this unpleasantness,
+which we have just reviewed: combinators and locals. Neither one is a zero-cost
+abstraction: manipulating values on the stack directly, so that they're in the
+right shape, is the most direct and efficient way to write a program. But they
+will very often result in a program which is easier to read, easier to think
+through, and easier to modify. 
+
+```
+(x y -- i)
+((pop id) (in? where) bi at) `inter def
+```
+
+Here we see another application of `bi`. In fact, `bi` applies two quotations
+to the same view of the stack (not just the top value, as in the
+arithmetic-mean example), and leaves both of their results in order on the top
+of the stack. Those two results are then consumed by `at`.
+
+The resulting program, while wordier than the direct solution, has an arguably
+simpler overall shape: the two initial arguments are passed through two
+separate functions, and the results are then combined into a single value.
+
+Note! In the first quotation, we *still* perform some shuffling: it's passed 
+`x y`, and we want to return `x` alone; so we `pop` `y` and then apply `id` to
+`x` in order to "select" it. Nevertheless, we can hopefully argue that the
+state management is easier to reason about in this case. There are a couple
+credible reasons that this might be so: for one, removing a value is arguably
+simpler than copying a value over its neighbor, and it results in a smaller
+after-shape rather than a bigger one. But as importantly: we have minimized the
+span of time and distance over which we must keep that state in mind, and
+encapsulated it entirely within the leftmost inner quotation. We only have to
+think about a concrete sequence of values and its shape for the duration of the
+application of the left branch of the `bi`; after that, we can think of the
+value `x` as being "returned" or "passed through" the computation.
+
+```
+(x y -- i)
+(.x .x .y in? where at) `inter def
+```
+
+If the direct approach and the combinator approach form a spectrum between
+efficiency and elegance, then locals arguably land somewhere in the middle. The
+programmer is still asked to reason independently about stack shape—the logical
+shape of "take a mask on `x` with respect to `y` and apply it to `x`", `f(x,y)
+|> x` has to be inverted spatially, such that the mask-taking is bounded on
+either side by `x` and `where`. On the other hand, having arrived at the stack
+shape we need, we can *declare* it by simply placing the tokens representing
+the arguments in their proper position, rather than *reasoning* through the
+primitive moves required to go from one shape to another.
+
+Variables in stack languages have often gotten a bit of a bad rap. It's
+partially because the combinatory idiom to which concatenative languages
+aspire was expressly designed to eliminate the need for them. It's also
+because, when they are lexically scoped, they break the concatenative nature of
+the language. A program in which `x` is bound can't be replaced, abstracted, or
+moved without changing its meaning depending on the boundness of `x` in its new
+lexical context.
+
+While this latter point is technically true of locals in ECL, its blast radius
+is significantly reduced, as local variables are not lexically scoped: some
+quotation `(|x| ... ( ... ))` does not bind `x` in its nested quotation.
+
+## Two Details: soft floors and `inter-len`
+
+The set-intersection example occurred to me during the exercise of writing out
+a program to calculate the Jaccard similarity of two arrays---`|x∩y| ÷ |x∪y|`.
+We can write a program:
+
+```ecl
+### def inter
+([pop id] [in? where] bi at) `inter def
+
+### def union
+(cat distinct) `union def
+
+### def jaccard
+([inter] [union] bi [len] both /) `jaccard def
+```
+
+First I want to elaborate on the behaviour of `bi`. The Factor word `bi` is
+unary: it grabs an element from the top of the stack, and passes it as an
+agument to two different quotations. It would thus be unsuitable for
+application in `inter`, which needs two values. In Factor we'd reach for `2bi`,
+which, as its name implies, consumes two values, not one.
+
+ECL doesn't have separate-arity versions of its important combinators. Instead,
+the combinators execute with a so-called *soft floor*, which dynamically
+measures the lowest consumed element of the stack by any of their applications,
+and use that to decide how many elements should be consumed after the
+combinator is finished. This allows us to apply quotations of arbitrary arity
+with the same word.
+
+This example also demonstrates one of the knock-on effects of this choice:
+because `bi` doesn't have a fixed arity, we need to infer which values are
+"returned" by each application. In the case of the left application in `inter`,
+which wants to "select" `x` from `x` and `y`, simply popping `y` off the stack
+isn't enough. We need to "touch" the intended value with `id`, which would
+otherwise be a no-op. 
+
+The Jaccard example is also a good one to demonstrate ECL's array semantics. In
+this case we're not actually interested in the intersection or sum; we're only
+interested in the numbers of their elements. We can thus write a new version of
+the program:
+
+```ecl
+### def inter-len
+(in? sum) `inter-len def
+
+### def union-len
+((pop len) (len) (inter-len) tri - +) `union-len def
+
+### def jaccard
+([inter-len] [union-len] bi /) `jaccard def
+```
+
+I note in passing that we can define the size of a union in terms of the size
+of the intersection. I want to draw attention to `inter-len`, which has dropped
+to just two words: `in? sum`. The conforming semantics of `in?` mean that "mark
+the elements of `x` that are in `y`" is a single vectorized operation,
+resulting in a bitmask; we can then sum the 1s in the mask. Thus we avoid not
+only iterating over each element of `x`, but also constructing the intersection
+array if all we need is its cardinality.
+
+# How to Manage State
+
+Every value in an ECL program is immutable. The ECL equivalent to mutating some
+value is to pop it from the stack and push an updated version to the stack in
+its place.
+
+Thus, the unit of state in ECL is the unit of concurrency: the *task*, each one
+of which has its own stack.
+
+The `agent` module provides utility words, built on top of `task.receive`
+and `task.send`, for defining stateful tasks that can communicate via
+message-passing. A trivial example: 
+
+```ecl
+ecl> (
+..    (0 agent.start) `init def
+..    ((1 +) agent.send) `inc def
+..    ((dup) agent.call) `get def
+.. ) `counter @defm
+ecl> counter.init `c set
+ecl> c counter.inc
+ecl> c counter.inc
+ecl> c counter.get
+2
+```
+
+We define a module `counter` which exposes a few words for starting and
+communicating with a stateful counter task.
+
+- `init` calls `agent.start` with an initial state, which will push the
+  resulting address on the stack;
+- `inc` expects an address on the stack and applies `agent.send` with a quotation
+  to be applied to the current state;
+- `get` expects an address on the stack and applies `agent.call` with a
+  quotation. While `agent.send` simply applies the quotation inside the task,
+  `agent.call` applies the quotation and then sends back the top value on the
+  task stack.
+
+At that point, creating a persistent stateful object is just a matter of
+initiating the counter and then assigning the resulting address to a name.
+
+We can then interact with the counter by applying `counter` words to its address. `inc` mutates the state in the task stack; `get` returns a value to the caller.

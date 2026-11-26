@@ -1,28 +1,5 @@
 <!-- Generated from design/SPEC.src.md; make changes in the source fragments. -->
-# ecl — language specification
-
-## Status, scope, and conformance
-
-This document defines the syntax and semantics of the ECL language. The
-language is defined independently of any implementation representation,
-interpreter architecture, host interface, or distribution. This document
-defines the language; the shipped ECL interpreter is its reference
-implementation. 
-
-ECL has three distinct fields of conformance:
-
-- An **ECL language implementation** conforms to this document. It provides
-  the source language, values, evaluation, bindings, units and errors,
-  modules, and tasks specified here.
-- An **ECL standard environment** is a conforming language implementation
-  that also provides the vocabulary specified by [`STDLIB.md`](STDLIB.md).
-  When a word in that vocabulary is a semantic primitive of the language, this document is
-  the authority for its spelling and behavior and `STDLIB.md` indexes that
-  definition rather than restating it.
-- An **ECL distribution or toolchain** may additionally provide a command,
-  module transports, native extensions, packages, a formatter, and other host
-  facilities. Those facilities are not language semantics unless this
-  document explicitly says otherwise.
+# ECL Language Specification
 
 ## Language overview
 
@@ -69,10 +46,6 @@ published and invoked.
 
 ## Source language
 
-The grammar in this chapter is the single authoritative grammar for ECL source.
-Later sections may quote productions for explanation but do not define a second
-grammar.
-
 ### Source text
 
 - Source is UTF-8. Invalid UTF-8 is a `` `parse `` error.
@@ -116,7 +89,7 @@ characters. An atom is classified whole-token, in this order:
    of that symbol, which run pushes the symbol: `` `foo `` and `(foo) first`
    push the same value. 
    `` ` `` is reserved token-initially and banned inside symbols.
-4. **Slot** — exactly `.x`, `.y`, or `.z`: an implicit local (see Forms).
+4. **Slot** — `.x`, `.y`, or `.z`: an implicit local (see Forms).
    Slots are not symbols and cannot be quoted.
 5. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
@@ -128,7 +101,7 @@ can include more dots, which have no additional meaning.
 Symbols with spaces in them can be constructed by wrapping the whole spelling
 in single quotes.
 
-**Strings** constructed with double quotes, and may span newlines. Raw
+**Strings** are constructed with double quotes, and may span newlines. Raw
 newlines, indentation, and blank lines inside the quotes are literal; there is
 no triple-quoted, dedented, or margin-stripped form. The escapes are `\\`
 for backslash, `\"` for double quote, `\n` for newline, `\t` for tab, and
@@ -667,12 +640,12 @@ into those keys.
 
 ## Numbers
 
-- A char is its codepoint to every numeric word, and no numeric word returns a
-  char: `\a 1 +` is `98`, `\a \b -` is `-1`, `\a \b <` is `1`, and `"ab" sum`
-  is `195`. A string enters arithmetic and comparison as the int vector of its
-  codepoints; `char` converts back. The one exception is a total that performs
-  no arithmetic step: `"a" sum` and `"a" product` return the sole element
-  unchanged, so the result is `\a`.
+- Numeric operations treat chars as their backing codepoint. Thus, `\a 1 +` is
+  `98`, `\a \b -` is `-1`, `\a \b <` is `1`, and `"ab" sum` is `195`. A string
+  enters arithmetic and comparison as the int vector of its codepoints; `char`
+  converts back. The one exception is a total that performs no arithmetic step:
+  `"a" sum` and `"a" product` return the sole element unchanged, so the result
+  is `\a`.
 - Arithmetic on int64 that overflows is an `` `overflow `` error — no wrapping, no
   promotion to float or bignum. Scalar and array arithmetic behave identically.
 - `/` is float division. `div` is checked integer division, floored toward
