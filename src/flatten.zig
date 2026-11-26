@@ -573,6 +573,8 @@ const Rewrite = struct {
     const Shape = union(enum) {
         apply,
         dip,
+        above,
+        below,
         /// This many quotations, each a form of its own.
         cleave: usize,
         spread: usize,
@@ -605,9 +607,11 @@ const Rewrite = struct {
                 .dip => .dip,
                 .cleave => |count| .{ .cleave = count },
                 .spread => |count| .{ .spread = count },
-                // The measured words find what their quotation consumed as
-                // it runs; nothing here can stand in for that.
-                .branch, .measured => return null,
+                .measured => |placement| switch (placement) {
+                    .above => Shape.above,
+                    .below => Shape.below,
+                },
+                .branch => return null,
                 .declared => if (combinators.listSharing(builtin.primitive)) |sharing| switch (sharing) {
                     .cleave => Shape.cleave_list,
                     .spread => Shape.spread_list,
@@ -617,7 +621,7 @@ const Rewrite = struct {
         // The forms that push the phrase's operands: its quotations, or the
         // one list of them.
         const operand_forms: usize = switch (shape) {
-            .apply, .dip, .cleave_list, .spread_list => 1,
+            .apply, .dip, .above, .below, .cleave_list, .spread_list => 1,
             .cleave, .spread => |count| count,
         };
         if (pending.count < operand_forms) return null;
@@ -629,11 +633,17 @@ const Rewrite = struct {
         // A quotation with a summary leaves no local bound. `dip` holds its
         // protected value in a local across its quotation, so it needs that;
         // a cleave or spread has it of every quotation already.
+        // A measured word needs what its quotation consumes, which a summary
+        // says before the quotation runs.
+        const applied_summary: ?stack_summary.Summary = switch (shape) {
+            .apply, .dip, .above, .below => try stack_summary.of(self.fiber, applied_site, applied[0].literal),
+            .cleave, .spread, .cleave_list, .spread_list => null,
+        };
         const neutral = switch (shape) {
-            .apply, .dip => try stack_summary.of(self.fiber, applied_site, applied[0].literal) != null,
+            .apply, .dip, .above, .below => applied_summary != null,
             .cleave, .spread, .cleave_list, .spread_list => true,
         };
-        if (shape == .dip and !neutral) return null;
+        if (shape != .apply and !neutral) return null;
         const expanded = expanded: {
             for (pending.items[0..kept]) |item| {
                 if (!self.emit(item.form, item.origin)) break :expanded false;
@@ -655,6 +665,27 @@ const Rewrite = struct {
                     if (!self.operation(words.drop, 1, at)) break :expanded false;
                     break :dip 1;
                 },
+                // Bind what the quotation consumes, run it over a copy, and
+                // put the originals back above its results or below them.
+                // The count is the summary's, so the publication is checked
+                // once the quotation has run, as a cleave checks it.
+                .above, .below => measured: {
+                    const consumed = applied_summary.?.consumed;
+                    if (consumed != 0 and !self.operation(words.load, consumed, at)) break :expanded false;
+                    if (shape == .below) for (0..consumed) |local| {
+                        if (!self.operation(words.get, @intCast(local), at)) break :expanded false;
+                    };
+                    for (0..consumed) |local| {
+                        if (!self.operation(words.get, @intCast(local), at)) break :expanded false;
+                    }
+                    if (!try self.body(applied[0].literal, &.{}, applied_site, depth + 1, inside)) break :expanded false;
+                    if (!self.operation(words.recheck, 0, at)) break :expanded false;
+                    if (shape == .above) for (0..consumed) |local| {
+                        if (!self.operation(words.get, @intCast(local), at)) break :expanded false;
+                    };
+                    if (consumed != 0 and !self.operation(words.drop, consumed, at)) break :expanded false;
+                    break :measured consumed;
+                },
                 .cleave, .spread, .cleave_list, .spread_list => counted: {
                     var quotations: Quotations = .{};
                     switch (shape) {
@@ -668,7 +699,7 @@ const Rewrite = struct {
                                 else => break :expanded false,
                             };
                         },
-                        .apply, .dip => unreachable,
+                        .apply, .dip, .above, .below => unreachable,
                     }
                     for (quotations.items[0..quotations.count], 0..) |quotation, index| {
                         const summary = try stack_summary.of(self.fiber, applied_site, quotation) orelse break :expanded false;
@@ -678,7 +709,7 @@ const Rewrite = struct {
                     break :counted switch (shape) {
                         .cleave, .cleave_list => try self.cleave(&quotations, applied_site, depth, at, inside),
                         .spread, .spread_list => try self.spread(&quotations, applied_site, depth, at, inside),
-                        .apply, .dip => unreachable,
+                        .apply, .dip, .above, .below => unreachable,
                     } orelse break :expanded false;
                 },
             };

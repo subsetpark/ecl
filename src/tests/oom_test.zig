@@ -592,6 +592,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "(3 (1 +) apply 4 (1 +) dip) apply pop pop " ++
             "(3 (1 +) (2 *) bi 4 5 (neg) (1 +) bracket) apply pop pop pop pop " ++
             "(3 4 (1 +) both) apply pop pop " ++
+            "(3 4 (+) below 5 (1 +) above) apply pop pop pop pop pop " ++
             // `retain` buffers the values its counts apply to.
             "1 2 [1 0] retain pop " ++
             // A cleave over summarized quotations, which runs them in place.

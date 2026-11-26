@@ -128,6 +128,20 @@ test "flatten: cleaves, spreads and measured words over literals compute what th
         .{ .name = "(1 +) `inc def (5 (inc) (inc inc) bi) `w def w w", .source = "(1 +) `inc def (5 (inc) (inc inc) bi) `w def w w", .expected = "6 7 6 7" },
         .{ .name = "(1 2 3 [] cleave 1 2 [(+)] cleave) apply", .source = "(1 2 3 [] cleave 1 2 [(+)] cleave) apply", .expected = "1 2 3 3" },
         .{ .name = "(\"abc\" (len) (reverse) bi) apply", .source = "(\"abc\" (len) (reverse) bi) apply", .expected = "3 \"cba\"" },
+        .{ .name = "(3 4 (+) below 3 4 (+) above) apply", .source = "(3 4 (+) below 3 4 (+) above) apply", .expected = "3 4 7 7 3 4" },
+        .{ .name = "(5 (dup *) below (1 +) above) apply", .source = "(5 (dup *) below (1 +) above) apply", .expected = "5 26 25" },
+        .{ .name = "(1 2 3 (+ +) below) apply", .source = "(1 2 3 (+ +) below) apply", .expected = "1 2 3 6" },
+        .{ .name = "(1 2 (pop) below 1 2 (pop) above) apply", .source = "(1 2 (pop) below 1 2 (pop) above) apply", .expected = "1 2 1 2" },
+        .{ .name = "(1 2 (pop pop 7 8 9) below) apply", .source = "(1 2 (pop pop 7 8 9) below) apply", .expected = "1 2 7 8 9" },
+        .{ .name = "(1 2 (swap) below (over) above) apply", .source = "(1 2 (swap) below (over) above) apply", .expected = "1 2 2 1 2 2 1" },
+        .{ .name = "(1 () below () above) apply", .source = "(1 () below () above) apply", .expected = "1" },
+        .{ .name = "(1 2 ((+) below) ((+) above) bi) apply", .source = "(1 2 ((+) below) ((+) above) bi) apply", .expected = "1 2 3 3 1 2" },
+        .{ .name = "(1 2 3 ((+) dip 5) below) apply", .source = "(1 2 3 ((+) dip 5) below) apply", .expected = "1 2 3 3 3 5" },
+        .{ .name = "(1 2 (|a b| a b + a) above) apply", .source = "(1 2 (|a b| a b + a) above) apply", .expected = "3 1 1 2" },
+        .{ .name = "(5 (dup 0 > (pop) (dup) if) below) apply", .source = "(5 (dup 0 > (pop) (dup) if) below) apply", .expected = "5" },
+        .{ .name = "(1 2 3 4 ((+) below) below) apply", .source = "(1 2 3 4 ((+) below) below) apply", .expected = "1 2 3 4 3 4 7" },
+        .{ .name = "(1 +) `inc def 2 (5 (inc) below (inc inc) above) times", .source = "(1 +) `inc def 2 (5 (inc) below (inc inc) above) times", .expected = "5 8 6 5 8 6" },
+        .{ .name = "([1 2 3] (2 (+) below + +) each) apply", .source = "([1 2 3] (2 (+) below + +) each) apply", .expected = "[6 8 10]" },
     });
 }
 
@@ -147,6 +161,11 @@ test "flatten: a phrase short of inputs fails as the unflattened phrase does" {
         .{ .source = "(len) `g def (1 2 3 (g 4) (+) bracket) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `g `w) data {source \"<command>\" line 1 col 2 sites ({source \"<command>\" line 1 col 2} {source \"<command>\" line 1 col 22} {source \"<command>\" line 1 col 47})}}" },
         .{ .source = "(1 2 (+) (1 0 div) bi) apply", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 15 sites ({source \"<command>\" line 1 col 15})}}" },
         .{ .source = "2 (1 (+) (-) bi) times", .expected = "{kind underflow msg \"+ needs 2 stack values, but found 0\" word + trace (`+) data {needed 2 available 0 source \"<command>\" line 1 col 7 sites ({source \"<command>\" line 1 col 7})}}" },
+        .{ .source = "((+) below) apply", .expected = "{kind underflow msg \"+ needs 2 stack values, but found 0\" word + trace (`+) data {needed 2 available 0 source \"<command>\" line 1 col 3 sites ({source \"<command>\" line 1 col 3})}}" },
+        .{ .source = "(1 (+) above) apply", .expected = "{kind underflow msg \"+ needs 2 stack values, but found 0\" word + trace (`+) data {needed 2 available 0 source \"<command>\" line 1 col 5 sites ({source \"<command>\" line 1 col 5})}}" },
+        .{ .source = "(1 2 (len) below) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len) data {source \"<command>\" line 1 col 7 sites ({source \"<command>\" line 1 col 7})}}" },
+        .{ .source = "(1 2 (len +) above) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len) data {source \"<command>\" line 1 col 7 sites ({source \"<command>\" line 1 col 7})}}" },
+        .{ .source = "(len) `g def (1 2 (g 3) above) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `g `w) data {source \"<command>\" line 1 col 2 sites ({source \"<command>\" line 1 col 2} {source \"<command>\" line 1 col 20} {source \"<command>\" line 1 col 39})}}" },
     });
 }
 
@@ -160,6 +179,7 @@ test "flatten: definitions changed during a flattened cleave fail as a counted c
         .{ .name = "(1 2 ((pop pop 7 8) `bi def) apply (+) (-) bi) apply", .source = "(1 2 ((pop pop 7 8) `bi def) apply (+) (-) bi) apply", .expected = "1 2 7 8" },
         .{ .name = "(pop pop 7) `bi def (1 2 (+) (-) bi) apply", .source = "(pop pop 7) `bi def (1 2 (+) (-) bi) apply", .expected = "1 2 7" },
     });
+    try expectFailures(&.{});
 }
 
 test "flatten: a source combinator over literals computes what the word does" {

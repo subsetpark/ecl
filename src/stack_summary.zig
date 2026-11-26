@@ -78,10 +78,10 @@ pub fn wordHasSummary(fiber: *Fiber, site: machine.ExecutionSite, word: value.Sy
     };
 }
 
-/// The failure of a cleave or spread that was running by its quotations'
-/// summaries when a publication changed what those summaries rested on.
+/// The failure of a word that was running its quotations by their summaries
+/// when a publication changed what those summaries rested on.
 pub fn failDefinitionsChanged(fiber: *Fiber) machine.MachineError {
-    return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+    return fiber.fail(.domain, "definitions changed while a quotation was running by its stack summary");
 }
 
 /// What a fiber has read of the quotations it applied, all in one

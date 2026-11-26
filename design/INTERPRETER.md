@@ -1145,8 +1145,9 @@ well, so every quotation must have a summary, and it holds its inputs in locals
 as `dip` holds its one. After each of its quotations it checks the publication and
 fails as a cleave running by its summaries does, since a summary read under one
 publication says nothing of a quotation run under another. The measured words
-`above` and `below` find what their quotation consumed as it runs, and stay as
-written.
+`above` and `below` are flattened the same way, by what the summary says their
+quotation consumes, and make the same check: written, they find that out as the
+quotation runs and have nothing to check.
 
 A call of a source word is flattened too when quotation literals are its
 arguments and the body can run in place without anyone telling: it runs where
