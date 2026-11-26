@@ -66,6 +66,18 @@ pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{
     return summary;
 }
 
+/// Whether `word`, run at `site`, has a summary. A word that has one moves
+/// only the values its counts say, and leaves no local bound.
+pub fn wordHasSummary(fiber: *Fiber, site: machine.ExecutionSite, word: value.Symbol) error{OutOfMemory}!bool {
+    var walk: Walk = .{ .fiber = fiber, .publication = fiber.currentPublication() };
+    return switch (try fiber.summaryTarget(word, site)) {
+        .none => false,
+        .source => |source| try walk.body(word, site, source) == .exact,
+        .builtin => |builtin| !prims.unsummarizable(builtin.primitive) and
+            Walk.exact(builtin.effect) != null and !Walk.takesQuotation(builtin.effect.?),
+    };
+}
+
 /// The failure of a cleave or spread that was running by its quotations'
 /// summaries when a publication changed what those summaries rested on.
 pub fn failDefinitionsChanged(fiber: *Fiber) machine.MachineError {

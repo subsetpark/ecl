@@ -163,11 +163,41 @@ test "flatten: definitions changed during a flattened cleave fail as a counted c
 }
 
 test "flatten: a source combinator over literals computes what the word does" {
-    // PENDING: patch 4.
-    return error.SkipZigTest;
+    try support.expectStacks(&.{
+        .{ .name = "(3 4 (1 +) both) apply", .source = "(3 4 (1 +) both) apply", .expected = "4 5" },
+        .{ .name = "(1 2 (1 +) both 3 (2 *) both) apply", .source = "(1 2 (1 +) both 3 (2 *) both) apply", .expected = "2 6 6" },
+        .{ .name = "(bi +) `fork+ def (3 (1 +) (2 *) fork+) apply", .source = "(bi +) `fork+ def (3 (1 +) (2 *) fork+) apply", .expected = "10" },
+        .{ .name = "(|x q| x q apply x q apply +) `twice def (3 (1 +) twice) apply", .source = "(|x q| x q apply x q apply +) `twice def (3 (1 +) twice) apply", .expected = "8" },
+        .{ .name = "(apply) `run def (run) `run2 def (5 (1 +) run2) apply", .source = "(apply) `run def (run) `run2 def (5 (1 +) run2) apply", .expected = "6" },
+        .{ .name = "(|q| q dip) `under def (1 2 (10 +) under) apply", .source = "(|q| q dip) `under def (1 2 (10 +) under) apply", .expected = "11 2" },
+        .{ .name = "(|a b q| a q apply b q apply) `mine def 2 (1 2 (10 *) mine) times", .source = "(|a b q| a q apply b q apply) `mine def 2 (1 2 (10 *) mine) times", .expected = "10 20 10 20" },
+        .{ .name = "(1 +) `inc def (bi) `b2 def (5 (inc) (inc inc) b2) apply", .source = "(1 +) `inc def (bi) `b2 def (5 (inc) (inc inc) b2) apply", .expected = "6 7" },
+        .{ .name = "(x q -- y) (apply) `eff def (5 (1 +) eff) apply", .source = "(x q -- y) (apply) `eff def (5 (1 +) eff) apply", .expected = "6" },
+        .{ .name = "((x q -- y) (apply) `ap def (x -- y) ((1 +) ap) `go def) `m @defm (5 m.go 5 (2 *) m.ap) apply", .source = "((x q -- y) (apply) `ap def (x -- y) ((1 +) ap) `go def) `m @defm (5 m.go 5 (2 *) m.ap) apply", .expected = "6 10" },
+        .{ .name = "([1 2 3] (dup (1 +) both +) each) apply", .source = "([1 2 3] (dup (1 +) both +) each) apply", .expected = "[4 6 8]" },
+        .{ .name = "(both +) `b def (3 4 (1 +) b) `w def w w", .source = "(both +) `b def (3 4 (1 +) b) `w def w w", .expected = "9 9" },
+        .{ .name = "(|q| q apply) `r def (5 (1 +) r (dup) `r def 5 (1 +) r) apply", .source = "(|q| q apply) `r def (5 (1 +) r (dup) `r def 5 (1 +) r) apply", .expected = "6 5 (1 +) (1 +)" },
+    });
 }
 
 test "flatten: an inlined source word keeps its trace and call site" {
-    // PENDING: patch 4.
-    return error.SkipZigTest;
+    try expectFailures(&.{
+        .{ .source = "(3 4 (len) both) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `both) data {source \"<command>\" line 1 col 7 sites ({source \"<command>\" line 1 col 7} {source \"<command>\" line 1 col 12})}}" },
+        .{ .source = "(3 (len) both) apply", .expected = "{kind underflow msg \"both needs 3 stack values, but found 2\" word both trace (`both) data {needed 3 available 2 source \"prelude.ecl\" line 21 col 1 sites ({source \"prelude.ecl\" line 21 col 1})}}" },
+        .{ .source = "(bi +) `fork+ def (3 (1 +) (len) fork+) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `fork+) data {source \"<command>\" line 1 col 29 sites ({source \"<command>\" line 1 col 29} {source \"<command>\" line 1 col 34})}}" },
+        .{ .source = "(|x q| x q apply x q apply +) `twice def (twice) apply", .expected = "{kind underflow msg \"twice needs 2 stack values, but found 0\" word twice trace (`twice) data {needed 2 available 0 source \"<command>\" line 1 col 1 sites ({source \"<command>\" line 1 col 1})}}" },
+        .{ .source = "(|q| 1 q apply) `one def ((len) one) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `one) data {source \"<command>\" line 1 col 28 sites ({source \"<command>\" line 1 col 28} {source \"<command>\" line 1 col 33})}}" },
+        .{ .source = "(apply) `run def (run) `run2 def (5 (len) run2) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `run) data {source \"<command>\" line 1 col 38 sites ({source \"<command>\" line 1 col 38} {source \"<command>\" line 1 col 19})}}" },
+        .{ .source = "(dip 1 +) `under def (1 2 (len) under 9) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `under) data {source \"<command>\" line 1 col 28 sites ({source \"<command>\" line 1 col 28} {source \"<command>\" line 1 col 33})}}" },
+        .{ .source = "(|q| q apply) `r def (5 (len) r) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `r) data {source \"<command>\" line 1 col 26 sites ({source \"<command>\" line 1 col 26} {source \"<command>\" line 1 col 31})}}" },
+        .{ .source = "(|q| q apply 1) `r def (5 (len) r) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `r) data {source \"<command>\" line 1 col 28 sites ({source \"<command>\" line 1 col 28} {source \"<command>\" line 1 col 33})}}" },
+        .{ .source = "(|q| q apply) `r def (5 (len) r 1) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `r `w) data {source \"<command>\" line 1 col 26 sites ({source \"<command>\" line 1 col 26} {source \"<command>\" line 1 col 31} {source \"<command>\" line 1 col 43})}}" },
+        .{ .source = "(|q| q apply 1) `r def (5 (len) r 2) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `r `w) data {source \"<command>\" line 1 col 28 sites ({source \"<command>\" line 1 col 28} {source \"<command>\" line 1 col 33} {source \"<command>\" line 1 col 45})}}" },
+        .{ .source = "(|q| q apply) `r def (|q| q r 1 +) `s def (4 (len) s) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `r `s) data {source \"<command>\" line 1 col 47 sites ({source \"<command>\" line 1 col 47} {source \"<command>\" line 1 col 29} {source \"<command>\" line 1 col 52})}}" },
+        .{ .source = "(|a b q| a q apply b q apply) `mine def (1 (10 *) mine) apply", .expected = "{kind underflow msg \"mine needs 3 stack values, but found 2\" word mine trace (`mine) data {needed 3 available 2 source \"<command>\" line 1 col 1 sites ({source \"<command>\" line 1 col 1})}}" },
+        .{ .source = "(apply) helper `h def (5 (len) h) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `h) data {source \"<command>\" line 1 col 32 sites ({source \"<command>\" line 1 col 27} {source \"<command>\" line 1 col 32})}}" },
+        .{ .source = "(x q -- y) (apply) `eff def ((x -- y) (5 (1 2) eff) `g def) `m @defm m.g", .expected = "{kind undefined-word msg \"undefined word `eff`\" word eff trace (`eff) data {name eff scope module source \"<command>\" line 1 col 48 sites ({source \"<command>\" line 1 col 48})}}" },
+        .{ .source = "(apply) `run def [1 2] ((1 2) run) each", .expected = "{kind contract msg \"each quotation at element 0 violated its stack effect; expected final depth 1 from 1 seeded value, observed 3\" word each trace (`each) data {expected (a -- b) seeded 1 observed 3 index 0 source \"<command>\" line 1 col 25 sites ({})}}" },
+        .{ .source = "(|q| q apply) `r def [1 2] ((len) r) each", .expected = "{kind type msg \"len expected a list\" word len trace (`len `r) data {source \"<command>\" line 1 col 30 sites ({source \"<command>\" line 1 col 30} {source \"<command>\" line 1 col 35})}}" },
+    });
 }

@@ -22,7 +22,9 @@ const TraceEntry = machine.TraceEntry;
 /// stays pending when this fails.
 pub fn start(via: *Unwinding) error{OutOfMemory}!void {
     const fiber = via.fiber();
-    const capacity = std.math.add(usize, fiber.frames.items.len, 3) catch
+    // The running evaluation may be traced under each word inlined around
+    // the failing form; a frame that is makes room as it is reached.
+    const capacity = std.math.add(usize, fiber.frames.items.len, 3 + running_words) catch
         return error.OutOfMemory;
     const trace = try fiber.allocator.alloc(TraceEntry, capacity);
     errdefer fiber.allocator.free(trace);
@@ -42,6 +44,10 @@ pub fn start(via: *Unwinding) error{OutOfMemory}!void {
     driver.appendInitial(via);
     via.adoptDriver(driver);
 }
+
+/// The most words one evaluation is traced under: its own, and each a
+/// flattened list can have inlined around one form.
+const running_words = 17;
 
 const FailureDriver = struct {
     pub const address_stable_driver = {};
@@ -123,7 +129,30 @@ const FailureDriver = struct {
             .site = null,
             .attribution = self.failure.trace_parent_attribution,
         });
-        if (via.currentTrace()) |entry| self.appendTrace(entry);
+        var nth: usize = 0;
+        while (via.currentTrace(nth)) |entry| : (nth += 1) self.appendTrace(entry);
+    }
+    /// Makes room for one more frame's words. A frame of a flattened list
+    /// can be traced under more words than one, so the trace can outgrow the
+    /// room one entry per frame gave it; doubling keeps the copying in
+    /// proportion to the entries added.
+    fn reserveFrame(self: *FailureDriver) error{OutOfMemory}!void {
+        if (self.trace.len - self.trace_count >= running_words) return;
+        const capacity = self.trace.len * 2 + running_words;
+        const trace = try self.allocator.alloc(TraceEntry, capacity);
+        errdefer self.allocator.free(trace);
+        const resolved = try self.allocator.alloc(u32, capacity);
+        errdefer self.allocator.free(resolved);
+        const located = try self.allocator.alloc(?spans.LocatedSpan, capacity);
+        @memcpy(trace[0..self.trace_count], self.trace[0..self.trace_count]);
+        @memcpy(resolved[0..self.trace_count], self.resolved[0..self.trace_count]);
+        @memcpy(located[0..self.trace_count], self.located[0..self.trace_count]);
+        self.allocator.free(self.trace);
+        self.allocator.free(self.resolved);
+        self.allocator.free(self.located);
+        self.trace = trace;
+        self.resolved = resolved;
+        self.located = located;
     }
     fn appendTrace(self: *FailureDriver, entry: TraceEntry) void {
         self.trace[self.trace_count] = entry;
@@ -201,8 +230,10 @@ const FailureDriver = struct {
                     self.state = .{ .spell = 0 };
                     continue;
                 }
+                try self.reserveFrame();
                 frame_index.* -= 1;
-                if (via.frameTrace(frame_index.*)) |entry| self.appendTrace(entry);
+                var nth: usize = 0;
+                while (via.frameTrace(frame_index.*, nth)) |entry| : (nth += 1) self.appendTrace(entry);
             },
             // Qualifying a module-local word interns its spelling. Failures
             // are rare, so this is the one place that cost is paid.

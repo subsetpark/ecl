@@ -3586,6 +3586,8 @@ pub const Fiber = struct {
                 .code = executable.code(),
                 .site = if (home) |target| .image(target, self.module_access, site.defining) else site,
                 .summary = self.resolutions.summary(word, self.inherited.registry.currentPublication(), key),
+                .trace_word = definitionTraceWord(definition, home, word.name),
+                .attribution = definition.attribution,
             } },
         };
     }
@@ -3705,23 +3707,45 @@ pub const Fiber = struct {
             .source => |index| index,
             .invocation, .replay, .redispatch => return self.fail(.domain, "a flattened list was resumed at a guard"),
         };
-        const operands: Value = .{ .list = guard.operands };
-        for (guard.operands_start..guard.operands_start + guard.operands_len) |position|
-            try self.pushBorrowed(list.atUnchecked(operands, position));
-        current.position = .{ .source = after + guard.skip };
+        // An operand is a literal, or a read of a local that holds one.
+        for (record.operands[guard.operands_start..][0..guard.operands_len]) |operand| {
+            const read = if (operand == .symbol) env.localOperand(operand.symbol.slot) else null;
+            if (read) |index| try self.localOperation(operand.symbol.name, index) else try self.pushBorrowed(operand);
+        }
+        self.current.?.position = .{ .source = after + guard.skip };
         return self.executeWord(guard.word);
     }
 
-    /// Whether a suspended evaluation of a flattened list stopped at a form
-    /// that ended every list it was written in. Evaluations of those lists
-    /// would not be suspended: they would be gone, their activation handed
-    /// on, so this one is traced under no word.
-    fn exhaustedAsWritten(self: *const Fiber, frame: *const Eval) bool {
-        if (!frame.flattened) return false;
-        const record = self.flattened.recordOf(frame.code) orelse return false;
-        const next = frame.nextIndex();
-        if (next == 0 or next > record.origins.len) return false;
-        return !record.origins[next - 1].continues;
+    /// The `nth` word an evaluation is traced under, innermost first, or
+    /// null past the last. An evaluation as written has one, its activation.
+    /// A flattened list stands for the evaluations of every list written in
+    /// it: of each word inlined around the form it is at, then its own. A
+    /// word is in the trace when an evaluation of one of its lists would
+    /// still exist: at a failing form the innermost always does, and
+    /// otherwise only one with forms left would, the rest having handed
+    /// their activation on.
+    fn tracedUnder(self: *const Fiber, evaluation: *const Eval, form: u32, suspended: bool, nth: usize) ?TraceEntry {
+        const record = (if (evaluation.flattened) self.flattened.recordOf(evaluation.code) else null) orelse
+            return if (nth == 0) Unwinding.traceEntry(evaluation.activation) else null;
+        if (form >= record.origins.len) return if (nth == 0) Unwinding.traceEntry(evaluation.activation) else null;
+        const origin = record.origins[form];
+        var visible = !suspended or origin.continues;
+        var word = origin.word;
+        var seen: usize = 0;
+        while (word != flatten.no_word) {
+            const inlined = record.chain[word];
+            if (visible) {
+                if (seen == nth) return .{
+                    .word = inlined.word,
+                    .site = .{ .code = inlined.code, .index = inlined.index },
+                    .attribution = inlined.attribution,
+                };
+                seen += 1;
+            }
+            visible = inlined.call_continues;
+            word = inlined.outer;
+        }
+        return if (visible and seen == nth) Unwinding.traceEntry(evaluation.activation) else null;
     }
 
     /// The check after each quotation of a flattened cleave or spread, whose
@@ -4073,8 +4097,20 @@ pub const Fiber = struct {
     fn lentPastFlattened(self: *Fiber, current: *const Eval) Activation {
         if (!current.flattened) return .none;
         const record = self.flattened.record(current.code) orelse return .none;
-        if (self.active_index >= record.origins.len or record.origins[self.active_index].continues) return .none;
-        return current.activation.borrowed();
+        if (self.active_index >= record.origins.len) return .none;
+        const origin = record.origins[self.active_index];
+        if (origin.continues) return .none;
+        // The innermost word whose lists end here: an inlined one, whose
+        // activation exists only in the record, or the evaluation's own.
+        if (origin.word == flatten.no_word) return current.activation.borrowed();
+        const inlined = record.chain[origin.word];
+        return .{
+            .word = inlined.word,
+            .origin = @intFromPtr(inlined.code),
+            .index = inlined.index,
+            .hold = .borrowed,
+            .attribution = inlined.attribution,
+        };
     }
     /// `suspendCurrent` for a word about to run, which records where it was
     /// called. A caller that stays suspended lends its code; one that has no
@@ -4652,6 +4688,10 @@ pub const SummaryTarget = union(enum) {
         /// Where the body runs: the caller's site, or the word's own image.
         site: ExecutionSite,
         summary: WordResolutions.BodySummary,
+        /// What an activation of the word is traced under, and whose
+        /// failure a failure in it is.
+        trace_word: intern.TraceWord,
+        attribution: env.Attribution,
     },
 };
 
@@ -5232,17 +5272,21 @@ pub const Unwinding = opaque {
         return self.fiber().takePendingForUnwind();
     }
 
-    /// The word the running evaluation is traced under, if any.
-    pub fn currentTrace(self: *Unwinding) ?TraceEntry {
-        const current = self.fiber().current orelse return null;
-        return traceEntry(current.activation);
+    /// The `nth` word the running evaluation is traced under, innermost
+    /// first, or null past the last.
+    pub fn currentTrace(self: *Unwinding, nth: usize) ?TraceEntry {
+        const current = if (self.fiber().current) |*running| running else return null;
+        return self.fiber().tracedUnder(current, self.fiber().active_index, false, nth);
     }
 
-    /// The word saved frame `index` is traced under, if it is a traced
-    /// evaluation.
-    pub fn frameTrace(self: *Unwinding, index: usize) ?TraceEntry {
+    /// The `nth` word saved frame `index` is traced under, if it is a traced
+    /// evaluation, or null past the last.
+    pub fn frameTrace(self: *Unwinding, index: usize, nth: usize) ?TraceEntry {
         return switch (self.fiber().frames.items[index]) {
-            .eval => |frame| if (self.fiber().exhaustedAsWritten(&frame)) null else traceEntry(frame.activation),
+            .eval => |*frame| trace: {
+                const next = frame.nextIndex();
+                break :trace self.fiber().tracedUnder(frame, if (next == 0) 0 else next - 1, true, nth);
+            },
             .effect_check, .application, .qualified_after_load, .boundary => null,
         };
     }

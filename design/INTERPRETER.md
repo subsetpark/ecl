@@ -1135,14 +1135,29 @@ that:
   and handed their activation on. Suspended there it lends its activation and
   is traced under no word, so a failure's trace holds the words it would have.
 
-`apply` and `dip` need nothing but the quotation. A cleave or spread also
-needs what each quotation consumes and leaves, so it is flattened only when
-every quotation has a stack summary, and it then holds its inputs in locals as
-`dip` holds its one. After each of its quotations it checks the publication and
+`apply` needs nothing but the quotation. `dip` holds its protected value in a
+local across the quotation, and a read of a local counts back from the newest
+binding, so `dip` is flattened only when the quotation has a stack summary:
+code with one leaves no local of its own bound. For the same reason a local is
+taken to hold the literal it was bound to only across forms that have
+summaries. A cleave or spread needs what each quotation consumes and leaves as
+well, so every quotation must have a summary, and it holds its inputs in locals
+as `dip` holds its one. After each of its quotations it checks the publication and
 fails as a cleave running by its summaries does, since a summary read under one
 publication says nothing of a quotation run under another. The measured words
 `above` and `below` find what their quotation consumed as it runs, and stay as
 written.
+
+A call of a source word is flattened too when quotation literals are its
+arguments and the body can run in place without anyone telling: it runs where
+its caller does, is reported as itself, does not reach itself, and binds locals
+only as its first form, where the guard stands for the word's own check of its
+arity. The body is put in place of the call with those arguments ahead of it,
+and a local the body binds to one of them counts as that literal where the body
+applies it. The record keeps, for each word inlined, what its activation would
+have said, and a failure's trace is read from it: each inlined word around the
+failing form, then the evaluation's own, each present when an evaluation of
+one of its lists would still exist.
 
 A record lasts as long as its flattened list is held: by the table, or by an
 evaluation still running it after the table has moved on.

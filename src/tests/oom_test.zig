@@ -591,6 +591,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // A list flattened on entry: the table, the record and the list.
             "(3 (1 +) apply 4 (1 +) dip) apply pop pop " ++
             "(3 (1 +) (2 *) bi 4 5 (neg) (1 +) bracket) apply pop pop pop pop " ++
+            "(3 4 (1 +) both) apply pop pop " ++
             // `retain` buffers the values its counts apply to.
             "1 2 [1 0] retain pop " ++
             // A cleave over summarized quotations, which runs them in place.
