@@ -60,6 +60,17 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try task_prims.install(core);
     try test_prims.install(core);
 }
+/// The words that only move values.
+pub const Shuffle = enum { dup, swap, over, pop };
+
+pub fn shuffle(primitive: env.PrimitiveImpl) ?Shuffle {
+    if (primitive == &dup) return .dup;
+    if (primitive == &swap) return .swap;
+    if (primitive == &over) return .over;
+    if (primitive == &pop) return .pop;
+    return null;
+}
+
 fn dup(fiber: *Fiber) MachineError!void {
     try fiber.require(1);
     try fiber.pushBorrowed(fiber.stack.items[fiber.stack.items.len - 1]);

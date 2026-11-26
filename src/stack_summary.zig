@@ -5,23 +5,16 @@
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
-const list = @import("list.zig");
 const env = @import("env.zig");
-const intern = @import("intern.zig");
 const machine = @import("machine.zig");
-const combinators = @import("combinators.zig");
+const lower = @import("lower.zig");
 const prims = @import("prims.zig");
 const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
 
-pub const Summary = struct {
-    /// Values the quotation takes from beneath where it starts.
-    consumed: u32,
-    /// Values it leaves where those were.
-    produced: u32,
-};
+pub const Summary = lower.Counts;
 
 /// A quotation longer than this is not summarized.
 const max_forms = 16;
@@ -36,8 +29,6 @@ const max_visited = 128;
 const max_depth = 8;
 /// The most a summary may consume or leave.
 const max_values = 32;
-/// The most locals one quotation or body may hold bound at once.
-const max_locals = 16;
 
 /// The summary of a quotation about to run at `site`, or null when any word
 /// leaves the counts to run time: a word that does not resolve, a native
@@ -52,8 +43,8 @@ pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{
     if (quotation.length() > max_forms) return null;
     const publication = fiber.currentPublication();
     if (fiber.summaries.find(quotation, site, publication)) |known| return known.summary;
-    var walk: Walk = .{ .fiber = fiber, .publication = publication };
-    const summary: ?Summary = switch (try walk.summarize(quotation, site, 0)) {
+    var visited: usize = 0;
+    const summary: ?Summary = switch (try summarize(Kept, fiber, &visited, quotation, site, 0)) {
         .exact => |summary| summary,
         .none => null,
         // A later walk resumes from the bodies this one finished, so the
@@ -66,15 +57,44 @@ pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{
     return summary;
 }
 
+/// The summary of a quotation literal about to run at `site`, read under the
+/// caller's bounds and not remembered: for a reader that looks at a list
+/// once and may look at longer quotations than a summary is kept for. A word's
+/// body is read as `of` reads it.
+pub fn read(
+    fiber: *Fiber,
+    site: machine.ExecutionSite,
+    quotation: *Header,
+    comptime bounds: struct { max_forms: usize, max_visited: usize },
+) error{OutOfMemory}!?Summary {
+    if (quotation.length() > bounds.max_forms) return null;
+    const publication = fiber.currentPublication();
+    var visited: usize = 0;
+    const Reader = Counting(.{
+        .capacity = 2 * max_values + 1,
+        .max_operand_forms = bounds.max_forms,
+        .max_visited = bounds.max_visited,
+        .max_depth = max_depth,
+        .branches = true,
+    });
+    const summary: Summary = switch (try summarize(Reader, fiber, &visited, quotation, site, 0)) {
+        .exact => |summary| summary,
+        .none, .exhausted => return null,
+    };
+    // Words read under different publications say nothing together.
+    if (fiber.currentPublication() != publication) return null;
+    return summary;
+}
+
 /// Whether `word`, run at `site`, has a summary. A word that has one moves
 /// only the values its counts say, and leaves no local bound.
 pub fn wordHasSummary(fiber: *Fiber, site: machine.ExecutionSite, word: value.Symbol) error{OutOfMemory}!bool {
-    var walk: Walk = .{ .fiber = fiber, .publication = fiber.currentPublication() };
+    var visited: usize = 0;
     return switch (try fiber.summaryTarget(word, site)) {
         .none => false,
-        .source => |source| try walk.body(word, site, source) == .exact,
+        .source => |source| try body(fiber, &visited, word, site, source) == .exact,
         .builtin => |builtin| !prims.unsummarizable(builtin.primitive) and
-            Walk.exact(builtin.effect) != null and !Walk.takesQuotation(builtin.effect.?),
+            lower.exact(builtin.effect) != null and !lower.takesQuotation(builtin.effect.?),
     };
 }
 
@@ -182,234 +202,97 @@ const Result = union(enum) {
     exhausted,
 };
 
-const Walk = struct {
+/// The summary of `code` run at `site` with nothing known beneath it.
+fn summarize(comptime Reader: type, fiber: *Fiber, visited: *usize, code: *Header, site: machine.ExecutionSite, depth: usize) error{OutOfMemory}!Result {
+    var counting: Reader = .{};
+    var walker: lower.Walker(Reader) = .{ .fiber = fiber, .mode = &counting, .visited = visited };
+    // The values beneath, one more than a summary may consume, so a walk
+    // that takes them all has gone too far.
+    const floor = max_values + 1;
+    @memset(walker.open(floor), .{});
+    walker.run(code, site, depth) catch |err| switch (err) {
+        error.Unread => return .none,
+        error.Exhausted => return .exhausted,
+        error.OutOfMemory => |oom| return oom,
+    };
+    const counts = walker.counts(floor);
+    if (counts.consumed > max_values or counts.produced > max_values) return .none;
+    return .{ .exact = counts };
+}
+
+/// The summary of a source word's body, read from the word's remembered
+/// resolution or walked and recorded there.
+fn body(
     fiber: *Fiber,
-    publication: u64,
-    visited: usize = 0,
+    visited: *usize,
+    word: value.Symbol,
+    site: machine.ExecutionSite,
+    source: @FieldType(machine.SummaryTarget, "source"),
+) error{OutOfMemory}!Result {
+    switch (source.summary) {
+        .exact => |counts| return .{ .exact = .{ .consumed = counts.consumed, .produced = counts.produced } },
+        .none, .reading => return .none,
+        .unread => {},
+    }
+    if (source.code.length() > max_body_forms) {
+        fiber.recordSummary(word, site, source.definition, .none);
+        return .none;
+    }
+    // The walk resolves more words, which may let go of this one's
+    // definition, so the body is held across it.
+    heap.incRef(source.code);
+    defer fiber.releases.releaseHeader(source.code);
+    fiber.recordSummary(word, site, source.definition, .reading);
+    // A walk that fails leaves the body unread, not mid-read forever.
+    errdefer fiber.recordSummary(word, site, source.definition, .unread);
+    const result = try summarize(Kept, fiber, visited, source.code, source.site, 1);
+    fiber.recordSummary(word, site, source.definition, switch (result) {
+        .exact => |summary| .{ .exact = .{ .consumed = @intCast(summary.consumed), .produced = @intCast(summary.produced) } },
+        .none => .none,
+        .exhausted => .unread,
+    });
+    return result;
+}
 
-    fn summarize(self: *Walk, code: *Header, site: machine.ExecutionSite, depth: usize) error{OutOfMemory}!Result {
-        const length: usize = @intCast(code.length());
-        if (depth > max_depth) return .exhausted;
-        self.visited += length;
-        if (self.visited > max_visited) return .exhausted;
-        var stack: Abstract = .{};
-        for (0..length) |index| {
-            // Every path below that skips the fall-through check
-            // (`continue`) is covered by checking before the next form.
-            if (stack.reach > max_values or stack.height > max_values) return .none;
-            const word = switch (list.atUnchecked(.{ .list = code }, index)) {
-                .symbol => |reference| reference,
-                .list => |literal| {
-                    stack.push(literal);
-                    continue;
-                },
-                else => {
-                    stack.push(null);
-                    continue;
-                },
+/// The reader whose answers are remembered, under the bounds of a summary.
+const Kept = Counting(.{
+    .capacity = 2 * max_values + 1,
+    .max_operand_forms = max_forms,
+    .max_visited = max_visited,
+    .max_depth = max_depth,
+    .branches = true,
+});
+
+/// The reader that only counts: it keeps nothing of a value. A word's body
+/// is read under a summary's bounds whatever the reader's own, since its
+/// answer is recorded with the word.
+fn Counting(comptime bounds: lower.Policy) type {
+    return struct {
+        const Self = @This();
+        pub const Payload = void;
+        pub const policy = bounds;
+        const Item = lower.Slot(void);
+
+        pub fn constant(_: *Self, _: value.Value) ?void {}
+
+        pub fn builtin(_: *Self, _: env.PrimitiveImpl, _: value.Symbol, _: lower.At, _: []const Item, outputs: []Item) bool {
+            @memset(outputs, .{});
+            return true;
+        }
+
+        pub fn source(
+            _: *Self,
+            fiber: *Fiber,
+            visited: *usize,
+            word: value.Symbol,
+            site: machine.ExecutionSite,
+            target: @FieldType(machine.SummaryTarget, "source"),
+        ) (lower.Stop || error{OutOfMemory})!Summary {
+            return switch (try body(fiber, visited, word, site, target)) {
+                .exact => |summary| summary,
+                .none => error.Unread,
+                .exhausted => error.Exhausted,
             };
-            if (env.isQuoted(word.slot)) {
-                stack.push(null);
-                continue;
-            }
-            if (env.localOperand(word.slot)) |count_or_index| {
-                if (!stack.local(self.fiber.environment.localsWords(), word.name, count_or_index)) return .none;
-                continue;
-            }
-            const applied: Result = switch (try self.fiber.summaryTarget(word, site)) {
-                .none => .none,
-                .source => |source| try self.body(word, site, source),
-                // An exact declared effect says everything; only a builtin
-                // whose effect holds a row can have a rule of its own.
-                .builtin => |builtin| if (prims.unsummarizable(builtin.primitive))
-                    .none
-                else if (exact(builtin.effect)) |declared|
-                    (if (takesQuotation(builtin.effect.?)) Result.none else .{ .exact = declared })
-                else switch (combinators.flow(builtin.primitive)) {
-                    .declared => .none,
-                    .apply => try self.operand(&stack, site, depth),
-                    .dip => dip: {
-                        const inner = try self.operand(&stack, site, depth);
-                        if (inner != .exact) break :dip inner;
-                        stack.pop(1);
-                        stack.apply(inner.exact);
-                        stack.push(null);
-                        continue;
-                    },
-                    .branch => branch: {
-                        const otherwise = try self.operand(&stack, site, depth);
-                        if (otherwise != .exact) break :branch otherwise;
-                        const then = try self.operand(&stack, site, depth);
-                        if (then != .exact) break :branch then;
-                        stack.pop(1);
-                        // Which branch runs is data, so the counts are known
-                        // only when the branches agree.
-                        if (!std.meta.eql(then.exact, otherwise.exact)) break :branch .none;
-                        break :branch then;
-                    },
-                    // A measured word leaves its quotation's results and the
-                    // inputs it consumed.
-                    .measured => measured: {
-                        const inner = try self.operand(&stack, site, depth);
-                        if (inner != .exact) break :measured inner;
-                        break :measured .{ .exact = .{
-                            .consumed = inner.exact.consumed,
-                            .produced = inner.exact.produced + inner.exact.consumed,
-                        } };
-                    },
-                    .cleave => |count| cleave: {
-                        var total: Summary = .{ .consumed = 0, .produced = 0 };
-                        for (0..count) |_| {
-                            const inner = try self.operand(&stack, site, depth);
-                            if (inner != .exact) break :cleave inner;
-                            total.consumed = @max(total.consumed, inner.exact.consumed);
-                            total.produced += inner.exact.produced;
-                        }
-                        break :cleave .{ .exact = total };
-                    },
-                    .spread => |count| spread: {
-                        var total: Summary = .{ .consumed = 0, .produced = 0 };
-                        for (0..count) |_| {
-                            const inner = try self.operand(&stack, site, depth);
-                            if (inner != .exact) break :spread inner;
-                            total.consumed += inner.exact.consumed;
-                            total.produced += inner.exact.produced;
-                        }
-                        break :spread .{ .exact = total };
-                    },
-                },
-            };
-            if (applied != .exact) return applied;
-            stack.apply(applied.exact);
-            if (stack.reach > max_values or stack.height > max_values) return .none;
         }
-        if (stack.reach > max_values or stack.height > max_values) return .none;
-        // A local left bound stays visible to the caller, which a summary
-        // cannot describe.
-        if (stack.bound != 0) return .none;
-        return .{ .exact = .{ .consumed = @intCast(stack.reach), .produced = @intCast(stack.height) } };
-    }
-
-    /// The summary of a source word's body, read from the word's remembered
-    /// resolution or walked and recorded there.
-    fn body(
-        self: *Walk,
-        word: value.Symbol,
-        site: machine.ExecutionSite,
-        source: @FieldType(machine.SummaryTarget, "source"),
-    ) error{OutOfMemory}!Result {
-        switch (source.summary) {
-            .exact => |counts| return .{ .exact = .{ .consumed = counts.consumed, .produced = counts.produced } },
-            .none, .reading => return .none,
-            .unread => {},
-        }
-        if (source.code.length() > max_body_forms) {
-            self.fiber.recordSummary(word, site, source.definition, .none);
-            return .none;
-        }
-        // The walk resolves more words, which may let go of this one's
-        // definition, so the body is held across it.
-        heap.incRef(source.code);
-        defer self.fiber.releases.releaseHeader(source.code);
-        self.fiber.recordSummary(word, site, source.definition, .reading);
-        // A walk that fails leaves the body unread, not mid-read forever.
-        errdefer self.fiber.recordSummary(word, site, source.definition, .unread);
-        const result = try self.summarize(source.code, source.site, 1);
-        self.fiber.recordSummary(word, site, source.definition, switch (result) {
-            .exact => |summary| .{ .exact = .{ .consumed = @intCast(summary.consumed), .produced = @intCast(summary.produced) } },
-            .none => .none,
-            .exhausted => .unread,
-        });
-        return result;
-    }
-
-    /// Whether a word's declared inputs include a quotation slot. Such a word
-    /// runs the quotation where no walk reads it, and that code may publish a
-    /// definition the summary rests on. Only the combinators with a rule of
-    /// their own are walked, and they do not reach here.
-    fn takesQuotation(effect: env.ValidatedEffect) bool {
-        const header = effect.header();
-        for (0..effect.inputs) |index| {
-            if (list.atUnchecked(.{ .list = header }, index) == .list) return true;
-        }
-        return false;
-    }
-
-    fn exact(declared: ?env.ValidatedEffect) ?Summary {
-        const effect = declared orelse return null;
-        if (effect.result_depth != .exact) return null;
-        return .{ .consumed = effect.inputs, .produced = effect.outputs };
-    }
-
-    /// The summary of the quotation on top of the abstract stack, which a
-    /// combinator is about to take: known only when it is a literal the
-    /// code pushed and nothing has moved since.
-    fn operand(self: *Walk, stack: *Abstract, site: machine.ExecutionSite, depth: usize) error{OutOfMemory}!Result {
-        const taken = stack.take() orelse return .none;
-        if (taken.length() > max_forms) return .none;
-        return self.summarize(taken, site.applied(), depth + 1);
-    }
-};
-
-/// The stack as a summary sees it: how far beneath its start the code has
-/// reached, how many values stand above that point, and which of those are
-/// list literals the code pushed.
-const Abstract = struct {
-    reach: usize = 0,
-    height: usize = 0,
-    // SAFETY: a slot is read only below `height`, and `push` writes every
-    // slot it raises `height` past.
-    literals: [max_values + 1]?*Header = undefined,
-    /// The locals this code has bound and not dropped. A quotation the code
-    /// applies binds its own.
-    bound: usize = 0,
-    // SAFETY: a slot is read only below `bound`, and binding writes every
-    // slot it raises `bound` past.
-    locals: [max_locals]?*Header = undefined,
-
-    /// One lowered locals operation: bind the top `operand` values, the
-    /// deepest first; push local `operand`; or drop `operand` locals. False
-    /// when the operation would fail where it runs, or binds more than a
-    /// summary follows.
-    fn local(self: *Abstract, words: intern.LocalsWords, name: u32, operand: u32) bool {
-        if (name == words.load) {
-            if (operand > max_locals - self.bound) return false;
-            // Stored as the runtime stores them: the top value first, so
-            // the deepest of the newest binding ends last and a read of
-            // local `n` counts back from the end.
-            for (0..operand) |index| self.locals[self.bound + index] = self.take();
-            self.bound += operand;
-        } else if (name == words.get) {
-            if (operand >= self.bound) return false;
-            self.push(self.locals[self.bound - 1 - operand]);
-        } else if (name == words.drop) {
-            if (operand > self.bound) return false;
-            self.bound -= operand;
-        } else return false;
-        return true;
-    }
-
-    fn push(self: *Abstract, literal: ?*Header) void {
-        if (self.height < self.literals.len) self.literals[self.height] = literal;
-        self.height += 1;
-    }
-    fn pop(self: *Abstract, count: usize) void {
-        if (count > self.height) {
-            self.reach += count - self.height;
-            self.height = 0;
-        } else self.height -= count;
-    }
-    /// Pops one value, returning it when it is a known literal.
-    fn take(self: *Abstract) ?*Header {
-        if (self.height == 0) {
-            self.reach += 1;
-            return null;
-        }
-        self.height -= 1;
-        return if (self.height < self.literals.len) self.literals[self.height] else null;
-    }
-    fn apply(self: *Abstract, summary: Summary) void {
-        self.pop(summary.consumed);
-        for (0..summary.produced) |_| self.push(null);
-    }
-};
+    };
+}

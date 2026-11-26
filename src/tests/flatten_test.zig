@@ -238,6 +238,20 @@ test "flatten: an inlined source word keeps its trace and call site" {
     });
 }
 
+test "flatten: a quotation longer than a summary is kept for runs in place all the same" {
+    try support.expectStacks(&.{
+        .{ .name = "(1 2 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) dip) apply", .source = "(1 2 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) dip) apply", .expected = "10 2" },
+        .{ .name = "(3 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) (2 *) bi) apply", .source = "(3 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) (2 *) bi) apply", .expected = "12 6" },
+        .{ .name = "(3 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) below (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) above) apply", .source = "(3 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) below (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) above) apply", .expected = "3 21 12" },
+        .{ .name = "(3 4 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) bracket) apply", .source = "(3 4 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) bracket) apply", .expected = "12 13" },
+    });
+    try expectFailures(&.{
+        .{ .source = "(1 2 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + len) dip) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len) data {source \"<command>\" line 1 col 43 sites ({source \"<command>\" line 1 col 43})}}" },
+        .{ .source = "(3 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + len) (2 *) bi) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len) data {source \"<command>\" line 1 col 41 sites ({source \"<command>\" line 1 col 41})}}" },
+        .{ .source = "(3 (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + len) below) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len) data {source \"<command>\" line 1 col 41 sites ({source \"<command>\" line 1 col 41})}}" },
+    });
+}
+
 test "programs: a fault in a compiled body reports the quotation and position" {
     try expectFailures(&.{
         .{ .source = "[4 0 2] (8 swap div) each", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 17 sites ({source \"<command>\" line 1 col 17})}}" },

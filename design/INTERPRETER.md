@@ -1088,7 +1088,12 @@ A quotation's footprint can also be read before it runs. A stack summary
 is the exact count of values a quotation takes from beneath and leaves,
 composed from its words: a literal, a builtin whose declared effect is exact,
 a lowered locals operation, a source word's body, and a combinator applied to
-literal quotations under that combinator's own rule. Any other word has no
+literal quotations under that combinator's own rule. One walk reads a
+quotation this way, following which values are literals the code pushed
+through the words that only move them and through locals, and each
+combinator's rule is stated there once. A summary is that walk keeping
+nothing of a value but its place; a scalar program (§7) is the same walk
+keeping a register. Any other word has no
 summary: a word that reaches itself, a native word, and a word behind a checked module
 boundary, whose check reports the depth it found. So does any quotation or
 body past a constant size, so the walk is bounded by a constant and an absent
@@ -1138,7 +1143,9 @@ that:
 `apply` needs nothing but the quotation. `dip` holds its protected value in a
 local across the quotation, and a read of a local counts back from the newest
 binding, so `dip` is flattened only when the quotation has a stack summary:
-code with one leaves no local of its own bound. For the same reason a local is
+code with one leaves no local of its own bound. The rewrite looks at a list
+once, so it reads a quotation's counts under its own bound on length, longer
+than the one a remembered summary is kept under. For the same reason a local is
 taken to hold the literal it was bound to only across forms that have
 summaries. A cleave or spread needs what each quotation consumes and leaves as
 well, so every quotation must have a summary, and it holds its inputs in locals
@@ -1448,11 +1455,14 @@ as the last following word's own.
 Numeric arithmetic has one compiled form, the scalar program: a run of numeric
 or char constants, stack words, and core numeric operations compiled to a
 straight-line function over registers, executed a block at a time through the
-typed kernels. Locals are registers under other names. A quotation literal
-that `apply`, `dip`, `above`, `below`, `bi`, `tri`, or `bracket` applies is
+typed kernels. It is compiled by the walk that reads a stack summary (§5),
+so a program admits exactly the combinators over literals a summary reads,
+`if` aside: a quotation literal one of them applies is
 compiled where the combinator stands, consuming and leaving what the paging
 floor would have counted, so the program holds its operations and no
-application; a fault inside one reports the quotation it was written in. Every numeric word reads a char as its codepoint, so a char
+application; a fault inside one reports the quotation it was written in.
+Locals are registers under other names. A source word has no place in a
+program: nothing a fault could report would keep its body alive. Every numeric word reads a char as its codepoint, so a char
 input or constant is an int to the program; a char the program passes through
 unread remains a char. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or
 `scan` compiles whole, over the inputs the combinator seeds, and is observed as
