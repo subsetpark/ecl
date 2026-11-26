@@ -207,11 +207,26 @@ pub const Cache = struct {
         return @intCast((@as(u64, @intFromPtr(code)) >> 4) *% 0x9E3779B97F4A7C15 >> (64 - std.math.log2(capacity)));
     }
 
+    /// The place `code` holds in the table, or the first empty one on its
+    /// probe: null only when the table is full of other lists. Where a list
+    /// lands depends on its address, so a collision moves it along rather
+    /// than refusing it, and what the table admits depends on the count of
+    /// lists alone.
+    fn entryFor(entries: []Entry, code: *const Header) ?*Entry {
+        var index = place(code);
+        for (0..capacity) |_| {
+            const entry = &entries[index];
+            if (entry.code == null or entry.code == code) return entry;
+            index = (index + 1) & (capacity - 1);
+        }
+        return null;
+    }
+
     /// What the fiber made of `code` at `site` in `publication`, if it has
     /// looked.
     pub inline fn find(self: *const Cache, code: *const Header, site: machine.ExecutionSite, publication: u64) ?Known {
         if (self.publication != publication or self.entries.len == 0) return null;
-        const entry = &self.entries[place(code)];
+        const entry = entryFor(self.entries, code) orelse return null;
         if (entry.code != code or entry.scope != site.scope.serial or
             entry.provenance != WordResolutions.provenanceKey(site.registration_provenance)) return null;
         return .{ .flattened = entry.record };
@@ -279,7 +294,8 @@ pub const Cache = struct {
             self.sweep(allocator, releases, height);
             self.publication = publication;
         }
-        return self.entries[place(code)].code == null;
+        const entry = entryFor(self.entries, code) orelse return false;
+        return entry.code == null;
     }
 
     /// Records the flattened form of `code`, which the table then owns. The
@@ -292,7 +308,7 @@ pub const Cache = struct {
         made: *Flattened,
     ) void {
         std.debug.assert(self.publication == publication);
-        const entry = &self.entries[place(code)];
+        const entry = entryFor(self.entries, code).?;
         std.debug.assert(entry.code == null);
         heap.incRef(code);
         self.by_code[place(made.code)] = made;
