@@ -1159,8 +1159,16 @@ have said, and a failure's trace is read from it: each inlined word around the
 failing form, then the evaluation's own, each present when an evaluation of
 one of its lists would still exist.
 
-A record lasts as long as its flattened list is held: by the table, or by an
-evaluation still running it after the table has moved on.
+A record outlasts the table's interest in it: an evaluation may still be
+running its list after a publication or after another list took its place.
+Such a record waits until the fiber's evaluations have come back beneath the
+lowest height it was entered at, when nothing can refer to it, and is retired
+then. That is a fact about the fiber's own stack, so what a fiber allocates and
+frees stays a function of its own run.
+
+Only a list a reader made from source is looked at. A list a program builds as
+it runs is a new list each time, which the table could only look at and
+forget.
 
 ### Failure is a bounded machine transition
 

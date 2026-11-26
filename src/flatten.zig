@@ -94,7 +94,12 @@ pub const Flattened = struct {
     bodies: []*Header,
     /// The publication it was built in.
     publication: u64,
-    /// The next record waiting for its code to be let go.
+    /// The lowest height of the fiber's evaluations at which one began
+    /// running this list: the evaluation and everything it leads to, the
+    /// frames it suspends beneath and the call sites recorded from it, stand
+    /// at that height or above.
+    lowest: usize = std.math.maxInt(usize),
+    /// The next record waiting for the fiber to come back beneath it.
     retired: ?*Flattened = null,
 
     fn destroy(self: *Flattened, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
@@ -118,9 +123,9 @@ pub const Flattened = struct {
         self.owner = owner;
     }
 
-    /// Whether anything but this record still holds the flattened code.
-    fn running(self: *const Flattened) bool {
-        return heap.heldElsewhere(self.code);
+    /// Notes an evaluation beginning to run this list at `height`.
+    pub fn enter(self: *Flattened, height: usize) void {
+        self.lowest = @min(self.lowest, height);
     }
 };
 
@@ -128,9 +133,11 @@ pub const Flattened = struct {
 ///
 /// One entry per place and a fixed number of places, as the stack summary
 /// table has: a list that lands on an occupied place replaces what was
-/// there. A replaced or outdated record whose code an evaluation still runs
-/// waits on a chain until that code is let go, so the chain is no longer than
-/// the evaluations the fiber has suspended, and each step retires a bounded
+/// there. A replaced or outdated record may still be running, so it waits on
+/// a chain until the fiber's evaluations have come back beneath the lowest
+/// height it was entered at, when nothing can still refer to it. That is a
+/// fact about the fiber's own stack, so when a record is retired does not
+/// depend on when anything else lets go, and each step retires a bounded
 /// number of records.
 pub const Cache = struct {
     const capacity = 64;
@@ -151,10 +158,43 @@ pub const Cache = struct {
     entries: []Entry = &.{},
     /// The publication every present entry was made in.
     publication: u64 = 0,
-    /// The record last asked for by its flattened code: an evaluation asks
-    /// at each guard, and one evaluation's guards ask for the same record.
-    last: ?*Flattened = null,
+    /// Records by the flattened code they own, one per place: an evaluation
+    /// asks at each guard, so the answer must not cost a search. A record
+    /// that lost its place to another is found by the search and takes the
+    /// place back.
+    by_code: [capacity]?*Flattened = @splat(null),
     waiting: ?*Flattened = null,
+    /// Lists found to have nothing to flatten in `plain_publication`, by
+    /// address alone and not held. An address that has passed to another
+    /// list answers for it too, and so may a list at another site; either
+    /// way a list runs as written, which is always right.
+    plain: []?*const Header = &.{},
+    plain_publication: u64 = 0,
+
+    const plain_capacity = 256;
+
+    fn plainPlace(code: *const Header) usize {
+        return @intCast((@as(u64, @intFromPtr(code)) >> 4) *% 0x9E3779B97F4A7C15 >> (64 - std.math.log2(plain_capacity)));
+    }
+
+    /// Whether `code` is known to have nothing to flatten in `publication`.
+    pub inline fn isPlain(self: *const Cache, code: *const Header, publication: u64) bool {
+        return self.plain_publication == publication and self.plain.len != 0 and self.plain[plainPlace(code)] == code;
+    }
+
+    /// Notes that `code` has nothing to flatten in `publication`.
+    pub fn notePlain(self: *Cache, allocator: std.mem.Allocator, code: *const Header, publication: u64) error{OutOfMemory}!void {
+        if (self.plain.len == 0) {
+            const plain = try allocator.alloc(?*const Header, plain_capacity);
+            @memset(plain, null);
+            self.plain = plain;
+        }
+        if (self.plain_publication != publication) {
+            @memset(self.plain, null);
+            self.plain_publication = publication;
+        }
+        self.plain[plainPlace(code)] = code;
+    }
 
     fn place(code: *const Header) usize {
         return @intCast((@as(u64, @intFromPtr(code)) >> 4) *% 0x9E3779B97F4A7C15 >> (64 - std.math.log2(capacity)));
@@ -173,14 +213,15 @@ pub const Cache = struct {
     /// The record that owns the flattened list `code`, if it is one. The
     /// search is over the table's places and the waiting chain, both bounded.
     pub fn record(self: *Cache, code: *const Header) ?*Flattened {
-        if (self.last) |flattened| if (flattened.code == code) return flattened;
+        const slot = &self.by_code[place(code)];
+        if (slot.*) |flattened| if (flattened.code == code) return flattened;
         for (self.entries) |entry| if (entry.record) |flattened| if (flattened.code == code) {
-            self.last = flattened;
+            slot.* = flattened;
             return flattened;
         };
         var waiting = self.waiting;
         while (waiting) |flattened| : (waiting = flattened.retired) if (flattened.code == code) {
-            self.last = flattened;
+            slot.* = flattened;
             return flattened;
         };
         return null;
@@ -189,7 +230,7 @@ pub const Cache = struct {
     /// `record` for a caller that may not write: it reads the same places and
     /// remembers nothing.
     pub fn recordOf(self: *const Cache, code: *const Header) ?*const Flattened {
-        if (self.last) |flattened| if (flattened.code == code) return flattened;
+        if (self.by_code[place(code)]) |flattened| if (flattened.code == code) return flattened;
         for (self.entries) |entry| if (entry.record) |flattened| if (flattened.code == code) return flattened;
         var waiting = self.waiting;
         while (waiting) |flattened| : (waiting = flattened.retired) if (flattened.code == code) return flattened;
@@ -207,6 +248,8 @@ pub const Cache = struct {
         site: machine.ExecutionSite,
         publication: u64,
         made: ?*Flattened,
+        /// The height of the fiber's evaluations now.
+        height: usize,
     ) error{OutOfMemory}!void {
         if (self.entries.len == 0) {
             const entries = try allocator.alloc(Entry, capacity);
@@ -217,10 +260,11 @@ pub const Cache = struct {
             for (self.entries) |*entry| self.vacate(releases, entry);
             self.publication = publication;
         }
-        self.sweep(allocator, releases, sweep_step);
+        self.sweep(allocator, releases, height);
         const entry = &self.entries[place(code)];
         self.vacate(releases, entry);
         heap.incRef(code);
+        if (made) |flattened| self.by_code[place(flattened.code)] = flattened;
         entry.* = .{
             .code = code,
             .scope = site.scope.serial,
@@ -240,19 +284,20 @@ pub const Cache = struct {
         entry.* = .{};
     }
 
-    /// Retires waiting records whose code nothing else holds, looking at no
-    /// more than `limit`.
-    fn sweep(self: *Cache, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain, limit: usize) void {
+    /// Retires waiting records the fiber, now at `height`, has come back
+    /// beneath, looking at no more than `sweep_step`.
+    pub fn sweep(self: *Cache, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain, height: usize) void {
         var link = &self.waiting;
         var looked: usize = 0;
         while (link.*) |flattened| : (looked += 1) {
-            if (looked == limit) return;
-            if (flattened.running()) {
+            if (looked == sweep_step) return;
+            if (height >= flattened.lowest) {
                 link = &flattened.retired;
                 continue;
             }
             link.* = flattened.retired;
-            if (self.last == flattened) self.last = null;
+            const slot = &self.by_code[place(flattened.code)];
+            if (slot.* == flattened) slot.* = null;
             flattened.destroy(allocator, releases);
         }
     }
@@ -267,6 +312,7 @@ pub const Cache = struct {
             flattened.destroy(allocator, releases);
         }
         if (self.entries.len != 0) allocator.free(self.entries);
+        if (self.plain.len != 0) allocator.free(self.plain);
         self.* = .{};
     }
 };
@@ -290,7 +336,11 @@ const max_visited = 1024;
 pub inline fn of(fiber: *Fiber, site: machine.ExecutionSite, code: *Header) error{OutOfMemory}!?*Flattened {
     const length = code.length();
     if (length < 2 or length > max_forms) return null;
+    // A list built as the program runs is a new list each time, which the
+    // table could only look at and forget.
+    if (!heap.readFromSource(code)) return null;
     const publication = fiber.currentPublication();
+    if (fiber.flattened.isPlain(code, publication)) return null;
     if (fiber.flattened.find(code, site, publication)) |known| return known.flattened;
     return make(fiber, site, code, publication);
 }
@@ -311,11 +361,15 @@ noinline fn make(fiber: *Fiber, site: machine.ExecutionSite, code: *Header, publ
         if (made) |flattened| flattened.destroy(fiber.allocator, fiber.releases);
         return null;
     }
-    fiber.flattened.remember(fiber.allocator, fiber.releases, code, site, publication, made) catch |err| {
-        if (made) |flattened| flattened.destroy(fiber.allocator, fiber.releases);
+    const flattened = made orelse {
+        try fiber.flattened.notePlain(fiber.allocator, code, publication);
+        return null;
+    };
+    fiber.flattened.remember(fiber.allocator, fiber.releases, code, site, publication, flattened, fiber.height()) catch |err| {
+        flattened.destroy(fiber.allocator, fiber.releases);
         return err;
     };
-    return made;
+    return flattened;
 }
 
 /// One rewrite in progress: the forms of the flattened list so far, where

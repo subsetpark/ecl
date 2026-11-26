@@ -919,10 +919,10 @@ fn claimHeldList(handle: *ListHandle, references: u32) ?*UniqueList {
     return @ptrCast(@alignCast(unique));
 }
 
-/// Whether anything besides one holder refers to the list. A question for a
-/// holder deciding when to let go: the answer licenses no write to the list.
-pub fn heldElsewhere(handle: *ListHandle) bool {
-    return headerImpl(mutableHeader(handle)).rc.load(.acquire) != 1;
+/// Whether a reader made the list from source text. A list a program built
+/// as it ran has no source to speak of, and usually no second use.
+pub fn readFromSource(handle: *ListHandle) bool {
+    return objectConst(headerFromList(handle)).provenance_namespace != .none;
 }
 
 pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {

@@ -3239,6 +3239,7 @@ pub const Fiber = struct {
         };
         const code = if (flattened) |record| run: {
             heap.incRef(record.code);
+            record.enter(self.frames.items.len + 1);
             self.releases.releaseHeader(quotation);
             break :run record.code;
         } else quotation;
@@ -3436,7 +3437,10 @@ pub const Fiber = struct {
         // whole invocation, so each application borrows it.
         // A flattened list is held by the evaluation that runs it, since the
         // table that made it may let it go first.
-        if (flattened) |record| heap.incRef(record.code);
+        if (flattened) |record| {
+            heap.incRef(record.code);
+            record.enter(self.frames.items.len + 1);
+        }
         self.current = .{
             .code = if (flattened) |record| record.code else application.quotation,
             .program = if (flattened != null) .owned else .borrowed,
@@ -3687,6 +3691,12 @@ pub const Fiber = struct {
         if (name == locals.guard) return self.guardFlattened(operand);
         if (name == locals.recheck) return self.recheckFlattened();
         return self.fail(.domain, "a locals operand on a word that is not a locals operation");
+    }
+
+    /// How many evaluations the fiber has, running and suspended: the
+    /// height a flattened list's record is entered and retired by.
+    pub fn height(self: *const Fiber) usize {
+        return self.frames.items.len + @intFromBool(self.current != null);
     }
 
     /// The guard at the start of a flattened phrase. It holds when the phrase
@@ -4183,6 +4193,8 @@ pub fn initialize(fiber: *Fiber, code: *Header) void {
     std.debug.assert(fiber.frames.items.len == 0);
     std.debug.assert(fiber.terminal == .evaluating);
     std.debug.assert(fiber.current == null);
+    // Nothing is running, so every flattened list set aside can go.
+    fiber.flattened.sweep(fiber.allocator, fiber.releases, 0);
     heap.incRef(code);
     fiber.current = .{
         .code = code,
@@ -4864,6 +4876,7 @@ fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord,
         // so the evaluation holds only the list: `entered` stays false and
         // the retain above is released.
         heap.incRef(record.code);
+        record.enter(self.frames.items.len + 1);
         self.current = .{
             .code = record.code,
             .program = .owned,
