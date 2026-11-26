@@ -951,7 +951,6 @@ test "programs: a body of combinators over literal quotations or of locals runs 
         .{ .source = "[1 2 3] (2 (-) above - -) each", .expected = "[0 0 0]" },
         .{ .source = "[1 2 3] (3 (1 +) (2 *) bracket -) each", .expected = "[-4 -3 -2]" },
         .{ .source = "[1 2 3] (2 ((+) (-) bi) (*) bi + +) each", .expected = "[4 8 12]" },
-        .{ .source = "[1 2 3] (2 (pop id) (+) bi -) each", .expected = "[-2 -2 -2]" },
         .{ .source = "[1 2 3] (2 (over) (swap) bi + + + +) each", .expected = "[7 10 13]" },
         .{ .source = "[1 2 3] (|a| a 1 + a 2 * +) each", .expected = "[4 7 10]" },
         .{ .source = "[1 2 3] (|a| a (|b| b b *) apply a +) each", .expected = "[2 6 12]" },
@@ -960,9 +959,13 @@ test "programs: a body of combinators over literal quotations or of locals runs 
         .{ .source = "[1 2 3] 0 (|sum x| sum x x * +) fold", .expected = "14" },
         .{ .source = "[1 2 3] ((max) (min) bi -) fold1", .expected = "2" },
         .{ .source = "[1 2 3] 0 ((+) apply) scan", .expected = "[1 3 6]" },
-        // Bodies no program holds: a branch, and a quotation not a literal.
-        .{ .source = "[1 2 3] (dup 2 > (10 +) (20 +) if) each", .expected = "[21 22 13]" },
+        // A literal that stack words copied is still a literal.
         .{ .source = "[1 2 3] ((1 +) dup bi +) each", .expected = "[4 6 8]" },
+        // Bodies no program holds: a branch, a word that is no program
+        // word, and a quotation that is the element, not a literal.
+        .{ .source = "[1 2 3] (2 (pop id) (+) bi -) each", .expected = "[-2 -2 -2]" },
+        .{ .source = "[(1 +) (2 *)] (5 swap apply) each", .expected = "[6 10]" },
+        .{ .source = "[1 2 3] (dup 2 > (10 +) (20 +) if) each", .expected = "[21 22 13]" },
     };
     var automatic_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&automatic_heap);

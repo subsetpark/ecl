@@ -57,6 +57,14 @@ test "flatten: apply and dip over literals compute what the words do" {
         .{ .name = "([1 2 3] (dup (1 +) dip +) each) apply", .source = "([1 2 3] (dup (1 +) dip +) each) apply", .expected = "[3 5 7]" },
         .{ .name = "(1 (2 (3 (4 (5 +) apply +) apply +) apply +) apply) apply", .source = "(1 (2 (3 (4 (5 +) apply +) apply +) apply +) apply) apply", .expected = "15" },
         .{ .name = "(5 ((1 +) apply) below 6 ((1 +) dip) above) apply", .source = "(5 ((1 +) apply) below 6 ((1 +) dip) above) apply", .expected = "5 7 6 6 6" },
+        .{ .name = "([1 2] (|x| x (1 +) apply) each) apply", .source = "([1 2] (|x| x (1 +) apply) each) apply", .expected = "[2 3]" },
+    });
+}
+
+test "flatten: the lowered operations' names are ordinary words to a program" {
+    try support.expectStacks(&.{
+        .{ .name = "a word spelled as the guard", .source = "(7) `_fg def (3 (1 +) apply _fg) apply", .expected = "4 7" },
+        .{ .name = "a word spelled as the check", .source = "(8) `_fc def (3 (1 +) (2 *) bi _fc) apply", .expected = "4 6 8" },
     });
 }
 
@@ -72,6 +80,10 @@ test "flatten: a failure inside a flattened quotation reports the quotation and 
         .{ .source = "(1 (nope) dip) apply", .expected = "{kind undefined-word msg \"undefined word `nope`\" word nope trace (`nope) data {name nope scope session source \"<command>\" line 1 col 5 sites ({source \"<command>\" line 1 col 5})}}" },
         .{ .source = "3 (1 2 3 ((len) dip) dip) times", .expected = "{kind type msg \"len expected a list\" word len trace (`len) data {source \"<command>\" line 1 col 12 sites ({source \"<command>\" line 1 col 12})}}" },
         .{ .source = "(1 2 (len) dip) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `w) data {source \"<command>\" line 1 col 7 sites ({source \"<command>\" line 1 col 7} {source \"<command>\" line 1 col 24})}}" },
+        .{ .source = "((|x| x) apply) `f def f", .expected = "{kind underflow msg \"local binding needs 1 stack value, but found 0\" trace (`f) data {needed 1 available 0 source \"<command>\" line 1 col 2 sites ({source \"<command>\" line 1 col 24})}}" },
+        .{ .source = "(1 (|x| x) dip) `f def f", .expected = "{kind underflow msg \"local binding needs 1 stack value, but found 0\" trace (`f) data {needed 1 available 0 source \"<command>\" line 1 col 4 sites ({source \"<command>\" line 1 col 24})}}" },
+        .{ .source = "([1] (|x| (1 2) apply) each) apply", .expected = "{kind contract msg \"each quotation at element 0 violated its stack effect; expected final depth 1 from 1 seeded value, observed 2\" word each trace (`each) data {expected (a -- b) seeded 1 observed 2 index 0 source \"<command>\" line 1 col 6 sites ({})}}" },
+        .{ .source = "([7] (|x| (1 2) apply) for) apply", .expected = "{kind contract msg \"for quotation at element 0 violated its stack effect; expected final depth 0 from 1 seeded value, observed 2\" word for trace (`for) data {expected (a --) seeded 1 observed 2 index 0 source \"<command>\" line 1 col 6 sites ({})}}" },
     });
 }
 
@@ -219,5 +231,21 @@ test "flatten: an inlined source word keeps its trace and call site" {
         .{ .source = "(x q -- y) (apply) `eff def ((x -- y) (5 (1 2) eff) `g def) `m @defm m.g", .expected = "{kind undefined-word msg \"undefined word `eff`\" word eff trace (`eff) data {name eff scope module source \"<command>\" line 1 col 48 sites ({source \"<command>\" line 1 col 48})}}" },
         .{ .source = "(apply) `run def [1 2] ((1 2) run) each", .expected = "{kind contract msg \"each quotation at element 0 violated its stack effect; expected final depth 1 from 1 seeded value, observed 3\" word each trace (`each) data {expected (a -- b) seeded 1 observed 3 index 0 source \"<command>\" line 1 col 25 sites ({})}}" },
         .{ .source = "(|q| q apply) `r def [1 2] ((len) r) each", .expected = "{kind type msg \"len expected a list\" word len trace (`len `r) data {source \"<command>\" line 1 col 30 sites ({source \"<command>\" line 1 col 30} {source \"<command>\" line 1 col 35})}}" },
+        .{ .source = "(dup pop apply) `run def (5 (len) run) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `run) data {source \"<command>\" line 1 col 30 sites ({source \"<command>\" line 1 col 30} {source \"<command>\" line 1 col 35})}}" },
+        .{ .source = "(dup pop apply) `run def ((missing-word) run) apply", .expected = "{kind undefined-word msg \"undefined word `missing-word`\" word missing-word trace (`missing-word `run) data {name missing-word scope session source \"<command>\" line 1 col 28 sites ({source \"<command>\" line 1 col 28} {source \"<command>\" line 1 col 42})}}" },
+        .{ .source = "(|q| q dup pop apply) `run def (5 (len) run) `w def w", .expected = "{kind type msg \"len expected a list\" word len trace (`len `run) data {source \"<command>\" line 1 col 36 sites ({source \"<command>\" line 1 col 36} {source \"<command>\" line 1 col 41})}}" },
+        .{ .source = "(dup pop apply) helper `hrun def (5 (len) hrun) apply", .expected = "{kind type msg \"len expected a list\" word len trace (`len `hrun) data {source \"<command>\" line 1 col 43 sites ({source \"<command>\" line 1 col 38} {source \"<command>\" line 1 col 43})}}" },
+    });
+}
+
+test "programs: a fault in a compiled body reports the quotation and position" {
+    try expectFailures(&.{
+        .{ .source = "[4 0 2] (8 swap div) each", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 17 sites ({source \"<command>\" line 1 col 17})}}" },
+        .{ .source = "[4 0 2] ((8 swap div) apply) each", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 18 sites ({source \"<command>\" line 1 col 18})}}" },
+        .{ .source = "[4 0 2] ((1 +) (8 swap div) bi +) each", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 24 sites ({source \"<command>\" line 1 col 24})}}" },
+        .{ .source = "[4 0 2] ((8 swap div) (1 +) bi +) each", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 18 sites ({source \"<command>\" line 1 col 18})}}" },
+        .{ .source = "[4 0 2] (|a| 8 a div) each", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 18 sites ({source \"<command>\" line 1 col 18})}}" },
+        .{ .source = "[4 0 2] (2 (8 swap div) dip +) each", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 20 sites ({source \"<command>\" line 1 col 20})}}" },
+        .{ .source = "[4 0 2] 1 (|a x| 8 x div a +) fold", .expected = "{kind domain msg \"kernel arithmetic is outside its domain\" word div trace (`div) data {source \"<command>\" line 1 col 22 sites ({source \"<command>\" line 1 col 22})}}" },
     });
 }

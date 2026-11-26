@@ -131,25 +131,28 @@ pub const Flattened = struct {
 
 /// What a fiber has made of the code lists it ran, all in one publication.
 ///
-/// One entry per place and a fixed number of places, as the stack summary
-/// table has: a list that lands on an occupied place replaces what was
-/// there. A replaced or outdated record may still be running, so it waits on
-/// a chain until the fiber's evaluations have come back beneath the lowest
-/// height it was entered at, when nothing can still refer to it. That is a
-/// fact about the fiber's own stack, so when a record is retired does not
-/// depend on when anything else lets go, and each step retires a bounded
-/// number of records.
+/// One entry per place and a fixed number of places. Within a publication a
+/// place keeps the first list that took it: a second list that lands there
+/// runs as written. So records leave the table only when the publication
+/// moves. One that may still be running then waits on a chain until the
+/// fiber's evaluations have come back beneath the lowest height it was
+/// entered at, when nothing can still refer to it. That is a fact about the
+/// fiber's own stack, so when a record is retired does not depend on when
+/// anything else lets go. The chain is bounded too: while it is full the
+/// table takes no new publication, and lists run as written. So the fiber
+/// holds a constant number of records however long it runs at one height,
+/// and every operation here, releasing them all included, is bounded by
+/// that constant.
 pub const Cache = struct {
-    const capacity = 64;
-    /// Waiting records one step looks at.
-    const sweep_step = 4;
+    const capacity = 128;
+    /// The most records that may wait at once.
+    const max_waiting = 128;
 
     const Entry = struct {
         /// Null for an empty place. Held, so the address stays this list's.
         code: ?*Header = null,
         scope: u64 = 0,
         provenance: u64 = 0,
-        /// Null when the list was looked at and has nothing to flatten.
         record: ?*Flattened = null,
     };
 
@@ -167,6 +170,7 @@ pub const Cache = struct {
     /// one, so most asks end here.
     last: ?*Flattened = null,
     waiting: ?*Flattened = null,
+    waiting_count: usize = 0,
     /// Lists found to have nothing to flatten in `plain_publication`, by
     /// address alone and not held. An address that has passed to another
     /// list answers for it too, and so may a list at another site; either
@@ -247,34 +251,51 @@ pub const Cache = struct {
         return null;
     }
 
-    /// Records what the fiber made of `code`: a record, which the table then
-    /// owns, or null for nothing to flatten. On failure the caller still
-    /// owns the record.
-    pub fn remember(
+    /// Whether the table can take a record for `code` in `publication`, with
+    /// the fiber's evaluations at `height`. It cannot when another list has
+    /// the place, or when moving to a new publication would set more records
+    /// waiting than the chain may hold.
+    pub fn admits(
         self: *Cache,
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        code: *Header,
-        site: machine.ExecutionSite,
+        code: *const Header,
         publication: u64,
-        made: ?*Flattened,
-        /// The height of the fiber's evaluations now.
         height: usize,
-    ) error{OutOfMemory}!void {
+    ) error{OutOfMemory}!bool {
         if (self.entries.len == 0) {
             const entries = try allocator.alloc(Entry, capacity);
             @memset(entries, .{});
             self.entries = entries;
         }
+        self.sweep(allocator, releases, height);
         if (self.publication != publication) {
+            var staying: usize = 0;
+            for (self.entries) |entry| if (entry.record) |flattened| {
+                if (height >= flattened.lowest) staying += 1;
+            };
+            if (staying > max_waiting - self.waiting_count) return false;
             for (self.entries) |*entry| self.vacate(releases, entry);
+            self.sweep(allocator, releases, height);
             self.publication = publication;
         }
-        self.sweep(allocator, releases, height);
+        return self.entries[place(code)].code == null;
+    }
+
+    /// Records the flattened form of `code`, which the table then owns. The
+    /// caller has asked `admits`.
+    pub fn remember(
+        self: *Cache,
+        code: *Header,
+        site: machine.ExecutionSite,
+        publication: u64,
+        made: *Flattened,
+    ) void {
+        std.debug.assert(self.publication == publication);
         const entry = &self.entries[place(code)];
-        self.vacate(releases, entry);
+        std.debug.assert(entry.code == null);
         heap.incRef(code);
-        if (made) |flattened| self.by_code[place(flattened.code)] = flattened;
+        self.by_code[place(made.code)] = made;
         entry.* = .{
             .code = code,
             .scope = site.scope.serial,
@@ -290,22 +311,22 @@ pub const Cache = struct {
         if (entry.record) |flattened| {
             flattened.retired = self.waiting;
             self.waiting = flattened;
+            self.waiting_count += 1;
         }
         entry.* = .{};
     }
 
-    /// Retires waiting records the fiber, now at `height`, has come back
-    /// beneath, looking at no more than `sweep_step`.
+    /// Retires every waiting record the fiber, now at `height`, has come
+    /// back beneath. The chain is bounded, so the walk is.
     pub fn sweep(self: *Cache, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain, height: usize) void {
         var link = &self.waiting;
-        var looked: usize = 0;
-        while (link.*) |flattened| : (looked += 1) {
-            if (looked == sweep_step) return;
+        while (link.*) |flattened| {
             if (height >= flattened.lowest) {
                 link = &flattened.retired;
                 continue;
             }
             link.* = flattened.retired;
+            self.waiting_count -= 1;
             const slot = &self.by_code[place(flattened.code)];
             if (slot.* == flattened) slot.* = null;
             if (self.last == flattened) self.last = null;
@@ -315,7 +336,7 @@ pub const Cache = struct {
 
     /// Releases everything. The fiber's evaluations are gone by now, so no
     /// record is still running. The table holds at most `capacity` records
-    /// and the chain no more than the fiber had evaluations.
+    /// and the chain at most `max_waiting`.
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
         for (self.entries) |*entry| self.vacate(releases, entry);
         while (self.waiting) |flattened| {
@@ -361,25 +382,29 @@ noinline fn make(fiber: *Fiber, site: machine.ExecutionSite, code: *Header, publ
     // Core's directory changes without a publication while it is built, and
     // a publication is all that outdates a flattened list.
     if (fiber.inherited.phase == .bootstrap) return null;
-    var rewrite: Rewrite = .{ .fiber = fiber };
-    const whole = try rewrite.body(code, &.{}, site, 0, .{ .continues = false, .tail = true, .word = no_word });
-    const made: ?*Flattened = if (whole and rewrite.guard_count != 0)
-        try rewrite.finish(code, publication)
-    else
-        null;
-    // Words resolved under different publications say nothing together.
-    if (fiber.currentPublication() != publication) {
-        if (made) |flattened| flattened.destroy(fiber.allocator, fiber.releases);
-        return null;
-    }
-    const flattened = made orelse {
+    // A list the table has no room for runs as written, and is not looked
+    // at again in this publication.
+    if (!try fiber.flattened.admits(fiber.allocator, fiber.releases, code, publication, fiber.height())) {
         try fiber.flattened.notePlain(fiber.allocator, code, publication);
         return null;
-    };
-    fiber.flattened.remember(fiber.allocator, fiber.releases, code, site, publication, flattened, fiber.height()) catch |err| {
+    }
+    var rewrite: Rewrite = .{ .fiber = fiber };
+    defer rewrite.deinit();
+    const whole = try rewrite.body(code, &.{}, site, 0, .{ .continues = false, .tail = true, .word = no_word });
+    // Words resolved under different publications say nothing together, and
+    // the table has moved on from the publication it admitted this list in.
+    if (fiber.currentPublication() != publication) return null;
+    if (!whole or rewrite.guard_count == 0) {
+        try fiber.flattened.notePlain(fiber.allocator, code, publication);
+        return null;
+    }
+    const flattened = try rewrite.finish(code, publication);
+    // Resolving words may have taken the table to another publication.
+    if (!try fiber.flattened.admits(fiber.allocator, fiber.releases, code, publication, fiber.height())) {
         flattened.destroy(fiber.allocator, fiber.releases);
-        return err;
-    };
+        return null;
+    }
+    fiber.flattened.remember(code, site, publication, flattened);
     return flattened;
 }
 
@@ -400,6 +425,9 @@ const Rewrite = struct {
     operand_count: usize = 0,
     // SAFETY: only the first `chain_count` entries of each are read.
     chain: [max_inlined]Inlined = undefined,
+    /// The bodies of the inlined words, each held from the moment it is
+    /// entered: the fiber's resolution of the word is all that otherwise
+    /// keeps it, and resolving the body's own words may let that go.
     // SAFETY: as `chain`.
     bodies: [max_inlined]*Header = undefined,
     chain_count: usize = 0,
@@ -426,7 +454,15 @@ const Rewrite = struct {
         self.count = to.count;
         self.guard_count = to.guard_count;
         self.operand_count = to.operand_count;
+        for (self.bodies[to.chain_count..self.chain_count]) |held| self.fiber.releases.releaseHeader(held);
         self.chain_count = to.chain_count;
+    }
+
+    /// Lets go of the inlined bodies a rewrite still holds: all of them,
+    /// unless `finish` handed them to a record.
+    fn deinit(self: *Rewrite) void {
+        for (self.bodies[0..self.chain_count]) |held| self.fiber.releases.releaseHeader(held);
+        self.chain_count = 0;
     }
 
     /// Appends one form. False when the flattened list is full.
@@ -641,6 +677,10 @@ const Rewrite = struct {
         const applied = pending.items[kept..pending.count];
         const words = self.fiber.environment.localsWords();
         const applied_site = site.applied();
+        // An applied quotation runs under the provenance `applied` gives it.
+        // Run in place it would keep the enclosing list's, so a list whose
+        // provenance applying would change keeps its phrases as written.
+        if (!std.meta.eql(applied_site.registration_provenance, site.registration_provenance)) return null;
         // A quotation with a summary leaves no local bound. `dip` holds its
         // protected value in a local across its quotation, so it needs that;
         // a cleave or spread has it of every quotation already.
@@ -655,6 +695,16 @@ const Rewrite = struct {
             .cleave, .spread, .cleave_list, .spread_list => true,
         };
         if (shape != .apply and !neutral) return null;
+        // A quotation applied as a value binds its locals as no word's body,
+        // and one short of values fails as that. Run in place it would be
+        // part of whatever body the list is, so the guard must keep it from
+        // ever being short: by its summary, or not at all.
+        const binds = switch (shape) {
+            .apply, .dip => bindsLocals(self.fiber, applied[0].literal),
+            .above, .below, .cleave, .spread, .cleave_list, .spread_list => false,
+        };
+        if (binds and applied_summary == null) return null;
+        const bound_inputs: usize = if (binds) applied_summary.?.consumed else 0;
         const expanded = expanded: {
             for (pending.items[0..kept]) |item| {
                 if (!self.emit(item.form, item.origin)) break :expanded false;
@@ -665,7 +715,7 @@ const Rewrite = struct {
             const needed: usize = switch (shape) {
                 .apply => apply: {
                     if (!try self.body(applied[0].literal, &.{}, applied_site, depth + 1, .{ .continues = at.continues, .tail = last, .word = within.word })) break :expanded false;
-                    break :apply 0;
+                    break :apply bound_inputs;
                 },
                 // Bind the protected value, run the quotation beneath where
                 // it stood, and put it back.
@@ -674,7 +724,7 @@ const Rewrite = struct {
                     if (!try self.body(applied[0].literal, &.{}, applied_site, depth + 1, inside)) break :expanded false;
                     if (!self.operation(words.get, 0, at)) break :expanded false;
                     if (!self.operation(words.drop, 1, at)) break :expanded false;
-                    break :dip 1;
+                    break :dip 1 + bound_inputs;
                 },
                 // Bind what the quotation consumes, run it over a copy, and
                 // put the originals back above its results or below them.
@@ -737,6 +787,20 @@ const Rewrite = struct {
         }
         pending.count = 0;
         return neutral;
+    }
+
+    /// Whether a list binds locals itself, as distinct from the quotations
+    /// in it.
+    fn bindsLocals(fiber: *Fiber, code: *Header) bool {
+        // A list too long to look at is taken to bind.
+        if (code.length() > max_forms) return true;
+        const load = fiber.environment.localsWords().load;
+        const whole: Value = .{ .list = code };
+        for (0..@intCast(code.length())) |index| switch (list.atUnchecked(whole, index)) {
+            .symbol => |reference| if (reference.name == load and !env.isQuoted(reference.slot) and env.localOperand(reference.slot) != null) return true,
+            else => {},
+        };
+        return false;
     }
 
     /// Appends a guard for the phrase whose word stands at `at`, whose
@@ -813,6 +877,7 @@ const Rewrite = struct {
                 .outer = at.word,
                 .call_continues = at.continues,
             };
+            heap.incRef(source.code);
             self.bodies[entered] = source.code;
             self.chain_count += 1;
             self.inlining[self.inlining_count] = source.code;
@@ -925,7 +990,8 @@ const Rewrite = struct {
             slot.* = form;
         }
         heap.incRef(original);
-        for (bodies) |held| heap.incRef(held);
+        // The record takes over the holds on the inlined bodies.
+        self.chain_count = 0;
         record.* = .{
             .code = builder.finish(),
             .original = original,

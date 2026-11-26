@@ -649,8 +649,11 @@ pub const locals_load = "_ll";
 pub const locals_get = "_gl";
 pub const locals_drop = "_dl";
 /// The two operations only a flattened list holds: the guard at the start of
-/// a flattened phrase, and the publication check between the quotations of a
-/// flattened cleave or spread. No reader emits them.
+/// a flattened phrase, and the publication check after a quotation that ran
+/// by its summary. No reader emits them and no flattened list is a value a
+/// program can hold, so an occurrence is only ever dispatched by the operand
+/// flag in its link. The names are therefore not reserved: a word a program
+/// calls `_fg` is an ordinary word and never meets these.
 pub const locals_guard = "_fg";
 pub const locals_recheck = "_fc";
 
@@ -683,7 +686,5 @@ pub fn isReservedWordBytes(name: []const u8) bool {
     return isReservedBytes(name) or
         std.mem.eql(u8, name, locals_load) or
         std.mem.eql(u8, name, locals_get) or
-        std.mem.eql(u8, name, locals_drop) or
-        std.mem.eql(u8, name, locals_guard) or
-        std.mem.eql(u8, name, locals_recheck);
+        std.mem.eql(u8, name, locals_drop);
 }

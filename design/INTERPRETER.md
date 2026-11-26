@@ -1160,12 +1160,23 @@ have said, and a failure's trace is read from it: each inlined word around the
 failing form, then the evaluation's own, each present when an evaluation of
 one of its lists would still exist.
 
-A record outlasts the table's interest in it: an evaluation may still be
-running its list after a publication or after another list took its place.
-Such a record waits until the fiber's evaluations have come back beneath the
-lowest height it was entered at, when nothing can refer to it, and is retired
-then. That is a fact about the fiber's own stack, so what a fiber allocates and
-frees stays a function of its own run.
+Within a publication a place in the table keeps the first list that took it,
+and a second list that lands there runs as written, so a record leaves the
+table only when the publication moves. One that may still be running then
+waits until the fiber's evaluations have come back beneath the lowest height it
+was entered at, when nothing can refer to it, and is retired then. That is a
+fact about the fiber's own stack, so what a fiber allocates and frees stays a
+function of its own run. The waiting records are bounded as the table is:
+while they are at their bound the table takes no new publication and lists run
+as written. A fiber therefore holds a constant number of records however long
+it runs at one height, and releasing them is bounded work.
+
+A quotation applied as a value runs under the provenance applying gives it and
+binds its locals as no word's body. Run in place it would take the enclosing
+list's provenance and be part of whatever body that list is. So a list whose
+provenance applying would change keeps its phrases as written, and a quotation
+that binds locals is expanded only behind a guard that its summary shows can
+never leave the binding short.
 
 Only a list a reader made from source is looked at. A list a program builds as
 it runs is a new list each time, which the table could only look at and

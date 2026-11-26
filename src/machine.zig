@@ -4093,10 +4093,44 @@ pub const Fiber = struct {
             try self.pushCurrent();
             return lent;
         }
-        const inherited = current.activation.handedOn();
+        const inherited = self.handedPastFlattened(current) orelse current.activation.handedOn();
         self.retireCompletedCode(current);
         self.current = null;
         return inherited;
+    }
+    /// What an exhausted evaluation of a flattened list hands on when its
+    /// last form ran inside an inlined word, or null when it hands on its
+    /// own activation as any evaluation does. The word's body would have
+    /// been the evaluation exhausted here, and the activation handed on the
+    /// word's. The evaluation's own would have gone when the word was
+    /// entered from a list with nothing left: released, or, for a helper
+    /// leaving its body, given to the word with the helper's call site.
+    /// The activation returned owns its call site's code, since the list
+    /// that kept it is being retired.
+    fn handedPastFlattened(self: *Fiber, current: *Eval) ?Activation {
+        if (!current.flattened) return null;
+        const record = self.flattened.record(current.code) orelse return null;
+        if (self.active_index >= record.origins.len) return null;
+        const word = record.origins[self.active_index].word;
+        if (word == flatten.no_word) return null;
+        const inlined = record.chain[word];
+        const own = current.activation;
+        current.activation = .none;
+        if (own.attribution == .caller and own.site() != null) {
+            var moved = own.handedOn();
+            moved.word = inlined.word;
+            moved.attribution = inlined.attribution;
+            return moved;
+        }
+        own.release(self.releases);
+        heap.incRef(inlined.code);
+        return .{
+            .word = inlined.word,
+            .origin = @intFromPtr(inlined.code),
+            .index = inlined.index,
+            .hold = .owned,
+            .attribution = inlined.attribution,
+        };
     }
     /// What a suspended evaluation hands on although it has forms left. A
     /// flattened list keeps running after a form that ended every list it
@@ -4137,7 +4171,7 @@ pub const Fiber = struct {
         }
         // Read in place: retiring an exhausted caller releases nothing here,
         // so copying the evaluation out would be the whole cost of the call.
-        const inherited = current.activation;
+        const inherited = self.handedPastFlattened(current) orelse current.activation;
         if (current.application_selection != .none) {
             // The selection takes the evaluation's reference; the call site
             // needs its own, because a later selection can replace this one.
@@ -4833,13 +4867,16 @@ fn scheduleWord(
 /// hold the callee's last reference.
 fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
+    // Held before anything else resolves a word: the fiber's resolution of
+    // this word may be all that keeps its definition, and looking at the
+    // body resolves the body's words, which can let that resolution go.
+    executable.owner().retain();
+    var entered = false;
+    defer if (!entered) executable.owner().release(self.releases);
     // A body under an effect check is found by its own code when the check
     // fails, so it runs as written.
     const flattened = if (effect == null) try flatten.of(self, site, executable.code()) else null;
     if (flattened) |record| record.hold(executable.owner());
-    executable.owner().retain();
-    var entered = false;
-    defer if (!entered) executable.owner().release(self.releases);
     var effect_tail = self.replaceTailEffectCandidate(executable.code());
     const application_tail = self.tailApplicationIndex();
     const call_index = self.active_index;
