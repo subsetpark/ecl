@@ -791,6 +791,60 @@ test "idioms: scalar programs preserve generic behavior" {
     try expectHits("(pop 9) `dup def [1 2] (dup *) each", 0);
 }
 
+test "idioms: a program holds the quotations its combinators apply" {
+    // A quotation literal that a combinator applies inside an offered
+    // quotation is compiled where the combinator stands. Each source agrees
+    // with the generic path and says whether it ran as one program.
+    const cases = [_]struct { source: []const u8, hits: u64 }{
+        .{ .source = "[1 2 3] ((1 +) apply 2 *) each", .hits = 1 },
+        .{ .source = "[1 2 3] (dup (1 +) dip +) each", .hits = 1 },
+        .{ .source = "[1 2 3] ((1 +) (2 *) bi +) each", .hits = 1 },
+        .{ .source = "[1 2 3] ((1 +) (2 *) (neg) tri + +) each", .hits = 1 },
+        .{ .source = "[1 2 3] (dup (1 +) (2 *) bracket +) each", .hits = 1 },
+        .{ .source = "[1 2 3] (2 (+) below + +) each", .hits = 1 },
+        .{ .source = "[1 2 3] (2 (+) above + +) each", .hits = 1 },
+        .{ .source = "[1 2 3] (|x| x x * x +) each", .hits = 1 },
+        .{ .source = "[1 2 3] (|x| x (|y| y 1 +) apply x *) each", .hits = 1 },
+        .{ .source = "[1 2 3] (dup ((1 +) (2 *) bi +) dip +) each", .hits = 1 },
+        .{ .source = "[1 2 3] [4 5 6] ((1 +) dip *) zip-with", .hits = 1 },
+        .{ .source = "[1 2 3] 0 ((2 *) dip +) fold", .hits = 1 },
+        .{ .source = "[1 2 3] 0 ((+) (-) bi *) scan", .hits = 1 },
+        // A quotation longer than a stack summary reads.
+        .{ .source = "[1 2 3] (dup (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) dip +) each", .hits = 1 },
+        .{ .source = "[1 2 3] ((1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) (2 *) bi +) each", .hits = 1 },
+        .{ .source = "[1 2 3] ((1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) above +) each", .hits = 1 },
+        .{ .source = "[1 2 3] ((1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +) below +) each", .hits = 1 },
+        // A literal a stack word moved before its combinator took it.
+        .{ .source = "[1 2 3] ((1 +) (2 *) swap bi -) each", .hits = 1 },
+        .{ .source = "[1 2 3] ((1 +) dup bi +) each", .hits = 1 },
+        .{ .source = "[1 2 3] ((1 +) over pop apply) each", .hits = 1 },
+        // Quotations given as one list.
+        .{ .source = "[1 2 3] ([(1 +) (2 *)] cleave +) each", .hits = 1 },
+        .{ .source = "[1 2 3] (dup [(1 +) (2 *)] spread +) each", .hits = 1 },
+        // Faults inside an applied quotation, in element order.
+        .{ .source = "[4 0 2] (dup (8 swap div) dip +) each", .hits = 1 },
+        .{ .source = "[4 0 2] ((1 +) (8 swap div) bi +) each", .hits = 1 },
+        .{ .source = "[4 0 2] (2 (div) below + +) each", .hits = 1 },
+        // Shapes a program declines.
+        .{ .source = "[1 2 3] (dup 0 > (1 +) (1 -) if) each", .hits = 0 },
+        .{ .source = "(1 +) `inc def [1 2 3] (inc 2 *) each", .hits = 0 },
+        .{ .source = "(1 +) `inc def [1 2 3] (dup (inc) dip +) each", .hits = 0 },
+        .{ .source = "(apply) `run def [1 2 3] ((1 +) run 2 *) each", .hits = 0 },
+        .{ .source = "(apply) `dip def [1 2 3] (dup (1 +) dip +) each", .hits = 0 },
+        .{ .source = "(pop pop 7) `bi def [1 2 3] ((1 +) (2 *) bi) each", .hits = 0 },
+        .{ .source = "[1 2 3] ((1 +) dip) each", .hits = 0 },
+        .{ .source = "[1 2 3] ((1 +) (2 *) bi) each", .hits = 0 },
+        .{ .source = "[1 2 3] ((len) apply) each", .hits = 0 },
+    };
+    for (cases) |case| {
+        compareModesExactly(case.source) catch |err| {
+            std.log.err("combinator-program differential failed for `{s}`", .{case.source});
+            return err;
+        };
+        try expectHits(case.source, case.hits);
+    }
+}
+
 test "idioms: reductions run two-input programs in order" {
     // `fold`, `fold1`, and `scan` feed the accumulator as the program's first
     // input and the element as its second, one element at a time.

@@ -424,6 +424,14 @@ noinline fn make(fiber: *Fiber, site: machine.ExecutionSite, code: *Header, publ
     return flattened;
 }
 
+/// What a quotation a phrase applies consumes and leaves: its remembered
+/// summary, or a read under a rewrite's own bounds when there is none, which
+/// a quotation longer than a summary is kept for needs.
+fn counted(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{OutOfMemory}!?stack_summary.Summary {
+    if (try stack_summary.of(fiber, site, quotation)) |summary| return summary;
+    return stack_summary.read(fiber, site, quotation, .{ .max_forms = max_forms, .max_visited = max_visited });
+}
+
 /// One rewrite in progress: the forms of the flattened list so far, where
 /// each came from, and the tables of the phrases flattened into it.
 const Rewrite = struct {
@@ -703,7 +711,7 @@ const Rewrite = struct {
         // A measured word needs what its quotation consumes, which a summary
         // says before the quotation runs.
         const applied_summary: ?stack_summary.Summary = switch (shape) {
-            .apply, .dip, .above, .below => try stack_summary.of(self.fiber, applied_site, applied[0].literal),
+            .apply, .dip, .above, .below => try counted(self.fiber, applied_site, applied[0].literal),
             .cleave, .spread, .cleave_list, .spread_list => null,
         };
         const neutral = switch (shape) {
@@ -779,7 +787,7 @@ const Rewrite = struct {
                         .apply, .dip, .above, .below => unreachable,
                     }
                     for (quotations.items[0..quotations.count], 0..) |quotation, index| {
-                        const summary = try stack_summary.of(self.fiber, applied_site, quotation) orelse break :expanded false;
+                        const summary = try counted(self.fiber, applied_site, quotation) orelse break :expanded false;
                         quotations.consumed[index] = summary.consumed;
                         quotations.produced[index] = summary.produced;
                     }
