@@ -66,6 +66,24 @@ pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{
     return summary;
 }
 
+/// Whether `word`, run at `site`, has a summary. A word that has one moves
+/// only the values its counts say, and leaves no local bound.
+pub fn wordHasSummary(fiber: *Fiber, site: machine.ExecutionSite, word: value.Symbol) error{OutOfMemory}!bool {
+    var walk: Walk = .{ .fiber = fiber, .publication = fiber.currentPublication() };
+    return switch (try fiber.summaryTarget(word, site)) {
+        .none => false,
+        .source => |source| try walk.body(word, site, source) == .exact,
+        .builtin => |builtin| !prims.unsummarizable(builtin.primitive) and
+            Walk.exact(builtin.effect) != null and !Walk.takesQuotation(builtin.effect.?),
+    };
+}
+
+/// The failure of a word that was running its quotations by their summaries
+/// when a publication changed what those summaries rested on.
+pub fn failDefinitionsChanged(fiber: *Fiber) machine.MachineError {
+    return fiber.fail(.domain, "definitions changed while a quotation was running by its stack summary");
+}
+
 /// What a fiber has read of the quotations it applied, all in one
 /// publication: a quotation applied again at the same site is answered
 /// without a walk. An entry holds its quotation, so the address it is found

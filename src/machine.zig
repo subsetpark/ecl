@@ -567,6 +567,9 @@ const Eval = struct {
     /// application. If it completes or transfers tail control, its existing
     /// code-header ownership becomes the application's selected quotation.
     application_selection: MaybeIndex(ApplicationFrameIndex) = .none,
+    /// `code` is a flattened list: the fiber's table has the record of where
+    /// its forms were written.
+    flattened: bool = false,
 
     /// Releases what this evaluation owns.
     inline fn release(self: *const Eval, releases: *heap.ReleaseDomain) void {
@@ -914,6 +917,7 @@ pub const Application = struct {
 
 const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 const stack_summary = @import("stack_summary.zig");
+const flatten = @import("flatten.zig");
 
 fn ApplicationAdapters(comptime Driver: type) type {
     return struct {
@@ -1700,6 +1704,8 @@ pub const Fiber = struct {
     resolutions: WordResolutions = .{},
     /// The stack summaries read for the quotations this fiber applied.
     summaries: stack_summary.Cache = .{},
+    /// What this fiber made of the code lists it ran.
+    flattened: flatten.Cache = .{},
     entry_base: usize,
     /// How far down a word may reach, and what `require` compares against.
     floor: floor_api.StackFloor = .{},
@@ -2189,6 +2195,9 @@ pub const Fiber = struct {
         }
         for (self.locals.items) |item| self.releases.releaseValue(item);
         self.locals.deinit(self.allocator);
+        // After every evaluation, frame, driver and failure that could hold a
+        // flattened list's code.
+        self.flattened.deinit(self.allocator, self.releases);
         self.lifetime.deinit(self.releases, self.allocator);
         self.* = undefined;
     }
@@ -2310,7 +2319,8 @@ pub const Fiber = struct {
     /// starts. Runtime-built code has no entry and returns null.
     pub fn activeSourceName(self: *const Fiber) ?[]const u8 {
         const current = self.current orelse return null;
-        const located = self.archive.locate(current.code, self.active_index) orelse
+        const site = self.written(current.code, self.active_index);
+        const located = self.archive.locate(site.code, site.index) orelse
             return null;
         return located.source_name;
     }
@@ -3209,20 +3219,32 @@ pub const Fiber = struct {
     /// Runs `quotation` inline with the caller, resolving one form at a time.
     pub fn callProgramOwned(self: *Fiber, quotation: *Header, program: Program) error{OutOfMemory}!void {
         std.debug.assert(program == .owned);
-        const effect_tail = self.replaceTailEffectCandidate(quotation);
+        const site = self.current.?.site.applied();
         const application_tail = self.tailApplicationIndex();
+        // An application that selects its quotation for a contract is found
+        // by that quotation's own code, so it runs as written.
+        const flattened = if (application_tail == .none) flatten.of(self, site, quotation) catch {
+            self.releases.releaseHeader(quotation);
+            return error.OutOfMemory;
+        } else null;
+        const effect_tail = self.replaceTailEffectCandidate(quotation);
         if (application_tail.get()) |application_index| {
             const frame = &self.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(quotation);
         }
-        const site = self.current.?.site.applied();
         const inherited = self.suspendCurrent() catch {
             self.releases.releaseHeader(quotation);
             return error.OutOfMemory;
         };
+        const code = if (flattened) |record| run: {
+            heap.incRef(record.code);
+            record.enter(self.frames.items.len + 1);
+            self.releases.releaseHeader(quotation);
+            break :run record.code;
+        } else quotation;
         self.current = .{
-            .code = quotation,
+            .code = code,
             .program = program,
             .position = .{ .source = 0 },
             .site = site,
@@ -3230,6 +3252,7 @@ pub const Fiber = struct {
             .effect_tail = effect_tail,
             .application_tail = application_tail,
             .application_selection = application_tail,
+            .flattened = flattened != null,
         };
     }
 
@@ -3359,6 +3382,13 @@ pub const Fiber = struct {
             },
         };
         const select_initial = application.provenance != .boundary;
+        // An application that selects its quotation for a contract is found
+        // by that quotation's own code, so it runs as written.
+        const flattened = if (select_initial) null else flatten.of(self, application.site, application.quotation) catch {
+            inherited.release(self.releases);
+            application.discard(self.releases, self.allocator);
+            return error.OutOfMemory;
+        };
         const activation = switch (kind) {
             .relaunch => inherited,
             .fresh => if (self.current != null) self.suspendCurrent() catch {
@@ -3405,9 +3435,16 @@ pub const Fiber = struct {
         }
         // The combinator state the frame holds keeps the quotation for the
         // whole invocation, so each application borrows it.
+        // A flattened list is held by the evaluation that runs it, since the
+        // table that made it may let it go first.
+        if (flattened) |record| {
+            heap.incRef(record.code);
+            record.enter(self.frames.items.len + 1);
+        }
         self.current = .{
-            .code = application.quotation,
-            .program = .borrowed,
+            .code = if (flattened) |record| record.code else application.quotation,
+            .program = if (flattened != null) .owned else .borrowed,
+            .flattened = flattened != null,
             .position = .{ .source = 0 },
             .site = application.site,
             .activation = lent,
@@ -3553,6 +3590,8 @@ pub const Fiber = struct {
                 .code = executable.code(),
                 .site = if (home) |target| .image(target, self.module_access, site.defining) else site,
                 .summary = self.resolutions.summary(word, self.inherited.registry.currentPublication(), key),
+                .trace_word = definitionTraceWord(definition, home, word.name),
+                .attribution = definition.attribution,
             } },
         };
     }
@@ -3649,7 +3688,97 @@ pub const Fiber = struct {
             if (operand > self.locals.items.len) return self.fail(.domain, "_dl count exceeds the live locals");
             return self.unbindLocals(operand);
         }
+        if (name == locals.guard) return self.guardFlattened(operand);
+        if (name == locals.recheck) return self.recheckFlattened();
         return self.fail(.domain, "a locals operand on a word that is not a locals operation");
+    }
+
+    /// How many evaluations the fiber has, running and suspended: the
+    /// height a flattened list's record is entered and retired by.
+    pub fn height(self: *const Fiber) usize {
+        return self.frames.items.len + @intFromBool(self.current != null);
+    }
+
+    /// The guard at the start of a flattened phrase. It holds when the phrase
+    /// may run as flattened: the list was flattened in the current
+    /// publication, the values the expansion takes for itself are in reach,
+    /// and a tail application is not owed the evaluation's tail authority.
+    /// Otherwise the phrase runs as it was written: its operands are pushed,
+    /// its expansion is passed over, and its word is dispatched from here.
+    fn guardFlattened(self: *Fiber, row: u32) MachineError!void {
+        const current = &self.current.?;
+        const record = self.flattened.record(current.code) orelse
+            return self.fail(.domain, "a flattened phrase's guard outside a flattened list");
+        if (row >= record.guards.len) return self.fail(.domain, "a flattened phrase's guard has no entry");
+        const guard = record.guards[row];
+        const owed = guard.tail and (current.effect_tail != .none or current.application_tail != .none);
+        if (!owed and record.publication == self.currentPublication() and floor_api.reachable(self, guard.needed)) return;
+        const after = switch (current.position) {
+            .source => |index| index,
+            .invocation, .replay, .redispatch => return self.fail(.domain, "a flattened list was resumed at a guard"),
+        };
+        // An operand is a literal, or a read of a local that holds one.
+        for (record.operands[guard.operands_start..][0..guard.operands_len]) |operand| {
+            const read = if (operand == .symbol) env.localOperand(operand.symbol.slot) else null;
+            if (read) |index| try self.localOperation(operand.symbol.name, index) else try self.pushBorrowed(operand);
+        }
+        self.current.?.position = .{ .source = after + guard.skip };
+        return self.executeWord(guard.word);
+    }
+
+    /// The `nth` word an evaluation is traced under, innermost first, or
+    /// null past the last. An evaluation as written has one, its activation.
+    /// A flattened list stands for the evaluations of every list written in
+    /// it: of each word inlined around the form it is at, then its own. A
+    /// word is in the trace when an evaluation of one of its lists would
+    /// still exist: at a failing form the innermost always does, and
+    /// otherwise only one with forms left would, the rest having handed
+    /// their activation on.
+    fn tracedUnder(self: *const Fiber, evaluation: *const Eval, form: u32, suspended: bool, nth: usize) ?TraceEntry {
+        const record = (if (evaluation.flattened) self.flattened.recordOf(evaluation.code) else null) orelse
+            return if (nth == 0) Unwinding.traceEntry(evaluation.activation) else null;
+        if (form >= record.origins.len) return if (nth == 0) Unwinding.traceEntry(evaluation.activation) else null;
+        const origin = record.origins[form];
+        var visible = !suspended or origin.continues;
+        var word = origin.word;
+        var seen: usize = 0;
+        while (word != flatten.no_word) {
+            const inlined = record.chain[word];
+            if (visible) {
+                if (seen == nth) return .{
+                    .word = inlined.word,
+                    .site = .{ .code = inlined.code, .index = inlined.index },
+                    .attribution = inlined.attribution,
+                };
+                seen += 1;
+            }
+            visible = inlined.call_continues;
+            word = inlined.outer;
+        }
+        return if (visible and seen == nth) Unwinding.traceEntry(evaluation.activation) else null;
+    }
+
+    /// The check after each quotation of a flattened cleave or spread, whose
+    /// expansion rests on the quotations' summaries. A publication since the
+    /// list was flattened may have changed what the quotation just run did,
+    /// so the phrase fails as one running by its summaries does.
+    fn recheckFlattened(self: *Fiber) MachineError!void {
+        const record = self.flattened.record(self.current.?.code) orelse
+            return self.fail(.domain, "a flattened phrase's check outside a flattened list");
+        if (record.publication == self.currentPublication()) return;
+        const origin = record.origins[self.active_index];
+        const word = list.atUnchecked(.{ .list = origin.code }, origin.index);
+        if (word == .symbol) self.active_word = .plain(word.symbol.name);
+        return stack_summary.failDefinitionsChanged(self);
+    }
+
+    /// Where a form the machine is running was written. A flattened list's
+    /// forms came from the list it was made from and the quotations in it.
+    fn written(self: *const Fiber, code: *Header, index: u32) ErrorSite {
+        const record = self.flattened.recordOf(code) orelse return .{ .code = code, .index = index };
+        if (index >= record.origins.len) return .{ .code = code, .index = index };
+        const origin = record.origins[index];
+        return .{ .code = origin.code, .index = origin.index };
     }
 
     /// Runs an occurrence by explicit lookup, against the current publication
@@ -3960,13 +4089,72 @@ pub const Fiber = struct {
     fn suspendCurrent(self: *Fiber) error{OutOfMemory}!Activation {
         const current = &self.current.?;
         if (current.hasInstructions()) {
+            const lent = self.lentPastFlattened(current);
             try self.pushCurrent();
-            return .none;
+            return lent;
         }
-        const inherited = current.activation.handedOn();
+        const inherited = self.handedPastFlattened(current) orelse current.activation.handedOn();
         self.retireCompletedCode(current);
         self.current = null;
         return inherited;
+    }
+    /// What an exhausted evaluation of a flattened list hands on when its
+    /// last form ran inside an inlined word, or null when it hands on its
+    /// own activation as any evaluation does. The word's body would have
+    /// been the evaluation exhausted here, and the activation handed on the
+    /// word's. The evaluation's own would have gone when the word was
+    /// entered from a list with nothing left: released, or, for a helper
+    /// leaving its body, given to the word with the helper's call site.
+    /// The activation returned owns its call site's code, since the list
+    /// that kept it is being retired.
+    fn handedPastFlattened(self: *Fiber, current: *Eval) ?Activation {
+        if (!current.flattened) return null;
+        const record = self.flattened.record(current.code) orelse return null;
+        if (self.active_index >= record.origins.len) return null;
+        const word = record.origins[self.active_index].word;
+        if (word == flatten.no_word) return null;
+        const inlined = record.chain[word];
+        const own = current.activation;
+        current.activation = .none;
+        if (own.attribution == .caller and own.site() != null) {
+            var moved = own.handedOn();
+            moved.word = inlined.word;
+            moved.attribution = inlined.attribution;
+            return moved;
+        }
+        own.release(self.releases);
+        heap.incRef(inlined.code);
+        return .{
+            .word = inlined.word,
+            .origin = @intFromPtr(inlined.code),
+            .index = inlined.index,
+            .hold = .owned,
+            .attribution = inlined.attribution,
+        };
+    }
+    /// What a suspended evaluation hands on although it has forms left. A
+    /// flattened list keeps running after a form that ended every list it
+    /// was written in: only what the rewrite inserted follows. The
+    /// evaluations of those lists would have been exhausted there and handed
+    /// their activation on, so this one lends it, and keeps it for the
+    /// quotations still to come.
+    fn lentPastFlattened(self: *Fiber, current: *const Eval) Activation {
+        if (!current.flattened) return .none;
+        const record = self.flattened.record(current.code) orelse return .none;
+        if (self.active_index >= record.origins.len) return .none;
+        const origin = record.origins[self.active_index];
+        if (origin.continues) return .none;
+        // The innermost word whose lists end here: an inlined one, whose
+        // activation exists only in the record, or the evaluation's own.
+        if (origin.word == flatten.no_word) return current.activation.borrowed();
+        const inlined = record.chain[origin.word];
+        return .{
+            .word = inlined.word,
+            .origin = @intFromPtr(inlined.code),
+            .index = inlined.index,
+            .hold = .borrowed,
+            .attribution = inlined.attribution,
+        };
     }
     /// `suspendCurrent` for a word about to run, which records where it was
     /// called. A caller that stays suspended lends its code; one that has no
@@ -3977,12 +4165,13 @@ pub const Fiber = struct {
         const current = &self.current.?;
         const code = current.code;
         if (current.hasInstructions()) {
+            const lent = self.lentPastFlattened(current);
             try self.pushCurrent();
-            return .{ .inherited = .none, .caller = .{ .code = code, .program = .borrowed } };
+            return .{ .inherited = lent, .caller = .{ .code = code, .program = .borrowed } };
         }
         // Read in place: retiring an exhausted caller releases nothing here,
         // so copying the evaluation out would be the whole cost of the call.
-        const inherited = current.activation;
+        const inherited = self.handedPastFlattened(current) orelse current.activation;
         if (current.application_selection != .none) {
             // The selection takes the evaluation's reference; the call site
             // needs its own, because a later selection can replace this one.
@@ -4038,6 +4227,8 @@ pub fn initialize(fiber: *Fiber, code: *Header) void {
     std.debug.assert(fiber.frames.items.len == 0);
     std.debug.assert(fiber.terminal == .evaluating);
     std.debug.assert(fiber.current == null);
+    // Nothing is running, so every flattened list set aside can go.
+    fiber.flattened.sweep(fiber.allocator, fiber.releases, 0);
     heap.incRef(code);
     fiber.current = .{
         .code = code,
@@ -4543,6 +4734,10 @@ pub const SummaryTarget = union(enum) {
         /// Where the body runs: the caller's site, or the word's own image.
         site: ExecutionSite,
         summary: WordResolutions.BodySummary,
+        /// What an activation of the word is traced under, and whose
+        /// failure a failure in it is.
+        trace_word: intern.TraceWord,
+        attribution: env.Attribution,
     },
 };
 
@@ -4672,9 +4867,16 @@ fn scheduleWord(
 /// hold the callee's last reference.
 fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
+    // Held before anything else resolves a word: the fiber's resolution of
+    // this word may be all that keeps its definition, and looking at the
+    // body resolves the body's words, which can let that resolution go.
     executable.owner().retain();
     var entered = false;
     defer if (!entered) executable.owner().release(self.releases);
+    // A body under an effect check is found by its own code when the check
+    // fails, so it runs as written.
+    const flattened = if (effect == null) try flatten.of(self, site, executable.code()) else null;
+    if (flattened) |record| record.hold(executable.owner());
     var effect_tail = self.replaceTailEffectCandidate(executable.code());
     const application_tail = self.tailApplicationIndex();
     const call_index = self.active_index;
@@ -4705,8 +4907,26 @@ fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord,
         self.effect_check_index = check_index;
         effect_tail = .some(check_index);
     }
-    entered = true;
     installed = true;
+    if (flattened) |record| {
+        // The record holds the definition for as long as its list can run,
+        // so the evaluation holds only the list: `entered` stays false and
+        // the retain above is released.
+        heap.incRef(record.code);
+        record.enter(self.frames.items.len + 1);
+        self.current = .{
+            .code = record.code,
+            .program = .owned,
+            .position = .{ .source = 0 },
+            .site = site,
+            .activation = activation,
+            .effect_tail = effect_tail,
+            .application_tail = application_tail,
+            .flattened = true,
+        };
+        return;
+    }
+    entered = true;
     self.current = .{
         .code = executable.code(),
         .program = .{ .definition = executable },
@@ -5102,17 +5322,21 @@ pub const Unwinding = opaque {
         return self.fiber().takePendingForUnwind();
     }
 
-    /// The word the running evaluation is traced under, if any.
-    pub fn currentTrace(self: *Unwinding) ?TraceEntry {
-        const current = self.fiber().current orelse return null;
-        return traceEntry(current.activation);
+    /// The `nth` word the running evaluation is traced under, innermost
+    /// first, or null past the last.
+    pub fn currentTrace(self: *Unwinding, nth: usize) ?TraceEntry {
+        const current = if (self.fiber().current) |*running| running else return null;
+        return self.fiber().tracedUnder(current, self.fiber().active_index, false, nth);
     }
 
-    /// The word saved frame `index` is traced under, if it is a traced
-    /// evaluation.
-    pub fn frameTrace(self: *Unwinding, index: usize) ?TraceEntry {
+    /// The `nth` word saved frame `index` is traced under, if it is a traced
+    /// evaluation, or null past the last.
+    pub fn frameTrace(self: *Unwinding, index: usize, nth: usize) ?TraceEntry {
         return switch (self.fiber().frames.items[index]) {
-            .eval => |frame| traceEntry(frame.activation),
+            .eval => |*frame| trace: {
+                const next = frame.nextIndex();
+                break :trace self.fiber().tracedUnder(frame, if (next == 0) 0 else next - 1, true, nth);
+            },
             .effect_check, .application, .qualified_after_load, .boundary => null,
         };
     }
@@ -5128,7 +5352,8 @@ pub const Unwinding = opaque {
     /// Where a failure is reported: the failing token, or the call site a
     /// helper's failure is attributed to.
     pub fn locateSite(self: *Unwinding, site: ErrorSite) spans.SpanArchive.LocateCursor {
-        return self.fiber().archive.locateCursor(site.code, site.index);
+        const origin = self.fiber().written(site.code, site.index);
+        return self.fiber().archive.locateCursor(origin.code, origin.index);
     }
 
     /// Where the failure happened: already known, or a cursor that finds it
@@ -5140,7 +5365,10 @@ pub const Unwinding = opaque {
         const archive = self.fiber().archive;
         const site = failure.site orelse return .{ .located = null };
         return switch (site) {
-            .token => |token| .{ .locating = archive.locateCursor(token.code, token.index) },
+            .token => |token| token: {
+                const origin = self.fiber().written(token.code, token.index);
+                break :token .{ .locating = archive.locateCursor(origin.code, origin.index) };
+            },
             .contract_quotation => |candidate| .{ .locating = archive.locateQuotationCursor(candidate.borrow()) },
             .explicit_location => |location| .{ .located = .{
                 .source_name = location.source_name,

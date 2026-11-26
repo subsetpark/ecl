@@ -919,6 +919,12 @@ fn claimHeldList(handle: *ListHandle, references: u32) ?*UniqueList {
     return @ptrCast(@alignCast(unique));
 }
 
+/// Whether a reader made the list from source text. A list a program built
+/// as it ran has no source to speak of, and usually no second use.
+pub fn readFromSource(handle: *ListHandle) bool {
+    return objectConst(headerFromList(handle)).provenance_namespace != .none;
+}
+
 pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {
     const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
     return @ptrCast(@alignCast(unique));

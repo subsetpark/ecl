@@ -31,8 +31,9 @@ pub const Flow = union(enum) {
     dip,
     /// Runs one of two quotations.
     branch,
-    /// Runs its quotation and puts back what it consumed.
-    measured,
+    /// Runs its quotation and puts back what it consumed, above its results
+    /// or below them.
+    measured: enum { above, below },
     /// Runs this many quotations from the same inputs.
     cleave: usize,
     /// Runs this many quotations, each on its own inputs.
@@ -43,12 +44,24 @@ pub fn flow(primitive: env.PrimitiveImpl) Flow {
     if (primitive == &call) return .apply;
     if (primitive == &dip) return .dip;
     if (primitive == &ifWord) return .branch;
-    if (primitive == &above or primitive == &below) return .measured;
+    if (primitive == &above) return .{ .measured = .above };
+    if (primitive == &below) return .{ .measured = .below };
     if (primitive == &bi) return .{ .cleave = 2 };
     if (primitive == &tri) return .{ .cleave = 3 };
     if (primitive == &bracket) return .{ .spread = 2 };
     return .declared;
 }
+
+/// Whether a primitive is `cleave` or `spread`, which take their quotations
+/// as one list.
+pub fn listSharing(primitive: env.PrimitiveImpl) ?enum { cleave, spread } {
+    if (primitive == &cleave) return .cleave;
+    if (primitive == &spread) return .spread;
+    return null;
+}
+
+/// The most quotations a cleave or spread runs in place by their summaries.
+pub const max_counted = 8;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
@@ -705,8 +718,8 @@ const CountedCleave = struct {
     /// What each quotation consumes and leaves, by its index. A cleave of
     /// more quotations than these hold runs over the soft floor.
     const Counts = struct {
-        consumed: [8]u8 = @splat(0),
-        produced: [8]u8 = @splat(0),
+        consumed: [max_counted]u8 = @splat(0),
+        produced: [max_counted]u8 = @splat(0),
         /// The publication read before any summary was, which every count
         /// here was read under.
         publication: u64 = 0,
@@ -738,10 +751,10 @@ const CountedCleave = struct {
                 summary.consumed == self.counts.consumed[index] and summary.produced == self.counts.produced[index]
             else
                 false;
-            if (!same) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+            if (!same) return stack_summary.failDefinitionsChanged(fiber);
         }
         // A publication during the reads leaves them under two.
-        if (fiber.currentPublication() != now) return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+        if (fiber.currentPublication() != now) return stack_summary.failDefinitionsChanged(fiber);
         self.publication = now;
     }
     /// Copies the next quotation's inputs to the top of the stack.
@@ -775,7 +788,7 @@ const CountedCleave = struct {
         // A publication while the quotation ran may have changed a word it
         // called, so its counts cannot be trusted to describe what it did.
         if (fiber.currentPublication() != self.publication)
-            return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+            return stack_summary.failDefinitionsChanged(fiber);
         // A summary that disagreed with what its quotation did would have
         // been read from a wrong effect declaration.
         std.debug.assert(fiber.stack.items.len == self.expected);

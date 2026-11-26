@@ -1107,6 +1107,81 @@ the end. The other
 measured words keep the floor, where reading a summary costs as much as the
 admitting it would replace.
 
+### A list may run flattened
+
+A quotation literal that reaches a core combinator directly is not a value
+anything else can see, so applying it and running its forms where the
+combinator stands compute the same thing. The first time a fiber enters a code
+list at a site it rewrites the phrases of this kind into one flattened list and
+remembers it for the publication, in a table of constant size beside its
+resolutions and summaries; later entries run the flattened list. The words
+inside an expanded quotation stay ordinary forms and resolve when they are
+reached. Core is built with every list as written.
+
+Flattening is an optimization and nothing observes it. Three things carry
+that:
+
+- Each flattened phrase begins with a guard. When the list was flattened under
+  an earlier publication, when the values the expansion takes for itself are
+  not in reach, or when a tail application is owed the evaluation's tail
+  authority, the guard runs the phrase as it was written and passes over the
+  expansion. A guard therefore never fails; whatever the written phrase would
+  have reported is what is reported.
+- Beside the flattened list is a record of where each form was written. Every
+  position the machine reports from a running list is read through it, so a
+  failure, a call site and a source name are the written quotation's.
+- A flattened list keeps running after a form that ended every list it was
+  written in, where the evaluations of those lists would have been exhausted
+  and handed their activation on. Suspended there it lends its activation and
+  is traced under no word, so a failure's trace holds the words it would have.
+
+`apply` needs nothing but the quotation. `dip` holds its protected value in a
+local across the quotation, and a read of a local counts back from the newest
+binding, so `dip` is flattened only when the quotation has a stack summary:
+code with one leaves no local of its own bound. For the same reason a local is
+taken to hold the literal it was bound to only across forms that have
+summaries. A cleave or spread needs what each quotation consumes and leaves as
+well, so every quotation must have a summary, and it holds its inputs in locals
+as `dip` holds its one. After each of its quotations it checks the publication and
+fails as a cleave running by its summaries does, since a summary read under one
+publication says nothing of a quotation run under another. The measured words
+`above` and `below` are flattened the same way, by what the summary says their
+quotation consumes, and make the same check: written, they find that out as the
+quotation runs and have nothing to check.
+
+A call of a source word is flattened too when quotation literals are its
+arguments and the body can run in place without anyone telling: it runs where
+its caller does, is reported as itself, does not reach itself, and binds locals
+only as its first form, where the guard stands for the word's own check of its
+arity. The body is put in place of the call with those arguments ahead of it,
+and a local the body binds to one of them counts as that literal where the body
+applies it. The record keeps, for each word inlined, what its activation would
+have said, and a failure's trace is read from it: each inlined word around the
+failing form, then the evaluation's own, each present when an evaluation of
+one of its lists would still exist.
+
+Within a publication a place in the table keeps the first list that took it,
+and a second list that lands there runs as written, so a record leaves the
+table only when the publication moves. One that may still be running then
+waits until the fiber's evaluations have come back beneath the lowest height it
+was entered at, when nothing can refer to it, and is retired then. That is a
+fact about the fiber's own stack, so what a fiber allocates and frees stays a
+function of its own run. The waiting records are bounded as the table is:
+while they are at their bound the table takes no new publication and lists run
+as written. A fiber therefore holds a constant number of records however long
+it runs at one height, and releasing them is bounded work.
+
+A quotation applied as a value runs under the provenance applying gives it and
+binds its locals as no word's body. Run in place it would take the enclosing
+list's provenance and be part of whatever body that list is. So a list whose
+provenance applying would change keeps its phrases as written, and a quotation
+that binds locals is expanded only behind a guard that its summary shows can
+never leave the binding short.
+
+Only a list a reader made from source is looked at. A list a program builds as
+it runs is a new list each time, which the table could only look at and
+forget.
+
 ### Failure is a bounded machine transition
 
 Language errors are ordinary dictionary values at observation boundaries, but
@@ -1373,7 +1448,11 @@ as the last following word's own.
 Numeric arithmetic has one compiled form, the scalar program: a run of numeric
 or char constants, stack words, and core numeric operations compiled to a
 straight-line function over registers, executed a block at a time through the
-typed kernels. Every numeric word reads a char as its codepoint, so a char
+typed kernels. Locals are registers under other names. A quotation literal
+that `apply`, `dip`, `above`, `below`, `bi`, `tri`, or `bracket` applies is
+compiled where the combinator stands, consuming and leaving what the paging
+floor would have counted, so the program holds its operations and no
+application; a fault inside one reports the quotation it was written in. Every numeric word reads a char as its codepoint, so a char
 input or constant is an int to the program; a char the program passes through
 unread remains a char. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or
 `scan` compiles whole, over the inputs the combinator seeds, and is observed as

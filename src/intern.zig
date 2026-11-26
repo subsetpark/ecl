@@ -648,6 +648,14 @@ pub fn isReservedBytes(name: []const u8) bool {
 pub const locals_load = "_ll";
 pub const locals_get = "_gl";
 pub const locals_drop = "_dl";
+/// The two operations only a flattened list holds: the guard at the start of
+/// a flattened phrase, and the publication check after a quotation that ran
+/// by its summary. No reader emits them and no flattened list is a value a
+/// program can hold, so an occurrence is only ever dispatched by the operand
+/// flag in its link. The names are therefore not reserved: a word a program
+/// calls `_fg` is an ordinary word and never meets these.
+pub const locals_guard = "_fg";
+pub const locals_recheck = "_fc";
 
 /// The locals backend's interned names. Because they are reserved from every
 /// publication, in every scope they can only mean their core primitives, and
@@ -656,12 +664,16 @@ pub const LocalsWords = struct {
     load: u32,
     get: u32,
     drop: u32,
+    guard: u32,
+    recheck: u32,
 
     pub fn mint() error{OutOfMemory}!LocalsWords {
         return .{
             .load = try intern(locals_load),
             .get = try intern(locals_get),
             .drop = try intern(locals_drop),
+            .guard = try intern(locals_guard),
+            .recheck = try intern(locals_recheck),
         };
     }
 };

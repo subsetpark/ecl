@@ -687,6 +687,9 @@ wrap (net.local-address `port at 0 >) @give task.await
 ### rest
 `( list -- result )` — Return all but the first element of `list`.
 
+### retain
+`( ... counts -- ... )` — Keep each of the values beneath `counts` as many times as its count, in order: the first count applies to the deepest of them, and the values consumed are as many as `counts` holds. The stack form of `where at`.
+
 ### reverse
 `( list -- result )` — Return `list` with its elements in reverse order.
 
@@ -942,9 +945,6 @@ applications of `q`, until the result matches
 
 ### parse-one
 `( string -- x )` — Parse source text describing exactly one form.
-
-### retain
-`( ... counts -- ... )` — Keep each of the values beneath `counts` as many times as its count, in order: the first count applies to the deepest of them, and the values consumed are as many as `counts` holds. The stack form of `where at`.
 
 ### scan1
 `( list (q: acc a -- acc) -- list )` — Fold `q` over `list`, using the first element of `list` as the accumulator and returning a list of each successive accumulator value.
