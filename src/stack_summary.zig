@@ -66,6 +66,12 @@ pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{
     return summary;
 }
 
+/// The failure of a cleave or spread that was running by its quotations'
+/// summaries when a publication changed what those summaries rested on.
+pub fn failDefinitionsChanged(fiber: *Fiber) machine.MachineError {
+    return fiber.fail(.domain, "definitions changed while a cleave or spread was running");
+}
+
 /// What a fiber has read of the quotations it applied, all in one
 /// publication: a quotation applied again at the same site is answered
 /// without a walk. An entry holds its quotation, so the address it is found

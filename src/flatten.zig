@@ -11,6 +11,7 @@ const list = @import("list.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const combinators = @import("combinators.zig");
+const stack_summary = @import("stack_summary.zig");
 const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 
 const Header = value.ListHandle;
@@ -420,17 +421,32 @@ const Rewrite = struct {
             .builtin => |builtin| builtin.primitive,
             .none, .source => return false,
         };
-        const flow = combinators.flow(primitive);
-        const quotations: usize = switch (flow) {
-            .apply, .dip => 1,
-            .declared, .branch, .measured, .cleave, .spread => return false,
+        const shape: Shape = switch (combinators.flow(primitive)) {
+            .apply => .apply,
+            .dip => .dip,
+            .cleave => |count| .{ .cleave = count },
+            .spread => |count| .{ .spread = count },
+            // The measured words find what their quotation consumed as it
+            // runs; nothing here can stand in for that.
+            .branch, .measured => return false,
+            .declared => if (combinators.listSharing(primitive)) |sharing| switch (sharing) {
+                .cleave => Shape.cleave_list,
+                .spread => Shape.spread_list,
+            } else return false,
         };
-        if (word_at - first < quotations) return false;
+        // The forms that push the phrase's operands: its quotations, or the
+        // one list of them.
+        const operand_forms: usize = switch (shape) {
+            .apply, .dip, .cleave_list, .spread_list => 1,
+            .cleave, .spread => |count| count,
+        };
+        if (word_at - first < operand_forms) return false;
         const start = self.mark();
         const length: usize = @intCast(code.length());
         const at = within.origin(code, word_at, length);
         const last = within.tail and word_at + 1 == length;
-        const operands = word_at - quotations;
+        const operands = word_at - operand_forms;
+        const words = self.fiber.environment.localsWords();
         const expanded = expanded: {
             for (first..operands) |position| {
                 if (!self.emit(list.atUnchecked(whole, position), within.origin(code, position, length))) break :expanded false;
@@ -438,33 +454,60 @@ const Rewrite = struct {
             if (self.guard_count == max_guards) break :expanded false;
             const row = self.guard_count;
             self.guard_count += 1;
-            if (!self.operation(self.fiber.environment.localsWords().guard, @intCast(row), at)) break :expanded false;
+            if (!self.operation(words.guard, @intCast(row), at)) break :expanded false;
             const after_guard = self.count;
-            const applied = list.atUnchecked(whole, operands).list;
-            const words = self.fiber.environment.localsWords();
-            const needed: u16 = switch (flow) {
+            const applied_site = site.applied();
+            const needed: usize = switch (shape) {
                 .apply => apply: {
-                    if (!try self.body(applied, site.applied(), depth + 1, .{ .continues = at.continues, .tail = last })) break :expanded false;
+                    const applied = list.atUnchecked(whole, operands).list;
+                    if (!try self.body(applied, applied_site, depth + 1, .{ .continues = at.continues, .tail = last })) break :expanded false;
                     break :apply 0;
                 },
                 // Bind the protected value, run the quotation beneath where
                 // it stood, and put it back.
                 .dip => dip: {
+                    const applied = list.atUnchecked(whole, operands).list;
                     if (!self.operation(words.load, 1, at)) break :expanded false;
-                    if (!try self.body(applied, site.applied(), depth + 1, .{ .continues = at.continues, .tail = false })) break :expanded false;
+                    if (!try self.body(applied, applied_site, depth + 1, .{ .continues = at.continues, .tail = false })) break :expanded false;
                     if (!self.operation(words.get, 0, at)) break :expanded false;
                     if (!self.operation(words.drop, 1, at)) break :expanded false;
                     break :dip 1;
                 },
-                else => unreachable,
+                .cleave, .spread, .cleave_list, .spread_list => counted: {
+                    var quotations: Quotations = .{};
+                    switch (shape) {
+                        .cleave, .spread => for (operands..word_at) |position| quotations.add(list.atUnchecked(whole, position).list),
+                        .cleave_list, .spread_list => {
+                            const held: Value = list.atUnchecked(whole, operands);
+                            const count: usize = @intCast(held.list.length());
+                            if (count == 0 or count > combinators.max_counted) break :expanded false;
+                            for (0..count) |index| switch (list.atUnchecked(held, index)) {
+                                .list => |quotation| quotations.add(quotation),
+                                else => break :expanded false,
+                            };
+                        },
+                        .apply, .dip => unreachable,
+                    }
+                    for (quotations.items[0..quotations.count], 0..) |quotation, index| {
+                        const summary = try stack_summary.of(self.fiber, applied_site, quotation) orelse break :expanded false;
+                        quotations.consumed[index] = summary.consumed;
+                        quotations.produced[index] = summary.produced;
+                    }
+                    const inside: Within = .{ .continues = at.continues, .tail = false };
+                    break :counted switch (shape) {
+                        .cleave, .cleave_list => try self.cleave(&quotations, applied_site, depth, at, inside),
+                        .spread, .spread_list => try self.spread(&quotations, applied_site, depth, at, inside),
+                        .apply, .dip => unreachable,
+                    } orelse break :expanded false;
+                },
             };
             self.guards[row] = .{
-                .needed = needed,
-                .tail = flow == .apply and last,
+                .needed = @intCast(needed),
+                .tail = shape == .apply and last,
                 .skip = @intCast(self.count - after_guard),
                 .operands = code,
                 .operands_start = @intCast(operands),
-                .operands_len = @intCast(quotations),
+                .operands_len = @intCast(operand_forms),
                 .word = word,
             };
             break :expanded true;
@@ -474,6 +517,84 @@ const Rewrite = struct {
         // its literals and its word.
         self.rewind(start);
         return false;
+    }
+
+    const Shape = union(enum) {
+        apply,
+        dip,
+        /// This many quotations, each a form of its own.
+        cleave: usize,
+        spread: usize,
+        /// One literal list of quotations.
+        cleave_list,
+        spread_list,
+    };
+
+    /// The quotations of a cleave or spread, with what each consumes and
+    /// leaves by its summary.
+    const Quotations = struct {
+        // SAFETY: only the first `count` of each are read.
+        items: [combinators.max_counted]*Header = undefined,
+        // SAFETY: as `items`.
+        consumed: [combinators.max_counted]u32 = undefined,
+        // SAFETY: as `items`.
+        produced: [combinators.max_counted]u32 = undefined,
+        count: usize = 0,
+
+        fn add(self: *Quotations, quotation: *Header) void {
+            self.items[self.count] = quotation;
+            self.count += 1;
+        }
+    };
+
+    /// A cleave: bind the most any quotation consumes, then for each
+    /// quotation push its own inputs from the locals, run it where they
+    /// stand, and check the publication. Returns the values bound, or null
+    /// past a bound.
+    fn cleave(self: *Rewrite, quotations: *const Quotations, site: machine.ExecutionSite, depth: usize, at: Origin, inside: Within) error{OutOfMemory}!?usize {
+        const words = self.fiber.environment.localsWords();
+        var bound: u32 = 0;
+        for (quotations.consumed[0..quotations.count]) |consumed| bound = @max(bound, consumed);
+        if (bound != 0 and !self.operation(words.load, bound, at)) return null;
+        for (quotations.items[0..quotations.count], quotations.consumed[0..quotations.count]) |quotation, consumed| {
+            // Local 0 is the deepest value bound, so a quotation's inputs,
+            // the top `consumed` of them, are the highest indices.
+            for (bound - consumed..bound) |local| {
+                if (!self.operation(words.get, @intCast(local), at)) return null;
+            }
+            if (!try self.body(quotation, site, depth + 1, inside)) return null;
+            if (!self.operation(words.recheck, 0, at)) return null;
+        }
+        if (bound != 0 and !self.operation(words.drop, bound, at)) return null;
+        return bound;
+    }
+
+    /// A spread: the last quotation runs first, on the top of the stack.
+    /// Before each earlier one, the results so far are bound out of its way;
+    /// at the end they are pushed back in the quotations' order. Returns the
+    /// values the quotations consume together, or null past a bound.
+    fn spread(self: *Rewrite, quotations: *const Quotations, site: machine.ExecutionSite, depth: usize, at: Origin, inside: Within) error{OutOfMemory}!?usize {
+        const words = self.fiber.environment.localsWords();
+        var needed: usize = 0;
+        var stashed: u32 = 0;
+        var index = quotations.count;
+        while (index != 0) {
+            index -= 1;
+            needed += quotations.consumed[index];
+            if (!try self.body(quotations.items[index], site, depth + 1, inside)) return null;
+            if (!self.operation(words.recheck, 0, at)) return null;
+            if (index != 0 and quotations.produced[index] != 0) {
+                if (!self.operation(words.load, quotations.produced[index], at)) return null;
+                stashed += quotations.produced[index];
+            }
+        }
+        // The stash bound last, the second quotation's results, holds the
+        // lowest indices, deepest value first.
+        for (0..stashed) |local| {
+            if (!self.operation(words.get, @intCast(local), at)) return null;
+        }
+        if (stashed != 0 and !self.operation(words.drop, stashed, at)) return null;
+        return needed;
     }
 
     /// Builds the record: the flattened list, holding every value in it, and

@@ -3683,6 +3683,7 @@ pub const Fiber = struct {
             return self.unbindLocals(operand);
         }
         if (name == locals.guard) return self.guardFlattened(operand);
+        if (name == locals.recheck) return self.recheckFlattened();
         return self.fail(.domain, "a locals operand on a word that is not a locals operation");
     }
 
@@ -3721,6 +3722,20 @@ pub const Fiber = struct {
         const next = frame.nextIndex();
         if (next == 0 or next > record.origins.len) return false;
         return !record.origins[next - 1].continues;
+    }
+
+    /// The check after each quotation of a flattened cleave or spread, whose
+    /// expansion rests on the quotations' summaries. A publication since the
+    /// list was flattened may have changed what the quotation just run did,
+    /// so the phrase fails as one running by its summaries does.
+    fn recheckFlattened(self: *Fiber) MachineError!void {
+        const record = self.flattened.record(self.current.?.code) orelse
+            return self.fail(.domain, "a flattened phrase's check outside a flattened list");
+        if (record.publication == self.currentPublication()) return;
+        const origin = record.origins[self.active_index];
+        const word = list.atUnchecked(.{ .list = origin.code }, origin.index);
+        if (word == .symbol) self.active_word = .plain(word.symbol.name);
+        return stack_summary.failDefinitionsChanged(self);
     }
 
     /// Where a form the machine is running was written. A flattened list's

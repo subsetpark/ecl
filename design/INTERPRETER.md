@@ -1135,6 +1135,15 @@ that:
   and handed their activation on. Suspended there it lends its activation and
   is traced under no word, so a failure's trace holds the words it would have.
 
+`apply` and `dip` need nothing but the quotation. A cleave or spread also
+needs what each quotation consumes and leaves, so it is flattened only when
+every quotation has a stack summary, and it then holds its inputs in locals as
+`dip` holds its one. After each of its quotations it checks the publication and
+fails as a cleave running by its summaries does, since a summary read under one
+publication says nothing of a quotation run under another. The measured words
+`above` and `below` find what their quotation consumed as it runs, and stay as
+written.
+
 A record lasts as long as its flattened list is held: by the table, or by an
 evaluation still running it after the table has moved on.
 
