@@ -108,12 +108,15 @@ pub fn failDefinitionsChanged(fiber: *Fiber) machine.MachineError {
 /// without a walk. An entry holds its quotation, so the address it is found
 /// by stays that quotation's.
 ///
-/// One entry per place and a fixed number of places: a quotation that lands
-/// on an occupied place replaces what was there, so the fiber holds at most
-/// `capacity` quotations it would otherwise have let go, and every operation
-/// is bounded by that constant.
+/// A fixed number of places, and a quotation is looked for in the `reach`
+/// places from its own, so quotations that share a place each keep an entry
+/// and two of them applied in one loop do not walk afresh on every turn. One
+/// that finds all of those taken replaces the first, so the fiber holds at
+/// most `capacity` quotations it would otherwise have let go, and every
+/// operation is bounded by `reach`.
 pub const Cache = struct {
-    const capacity = 64;
+    const capacity = 128;
+    const reach = 8;
     const Entry = struct {
         /// Null for an empty place.
         quotation: ?*Header = null,
@@ -141,10 +144,24 @@ pub const Cache = struct {
     /// What was read of `quotation` at `site` in `publication`, if anything.
     pub inline fn find(self: *const Cache, quotation: *const Header, site: machine.ExecutionSite, publication: u64) ?Known {
         if (self.publication != publication or self.entries.len == 0) return null;
-        const entry = &self.entries[place(quotation)];
-        if (entry.quotation != quotation or entry.scope != site.scope.serial or
-            entry.provenance != @backingInt(site.registration_provenance.sourceId())) return null;
+        const entry = self.entryFor(quotation, site) orelse return null;
+        if (entry.quotation == null) return null;
         return .{ .summary = if (entry.exact) .{ .consumed = entry.consumed, .produced = entry.produced } else null };
+    }
+
+    /// The entry holding `quotation` at `site`, or the first empty one in
+    /// reach of its place; null when every place in reach holds another.
+    /// Entries leave only all together, so an empty place ends the search.
+    inline fn entryFor(self: *const Cache, quotation: *const Header, site: machine.ExecutionSite) ?*Entry {
+        var index = place(quotation);
+        for (0..reach) |_| {
+            const entry = &self.entries[index];
+            if (entry.quotation == null) return entry;
+            if (entry.quotation == quotation and entry.scope == site.scope.serial and
+                entry.provenance == @backingInt(site.registration_provenance.sourceId())) return entry;
+            index = (index + 1) & (capacity - 1);
+        }
+        return null;
     }
 
     /// Records what a walk in `publication` found, null for no summary.
@@ -166,7 +183,7 @@ pub const Cache = struct {
             self.clear(releases);
             self.publication = publication;
         }
-        const entry = &self.entries[place(quotation)];
+        const entry = self.entryFor(quotation, site) orelse &self.entries[place(quotation)];
         if (entry.quotation) |held| releases.releaseHeader(held);
         heap.incRef(quotation);
         entry.* = .{
