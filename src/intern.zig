@@ -187,8 +187,7 @@ pub fn moduleName(id: u32) NameError!ModuleName {
 }
 
 pub fn internModuleName(bytes: []const u8) error{ OutOfMemory, InvalidName }!ModuleName {
-    var cursor = internModuleNameCursor(bytes);
-    return (try poll.driveFallible(?ModuleName, &cursor, .{})) orelse error.InvalidName;
+    return moduleName(try intern(bytes));
 }
 
 const Entry = struct {
@@ -690,35 +689,6 @@ pub fn lookupCursor(bytes: []const u8) InternLookupCursor {
 pub const InternInsertionCursor = Table.InternCursor;
 pub fn insertionCursor(bytes: []const u8) InternInsertionCursor {
     return process_table.internCursor(bytes);
-}
-
-/// The single traversal for turning external bytes into a validated module
-/// name. Interning and validation are deliberately one cursor: a scheduled
-/// caller must not finish the bounded insertion and then fall back to the
-/// blocking `moduleName` facade for a user-sized spelling.
-pub const InternModuleNameProgress = poll.Progress(?ModuleName);
-pub const InternModuleNameCursor = struct {
-    insertion: InternInsertionCursor,
-    validation: ?ModuleNameCursor = null,
-
-    pub fn init(bytes: []const u8) InternModuleNameCursor {
-        return .{ .insertion = insertionCursor(bytes) };
-    }
-
-    pub fn advance(self: *InternModuleNameCursor) error{OutOfMemory}!InternModuleNameProgress {
-        if (self.validation) |*validation| return validation.advance();
-        return switch (try self.insertion.advance()) {
-            .pending => .pending,
-            .complete => |id| result: {
-                self.validation = ModuleNameCursor.init(id);
-                break :result .pending;
-            },
-        };
-    }
-};
-
-pub fn internModuleNameCursor(bytes: []const u8) InternModuleNameCursor {
-    return .init(bytes);
 }
 
 pub const QualifiedProgress = poll.Progress(u32);

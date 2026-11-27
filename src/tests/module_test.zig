@@ -153,23 +153,6 @@ test "module names: branded factories enforce the reader symbol grammar" {
     _ = try intern.internModuleName("valid.module-name");
 }
 
-test "module names: intern and validation share one resumable cursor" {
-    const allocator = std.testing.allocator;
-    const spelling = try allocator.alloc(u8, 70_000);
-    defer allocator.free(spelling);
-    @memset(spelling, 'v');
-    try expectInternMissing(spelling);
-
-    var cursor = intern.internModuleNameCursor(spelling);
-    var pending: usize = 0;
-    const name = while (true) switch (try cursor.advance()) {
-        .pending => pending += 1,
-        .complete => |maybe_name| break maybe_name.?,
-    };
-    try std.testing.expect(pending > 256);
-    try std.testing.expectEqualStrings(spelling, intern.get(intern.moduleId(name)));
-}
-
 test "module names: a long qualified spelling is decided in bounded steps as it is interned" {
     const allocator = std.testing.allocator;
     const prefix = try allocator.alloc(u8, 70_000);
@@ -439,11 +422,10 @@ fn registryWorker(context: RegistryThreadContext, worker_id: usize) void {
             context.failed.store(true, .release);
             return;
         }
-        var lease = modules.testing.acquire(context.registry, context.shared) orelse {
+        if (!modules.testing.registered(context.registry, context.shared)) {
             context.failed.store(true, .release);
             return;
-        };
-        lease.deinit();
+        }
     }
 }
 
@@ -483,8 +465,7 @@ test "registry: concurrent commits are linearized without lost names" {
     // Every commit published from a snapshot no other commit had replaced,
     // so every name any worker registered is still in the directory.
     for (distinct) |names| for (names) |name| {
-        var lease = modules.testing.acquire(&registry, name) orelse return error.LostRegistration;
-        lease.deinit();
+        if (!modules.testing.registered(&registry, name)) return error.LostRegistration;
     };
 }
 
@@ -505,6 +486,9 @@ test "loader: failures and cycles are total" {
     // An import loads nothing; each failure belongs to the imported word.
     try expectErrorContains(&runtime, "`missing-module (x) import x", &.{ "kind undefined-word", "word x" });
     try expectErrorContains(&runtime, "`cycle (x) import x", &.{ "kind domain", "never reach a definition" });
+    // A file whose first form calls into the module it is loading asks for
+    // that load again before it has registered anything.
+    try expectErrorContains(&runtime, "selfload.x", &.{ "kind domain", "recursive auto-load of module `selfload`" });
     try expectErrorContains(&runtime, "`orphan (x) import x", &.{
         "kind io",
         "registered nothing under that name",
@@ -564,8 +548,10 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var first_sealed = try first.sealLiteralGroup();
     defer first_sealed.deinit();
     try modules.testing.register(&registry, &first_sealed);
-    var lease = modules.testing.acquire(&registry, first_name).?;
-    defer lease.deinit();
+    // A view held across the reload keeps the first generation readable.
+    var held = registry.view();
+    defer held.deinit();
+    _ = held.moduleFind(first_name).?;
     var second = try registry.createImage(try environment.moduleScope(first_name), .ordinary);
     defer second.deinit();
     try second.stageDefinition(word_name, .{ .word = .{

@@ -11,12 +11,6 @@ const poll = @import("poll.zig");
 
 pub const Error = error{ OutOfMemory, InvalidPrelude };
 
-var execution_access_seal: u8 = 0;
-
-fn executionAccess() *const modules.ExecutionAccess {
-    return @ptrCast(&execution_access_seal);
-}
-
 pub fn install(
     host: *const heap.HostCleanup,
     building: *env.BuildingEnv,
@@ -81,7 +75,6 @@ pub fn installSource(
     var fiber = machine.Fiber.init(
         allocator,
         release_domain,
-        executionAccess(),
         .empty,
         &environment,
         &archive,

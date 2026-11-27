@@ -807,15 +807,6 @@ fn auditUnsafeCasts() bool {
             }) |cast| {
                 failed = auditProductionFunctionTokenPair(file, source, "HostCleanup", cast) or failed;
             };
-            const execution_cast_allowed = std.mem.eql(u8, file, "session.zig") or
-                std.mem.eql(u8, file, "prelude.zig") or
-                std.mem.eql(u8, file, "machine.zig");
-            if (!execution_cast_allowed) for ([_][]const u8{
-                "@ptrCast",
-                "@ptrFromInt",
-            }) |cast| {
-                failed = auditProductionFunctionTokenPair(file, source, "ExecutionAccess", cast) or failed;
-            };
         }
     }
 

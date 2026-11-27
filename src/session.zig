@@ -246,7 +246,6 @@ fn releaseDisplayBlocks(
 const EnvironSnapshot = @import("startup_environment.zig").Snapshot;
 
 const SessionCore = struct {
-    module_access_seal: u8 = 0,
     host_owner: *heap.HostOwner,
     environment: env.Env,
     registry: modules.Registry,
@@ -271,10 +270,6 @@ const SessionCore = struct {
     requested_exit: ?u8 = null,
     last_polls: u64 = 0,
     last_root_execution_metrics: if (machine.root_execution_metrics_enabled) machine.RootExecutionMetrics else void = if (machine.root_execution_metrics_enabled) .{} else {},
-
-    fn moduleAccess(self: *const SessionCore) *const modules.ExecutionAccess {
-        return @ptrCast(&self.module_access_seal);
-    }
 
     fn allocator(self: *const SessionCore) std.mem.Allocator {
         return self.host_owner.cleanup().allocator();
@@ -652,7 +647,6 @@ pub const Session = enum(usize) {
         const fiber = machine.Fiber.init(
             core.allocator(),
             core.releaseDomain(),
-            core.moduleAccess(),
             core.stack,
             &core.environment,
             &core.archive,
@@ -683,11 +677,7 @@ pub const Session = enum(usize) {
         const core = self.coreState();
         var acquisition = core.registry.acquireCursor(name);
         defer acquisition.deinit();
-        if (poll.drive(?modules.GenerationLease, &acquisition, .{})) |generation| {
-            var lease = generation;
-            lease.deinit();
-            return .ok;
-        }
+        if (poll.drive(?modules.Generation, &acquisition, .{}) != null) return .ok;
         return self.loadTarget(.{ .module = name });
     }
 
@@ -810,11 +800,8 @@ pub const Session = enum(usize) {
                 if (intern.moduleName(namespace_id) catch null) |module_name| {
                     var acquisition = core.registry.acquireCursor(module_name);
                     defer acquisition.deinit();
-                    if (poll.drive(?modules.GenerationLease, &acquisition, .{})) |generation| {
-                        var generation_lease = generation;
-                        defer generation_lease.deinit();
-                        var names = generation_lease.publicNameCursor();
-                        defer names.deinit();
+                    if (poll.drive(?modules.Generation, &acquisition, .{})) |generation| {
+                        var names = generation.publicNameCursor();
                         while (true) switch (names.advance()) {
                             .pending => {},
                             .complete => break,
@@ -1035,7 +1022,7 @@ fn sessionTypeExposesAuthority(
     comptime depth: u8,
     comptime position: SessionAuthorityPosition,
 ) bool {
-    if (T == env.Definition or T == modules.GenerationLease) return true;
+    if (T == env.Definition or T == modules.Generation) return true;
     if (position == .result and
         (T == std.mem.Allocator or
             T == std.Io or

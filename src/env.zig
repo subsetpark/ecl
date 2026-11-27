@@ -564,16 +564,6 @@ pub const Definition = struct {
     }
 };
 
-/// Whether a quotation executes a word. A literal table entry of a host-built
-/// module is a body that does not.
-pub fn executesWord(body: *value.ListHandle) bool {
-    if (body.kind() != .generic_spine) return false;
-    for (heap.valuesConst(body)[0..@intCast(body.length())]) |form| {
-        if (form == .symbol and !isQuoted(form.symbol.slot) and localOperand(form.symbol.slot) == null) return true;
-    }
-    return false;
-}
-
 /// What a running activation must hold to keep its definition alive. A static
 /// owner needs nothing. A counted definition is retained by each
 /// activation running it and released when the activation ends; a tail call
@@ -800,17 +790,8 @@ pub const CellPublisher = enum(usize) {
 /// module is registered.
 pub const ScopeId = enum(u32) { none = 0, _ };
 
-/// A `ScopeId` is 24 bits of directory index plus a reserved high byte, kept
-/// clear so a generation tag could later be added without colliding with a
-/// live id.
+/// How many bits of a `ScopeId` the scope directory indexes.
 pub const id_bits: u5 = 24;
-
-comptime {
-    const reserved_bits: u5 = 8;
-    const budget: u16 = @as(u16, id_bits) + @as(u16, reserved_bits);
-    if (budget != @bitSizeOf(@typeInfo(ScopeId).@"enum".tag_type))
-        @compileError("scope id bit budget does not cover its tag type");
-}
 
 /// The root a `ScopeId` denotes.
 pub const Root = union(enum) {
@@ -1630,7 +1611,7 @@ pub fn assertStaticModuleName(comptime name: []const u8) void {
     }
 }
 
-test "env: issued scope ids leave their reserved high bits clear" {
+test "env: a module name keeps one scope id, issued monotonically" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
     var container = try Env.init(&host);
@@ -1650,7 +1631,6 @@ test "env: issued scope ids leave their reserved high bits clear" {
         const raw = @backingInt(id);
         try std.testing.expect(raw != 0);
         try std.testing.expect(raw <= ScopeIndex.max_id);
-        try std.testing.expectEqual(@as(u32, 0), raw >> id_bits);
         try std.testing.expect(raw > previous);
         previous = raw;
     }

@@ -288,14 +288,11 @@ const InvocationDriver = struct {
                 .complete => |maybe_invocation| {
                     if (maybe_invocation == null)
                         return .{ .output = try missingOutcome(fiber) };
-                    var invocation = maybe_invocation.?;
-                    defer invocation.deinit();
-                    var target = invocation.enter(fiber.module_access);
-                    defer target.deinit();
+                    const invocation = maybe_invocation.?;
                     const task = fiber.scheduling().scheduler.spawn(fiber.scheduling().scope, .{
                         .parent_fiber = fiber,
-                        .site = .{ .module = target.root() },
-                        .quotation = target.quotation(),
+                        .site = .{ .module = invocation.root },
+                        .quotation = invocation.quotation(),
                     }) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Io => return fiber.fail(

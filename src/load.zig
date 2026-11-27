@@ -486,11 +486,8 @@ const AutoLoadDriver = struct {
                         fiber.releases,
                         fiber.allocator,
                     );
-                    if (maybe_generation) |generation| {
-                        var lease = generation;
-                        lease.deinit();
+                    if (maybe_generation != null)
                         return self.finishWithoutLoading(via, &loading);
-                    }
                     // The embedded manifest is consulted before the
                     // search path: a stdlib name resolves without filesystem lookup
                     // and no ECL_PATH, and no path module can shadow one.
@@ -602,13 +599,11 @@ const AutoLoadDriver = struct {
                 .pending => {},
                 .complete => |maybe_generation| {
                     cursor.deinit(fiber.releases, fiber.allocator);
-                    const generation = maybe_generation orelse return fiber.failFmt(
+                    if (maybe_generation == null) return fiber.failFmt(
                         .io,
                         "a committed mapped artifact is missing module `{s}`",
                         .{intern.get(intern.moduleId(self.request.module.name))},
                     );
-                    var lease = generation;
-                    lease.deinit();
                     return continueSourceRequest(via, self, self.request);
                 },
             },
@@ -1090,10 +1085,7 @@ const NativeLoadDriver = struct {
                 } };
                 return .stepped;
             },
-            .definitions => |*definitions| switch (definitions.publication.borrowMut().advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.UnboundWord => return self.failLoad(via, "native module declares an invalid word"),
-            }) {
+            .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
                 .pending => return .stepped,
                 .complete => |candidate| {
                     // Sealing can fail; until it succeeds the instance and
@@ -1695,11 +1687,9 @@ const QualifiedRegistrationDriver = struct {
                     fiber.addErrorPath(self.path.borrow());
                     return failure;
                 };
-                var lease = generation;
-                defer lease.deinit();
                 if (self.artifact) |artifact| {
                     const expected_source = fiber.inherited.module_snapshot.?.sourceScope(artifact);
-                    const valid_origin = switch (lease.provenance().kind()) {
+                    const valid_origin = switch (generation.provenance().kind()) {
                         .source => |source| source == expected_source,
                         .ordinary, .root_scope, .standard_library => false,
                     };

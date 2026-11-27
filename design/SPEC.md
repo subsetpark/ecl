@@ -1179,7 +1179,7 @@ first element:
 
 The words `--`, `:`, and `...` are reserved against binding: they remain
 legal symbol values and can be built into annotations at runtime, but cannot be
-introduced as definitions, values, locals, module names, aliases, exports, or
+introduced as definitions, values, locals, module names, imports, exports, or
 native entries. Binding attempts are `` `domain ``; use as a local name is a
 parse error. Longer names containing the same punctuation remain legal.
 
@@ -1314,39 +1314,45 @@ registrations. Modules are not values.
 
 ##### Contexts
 
-**`Calls`**, **`Construction`**, **`Registry`**
+**`Calls`**, **`Registry`**
 
 #### Chapter 1
 
 ##### Domains
 
-`RegistryName`, `BindingName`
+`RegistryName`, `BindingName`, `Word`
+
+##### Rules
+
+**word-module** *word*: `Word` ⇒ `RegistryName`.
+
+**word-binding** *word*: `Word` ⇒ `BindingName`.
+
+**written-in-module?** *word*: `Word` ⇒ `Bool`.
 
 ##### Action
 
-> This model is normative for registry names, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation. It also abstracts over construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A call selects a registry name's current image and a binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. A qualified call selects a public binding of the module it spells; a scoped call selects any binding of the module its word was written in. Explicit lookup performs the same fresh selection each time it runs.
+> This model is normative for registry names, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation. It also abstracts over construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A call selects a registry name's current image and a binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. The word a call begins from denotes a module name and a binding name, fixed where it was written. A word written in that module may select any of its bindings; any other word selects only a public one. Explicit lookup performs the same fresh selection each time it runs.
 
-**`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
+**`Calls`** ↝ Begin call *word*: `Word`.
 
 ---
 
-**module?** *module-name*.
+**module?** (**word-module** *word*).
 
-∃ *call*: `Call`, *image*: `Image`, *definition*: `Definition`, ¬**call-created?** *call*, *image* = **image-of** *module-name*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, **public?** *definition* · **call-created?**′ *call* ∧ **call-active?**′ *call* ∧ **call-image**′ *call* = *image* ∧ **call-definition**′ *call* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *call* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
+∃ *call*: `Call`, *image*: `Image`, *definition*: `Definition`, ¬**call-created?** *call*, *image* = **image-of** (**word-module** *word*), **binding-present?** *image* (**word-binding** *word*), *definition* = **definition-at** *image* (**word-binding** *word*), (**written-in-module?** *word* ∨ **public?** *definition*) · **call-created?**′ *call* ∧ **call-active?**′ *call* ∧ **call-image**′ *call* = *image* ∧ **call-definition**′ *call* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *call* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
 #### Chapter 2
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under one module name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. No call begins in a retired image: a word occurrence retains the name of the module it was written in, never an image.
+> The model has one kind of module object: an immutable image, published under one module name as one generation. An image exists only as a published generation: no program can hold one any other way. Reload publishes a new image under the same name, and the image it replaces is retired: published, and no longer what its name maps to. No action removes a registration, and no retired image becomes current again, because a registration always publishes a fresh image.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which calls may select it. The model begins with no published images, occupied names, or calls. Domain atoms are possibilities rather than initially existing language values.  No call begins in a retired image: a word retains the name of the module it was written in, never an image.
 
 `Call`.
 
 `Image`.
 
 `Definition`.
-
-`WordOccurrence`.
 
 `InvocationContext`.
 
@@ -1360,23 +1366,15 @@ registrations. Modules are not values.
 
 {**`Calls`**} **call-definition** *call*: `Call` ⇒ `Definition`.
 
-**occurrence-name** *occurrence*: `WordOccurrence` ⇒ `BindingName`.
-
-**occurrence-module** *occurrence*: `WordOccurrence` ⇒ `RegistryName`.
-
 **call-invocation?** *invoker*: `InvocationContext` ⇒ `Bool`.
 
 **invocation-call** *invoker*: `InvocationContext` ⇒ `Call`.
-
-{**`Construction`**} **constructed?** *image*: `Image` ⇒ `Bool`.
 
 {**`Registry`**} **module?** *name*: `RegistryName` ⇒ `Bool`.
 
 {**`Registry`**} **image-of** *name*: `RegistryName` ⇒ `Image`.
 
 {**`Registry`**} **image-published?** *image*: `Image` ⇒ `Bool`.
-
-{**`Registry`**} **image-retired?** *image*: `Image` ⇒ `Bool`.
 
 {**`Registry`**} **image-name** *image*: `Image` ⇒ `RegistryName`.
 
@@ -1396,33 +1394,24 @@ registrations. Modules are not values.
 
 ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** *left* = **definition-image** *right*, **definition-name** *left* = **definition-name** *right* · *left* = *right*.
 
-initially ∀ *image*: `Image`, *name*: `BindingName`, **binding-present?** *image* *name* · **definition-image** (**definition-at** *image* *name*) = *image* ∧ **definition-name** (**definition-at** *image* *name*) = *name*.
+initially ∀ *image*: `Image`, *name*: `BindingName`, **binding-present?** *image* *name* · **definition-image** (**definition-at** *image* *name*) = *image* ∧ **definition-name** (**definition-at** *image*
+*name*) = *name*.
 
 initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** *left* = **definition-image** *right*, **definition-name** *left* = **definition-name** *right* · *left* = *right*.
 
-> A live name maps to its current generation.
+> A live name maps to its current generation, which is published under it.
 
-∀ *registry-name*: `RegistryName`, **module?** *registry-name* · **image-published?** (**image-of** *registry-name*) ∧ ¬**image-retired?** (**image-of** *registry-name*).
+∀ *registry-name*: `RegistryName`, **module?** *registry-name* · **image-published?** (**image-of** *registry-name*) ∧ **image-name** (**image-of** *registry-name*) = *registry-name*.
 
-∀ *registry-name*: `RegistryName`, **module?** *registry-name* · **image-name** (**image-of** *registry-name*) = *registry-name*.
+> A published image's name stays live.
 
-**image-published?** *image* → **constructed?** *image*.
-
-> An image exists only as a published generation: no program can hold one any other way.
-
-**constructed?** *image* → **image-published?** *image*.
-
-**image-retired?** *image* → **image-published?** *image*.
-
-> A published image that is not retired is current under its own name.
-
-**image-published?** *image* ∧ ¬**image-retired?** *image* → **module?** (**image-name** *image*) ∧ **image-of** (**image-name** *image*) = *image*.
+**image-published?** *image* → **module?** (**image-name** *image*).
 
 **call-active?** *call* → **call-created?** *call*.
 
-**call-active?** *call* → **constructed?** (**call-image** *call*) ∧ **definition-image** (**call-definition** *call*) = **call-image** *call*.
+**call-active?** *call* → **image-published?** (**call-image** *call*) ∧ **definition-image** (**call-definition** *call*) = **call-image** *call*.
 
-initially ∀ *image*: `Image` · ¬**constructed?** *image* ∧ ¬**image-published?** *image* ∧ ¬**image-retired?** *image*.
+initially ∀ *image*: `Image` · ¬**image-published?** *image*.
 
 initially ∀ *registry-name*: `RegistryName` · ¬**module?** *registry-name*.
 
@@ -1438,28 +1427,13 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 > `Register` is `@defm`'s publication: it constructs a fresh image and publishes it in one step, because no program can observe an image between the two. It is an ordered upsert. Publishing under a missing module name creates the registration; publishing under an existing module name retires that name's current image. Nothing else carries over. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
-**`Registry`**, **`Construction`** ↝ Register *invoker*: `InvocationContext`, *image*: `Image`, *module-name*: `RegistryName`, ¬**constructed?** *image*.
+**`Registry`** ↝ Register *invoker*: `InvocationContext`, *image*: `Image`, *module-name*: `RegistryName`, ¬**image-published?** *image*.
 
 ---
 
-**module?**′ *module-name* ∧ **image-of**′ *module-name* = *image* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **module?**′ *other-name* = **module?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ **image-published?**′ *image* ∧ ¬**image-retired?**′ *image* ∧ **image-name**′ *image* = *module-name* ∧ **constructed?**′ *image* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **constructed?**′ *other-image* = **constructed?** *other-image* ∧ **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ **module?** *module-name* ∧ *other-image* = **image-of** *module-name*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
+**module?**′ *module-name* ∧ **image-of**′ *module-name* = *image* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **module?**′ *other-name* = **module?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ **image-published?**′ *image* ∧ **image-name**′ *image* = *module-name* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-name**′ *other-image* = **image-name** *other-image*).
 
 #### Chapter 4
-
-##### Action
-
-> `Begin scoped call` resolves the name stored in a word occurrence against the current image of the module stored in that occurrence. A quotation or word occurrence owns this scope but does not cache a definition or an image. Private definitions are available to scoped resolution, wherever the occurrence is applied, without becoming publicly invocable.
-
-**`Calls`** ↝ Begin scoped call *caller*: `Call`, *occurrence*: `WordOccurrence`, *binding-name*: `BindingName`, **call-active?** *caller*, **occurrence-name** *occurrence* = *binding-name*.
-
----
-
-**module?** (**occurrence-module** *occurrence*).
-
-∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **image-of** (**occurrence-module** *occurrence*), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image*
-*binding-name*, ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
-
-#### Chapter 5
 
 ##### Action
 

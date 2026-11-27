@@ -459,7 +459,8 @@ fn doc(fiber: *Fiber) MachineError!void {
 }
 
 const ReflectionResolution = union(enum) {
-    resolved: machine.Reflected,
+    /// Borrowed for the turn that resolved it.
+    resolved: *env.Definition,
     retry: machine.WorkProgress,
 };
 
@@ -473,14 +474,14 @@ fn resolveForReflection(
     outcome: binder.Outcome,
 ) MachineError!ReflectionResolution {
     return switch (outcome) {
-        .resolved => |definition| .{ .resolved = machine.Reflected.hold(fiber, definition, requested.name) },
+        .resolved => |definition| .{ .resolved = definition },
         .missed => |miss| switch (miss) {
-            .unregistered_module => {
+            .unregistered_module => |module| {
                 fiber.retireDriver(driver);
-                return .{ .retry = try fiber.retryQualifiedOperandAfterLoad(requested, miss) };
+                return .{ .retry = try fiber.retryQualifiedOperandAfterLoad(requested, module) };
             },
             .unresolved => |chain| fiber.undefinedNameIn(requested.name, chain),
-            .alias_cycle => fiber.failUnbound(requested, .alias_cycle),
+            .alias_cycle => fiber.failAliasCycle(requested),
         },
     };
 }
@@ -492,7 +493,7 @@ fn resolveForReflection(
 fn installLookup(fiber: *Fiber, requested: value.Symbol) MachineError!void {
     try fiber.startDriver(LookupDriver{
         .requested = requested,
-        .resolution = .init(machine.ExplicitLookup.init(fiber, requested)),
+        .resolution = .init(try machine.ExplicitLookup.init(fiber, requested)),
     });
 }
 /// A binding's documentation as written, retained while it is normalized:
@@ -533,20 +534,19 @@ const LookupDriver = struct {
             if (self.normalization.isPresent()) {
                 if (try self.normalization.borrowMut().advance(work)) |normalized|
                     return .{ .output = normalized };
-            } else switch (self.resolution.borrowMut().advance()) {
+            } else switch (self.resolution.borrowMut().advance(fiber)) {
                 .pending => {},
                 .complete => |outcome| {
-                    var resolved = switch (try resolveForReflection(
+                    const resolved = switch (try resolveForReflection(
                         fiber,
                         self,
                         self.requested,
                         outcome,
                     )) {
                         .retry => |progress| return progress,
-                        .resolved => |resolution| resolution,
+                        .resolved => |definition| definition,
                     };
-                    defer resolved.deinit();
-                    const document = resolved.definition.doc orelse
+                    const document = resolved.doc orelse
                         return fiber.fail(.domain, "binding has no documentation");
                     self.normalization = .init(try .init(fiber, document));
                 },
@@ -560,7 +560,7 @@ fn declaredEffect(fiber: *Fiber) MachineError!void {
     const requested = try fiber.popWord();
     try fiber.startDriver(EffectDriver{
         .requested = requested,
-        .resolution = .init(machine.ExplicitLookup.init(fiber, requested)),
+        .resolution = .init(try machine.ExplicitLookup.init(fiber, requested)),
     });
 }
 
@@ -574,15 +574,14 @@ const EffectDriver = struct {
     resolution: heap.Owned(machine.ExplicitLookup),
     pub fn advance(fiber: *Fiber, self: *EffectDriver) MachineError!machine.WorkProgress {
         const work = fiber.workBudget();
-        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
+        while (work.spend()) switch (self.resolution.borrowMut().advance(fiber)) {
             .pending => {},
             .complete => |outcome| {
-                var resolved = switch (try resolveForReflection(fiber, self, self.requested, outcome)) {
+                const resolved = switch (try resolveForReflection(fiber, self, self.requested, outcome)) {
                     .retry => |progress| return progress,
-                    .resolved => |resolution| resolution,
+                    .resolved => |definition| definition,
                 };
-                defer resolved.deinit();
-                const declared = resolved.definition.effect orelse
+                const declared = resolved.effect orelse
                     return .{ .output = try list.fromValues(fiber.allocator, &.{}) };
                 declared.retain();
                 return .{ .output = .{ .list = declared.header() } };
@@ -594,7 +593,7 @@ const EffectDriver = struct {
 
 fn see(fiber: *Fiber) MachineError!void {
     const requested = try fiber.popWord();
-    try fiber.startDriver(SeeDriver.init(fiber, requested));
+    try fiber.startDriver(try SeeDriver.init(fiber, requested));
 }
 
 const SeeDriver = struct {
@@ -657,12 +656,12 @@ const SeeDriver = struct {
         }
     };
 
-    fn init(fiber: *Fiber, requested: value.Symbol) SeeDriver {
+    fn init(fiber: *Fiber, requested: value.Symbol) error{OutOfMemory}!SeeDriver {
         return .{
             .requested = requested,
             .actions = .init(reflection.ActionPlan.init(fiber.allocator)),
             .state = .init(.{ .resolve = .init(
-                machine.ExplicitLookup.init(fiber, requested),
+                try machine.ExplicitLookup.init(fiber, requested),
             ) }),
         };
     }
@@ -750,18 +749,20 @@ const SeeDriver = struct {
     pub fn advance(fiber: *Fiber, self: *SeeDriver) MachineError!machine.WorkProgress {
         const work = fiber.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
-            .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
+            .resolve => |*cursor| switch (cursor.borrowMut().advance(fiber)) {
                 .pending => {},
                 .complete => |outcome| {
-                    const resolved = switch (try resolveForReflection(
+                    // Rendering spans turns, so the driver holds what it
+                    // reads.
+                    const resolved = machine.Reflected.hold(fiber, switch (try resolveForReflection(
                         fiber,
                         self,
                         self.requested,
                         outcome,
                     )) {
                         .retry => |progress| return progress,
-                        .resolved => |resolution| resolution,
-                    };
+                        .resolved => |definition| definition,
+                    }, self.requested.name);
                     cursor.deinit(fiber.releases, fiber.allocator);
                     var context: Context = .{ .resolved = .init(resolved) };
                     const document = resolved.definition.doc orelse {

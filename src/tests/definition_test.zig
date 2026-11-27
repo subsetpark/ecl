@@ -39,15 +39,6 @@ test "call sites resolve against the current definitions, core shadowing include
     );
 }
 
-test "call sites stay correct across resolution churn" {
-    try support.expectStack(
-        "1 `outside set (outside) `probe def probe probe probe " ++
-            "3 (" ++ support.repeated("outside pop ", 32) ++ ") times " ++
-            "2 `outside set probe",
-        "1 1 1 2",
-    );
-}
-
 test "definition annotations support all top-level forms and dynamic data" {
     try support.expectStack(
         "(1) `plain def " ++
@@ -480,22 +471,6 @@ test "definitions: top-level setp fails through defp's module-root check" {
     });
     // An application inside a module body writes the module root.
     try support.expectStack("([1] (1 `x setp pop) for (-- n) (x) `y def) `m @defm m.y", "1");
-}
-
-test "definitions: data-combinator applications resolve their words across elements" {
-    try support.expectStacks(&.{
-        // A source word and a builtin, across more applications than it takes
-        // the call-site cache to warm.
-        .{ .name = "source and builtin", .source = "(dup *) `sq def [1 2 3 4 5] (sq 1 +) each", .expected = "[2 5 10 17 26]" },
-        // The binding a call keeps is the one in effect when the call began.
-        .{ .name = "next apply", .source = "(1) `k def [1 2] (pop k) each (2) `k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
-    });
-    // A call that fails after keeping bindings releases them with the call.
-    try support.expectError(.{
-        .name = "failure after kept bindings",
-        .source = "(dup *) `sq def [1 2 x] (sq 1 +) each",
-        .kind = "type",
-    });
 }
 
 test "definitions: def inside a word body writes the caller's scope" {

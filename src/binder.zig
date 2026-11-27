@@ -21,7 +21,6 @@ pub const Context = struct {
     environment: *env.Env,
     /// Owned by the context's holder, which releases it with `deinit`.
     view: modules.View,
-    registry: *modules.Registry,
     project: ?*const map_state.Snapshot,
     libraries: machine.EmbeddedLibraries,
 
@@ -39,16 +38,13 @@ pub const Miss = union(enum) {
     /// one `searcher` may refer to. A load that follows asks as `searcher`,
     /// the view the lookup searched under, so it fails where the lookup
     /// would miss again.
-    unregistered_module: struct { name: intern.ModuleName, searcher: modules.RegistrationProvenance },
+    unregistered_module: UnregisteredModule,
     /// Following name aliases did not reach a definition.
     alias_cycle,
 };
 
-/// A miss that no module load can turn into a definition.
-pub const Unbound = union(enum) {
-    unresolved: LookupChain,
-    alias_cycle,
-};
+/// A qualified name's module, unregistered or invisible to `searcher`.
+pub const UnregisteredModule = struct { name: intern.ModuleName, searcher: modules.RegistrationProvenance };
 
 /// What resolving one word produced. Borrowed: valid while the context's
 /// view is held.
@@ -73,9 +69,6 @@ pub const Resolver = struct {
     /// The module and binding a qualified lookup is of: the word's own
     /// spelling, then each alias followed.
     target: ?Target = null,
-    /// The registration whose directory is being read: the word's own
-    /// module, or the module a qualified name selected.
-    generation: ?modules.GenerationLease = null,
     /// The provenance of the image whose directory held the alias being
     /// followed: an alias resolves as its own module would resolve it.
     owner_provenance: ?modules.RegistrationProvenance = null,
@@ -104,46 +97,33 @@ pub const Resolver = struct {
     const Work = union(enum) {
         none,
         acquisition: machine.ModuleLookupCursor,
-        own_acquisition: modules.Registry.AcquireCursor,
-        export_lookup: modules.ModuleNameLookupCursor,
+        own_acquisition: modules.ModuleCursor,
+        export_lookup: env.NameMap.RawLookupCursor,
         core_lookup: env.CoreMap.RawLookupCursor,
 
         fn deinit(self: *Work) void {
             switch (self.*) {
                 .acquisition => |*cursor| cursor.deinit(),
-                .own_acquisition => |*cursor| cursor.deinit(),
-                .export_lookup => |*cursor| cursor.deinit(),
-                .none, .core_lookup => {},
+                .none, .own_acquisition, .export_lookup, .core_lookup => {},
             }
             self.* = .none;
         }
     };
 
-    pub fn init(context: *const Context, word: value.Symbol) Resolver {
+    /// Resolves the word of cell `id` as it was written there.
+    pub fn init(context: *const Context, id: env.CellId) Resolver {
         const environment = context.environment;
-        return switch (env.wordTarget(word.slot)) {
-            // A word with no cell reads what its interned name records.
-            .unlinked, .local => .{
-                .name = word.name,
-                .root = .core,
-                .written = .ordinary,
-                .spelling = intern.spelling(word.name),
-            },
-            .cell => |id| cell: {
-                const place = environment.place(id);
-                break :cell .{
-                    .name = word.name,
-                    .root = environment.scopeOf(place.root),
-                    .written = place.source,
-                    .spelling = environment.spelling(id),
-                };
-            },
+        const place = environment.place(id);
+        return .{
+            .name = place.name,
+            .root = environment.scopeOf(place.root),
+            .written = place.source,
+            .spelling = environment.spelling(id),
         };
     }
 
     pub fn deinit(self: *Resolver) void {
         self.work.deinit();
-        if (self.generation) |*lease| lease.deinit();
         self.* = undefined;
     }
 
@@ -181,7 +161,7 @@ pub const Resolver = struct {
             // The word's own module is found by name with no visibility
             // check: it is the module the word was written in.
             .module => |name| {
-                self.work = .{ .own_acquisition = context.view.acquireCursor(name) };
+                self.work = .{ .own_acquisition = context.view.moduleCursor(name) };
                 self.phase = .own_acquire;
                 return .pending;
             },
@@ -231,10 +211,8 @@ pub const Resolver = struct {
     }
 
     fn beginAcquire(self: *Resolver, context: *const Context) Progress {
-        if (self.generation) |*lease| lease.deinit();
-        self.generation = null;
         self.work.deinit();
-        self.work = .{ .acquisition = .initIn(context, self.provenance(), self.target.?.module) };
+        self.work = .{ .acquisition = .init(&context.view, context.project, context.libraries, self.provenance(), self.target.?.module) };
         self.phase = .acquire;
         return .pending;
     }
@@ -260,7 +238,7 @@ pub const Resolver = struct {
                 },
                 .malformed => self.miss(.{ .unresolved = .qualified }),
             },
-            .acquire => switch (self.work.acquisition.advance()) {
+            .acquire => switch (self.work.acquisition.advance(&context.view)) {
                 .pending => .pending,
                 .complete => |maybe_generation| {
                     self.work.deinit();
@@ -268,7 +246,8 @@ pub const Resolver = struct {
                         .name = self.target.?.module,
                         .searcher = self.provenance(),
                     } });
-                    self.generation = generation;
+                    // An entry found there resolves as that module would.
+                    self.owner_provenance = generation.provenance();
                     self.work = .{ .export_lookup = generation.lookupCursor(self.target.?.binding) };
                     self.phase = .export_lookup;
                     return .pending;
@@ -278,7 +257,6 @@ pub const Resolver = struct {
                 .pending => .pending,
                 .complete => |maybe_entry| {
                     const entry = maybe_entry orelse return self.miss(.{ .unresolved = .qualified });
-                    self.owner_provenance = self.generation.?.provenance();
                     return self.follow(context, entry, true);
                 },
             },
@@ -298,7 +276,7 @@ pub const Resolver = struct {
                     self.work.deinit();
                     const binding: intern.BindingName = @fromBackingInt(self.name);
                     const generation = maybe_generation orelse return self.beginCore(context, binding);
-                    self.generation = generation;
+                    self.owner_provenance = generation.provenance();
                     self.work = .{ .export_lookup = generation.lookupCursor(binding) };
                     self.phase = .own_lookup;
                     return .pending;
@@ -311,7 +289,6 @@ pub const Resolver = struct {
                         self.work.deinit();
                         return self.beginCore(context, @fromBackingInt(self.name));
                     };
-                    self.owner_provenance = self.generation.?.provenance();
                     return self.follow(context, entry, false);
                 },
             },
@@ -320,13 +297,9 @@ pub const Resolver = struct {
     }
 };
 
-/// The source `word` was written in: what its cell records, and no source for
-/// a word that carries no cell.
-pub fn sourceOf(environment: *const env.Env, word: value.Symbol) modules.RegistrationProvenance {
-    return switch (env.wordTarget(word.slot)) {
-        .unlinked, .local => .ordinary,
-        .cell => |id| environment.place(id).source,
-    };
+/// The source the word of cell `id` was written in.
+pub fn sourceOf(environment: *const env.Env, id: env.CellId) modules.RegistrationProvenance {
+    return environment.place(id).source;
 }
 
 /// The occurrence a form executes as a word, or null when the form is data:

@@ -1114,11 +1114,9 @@ comptime {
     // A load-return frame owns the complete qualified-operation continuation
     // across nested source execution. Keeping that tagged state in the frame
     // makes replay-vs-dispatch ownership unrepresentable rather than relying
-    // on correlated Fiber fields. Application frames likewise own the lexical scope
-    // provenance every sibling resumption must preserve.
-    // File-owned execution provenance carries a Session-scoped source capability.
-    // Every eval and application frame also records its activation's call
-    // site; the activation packs into three words to stay within this.
+    // on correlated Fiber fields. Every eval and application frame records
+    // its activation's execution site and call site; the activation packs
+    // into three words to stay within this.
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
@@ -1523,12 +1521,6 @@ pub const Loading = opaque {
         return self.fiber().dispatchAfterLoad(word, site);
     }
 
-    /// Puts back the symbol operand a primitive consumed before its module
-    /// turned out to be unloaded, and rewinds so the primitive runs again.
-    pub fn replayOperand(self: *Loading, requested: value.Symbol) error{OutOfMemory}!void {
-        return self.fiber().replayOperand(requested);
-    }
-
     /// The embedded or registered standard library named `name`, if any.
     pub fn embeddedLibrary(self: *Loading, name: intern.ModuleName) ?stdlib.Entry {
         return self.fiber().inherited.libraries().find(name);
@@ -1556,7 +1548,6 @@ pub const Fiber = struct {
 
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    module_access: *const modules.ExecutionAccess,
     frames: std.ArrayList(Frame) = .empty,
     stack: std.ArrayList(Value),
     environment: *env.Env,
@@ -1623,7 +1614,6 @@ pub const Fiber = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        module_access: *const modules.ExecutionAccess,
         stack: std.ArrayList(Value),
         environment: *env.Env,
         archive: *spans.SpanArchive,
@@ -1635,7 +1625,6 @@ pub const Fiber = struct {
         return .{
             .allocator = allocator,
             .releases = releases,
-            .module_access = module_access,
             .stack = stack,
             .environment = environment,
             .cells = environment.wordCells(),
@@ -1944,8 +1933,12 @@ pub const Fiber = struct {
     pub fn visibleNameRoot(self: *Fiber) reflection.VisibleNameRoot {
         return switch (self.currentScope().storage) {
             .module_root => |module| {
-                const lease = self.inherited.registry.currentGeneration(module.name) orelse return .core;
-                return .{ .image = .{ .entries = lease.entries(), .lease = lease } };
+                var view = self.inherited.registry.view();
+                const generation = view.moduleFind(module.name) orelse {
+                    view.deinit();
+                    return .core;
+                };
+                return .{ .image = .{ .entries = generation.entries(), .view = view } };
             },
             .core_build => .core,
             .session => .{ .session = self.inherited.registry.view() },
@@ -1978,11 +1971,9 @@ pub const Fiber = struct {
         return false;
     }
 
-    /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
-    /// Includes native registration authority and a reference to the Fiber's
-    /// bounded lexical observations for lookup and idiom recognition. Preserve the
-    /// complete ownership state without allocating on ordinary resolution.
-    const driver_slot_len = 736;
+    /// Sized to the largest driver that opts in, a numeric reduction, and
+    /// checked by `inlineDriverCapable`.
+    const driver_slot_len = 648;
     const driver_slot_align = 16;
 
     /// Sized to the application states that opt in, checked by
@@ -2420,23 +2411,15 @@ pub const Fiber = struct {
     pub fn retryQualifiedOperandAfterLoad(
         self: *Fiber,
         requested: value.Symbol,
-        outcome: binder.Miss,
+        module: binder.UnregisteredModule,
     ) MachineError!WorkProgress {
-        if (self.current == null)
-            return self.undefinedNameIn(requested.name, .qualified);
-        switch (outcome) {
-            .unregistered_module => |module| {
-                try self.replayOperand(requested);
-                try self.autoLoadModule(module.name, .{
-                    .qualified = requested.name,
-                    .context = module.searcher,
-                    .continuation = .replay,
-                });
-                return .detached;
-            },
-            .unresolved => |chain| return self.undefinedNameIn(requested.name, chain),
-            .alias_cycle => return self.failUnbound(requested, .alias_cycle),
-        }
+        try self.replayOperand(requested);
+        try self.autoLoadModule(module.name, .{
+            .qualified = requested.name,
+            .context = module.searcher,
+            .continuation = .replay,
+        });
+        return .detached;
     }
     /// A completed auto-load registers the module before resuming the tagged
     /// qualified operation. The requested spelling also identifies a
@@ -2468,8 +2451,15 @@ pub const Fiber = struct {
 
     /// A named module lookup as the source that wrote `operand`, the symbol
     /// that refers to the module, sees it.
-    pub fn moduleLookup(self: *Fiber, operand: value.Symbol, name: intern.ModuleName) ModuleLookupCursor {
-        return .init(self.inherited.registry, self.inherited.module_snapshot, self.inherited.libraries(), binder.sourceOf(self.environment, operand), name);
+    pub fn moduleLookup(self: *Fiber, operand: value.Symbol, name: intern.ModuleName) error{OutOfMemory}!module_lookup.HeldModuleLookup {
+        const searcher = try self.sourceOf(operand);
+        const view = self.inherited.registry.view();
+        return .{ .view = view, .cursor = .init(&view, self.inherited.module_snapshot, self.inherited.libraries(), searcher, name) };
+    }
+
+    /// The source `operand` was written in: what its cell records.
+    pub fn sourceOf(self: *Fiber, operand: value.Symbol) error{OutOfMemory}!modules.RegistrationProvenance {
+        return binder.sourceOf(self.environment, try self.cellOf(operand));
     }
 
     /// A mapped source file registers only the modules its artifact exports;
@@ -3320,7 +3310,6 @@ pub const Fiber = struct {
         return .{
             .environment = self.environment,
             .view = self.inherited.registry.view(),
-            .registry = self.inherited.registry,
             .project = self.inherited.module_snapshot,
             .libraries = self.inherited.libraries(),
         };
@@ -3330,11 +3319,12 @@ pub const Fiber = struct {
     /// implementation built for itself, the cell of its spelling written in
     /// core by no source, which is the place such a word resolves in. So
     /// every word that runs has a cell, and one rule answers for it.
-    fn cellOf(self: *Fiber, word: value.Symbol) error{OutOfMemory}!env.CellId {
+    pub fn cellOf(self: *Fiber, word: value.Symbol) error{OutOfMemory}!env.CellId {
         return switch (env.wordTarget(word.slot)) {
             .cell => |id| id,
-            .unlinked => @fromBackingInt(try self.environment.linker(self.environment.coreScopeId(), .ordinary).link(word.name)),
-            .local => unreachable,
+            // A lowered locals operation handed over as a value is a name
+            // like any other.
+            .unlinked, .local => @fromBackingInt(try self.environment.linker(self.environment.coreScopeId(), .ordinary).link(word.name)),
         };
     }
 
@@ -3349,17 +3339,12 @@ pub const Fiber = struct {
     }
 
     noinline fn resolveDenoted(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?*env.Definition {
-        const id = try self.cellOf(word);
-        const link = @backingInt(id);
-        if (self.cells.of(link).definition.load(.seq_cst)) |definition| return definition;
-        var lookup = ExplicitLookup.init(self, .{ .name = word.name, .slot = link });
+        var lookup = try ExplicitLookup.init(self, word);
         defer lookup.deinit();
-        const found = switch (poll_api.drive(binder.Outcome, &lookup, .{})) {
+        return switch (poll_api.drive(binder.Outcome, &lookup, .{self})) {
             .resolved => |definition| definition,
-            .missed => return null,
+            .missed => null,
         };
-        self.inherited.registry.fillCell(&lookup.context.view, id, found);
-        return found;
     }
 
     /// The trace word of `word` when it denotes, now, a builtin of core or
@@ -3558,35 +3543,13 @@ pub const Fiber = struct {
         if (self.cells.of(linked.slot).definition.load(.seq_cst)) |definition|
             return invokeDefinition(self, definition, word.name);
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
-        try self.startDriver(LookupDispatchDriver{ .word = linked, .site = site, .lookup = .init(.init(self, linked)) });
+        try self.startDriver(LookupDispatchDriver{ .word = linked, .site = site, .lookup = .init(try .init(self, linked)) });
     }
 
-    /// The failure for a word that did not bind and will not after a load.
-    pub fn failUnbound(self: *Fiber, word: value.Symbol, miss: binder.Unbound) MachineError {
+    /// The failure for a word whose imports never reach a definition.
+    pub fn failAliasCycle(self: *Fiber, word: value.Symbol) MachineError {
         self.active_word = .plain(word.name);
-        return switch (miss) {
-            .unresolved => |chain| self.undefinedWordIn(word.name, chain),
-            .alias_cycle => self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)}),
-        };
-    }
-
-    /// Fails a lookup miss for `word`, starting a module load when one may
-    /// make it resolvable. `continuation` says how to resume after the load.
-    fn missOrLoad(
-        self: *Fiber,
-        word: value.Symbol,
-        miss: binder.Miss,
-        continuation: load.QualifiedLoadContinuation,
-    ) MachineError!void {
-        self.active_word = .plain(word.name);
-        switch (miss) {
-            .unregistered_module => |module| try self.autoLoadModule(
-                module.name,
-                .{ .qualified = word.name, .context = module.searcher, .continuation = continuation },
-            ),
-            .unresolved => |chain| return self.failUnbound(word, .{ .unresolved = chain }),
-            .alias_cycle => return self.failUnbound(word, .alias_cycle),
-        }
+        return self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)});
     }
 
     pub fn raiseOwned(self: *Fiber, raised: Value) MachineError {
@@ -3726,21 +3689,23 @@ pub const Fiber = struct {
     }
     fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite) error{OutOfMemory}!void {
         self.active_word = .plain(word.name);
-        try self.startDriver(LookupDispatchDriver{ .word = word, .site = site, .lookup = .init(.init(self, word)) });
+        try self.startDriver(LookupDispatchDriver{ .word = word, .site = site, .lookup = .init(try .init(self, word)) });
         if (site) |at| self.setWorkDriverSite(at.code, at.index);
     }
     fn replayOperand(self: *Fiber, requested: value.Symbol) error{OutOfMemory}!void {
         try self.pushBorrowed(.{ .symbol = requested });
         self.current.?.rewind(self.active_index);
     }
-    fn beginModuleSeal(self: *Fiber) MachineError!*modules.OwnedImage {
-        const frame = &self.frames.items[self.frames.items.len - 1].boundary;
-        const observed = self.stack.items.len - frame.stack_base;
+    /// Closes the construction boundary on top once its body has run, and
+    /// returns the image it held. A body that left values on its stack
+    /// closes it and fails instead.
+    fn closeModuleBoundary(self: *Fiber) MachineError!modules.OwnedImage {
+        const boundary = self.popFrame(.boundary);
+        self.boundary_index = boundary.previous_boundary;
+        self.floor.restore(boundary.beneath);
+        self.active_word = boundary.word;
+        const observed = self.stack.items.len - boundary.stack_base;
         if (observed != 0) {
-            const boundary = self.popFrame(.boundary);
-            self.boundary_index = boundary.previous_boundary;
-            self.floor.restore(boundary.beneath);
-            self.active_word = boundary.word;
             boundary.deinit();
             return self.failFmt(
                 .domain,
@@ -3748,15 +3713,7 @@ pub const Fiber = struct {
                 .{ observed, if (observed == 1) "" else "s" },
             );
         }
-        self.active_word = frame.word;
-        return &frame.mode.module.image;
-    }
-    fn closeModuleBoundary(self: *Fiber) modules.OwnedImage {
         releaseCurrent(self);
-        const boundary = self.popFrame(.boundary);
-        self.boundary_index = boundary.previous_boundary;
-        self.floor.restore(boundary.beneath);
-        self.active_word = boundary.word;
         return boundary.mode.module.image;
     }
     /// Establishes completion before invoking foreign implementation code.
@@ -4349,21 +4306,14 @@ const LookupDispatchDriver = struct {
 
     fn advance(fiber: *Fiber, self: *LookupDispatchDriver) MachineError!WorkProgress {
         const work = fiber.workBudget();
-        while (work.spend()) switch (self.lookup.borrowMut().advance()) {
+        while (work.spend()) switch (self.lookup.borrowMut().advance(fiber)) {
             .pending => {},
             .complete => |outcome| {
                 const word = self.word;
                 switch (outcome) {
                     .resolved => |definition| {
-                        // The view keeps a counted definition alive; hold it
-                        // across the invocation, which retains what it keeps.
-                        definition.retain();
-                        defer definition.release(fiber.releases);
-                        fiber.inherited.registry.fillCell(
-                            &self.lookup.borrowMut().context.view,
-                            env.wordTarget(word.slot).cell,
-                            definition,
-                        );
+                        // The turn keeps the definition alive once the view
+                        // is released; the invocation retains what it keeps.
                         const site = self.site;
                         fiber.retireDriver(self);
                         // A module load ran other code in between, so the
@@ -4378,7 +4328,18 @@ const LookupDispatchDriver = struct {
                     .missed => |miss| {
                         const site = self.site;
                         fiber.retireDriver(self);
-                        try fiber.missOrLoad(word, miss, .{ .dispatch = .{ .word = word, .site = site } });
+                        fiber.active_word = .plain(word.name);
+                        switch (miss) {
+                            // A load may make the word resolvable: dispatch
+                            // it again once the module is registered.
+                            .unregistered_module => |module| try fiber.autoLoadModule(module.name, .{
+                                .qualified = word.name,
+                                .context = module.searcher,
+                                .continuation = .{ .dispatch = .{ .word = word, .site = site } },
+                            }),
+                            .unresolved => |chain| return fiber.undefinedWordIn(word.name, chain),
+                            .alias_cycle => return fiber.failAliasCycle(word),
+                        }
                         return .detached;
                     },
                 }
@@ -4388,25 +4349,47 @@ const LookupDispatchDriver = struct {
     }
 };
 
-/// One explicit lookup of a supplied symbol, in the root its link identifies and
-/// against the current view: what reflection and `execute` resolve.
+/// One explicit lookup of a word: what its cell answers, or, when the cell
+/// is empty, what a resolution against the current view finds, which the
+/// registry is then asked to keep in the cell. Dispatch of an empty cell,
+/// `execute`, and reflection ask this way. What it answers is borrowed for
+/// the turn that answered.
 pub const ExplicitLookup = struct {
-    context: binder.Context,
-    resolver: binder.Resolver,
+    cell: env.CellId,
+    resolution: ?struct {
+        context: binder.Context,
+        resolver: binder.Resolver,
+    } = null,
 
-    pub fn init(fiber: *Fiber, word: value.Symbol) ExplicitLookup {
-        const context = fiber.resolutionContext();
-        return .{ .context = context, .resolver = binder.Resolver.init(&context, word) };
+    pub fn init(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!ExplicitLookup {
+        return .{ .cell = try fiber.cellOf(word) };
     }
 
     pub fn deinit(self: *ExplicitLookup) void {
-        self.resolver.deinit();
-        self.context.deinit();
+        if (self.resolution) |*resolution| {
+            resolution.resolver.deinit();
+            resolution.context.deinit();
+        }
         self.* = undefined;
     }
 
-    pub fn advance(self: *ExplicitLookup) binder.Resolver.Progress {
-        return self.resolver.advance(&self.context);
+    pub fn advance(self: *ExplicitLookup, fiber: *Fiber) binder.Resolver.Progress {
+        const resolution = if (self.resolution) |*resolving| resolving else {
+            if (fiber.cells.of(@backingInt(self.cell)).definition.load(.seq_cst)) |definition|
+                return .{ .complete = .{ .resolved = definition } };
+            const context = fiber.resolutionContext();
+            self.resolution = .{ .context = context, .resolver = .init(&context, self.cell) };
+            return .pending;
+        };
+        const progress = resolution.resolver.advance(&resolution.context);
+        switch (progress) {
+            .complete => |outcome| switch (outcome) {
+                .resolved => |definition| fiber.inherited.registry.fillCell(&resolution.context.view, self.cell, definition),
+                .missed => {},
+            },
+            .pending => {},
+        }
+        return progress;
     }
 };
 
@@ -4416,7 +4399,8 @@ pub const Reflected = struct {
     trace_word: intern.TraceWord,
     releases: *heap.ReleaseDomain,
 
-    /// Holds a definition the lookup's view kept alive.
+    /// Holds, across turns, a definition the turn that resolved it kept
+    /// alive.
     pub fn hold(fiber: *Fiber, definition: *env.Definition, name: u32) Reflected {
         definition.retain();
         return .{
@@ -4551,6 +4535,7 @@ pub const PlanEntry = resolution_plan.PlanEntry;
 pub const ResolutionPlan = resolution_plan.ResolutionPlan;
 pub const EmbeddedLibraries = module_lookup.EmbeddedLibraries;
 pub const ModuleLookupCursor = module_lookup.ModuleLookupCursor;
+pub const HeldModuleLookup = module_lookup.HeldModuleLookup;
 
 /// Suspends the caller and makes `executable` the running evaluation, under
 /// a check of `effect` if it has one. The callee's owner is secured before
@@ -4787,7 +4772,6 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
         },
         .boundary => {
             if (self.frames.items[self.frames.items.len - 1].boundary.mode == .module) {
-                // The image stays in its frame until it is sealed.
                 try module_construction.startSeal(.of(self));
                 return true;
             }
@@ -4956,22 +4940,10 @@ pub const Construction = opaque {
         return self.fiber().openImageBoundary(candidate, word, body);
     }
 
-    /// The image the innermost frame, a construction boundary, is building.
-    pub fn image(self: *Construction) *modules.OwnedImage {
-        const frames = self.fiber().frames.items;
-        return &frames[frames.len - 1].boundary.mode.module.image;
-    }
-
-    /// Begins sealing the module whose construction boundary is the top
-    /// frame. A module body defines words and keeps no state, so a residual
-    /// operand window closes the boundary and fails.
-    pub fn beginSeal(self: *Construction) MachineError!*modules.OwnedImage {
-        return self.fiber().beginModuleSeal();
-    }
-
-    /// Closes the construction boundary once its directory is built, and
-    /// returns the image it held.
-    pub fn closeBoundary(self: *Construction) modules.OwnedImage {
+    /// Closes the construction boundary on top once its body has run, and
+    /// returns the image it held. A module body defines words and keeps no
+    /// state, so a residual operand window closes the boundary and fails.
+    pub fn closeBoundary(self: *Construction) MachineError!modules.OwnedImage {
         return self.fiber().closeModuleBoundary();
     }
 };

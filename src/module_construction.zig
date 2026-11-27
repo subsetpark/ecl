@@ -135,20 +135,24 @@ const ConstructionDriver = struct {
     }
 };
 
-/// Begins sealing the module whose construction boundary is the top frame. A
-/// module body defines words and keeps no state, so a residual operand window
-/// is refused before anything is sealed.
+/// Begins sealing the module whose construction boundary is the top frame,
+/// once its body has run: the boundary closes and hands its image to the
+/// sealing driver. A module body defines words and keeps no state, so a
+/// residual operand window is refused before anything is sealed.
 pub fn startSeal(via: *Construction) MachineError!void {
-    const image = try via.beginSeal();
-    try via.startDriver(ModuleSealDriver{ .phase = .init(.{ .group = image.groupCursor() }) });
+    var image = try via.closeBoundary();
+    const group = image.groupCursor();
+    try via.startDriver(ModuleSealDriver{ .image = .init(image.move()), .phase = .init(.{ .group = group }) });
 }
 
 /// Turns a module's staged names into its directory, warns of the core words
 /// the directory shadows, and hands the sealed image to registration. The
-/// image under construction owns every staged definition, so a failure leaves
-/// nothing for this driver to release.
+/// image owns every staged definition, so a failure leaves nothing for this
+/// driver to release but the image.
 const ModuleSealDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    // Fields are released last to first: the phase borrows the image.
+    image: heap.Owned(modules.OwnedImage),
     phase: heap.Owned(Phase),
 
     const Phase = union(enum) {
@@ -179,20 +183,20 @@ const ModuleSealDriver = struct {
                 .pending => {},
                 .complete => {
                     cursor.deinit();
-                    self.phase.borrowMut().* = .{ .shadows = via.image().entries() };
+                    self.phase.borrowMut().* = .{ .shadows = self.image.borrowMut().entries() };
                 },
             },
             .shadows => |*entries| switch (entries.advance()) {
                 .pending => {},
                 .item => |entry| {
-                    const owned = via.image();
+                    const owned = self.image.borrowMut();
                     // Shadowing in a shipped module is deliberate.
                     if (owned.provenance() != .standard_library)
                         fiber.warnCoreShadowing(entry.key, owned.moduleName());
                 },
                 .complete => {
+                    var built = self.image.take();
                     fiber.retireDriver(self);
-                    var built = via.closeBoundary();
                     var sealed = heap.Owned(modules.SealedImage).init(built.seal());
                     errdefer sealed.deinit(fiber.releases, fiber.allocator);
                     const driver = try fiber.allocator.create(ModuleCompletionDriver);

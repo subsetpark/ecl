@@ -1410,11 +1410,11 @@ test "native: the static transport publishes a linked descriptor through the sam
     var candidate_sealed = try candidate.sealLiteralGroup();
     defer candidate_sealed.deinit();
     try modules.testing.register(&registry, &candidate_sealed);
-    var generation = modules.testing.acquire(&registry, requested).?;
-    defer generation.deinit();
+    var captured = registry.view();
+    defer captured.deinit();
+    const generation = captured.moduleFind(requested).?;
     const increment = try intern.internNamespace("increment");
     var resolver = generation.lookupCursor(increment);
-    defer resolver.deinit();
     const entry = while (true) switch (resolver.advance()) {
         .pending => {},
         .complete => |resolved| break resolved.?,

@@ -613,7 +613,7 @@ first element:
 
 The words `--`, `:`, and `...` are reserved against binding: they remain
 legal symbol values and can be built into annotations at runtime, but cannot be
-introduced as definitions, values, locals, module names, aliases, exports, or
+introduced as definitions, values, locals, module names, imports, exports, or
 native entries. Binding attempts are `` `domain ``; use as a local name is a
 parse error. Longer names containing the same punctuation remain legal.
 

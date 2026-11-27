@@ -27,11 +27,11 @@ pub const VisibleNameRoot = union(enum) {
     /// The session's top-level names in one captured view, which the cursor
     /// owns.
     session: modules.View,
-    /// The names of a module's current registration, held by the lease the
-    /// cursor owns.
+    /// The names of a module's current registration, in a view the cursor
+    /// owns.
     image: struct {
         entries: env.NameMap.RawEntryCursor,
-        lease: modules.GenerationLease,
+        view: modules.View,
     },
     /// Core's names alone.
     core,
@@ -84,7 +84,7 @@ pub const VisibleNameCursor = struct {
     pub fn deinit(self: *VisibleNameCursor) void {
         switch (self.root) {
             .session => |*view| view.deinit(),
-            .image => |*image| image.lease.deinit(),
+            .image => |*image| image.view.deinit(),
             .core => {},
         }
         self.* = undefined;

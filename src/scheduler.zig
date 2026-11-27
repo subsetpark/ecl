@@ -1952,7 +1952,6 @@ pub const WorkerScheduler = enum(usize) {
             .fiber = machine.Fiber.init(
                 self.allocator(),
                 self.releaseDomain(),
-                request.parent_fiber.module_access,
                 .empty,
                 request.parent_fiber.environment,
                 request.parent_fiber.archive,

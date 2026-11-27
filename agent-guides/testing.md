@@ -290,14 +290,14 @@ reason before selecting the matrix.
 
 - Treat a model-only property as specification evidence. Proof of the production
   implementation requires concurrency and reclamation acceptance against the real
-  publisher, leases/cursors, mutation path, and retirement domain through public or
+  publisher, views/cursors, mutation path, and retirement domain through public or
   production-connected interfaces.
 - For snapshot reclamation, run real readers that repeatedly acquire, resolve through,
-  and release production leases while real writers publish and the same domain reclaims.
+  and release production views while real writers publish and the same domain reclaims.
   Assert stable observable values and, after delayed readers release and retirement
   settles, memory bounded independently of update count. Run that path under TSan and
   retain a counting-allocator delayed-reader property covering Directory
-  histories, alias churn, and distinct-module publication.
+  histories, import churn, and distinct-module publication.
 - Keep gameplan proof traceability exact while executing an active gameplan: every
   `testMap` row identifies exactly one existing test in its declared file and exactly one
   introducing and implementing patch entry. Reject duplicate, stale, missing, or
