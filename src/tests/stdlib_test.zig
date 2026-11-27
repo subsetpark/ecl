@@ -225,13 +225,31 @@ test "stdlib: a body refers to a word of an unregistered module without loading 
             .kind = "undefined-word",
             .word = "result.nope",
         },
-        .{
-            // A registered module's missing export is still a binding miss.
-            .name = "a loaded module's missing export fails where it is called",
-            .source = "[1] result.ok pop (result.nope) `f def f",
-            .kind = "undefined-word",
-            .word = "result.nope",
-        },
+    });
+}
+
+test "stdlib: a loaded module's missing export fails where it is called" {
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // With `result` already registered, the definition still succeeds: a
+    // registered module's missing export is a binding miss like any other.
+    try expectDisplay(&runtime, "[1] result.ok pop (result.nope) `f def", "");
+    // The call, in its own unit, is what reports it.
+    const failure = switch (try runtime.runUnit("<stdlib-test>", "f")) {
+        .err => |item| item,
+        .ok => return error.ExpectedLanguageError,
+        .incomplete => return error.UnexpectedIncomplete,
+    };
+    defer runtime.release(failure);
+    try support.expectLanguageError(failure, .{
+        .name = "the call reports the missing export",
+        .source = "f",
+        .kind = "undefined-word",
+        .word = "result.nope",
     });
 }
 

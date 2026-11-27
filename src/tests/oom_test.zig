@@ -649,7 +649,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // allocation-failure paths through registration. A module whose
             // body refers to an undefined word seals; that word and an explicit
             // lookup fail only when they run.
-            "(((missing) `f def) `oom-unbound @defm) @attempt pop " ++
+            "((missing) `f def) `oom-unbound @defm (oom-unbound.f) @attempt pop " ++
             "((1) `bump def (`missing execute) `boom def (7) `peek def) `oom-calls @defm " ++
             "oom-calls.bump pop (oom-calls.boom) @attempt pop " ++
             "oom-calls.peek 7 match? pop " ++
@@ -746,6 +746,7 @@ const StdlibSurface = enum {
     source_declarations,
     host_metadata,
     mapped_module,
+    module_body_import,
     root_source_preload,
     random,
     dict,
@@ -788,6 +789,20 @@ fn stdlibSessionAllocationProbe(
         try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "suite.ecl",
             .data = "((1) `answer test) `helper @defm\n",
+        });
+    }
+    if (surface == .module_body_import) {
+        // The first module's body records an import from a module declared
+        // later in the same artifact, so the import runs while the artifact
+        // loads and its word resolves when `answer` first reaches it.
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.modules",
+            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
+                "{path \"imports.ecl\" kind ecl exports [\"importprobe\" \"importlater\"]}]}}}",
+        });
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "imports.ecl",
+            .data = "(`importlater (seven) importp (seven) `answer def) `importprobe @defm ((7) `seven def) `importlater @defm",
         });
     }
     // Paths and source strings are borrowed test scaffolding outside Session
@@ -876,6 +891,11 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-lock-tier.ecl",
             "mapprobe.answer pop",
+        ),
+        .module_body_import => try runOk(
+            &runtime,
+            "oom-module-body-import.ecl",
+            "importprobe.answer pop",
         ),
         .random => try runOk(
             &runtime,
@@ -1711,6 +1731,11 @@ test "oom: standard-library and host: native port lifecycle transfer and rollbac
 test "oom: standard-library and host: module map: artifact loading propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.mapped_module);
+}
+
+test "oom: standard-library and host: module map: module-body imports propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.module_body_import);
 }
 
 test "oom: standard-library and host: module map: local source preload propagates every allocation failure" {

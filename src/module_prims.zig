@@ -126,12 +126,14 @@ const DefmDriver = struct {
 
 /// Returns the name of the module whose code is running. A construction
 /// body reports the name it is being built under.
+/// The symbol is linked as the running code would have written it, so a
+/// word that takes a module operand finds the module from that code's source.
 fn moduleNameWord(fiber: *Fiber) MachineError!void {
     const name = fiber.currentModule() orelse return fiber.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    try fiber.pushOwned(.{ .symbol = .{ .name = intern.moduleId(name) } });
+    try fiber.pushOwned(.{ .symbol = try fiber.linkedWord(intern.moduleId(name)) });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names

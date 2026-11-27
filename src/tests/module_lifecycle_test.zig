@@ -420,11 +420,14 @@ test "concurrency: escaped quotations follow a concurrent reload" {
             &runtime,
             "((1) `k def ((k)) `q def) `goner @defm goner.q `gone set",
         );
+        // Every task completes with one of the two definitions' results; a
+        // failure inside any of them leaves a 0 here.
         try expectStack(
             &runtime,
             "[1] 64 take (pop ((gone apply) @attempt) @spawn) each " ++
-                "((2) `k def ((k)) `q def) `goner @defm (task.await) each pop",
-            "",
+                "((2) `k def ((k)) `q def) `goner @defm (task.await) each " ++
+                "(`ok at first `ok at first [1 2] swap has?) all?",
+            "1",
         );
         // Once the reload has completed, the quotation runs the new word.
         try expectStack(&runtime, "gone apply", "2");
@@ -447,11 +450,16 @@ test "concurrency: a reload that drops a word leaves escaped quotations undefine
             &runtime,
             "((1) `k def ((k)) `q def) `reloaded @defm reloaded.q `held set",
         );
+        // Every task completes, and its attempt holds either the old word's
+        // result or the undefined-word error for `k`; any other failure
+        // leaves a 0 here.
         try expectStack(
             &runtime,
             "[1] 64 take (pop ((held apply) @attempt) @spawn) each " ++
-                "((2) `j def) `reloaded @defm (task.await) each pop",
-            "",
+                "((2) `j def) `reloaded @defm (task.await) each " ++
+                "(`ok at first dup `ok has? (`ok at first 1 =) " ++
+                "(`err at dup `kind at `undefined-word match? swap `word at `k match? and) if) all?",
+            "1",
         );
         // The replacement is what callers now reach, and the escaped
         // quotation's word has no definition in it.

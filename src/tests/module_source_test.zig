@@ -56,6 +56,36 @@ test "loader: standalone maps capture local discovery and enforce direct lexical
     try std.testing.expectEqual(@as(i64, 20), next.stackItems()[0].int);
 }
 
+test "loader: a mapped module reads its own exports and doc through *module*" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const dir = inputs.temporary.dir;
+    try dir.createDir(std.testing.io, "local", .default_dir);
+    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = standalone_map });
+    // `direct` is visible to the session; `indirect` only to `direct`. Each
+    // asks about itself, so the module operand is found from the asking
+    // module's own place in the map, not from the session's.
+    try dir.writeFile(std.testing.io, .{
+        .sub_path = "direct.ecl",
+        .data = "(: \"Direct doc.\") ((*module* exports) `names def (*module* module-doc) `about def " ++
+            "(indirect.names) `inner-names def (indirect.about) `inner-about def) `direct @defm " ++
+            "((7) `answer def) `sibling @defm",
+    });
+    try dir.writeFile(std.testing.io, .{
+        .sub_path = "indirect.ecl",
+        .data = "(: \"Indirect doc.\") ((*module* exports) `names def (*module* module-doc) `about def " ++
+            "(1) `hidden defp) `indirect @defm",
+    });
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "direct.names", "(`about `inner-about `inner-names `names)");
+    try expectStack(&runtime, "direct.about", "\"Direct doc.\"");
+    try expectStack(&runtime, "direct.inner-names", "(`about `names)");
+    try expectStack(&runtime, "direct.inner-about", "\"Indirect doc.\"");
+}
+
 test "loader: map references relocate and malformed nearest maps fail closed" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
@@ -322,14 +352,23 @@ test "module: qualified calls follow reloads" {
     try std.testing.expectEqualStrings("1 2", display.bytes());
 }
 
-test "module: a task spawned by a failed construction outlives the discarded image" {
+test "module: a failed construction discards the definitions it staged" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "((((1) () while) @spawn pop missing) `bad @defm) @attempt pop");
+    // The body stages `staged` and then reaches a word with no definition,
+    // which aborts the construction: nothing it staged is registered.
+    try expectErrorContains(&runtime, "((1) `staged def missing) `bad @defm", &.{
+        "kind undefined-word",
+        "word missing",
+    });
+    try expectErrorContains(&runtime, "bad.staged", &.{
+        "kind undefined-word",
+        "word bad.staged",
+    });
 }
 
 test "module: hot reload commit failure and a word that reloads its own module" {

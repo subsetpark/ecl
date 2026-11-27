@@ -1357,9 +1357,19 @@ test "native: only exact completion mutates the operand stack" {
 
 test "native: the static transport publishes a linked descriptor through the same path" {
     var host = heap.HostOwner.init(std.testing.allocator);
+    // Until the Owner exists, each object releases itself if a later
+    // creation fails, newest first; from then on the block below owns the
+    // whole teardown, whose order the Owner's closing dictates.
+    var torn_down_together = false;
     var environment = try env.Env.init(&host);
+    errdefer if (!torn_down_together) environment.deinit();
     var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
+    errdefer if (!torn_down_together) {
+        registry.deinit();
+        host.cleanup().drain();
+    };
     const owner = try native_module.Owner.init(host.cleanup());
+    torn_down_together = true;
     defer {
         const closing = owner.closeCalls();
         registry.deinit();
