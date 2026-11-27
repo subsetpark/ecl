@@ -547,9 +547,10 @@ test "loader: failures and cycles are total" {
         .ecl_path = "test/acceptance/modules",
     }), .default, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "`missing-module (x) import", &.{ "kind undefined-word", "name missing-module.x" });
-    try expectErrorContains(&runtime, "`cycle (x) import", &.{ "kind domain", "recursive auto-load" });
-    try expectErrorContains(&runtime, "`orphan (x) import", &.{
+    // An import loads nothing; each failure belongs to the imported word.
+    try expectErrorContains(&runtime, "`missing-module (x) import x", &.{ "kind undefined-word", "word x" });
+    try expectErrorContains(&runtime, "`cycle (x) import x", &.{ "kind domain", "never reach a definition" });
+    try expectErrorContains(&runtime, "`orphan (x) import x", &.{
         "kind io",
         "registered nothing under that name",
         "path \"test/acceptance/modules/orphan.ecl\"",
@@ -646,11 +647,9 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     const reserved = "module name `dict` is reserved for the standard library";
     // `dict` has not loaded yet: the refusal cannot depend on that.
     try expectErrorContains(&runtime, "((a b -- c) (pop pop 0) `has? def) `dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "`m `dict alias", &.{reserved});
     try expectOk(&runtime, "{a 1} [a] dict.has? [1] match? {kind user msg \"dict did not load\"} assert");
-    // Loaded, it is refused the same way, and an alias cannot claim the name.
+    // Loaded, it is refused the same way.
     try expectErrorContains(&runtime, "() `dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "(`m `dict alias) `m @defm", &.{reserved});
     try expectErrorContains(&runtime, "((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
@@ -671,8 +670,8 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     const reserved = "module name `dict` is reserved for the standard library";
     // `map` applies the caller's quotation under `@attempt`, `either`
     // inline; neither runs it as standard-library code.
-    try expectOk(&runtime, "[] result.ok (`m `dict alias []) result.map `err at `kind at `domain match? " ++
-        "{kind user msg \"alias escaped\"} assert");
+    try expectOk(&runtime, "[] result.ok (() `dict @defm []) result.map `err at `kind at `domain match? " ++
+        "{kind user msg \"registration escaped\"} assert");
     try expectErrorContains(&runtime, "[] result.ok (() `dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
 }

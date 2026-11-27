@@ -71,7 +71,7 @@ test "testing: test names are absent from application resolution" {
     try expectErr(&runtime, "visibility.hidden");
 }
 
-test "testing: test mode discovers each module once, ignoring aliases" {
+test "testing: test mode discovers each module once" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -83,7 +83,6 @@ test "testing: test mode discovers each module once, ignoring aliases" {
         &runtime,
         "((1) `z test (2) `a test) `suite.two @defm " ++
             "((3) `only test) `suite.one @defm ((3) `only test) `suite.copy @defm " ++
-            "`suite.one `short alias " ++
             "tests dup len 4 = {kind user} assert " ++
             "first dup `module at `suite.copy match? {kind user} assert " ++
             "`name at `only match? {kind user} assert",

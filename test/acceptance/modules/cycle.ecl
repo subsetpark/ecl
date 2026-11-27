@@ -1,1 +1,2 @@
-`cycle (x) import
+### module cycle
+(`cycle (x) import) `cycle @defm

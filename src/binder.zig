@@ -105,7 +105,6 @@ pub const Resolver = struct {
         dot,
         prefix,
         prefix_validate,
-        prefix_alias,
         export_name,
         export_validate,
         acquire,
@@ -217,8 +216,8 @@ pub const Resolver = struct {
         return .pending;
     }
 
-    /// Follows one directory entry: a definition resolves, an alias starts a
-    /// qualified lookup of its target, and a module alias is not a word.
+    /// Follows one directory entry: a definition resolves, and an alias
+    /// starts a qualified lookup of its target.
     fn follow(self: *Resolver, context: *const Context, entry: env.Entry, require_public: bool) Progress {
         switch (entry) {
             .definition => |definition| {
@@ -227,7 +226,6 @@ pub const Resolver = struct {
                 return self.found(definition);
             },
             .alias => |alias| return self.followAlias(context, alias, require_public),
-            .module => return self.miss(.{ .unresolved = if (require_public) .qualified else self.plainChain() }),
         }
     }
 
@@ -237,39 +235,6 @@ pub const Resolver = struct {
         self.work = .{ .atom = intern.lookupCursor(self.spelling()[self.dot_index + 1 ..]) };
         self.phase = .export_name;
         return .pending;
-    }
-
-    /// A module part that is one segment may be a module alias of the scope
-    /// the word was written in, which then denotes its target. Core holds no
-    /// aliases, so a word written there goes straight to the registry.
-    fn beginPrefixAlias(self: *Resolver, context: *const Context) Progress {
-        const binding = intern.moduleBindingName(self.prefix.?) orelse return self.beginExportName();
-        switch (self.root) {
-            .core, .retired => return self.beginExportName(),
-            .session => {
-                if (context.view.sessionFind(binding)) |entry| self.applyPrefixAlias(entry);
-                return self.beginExportName();
-            },
-            .image => |cell| {
-                self.work.deinit();
-                const owner = cell.ownerHandle() orelse return self.beginExportName();
-                if (self.image_pin == null) self.image_pin = modules.tryPinAnchor(owner, context.module_access) orelse
-                    return self.miss(.retired);
-                const scope = cell.scopeUnder(.fresh_pin) orelse return self.miss(.retired);
-                const home = modules.homeForModuleRootScope(scope) orelse return self.beginExportName();
-                const lookup = home.lookupCursor(binding) orelse return self.beginExportName();
-                self.work = .{ .lookup = lookup };
-                self.phase = .prefix_alias;
-                return .pending;
-            },
-        }
-    }
-
-    fn applyPrefixAlias(self: *Resolver, entry: env.Entry) void {
-        switch (entry) {
-            .module => |target| self.prefix = target,
-            .definition, .alias => {},
-        }
     }
 
     fn followAlias(self: *Resolver, context: *const Context, alias: env.Alias, require_public: bool) Progress {
@@ -369,13 +334,6 @@ pub const Resolver = struct {
                 .pending => .pending,
                 .complete => |maybe_module| {
                     self.prefix = maybe_module orelse return self.miss(.{ .unresolved = .qualified });
-                    return self.beginPrefixAlias(context);
-                },
-            },
-            .prefix_alias => switch (self.work.lookup.advance()) {
-                .pending => .pending,
-                .complete => |maybe_entry| {
-                    if (maybe_entry) |entry| self.applyPrefixAlias(entry);
                     return self.beginExportName();
                 },
             },

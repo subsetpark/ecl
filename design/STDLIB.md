@@ -115,9 +115,6 @@ wrap (net.local-address `port at 0 >) @give task.await
 ### abs
 `( x -- y )` — Evaluate the absolute value of `x`.
 
-### alias
-`( name short -- )` — Bind `short` in the current scope as an alias of the module name `name`: a qualified word written in this scope whose module part is exactly `short` denotes `name` instead, resolved at each call. The alias is private to the scope and never exported. Inside a module it is legal only during construction.
-
 ### all?
 `( list (p: a -- bool) -- bool )` — Return 1 when `p` returns 1 for every element of `list`; otherwise return 0.
 

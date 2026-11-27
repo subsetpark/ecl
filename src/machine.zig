@@ -224,7 +224,6 @@ const ErrorDataKey = enum {
     @"destination-path",
     address,
     port,
-    importer,
 };
 const ErrorData = struct {
     key: union(enum) { builtin: ErrorDataKey, symbol: u32 },
@@ -1548,11 +1547,6 @@ pub const Loading = opaque {
     pub fn embeddedLibrary(self: *Loading, name: intern.ModuleName) ?stdlib.Entry {
         return self.fiber().inherited.libraries().find(name);
     }
-
-    /// Records the module whose deferred import the pending failure is about.
-    pub fn addErrorImporter(self: *Loading, importer: intern.ModuleName) void {
-        self.fiber().pendingFailure().addData(.importer, .{ .symbol = .{ .name = intern.moduleId(importer) } });
-    }
 };
 
 pub const Fiber = struct {
@@ -2583,41 +2577,6 @@ pub const Fiber = struct {
             .alias_cycle => return self.failUnbound(requested, .alias_cycle),
         }
     }
-    /// A batch import consumes its module symbol and requested-name list before
-    /// discovering a cold module. Restore both operands, rewind the primitive,
-    /// and share the ordinary qualified-name auto-load/retry path.
-    pub fn retryImportAfterLoad(
-        self: *Fiber,
-        module_id: u32,
-        requested: Value,
-        module_name: intern.ModuleName,
-        requested_word: u32,
-    ) MachineError!WorkProgress {
-        if (self.current == null) {
-            self.releases.releaseValue(requested);
-            return self.undefinedNameIn(requested_word, .qualified);
-        }
-        try self.restoreImportOperands(module_id, requested);
-        self.current.?.rewind(self.active_index);
-        try self.autoLoadModule(module_name, .{
-            .qualified = requested_word,
-            .context = self.current.?.site.registration_provenance,
-            .continuation = .replay,
-        });
-        return .detached;
-    }
-    /// Consumes the requested-name list on both success and allocation
-    /// failure. Keeping the exact stack commit outside the driver-returning
-    /// retry function preserves the WorkProgress output boundary audited for
-    /// every driver.
-    fn restoreImportOperands(self: *Fiber, module_id: u32, requested: Value) error{OutOfMemory}!void {
-        var owned = heap.Owned(Value).init(requested);
-        defer owned.deinit(self.releases, self.allocator);
-        var reservation = try self.reserveStack(2);
-        reservation.pushBorrowed(.{ .symbol = .{ .name = module_id } });
-        reservation.pushOwned(owned.take());
-        std.debug.assert(reservation.complete());
-    }
     /// A completed auto-load registers the module before resuming the tagged
     /// qualified operation. The requested spelling also identifies a
     /// misspelled export in the final undefined-word error.
@@ -2634,8 +2593,8 @@ pub const Fiber = struct {
 
     /// Standard-library names are reserved, like `core`: only embedded loading
     /// registers them, so a stdlib name means the same module in every scope,
-    /// whether or not it has loaded. User registration, aliasing, and removal
-    /// under one are `'domain`.
+    /// whether or not it has loaded. User registration and removal under one
+    /// are `'domain`.
     pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
         if (provenance == .standard_library) return;
         if (self.inherited.libraries().find(name) == null) return;

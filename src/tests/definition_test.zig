@@ -75,27 +75,27 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",          "swap",           "pop",            "over",     "rollup",     "rolldown",
-        "cons",         "match?",         "type",           "parse",    "chars",      "bytes",
-        "symbol",       "intern",         "int",            "float",    "char",       "@attempt",
-        "raise",        "args",           "exit",           "dip",      "apply",      "if",
-        "while",        "times",          "cond",           "each",     "zip-with",   "for",
-        "fold",         "scan",           "stencil",        "unfold",   "infra",      "def",
-        "set",          "defp",           "setp",           "test",     "tests",      "@test",
-        "effect",       "exports",        "doc",            "see",      "@defm",      "import",
-        "alias",        "words",          "@load",          "@spawn",   "task.await", "task.cancel",
-        "task.pending", "task.await-any", "task.await-for", "@each",    "+",          "-",
-        "*",            "/",              "div",            "mod",      "pow",        "atan2",
-        "min",          "max",            "=",              "not=",     "<",          ">",
-        "<=",           ">=",             "and",            "or",       "neg",        "abs",
-        "sqrt",         "floor",          "ceil",           "round",    "exp",        "log",
-        "sin",          "cos",            "not",            "at",       "where",      "first-where",
-        "in?",          "raze",           "cat",            "take",     "drop",       "reverse",
-        "first",        "rest",           "range",          "shape",    "len",        "flip",
-        "reshape",      "cmp",            "grade",          "distinct", "group",      "put",
-        "update",       "del",            "str",            "band",     "bor",        "bxor",
-        "bsl",          "bsr",            "bnot",           "stack",    "cut",        "+%",
-        "-%",           "*%",             "bytes?",
+        "dup",            "swap",           "pop",      "over",       "rollup",      "rolldown",
+        "cons",           "match?",         "type",     "parse",      "chars",       "bytes",
+        "symbol",         "intern",         "int",      "float",      "char",        "@attempt",
+        "raise",          "args",           "exit",     "dip",        "apply",       "if",
+        "while",          "times",          "cond",     "each",       "zip-with",    "for",
+        "fold",           "scan",           "stencil",  "unfold",     "infra",       "def",
+        "set",            "defp",           "setp",     "test",       "tests",       "@test",
+        "effect",         "exports",        "doc",      "see",        "@defm",       "import",
+        "words",          "@load",          "@spawn",   "task.await", "task.cancel", "task.pending",
+        "task.await-any", "task.await-for", "@each",    "+",          "-",           "*",
+        "/",              "div",            "mod",      "pow",        "atan2",       "min",
+        "max",            "=",              "not=",     "<",          ">",           "<=",
+        ">=",             "and",            "or",       "neg",        "abs",         "sqrt",
+        "floor",          "ceil",           "round",    "exp",        "log",         "sin",
+        "cos",            "not",            "at",       "where",      "first-where", "in?",
+        "raze",           "cat",            "take",     "drop",       "reverse",     "first",
+        "rest",           "range",          "shape",    "len",        "flip",        "reshape",
+        "cmp",            "grade",          "distinct", "group",      "put",         "update",
+        "del",            "str",            "band",     "bor",        "bxor",        "bsl",
+        "bsr",            "bnot",           "stack",    "cut",        "+%",          "-%",
+        "*%",             "bytes?",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -372,11 +372,9 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
         // @defm validates its name before the body runs.
         .{ .name = "@defm", .source = "() `-- @defm", .kind = "domain", .word = "@defm" },
-        .{ .name = "alias", .source = "() `m @defm `m `-- alias", .kind = "domain", .word = "alias" },
-        // The exact name `core` is the core qualifier, so neither publication
-        // surface may claim it; `core.utils` remains an ordinary module name.
+        // The exact name `core` is the core qualifier, so no registration
+        // may claim it; `core.utils` remains an ordinary module name.
         .{ .name = "@defm core", .source = "() `core @defm", .kind = "domain", .word = "@defm" },
-        .{ .name = "alias core", .source = "() `m @defm `m `core alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "((-- x) (1) `-- def) `m @defm", .kind = "domain", .word = "def" },
         .{ .name = "private value", .source = "(1 `: setp) `m @defm", .kind = "domain", .word = "defp" },
         .{ .name = "unset is not a word", .source = "`x unset", .kind = "undefined-word", .word = "unset" },

@@ -198,9 +198,9 @@ test "modules: *module* reports the running module's name" {
             "left.name right.name",
         "left right",
     );
-    // An alias resolves to its module, so the call reports that module's
-    // name rather than the spelling used at the call site.
-    try expectStack(&runtime, "`left `short alias short.name", "left");
+    // An imported word runs as its module, so it reports that module's
+    // name rather than the scope that imported it.
+    try expectStack(&runtime, "`left (name) import name", "left");
 
     // A module's code runs as that module wherever it runs: under `@attempt`
     // and in a task the module spawns alike.
@@ -257,8 +257,6 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "base.utils base.utils.f", "1 41");
     try expectStack(&runtime, "`base.utils `f qualify dup type swap execute", "symbol 41");
     try expectStack(&runtime, "`base.utils 1 (`f) (`g) if qualify execute", "41");
-    try expectOk(&runtime, "`base.utils `utils alias");
-    try expectStack(&runtime, "utils.g", "42");
     try expectOk(&runtime, "`base.utils (g) import");
     try expectStack(&runtime, "g", "42");
     try expectOk(&runtime, "((43) `f def) `base.utils @defm");
@@ -282,13 +280,10 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     try expectStack(&runtime, "shadow.host.indices", "[1 2]");
     try expectStack(&runtime, "7 shadow.host.where", "shadowed");
     try expectErrorContains(&runtime, "core.no-such-binding", &.{ "kind undefined-word", "scope core" });
-    // Core is a scope, not a registration: nothing may publish under its name
-    // as a module or an alias, and it is not a module to
-    // alias or import from.
+    // Core is a scope, not a registration: nothing may publish under its
+    // name as a module, and it is not a module to import from.
     try expectErrorContains(&runtime, "() `core @defm", &.{ "kind domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "`shadow.host `core alias", &.{ "kind domain", "alias name" });
-    try expectErrorContains(&runtime, "`core `short alias", &.{ "kind domain", "core qualifier, not a module" });
-    try expectErrorContains(&runtime, "`core (dup) import", &.{ "kind undefined-word", "scope qualified" });
+    try expectErrorContains(&runtime, "`core (swap) import 1 2 swap", &.{ "kind undefined-word", "word swap", "scope qualified" });
     // The reservation is the whole name, not a segment: a dotted name under it
     // registers, resolves, and qualifies like any other module.
     try expectOk(&runtime, "((1) `f def) `core.utils @defm");

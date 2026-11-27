@@ -722,14 +722,13 @@ the same resolver against the current view.
 ### One snapshot is the publication view
 
 The registry's directory snapshot is the Session's publication view. It maps
-module names to images and the session's top-level names to definitions,
-word aliases, and module aliases. A resolution captures one snapshot
-and resolves its session and qualified names against it across scheduler
+module names to images and the session's top-level names to definitions
+and name aliases. A resolution captures one snapshot and resolves its session and qualified names against it across scheduler
 turns, so it never answers from two publication states. Core's directory is
 fixed when core freezes and an image's when the image is sealed, so neither
 needs capturing.
 
-Every mutation — a top-level definition, an import, an alias, a registration,
+Every mutation — a top-level definition, an import, a registration,
 a reload — is one bounded cursor: snapshot the current directory, build a
 successor with the edit applied, and publish it under the
 writer lock if the snapshot is still current; otherwise discard it and start
@@ -793,8 +792,8 @@ A module image is created with its name, by `@defm` or by a loader that has
 validated the name. The name is part of the image's identity: registration consumes
 the sealed image and publishes it under that name, so no image is ever
 registered under a second one. Whatever reports running code's module, `*module*`, a diagnostic's
-qualified spelling, or the private home, reads it from the image. While its construction body runs, `def`, `defp`, `import`,
-`importp`, and `alias` stage names in the image; nothing staged is visible, so the body
+qualified spelling, or the private home, reads it from the image. While its construction body runs, `def`, `defp`, `import`, and
+`importp` stage names in the image; nothing staged is visible, so the body
 cannot run a definition it has made. When the body completes, the module is
 sealed: the staged names become the image's directory, and a name staged
 twice fails construction. Sealing reads no body. The image
@@ -826,14 +825,6 @@ and gains no module lifecycle by being nameable: the registry refuses the exact
 name `core`, which is the single boundary that owns registry names, so no later
 registration can capture the qualifier.
 
-A module alias is a scope entry, not a registry name. It maps a short name to a
-module name in the session's or an image's directory, beside definitions and
-word aliases, and is never a word or an export. The resolver consults it only
-for a qualified spelling whose module part is one segment, in the root the
-word was written in; core holds definitions alone, so a word written there goes
-straight to the registry. The alias stores the name, so every resolution
-reaches the target's current generation.
-
 ### Module visibility belongs to the defining source
 
 A Session owns one immutable validated module map and the source identities
@@ -862,20 +853,11 @@ loader can observe completion. Provenance carries the artifact's publication
 identity. Failed loads publish neither partial public registrations nor a
 committed artifact; retry uses the same source identity.
 
-A loading lease also carries the module-body imports deferred onto it. An
-import whose target module its own fiber is still loading, by name on the
-search path or through the declaring artifact under a map, would be a load
-cycle. Instead it stages its aliases unchecked and records each name on the
-held lease. It does that through a claim that only a scan for that same owner
-can mint. The lease's frame lies below the importing driver, so the claim
-cannot outlive it. The load checks deferred names against the registry after
-its declared modules and before it commits. It reads the registry directly
-because an importer's own lookup cannot see an uncommitted artifact. Releasing
-the lease on any path discards the list. A nested load that deferred names
-onto an outer one has already committed if the outer load later fails.
-A load that fails deferred validation still leaves the modules its bodies
-registered published, as it does when any later step fails: the registry
-has no unpublish edit, and each image lives in its history until teardown.
+An import is a directory entry that refers to its target by module name and
+binding name. Publishing one loads no module and reads no other directory; the
+resolver follows the entry when its word is reached, and loads the target then.
+A load therefore never waits on a module that imports from it, and modules that
+import from each other need no loading order.
 
 Standalone validation owns bounded input and the validated map through a host
 cleanup owner without constructing a Session. An unpublished document supplies
@@ -1956,8 +1938,8 @@ storage is the core-building authority; core is then frozen before any
 ordinary unit starts. `stdlib.zig` is a compile-time manifest of embedded
 source and host-backed modules. Embedded modules win before filesystem search,
 so a stray file cannot silently replace shipped code, and their names are
-reserved like `core`: only embedded loading registers them, so user code can
-neither replace one nor bind an alias under its name. That exemption belongs to embedded
+reserved like `core`: only embedded loading registers them, so user code
+cannot replace one. That exemption belongs to embedded
 code, not to its dynamic extent: a quotation a stdlib word applies runs with
 ordinary provenance. A qualified stdlib name therefore
 resolves to the same module from every scope, which is what lets prelude and

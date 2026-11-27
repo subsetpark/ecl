@@ -735,7 +735,7 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
     try runOk(
         &runtime,
         "(1 `alpha set 2 `private setp) `fuzzmod @defm " ++
-            "`fuzzmod `fm alias `fuzzmod (alpha) import 3 `fuzz-live set",
+            "`fuzzmod (alpha) import 3 `fuzz-live set",
     );
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
@@ -749,7 +749,7 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
                 const prefix: []const u8 = switch (action) {
                     4 => prefix_storage[0..smith.slice(&prefix_storage)],
                     5 => "fuzzmod.",
-                    6 => "fm.",
+                    6 => "fuzzmod.al",
                     7 => "fuzz",
                     else => unreachable,
                 };
@@ -761,11 +761,11 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
     }
 }
 
-test "fuzz: completion survives prefixes definitions aliases and reloads" {
+test "fuzz: completion survives prefixes definitions and reloads" {
     try std.testing.fuzz({}, fuzzCompletionMutation, .{ .corpus = &.{
         "",
         "fuzzmod.",
-        "fm.alpha",
+        "fuzzmod.alpha",
         "reload-reload-query",
         "\x00\xff.private",
     } });

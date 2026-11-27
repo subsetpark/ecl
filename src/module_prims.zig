@@ -11,7 +11,6 @@ const definition_prims = @import("definition_prims.zig");
 const poll_api = @import("poll.zig");
 const reflection = @import("reflection.zig");
 const kernel_storage = @import("kernel_storage.zig");
-const map_state = @import("module_snapshot.zig");
 const Value = value.Value;
 const Header = machine.Header;
 const Fiber = machine.Fiber;
@@ -26,7 +25,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the name of the module whose code is running." },
         .{ .name = "import", .primitive = importAs(.public), .effect = "module-name bindings --", .doc = "For each value in `bindings`, create a public alias in the current scope from <value> to <module-name>.<value>." },
         .{ .name = "importp", .primitive = importAs(.private), .effect = "module-name q --", .doc = "For each value in `bindings`, create a private alias in the current scope from <value> to <module-name>.<value>." },
-        .{ .name = "alias", .primitive = aliasModule, .effect = "name short --", .doc = "Bind `short` in the current scope as an alias of the module name `name`: a qualified word written in this scope whose module part is exactly `short` denotes `name` instead, resolved at each call. The alias is private to the scope and never exported. Inside a module it is legal only during construction." },
         .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Create a symbol value containing the qualified name `module-name`.`binding-name`." },
         .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print all visible words in sorted order." },
         .{ .name = "exports", .primitive = exportsWord, .effect = "module-name -- names", .doc = "Return the public words of a module as a list of symbols in codepoint order." },
@@ -39,7 +37,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// inputs, so a stack summary cannot rest on its effect.
 pub fn reshapesWords(primitive: env.PrimitiveImpl) bool {
     return definition_prims.binds(primitive) or primitive == &defmWord or primitive == &load or
-        primitive == importAs(.public) or primitive == importAs(.private) or primitive == &aliasModule;
+        primitive == importAs(.public) or primitive == importAs(.private);
 }
 
 /// The one module constructor. The name is validated before the body runs, so
@@ -125,9 +123,8 @@ const DefmDriver = struct {
     }
 };
 
-/// Returns the name of the active execution home's image. An alias resolves to
-/// the image before the call, so it reports the module's own name. A
-/// construction body reports the name it is being built under.
+/// Returns the name of the active execution home's image. A construction
+/// body reports the name it is being built under.
 fn moduleNameWord(fiber: *Fiber) MachineError!void {
     const home = fiber.currentHome() orelse return fiber.fail(
         .domain,
@@ -178,7 +175,7 @@ fn importWord(fiber: *Fiber, visibility: env.Visibility) MachineError!void {
     errdefer requested.deinit();
     const module_id = try fiber.popSymbol();
     const requested_count: usize = @intCast(requested.borrow().list.length());
-    const prepared = try fiber.allocator.alloc(ImportName, requested_count);
+    const prepared = try fiber.allocator.alloc(intern.BindingName, requested_count);
     try fiber.startDriver(ImportDriver.init(
         fiber,
         module_id,
@@ -187,64 +184,21 @@ fn importWord(fiber: *Fiber, visibility: env.Visibility) MachineError!void {
         visibility,
     ));
 }
-fn aliasModule(fiber: *Fiber) MachineError!void {
-    try fiber.require(2);
-    const scope = try fiber.definitionScope();
-    const short = try fiber.popSymbol();
-    const target = try fiber.popSymbol();
-    try fiber.startDriver(AliasDriver{
-        .scope = scope,
-        .short_validation = .init(short),
-        .target_validation = .init(target),
-    });
-}
-
-const ImportName = struct {
-    binding: intern.BindingName,
-    qualified: u32,
-};
-
-/// Batch import validates the entire requested public surface against one
-/// pinned generation before publishing the first name. A missing or private
-/// attribute therefore cannot leave a prefix of the request installed in the
-/// destination scope. What it publishes are name aliases, `x -> m.x`: every
-/// later binding or lookup follows the alias, so an import never captures the
-/// target it validated.
-///
-/// A module body may import from a module that its own fiber is still
-/// loading, whether that module is declared later in the same file or by a
-/// file earlier in the load chain. Auto-loading it would be a cycle, so the
-/// import instead stages its aliases unvalidated and hands each name to the
-/// held load, which validates them before it completes. Where a module lives
-/// therefore never decides whether an import between modules succeeds.
+/// `import` checks how its operands are spelled and publishes one alias per
+/// requested name, `x -> m.x`. It neither loads the module nor reads what the
+/// module holds: an alias is followed when its word is reached, and a missing
+/// or private attribute fails there. Every spelling is checked before the
+/// first name is published, so a refused request installs nothing.
 const ImportDriver = struct {
-    /// How an unregistered target is resolved: by auto-loading it, or by
-    /// deferring to a load this fiber already holds.
-    const Deferral = union(enum) {
-        unprobed,
-        module: modules.Registry.HeldLoadingCursor,
-        catalog: map_state.LookupCursor,
-        artifact: modules.Registry.HeldLoadingCursor,
-        claimed: struct { held: modules.LoadingClaim, importer: intern.ModuleName },
-        load,
-    };
     pub const ownership: heap.DriverOwnership = .fields;
-    module_id: u32,
     requested: heap.Owned(Value),
-    prepared: heap.Owned([]ImportName),
+    prepared: heap.Owned([]intern.BindingName),
     scope: *env.Scope,
     visibility: env.Visibility,
     module_validation: intern.ModuleNameCursor,
     module_name: ?intern.ModuleName = null,
     prepare_index: usize = 0,
     binding_validation: ?intern.NamespaceCursor = null,
-    qualifier: ?heap.Owned(intern.QualifiedCursor) = null,
-    acquisition: ?heap.Owned(machine.ModuleLookupCursor) = null,
-    generation: ?heap.Owned(modules.GenerationLease) = null,
-    validation_index: usize = 0,
-    resolution: ?heap.Owned(modules.ModuleNameLookupCursor) = null,
-    validated: bool = false,
-    deferral: Deferral = .unprobed,
     publish_index: usize = 0,
     publisher: ?heap.Owned(modules.Registry.DefineCursor) = null,
 
@@ -252,11 +206,10 @@ const ImportDriver = struct {
         fiber: *Fiber,
         module_id: u32,
         requested: Value,
-        prepared: []ImportName,
+        prepared: []intern.BindingName,
         visibility: env.Visibility,
     ) ImportDriver {
         return .{
-            .module_id = module_id,
             .requested = .init(requested),
             .prepared = .init(prepared),
             .scope = fiber.currentScope(),
@@ -280,15 +233,14 @@ const ImportDriver = struct {
             };
 
             if (self.prepare_index != self.prepared.borrow().len) {
-                const item = list.atUnchecked(self.requested.borrow(), self.prepare_index);
-                if (self.binding_validation == null and self.qualifier == null) {
-                    const symbol = switch (item) {
+                if (self.binding_validation == null) {
+                    const symbol = switch (list.atUnchecked(self.requested.borrow(), self.prepare_index)) {
                         .symbol => |name| name.name,
                         else => return fiber.typeError("a list of symbols"),
                     };
                     self.binding_validation = .init(symbol);
                 }
-                if (self.qualifier == null) switch (self.binding_validation.?.advance()) {
+                switch (self.binding_validation.?.advance()) {
                     .pending => continue,
                     .complete => |maybe_name| {
                         const binding = maybe_name orelse return fiber.fail(
@@ -296,152 +248,18 @@ const ImportDriver = struct {
                             "import attributes must be unqualified and non-reserved symbols",
                         );
                         self.binding_validation = null;
-                        self.prepared.borrowMut().*[self.prepare_index].binding = binding;
-                        self.qualifier = .init(try .init(
-                            fiber.allocator,
-                            intern.qualifiedName(self.module_name.?, binding),
-                        ));
-                        continue;
-                    },
-                };
-                switch (try self.qualifier.?.borrowMut().advance()) {
-                    .pending => continue,
-                    .complete => |qualified| {
-                        self.prepared.borrowMut().*[self.prepare_index].qualified = qualified;
-                        self.qualifier.?.deinit(fiber.releases, fiber.allocator);
-                        self.qualifier = null;
-                        self.binding_validation = null;
+                        self.prepared.borrowMut().*[self.prepare_index] = binding;
                         self.prepare_index += 1;
                         continue;
                     },
                 }
             }
 
-            if (self.generation == null) switch (self.deferral) {
-                .unprobed => {
-                    if (self.acquisition == null)
-                        self.acquisition = .init(fiber.moduleLookup(self.module_name.?));
-                    switch (self.acquisition.?.borrowMut().advance()) {
-                        .pending => continue,
-                        .complete => |maybe_generation| {
-                            self.acquisition.?.deinit(fiber.releases, fiber.allocator);
-                            self.acquisition = null;
-                            if (maybe_generation) |generation| {
-                                self.generation = .init(generation);
-                                continue;
-                            }
-                            // Only a module body stages its imports for a
-                            // later check; top-level source stays incremental.
-                            self.deferral = if (self.scope.storage == .module_root)
-                                .{ .module = fiber.inherited.registry.heldModuleLoadingCursor(self.module_name.?, .of(fiber)) }
-                            else
-                                .load;
-                            continue;
-                        },
-                    }
-                },
-                // A search-path load holds its module's name while its file runs.
-                .module => |*held| switch (held.advance()) {
-                    .pending => continue,
-                    .complete => |maybe_claim| {
-                        if (maybe_claim) |held_claim| {
-                            try self.claimLoad(fiber, held_claim);
-                            continue;
-                        }
-                        self.deferral = if (fiber.inherited.module_snapshot) |project|
-                            .{ .catalog = project.lookupCursor(
-                                fiber.current.?.site.registration_provenance.scopeId(),
-                                intern.get(intern.moduleId(self.module_name.?)),
-                            ) }
-                        else
-                            .load;
-                        continue;
-                    },
-                },
-                // A mapped load holds the artifact that declares the module.
-                // An unmatched or hidden module takes the ordinary loader,
-                // which reports it.
-                .catalog => |*lookup| switch (lookup.advance()) {
-                    .pending => continue,
-                    .complete => |outcome| {
-                        lookup.deinit();
-                        self.deferral = switch (outcome) {
-                            .matched => |match| .{ .artifact = fiber.inherited.registry.heldArtifactLoadingCursor(match.artifact_id, .of(fiber)) },
-                            .unmatched, .hidden => .load,
-                        };
-                        continue;
-                    },
-                },
-                .artifact => |*held| switch (held.advance()) {
-                    .pending => continue,
-                    .complete => |maybe_claim| {
-                        if (maybe_claim) |held_claim| {
-                            try self.claimLoad(fiber, held_claim);
-                            continue;
-                        }
-                        self.deferral = .load;
-                        continue;
-                    },
-                },
-                .claimed => {},
-                .load => {
-                    const module_id = self.module_id;
-                    const module_name = self.module_name.?;
-                    const requested_word = if (self.prepared.borrow().len == 0)
-                        module_id
-                    else
-                        self.prepared.borrow()[0].qualified;
-                    const requested = self.requested.take();
-                    fiber.retireDriver(self);
-                    return fiber.retryImportAfterLoad(
-                        module_id,
-                        requested,
-                        module_name,
-                        requested_word,
-                    );
-                },
-            };
-
-            if (self.prepared.borrow().len == 0) return .completed;
-
-            if (!self.validated) {
-                if (self.validation_index == self.prepared.borrow().len) {
-                    self.validated = true;
-                    continue;
-                }
-                const requested = self.prepared.borrow()[self.validation_index];
-                if (self.deferral == .claimed) {
-                    self.deferral.claimed.held.deferAssumeCapacity(.{
-                        .module = self.module_name.?,
-                        .binding = requested.binding,
-                        .qualified = requested.qualified,
-                        .importer = self.deferral.claimed.importer,
-                    });
-                    self.validation_index += 1;
-                    continue;
-                }
-                if (self.resolution == null)
-                    self.resolution = .init(self.generation.?.borrow().lookupCursor(requested.binding));
-                switch (self.resolution.?.borrowMut().advance()) {
-                    .pending => continue,
-                    .complete => |maybe_entry| {
-                        const entry = maybe_entry orelse
-                            return fiber.undefinedNameIn(requested.qualified, .qualified);
-                        if (!modules.entryIsPublic(entry))
-                            return fiber.undefinedNameIn(requested.qualified, .qualified);
-                        self.resolution.?.deinit(fiber.releases, fiber.allocator);
-                        self.resolution = null;
-                        self.validation_index += 1;
-                        continue;
-                    },
-                }
-            }
-
             if (self.publish_index == self.prepared.borrow().len) return .completed;
-            const requested = self.prepared.borrow()[self.publish_index];
+            const binding = self.prepared.borrow()[self.publish_index];
             const alias: env.Alias = .{
                 .module = self.module_name.?,
-                .binding = requested.binding,
+                .binding = binding,
                 .visibility = self.visibility,
             };
             switch (self.scope.storage) {
@@ -452,7 +270,7 @@ const ImportDriver = struct {
                         .domain,
                         "module imports are legal only while the module is under construction",
                     );
-                    try image.stageAlias(requested.binding, alias);
+                    try image.stageAlias(binding, alias);
                     self.publish_index += 1;
                     continue;
                 },
@@ -460,90 +278,15 @@ const ImportDriver = struct {
                 .session => {},
             }
             if (self.publisher == null)
-                self.publisher = .init(fiber.inherited.registry.defineCursor(requested.binding, .{ .alias = alias }));
+                self.publisher = .init(fiber.inherited.registry.defineCursor(binding, .{ .alias = alias }));
             switch (try self.publisher.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
-                    if (outcome == .introduced) fiber.warnCoreShadowing(requested.binding, null);
+                    if (outcome == .introduced) fiber.warnCoreShadowing(binding, null);
                     self.publisher.?.deinit(fiber.releases, fiber.allocator);
                     self.publisher = null;
                     self.publish_index += 1;
                 },
-            }
-        }
-        return .stepped;
-    }
-
-    /// Capacity for every requested name is reserved up front, so recording
-    /// them cannot fail partway through the request.
-    fn claimLoad(self: *ImportDriver, fiber: *Fiber, held: modules.LoadingClaim) MachineError!void {
-        const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
-            .domain,
-            "module imports are legal only while the module is under construction",
-        );
-        try held.reserveDeferred(self.prepared.borrow().len);
-        self.deferral = .{ .claimed = .{ .held = held, .importer = image.moduleName() } };
-    }
-};
-
-/// `alias` binds a module alias in the scope it runs in, as `def` binds a word:
-/// a module root stages it with the image under construction, and the session
-/// publishes it to its own directory. It refers to its target by name, so it
-/// follows reload, and it is never a word or an export.
-const AliasDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    scope: *env.Scope,
-    short_validation: intern.NamespaceCursor,
-    target_validation: intern.ModuleNameCursor,
-    short: ?intern.BindingName = null,
-    target: ?intern.ModuleName = null,
-    publisher: ?heap.Owned(modules.Registry.DefineCursor) = null,
-    pub fn advance(fiber: *Fiber, self: *AliasDriver) MachineError!machine.WorkProgress {
-        const work = fiber.workBudget();
-        while (work.spend()) {
-            if (self.target == null) switch (self.target_validation.advance()) {
-                .pending => continue,
-                .complete => |name| {
-                    self.target = name orelse return fiber.fail(
-                        .domain,
-                        "alias target requires a valid module name",
-                    );
-                    if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(self.target.?))))
-                        return fiber.fail(.domain, "alias target `core` is the core qualifier, not a module");
-                    continue;
-                },
-            };
-            if (self.short == null) switch (self.short_validation.advance()) {
-                .pending => continue,
-                .complete => |name| {
-                    self.short = name orelse return fiber.fail(
-                        .domain,
-                        "alias name requires an unqualified, non-reserved name",
-                    );
-                    if (intern.isReservedRegistryBytes(intern.get(intern.bindingId(self.short.?))))
-                        return fiber.fail(.domain, "alias name `core` is reserved for the core qualifier");
-                    // A standard-library name means the same module in every
-                    // scope, so no alias may claim one.
-                    if (intern.moduleName(intern.bindingId(self.short.?)) catch null) |short|
-                        try fiber.refuseReservedModule(short, fiber.current.?.site.registration_provenance);
-                    continue;
-                },
-            };
-            if (self.publisher == null) switch (self.scope.storage) {
-                .module_root => {
-                    const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
-                        .domain,
-                        "a module alias is legal only while its module is under construction",
-                    );
-                    try image.stageModuleAlias(self.short.?, self.target.?);
-                    return .completed;
-                },
-                .core_build => return fiber.fail(.domain, "core does not alias"),
-                .session => self.publisher = .init(fiber.inherited.registry.defineCursor(self.short.?, .{ .module = self.target.? })),
-            };
-            switch (try self.publisher.?.borrowMut().advance()) {
-                .pending => {},
-                .complete => return .completed,
             }
         }
         return .stepped;

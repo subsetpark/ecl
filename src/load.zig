@@ -171,8 +171,8 @@ pub fn verifyAfterLoad(via: *Loading, after: AfterLoad) MachineError!bool {
         }
         break :name names[0];
     } else after.request.module.name;
-    // The lease stays held through verification: imports deferred onto this
-    // load are checked before it releases.
+    // The lease stays held through verification: an artifact commits only
+    // once every module it declares is found registered.
     try via.startDriver(QualifiedRegistrationDriver{
         .path = .init(path.take()),
         .acquisition = .init(fiber.inherited.registry.acquireCursor(first_name)),
@@ -1721,9 +1721,8 @@ fn verifyPublishedModule(
     return .detached;
 }
 
-/// Verifies what a completed load registered before releasing its lease:
-/// every module the load was expected to register, then every import a
-/// module body deferred onto this load. An artifact commits only after both.
+/// Verifies that a completed load registered every module it was expected
+/// to before releasing its lease. An artifact commits only after that.
 const QualifiedRegistrationDriver = struct {
     path: heap.Owned(Value),
     acquisition: heap.Owned(modules.Registry.AcquireCursor),
@@ -1731,36 +1730,9 @@ const QualifiedRegistrationDriver = struct {
     loading: ?heap.Owned(modules.LoadingLease) = null,
     artifact: ?map_state.ArtifactId = null,
     module_index: usize = 0,
-    /// The active name lookup of the `.resolving` phase. It is a direct field,
-    /// not a phase payload, so cancelling the driver releases its pin.
-    resolving_cursor: ?heap.Owned(modules.ModuleNameLookupCursor) = null,
-    phase: union(enum) {
-        declared,
-        /// The index of the deferred import whose module is being acquired.
-        deferred: usize,
-        /// The deferred import whose name is being looked up.
-        resolving: usize,
-    } = .declared,
 
     pub fn advance(via: *Loading, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        switch (self.phase) {
-            .declared => {},
-            .deferred => |index| return self.acquireDeferred(via, index),
-            .resolving => |index| {
-                const cursor = if (self.resolving_cursor) |*owned| owned else unreachable;
-                switch (cursor.borrowMut().advance()) {
-                    .pending => return .stepped,
-                    .complete => |maybe_entry| {
-                        const public = if (maybe_entry) |entry| modules.entryIsPublic(entry) else false;
-                        cursor.deinit(fiber.releases, fiber.allocator);
-                        self.resolving_cursor = null;
-                        if (!public) return self.failDeferred(via, index);
-                        return self.nextDeferred(via, index + 1);
-                    },
-                }
-            },
-        }
         switch (self.acquisition.borrowMut().advance()) {
             .pending => return .stepped,
             .complete => |maybe_generation| {
@@ -1811,50 +1783,9 @@ const QualifiedRegistrationDriver = struct {
                         return .stepped;
                     }
                 }
-                return self.nextDeferred(via, 0);
+                return self.complete(via);
             },
         }
-    }
-
-    fn deferredImports(self: *const QualifiedRegistrationDriver) []const modules.DeferredImport {
-        const loading = if (self.loading) |*owned| owned.borrow() else return &.{};
-        return loading.deferredImports();
-    }
-
-    /// A deferred target is always a module this load registers, so it is
-    /// read from the main registry directly: the importer's own lookup would
-    /// not see an artifact that has yet to commit.
-    fn nextDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError!WorkProgress {
-        const fiber = via.fiber();
-        const deferred = self.deferredImports();
-        if (index == deferred.len) return self.complete(via);
-        self.acquisition.deinit(fiber.releases, fiber.allocator);
-        self.acquisition = .init(fiber.inherited.registry.acquireCursor(deferred[index].module));
-        self.phase = .{ .deferred = index };
-        return .stepped;
-    }
-
-    fn acquireDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError!WorkProgress {
-        switch (self.acquisition.borrowMut().advance()) {
-            .pending => return .stepped,
-            .complete => |maybe_generation| {
-                var lease = maybe_generation orelse return self.failDeferred(via, index);
-                defer lease.deinit();
-                const binding = self.deferredImports()[index].binding;
-                self.resolving_cursor = .init(lease.lookupCursor(binding));
-                self.phase = .{ .resolving = index };
-                return .stepped;
-            },
-        }
-    }
-
-    fn failDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError {
-        const fiber = via.fiber();
-        const deferred = self.deferredImports()[index];
-        const failure = fiber.undefinedNameIn(deferred.qualified, .qualified);
-        via.addErrorImporter(deferred.importer);
-        fiber.addErrorPath(self.path.borrow());
-        return failure;
     }
 
     fn complete(self: *QualifiedRegistrationDriver, via: *Loading) MachineError!WorkProgress {

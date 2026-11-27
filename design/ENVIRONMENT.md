@@ -16,9 +16,10 @@ ECL calls Zig extensions through `ecl-native`.
 ### Embedded standard library
 
 Every module listed in `STDLIB.md` ships inside the `ecl` binary. Embedded
-modules load lazily at the first qualified reference or import. Loading needs
-no filesystem access and works with no `ECL_PATH`, and it is not observable: an
-embedded module means the same thing before and after it loads.
+modules load lazily, when a qualified or imported word of one is first
+reached. Loading needs no filesystem access and works with no `ECL_PATH`, and
+it is not observable: an embedded module means the same thing before and after
+it loads.
 
 Embedded modules use ECL source, linked native descriptors, builtin word
 tables, or registered built-in capabilities. The transport is an implementation

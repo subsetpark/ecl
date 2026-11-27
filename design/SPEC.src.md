@@ -430,7 +430,7 @@ a definition therefore keeps reporting the file that authored its body when
 another file calls it. Runtime-assembled code has no source provenance, so
 `*file*` is `` `domain `` there rather than falling back to its caller.
 `*module*` returns the name of the module whose code is running, the name
-`@defm` published it under even when the call came through an alias, including
+`@defm` published it under even when the call came through an import, including
 a construction body that has not yet published; at the root there is no module
 and it is `` `domain ``. The stars are ordinary word characters with no reader
 meaning, and the convention applies to shipped vocabulary without reserving the
@@ -482,9 +482,8 @@ core word.
 Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
-first use. `@defm` with a standard-library module name is `` `domain ``, as is
-`alias` with one as the alias name. A dotted name below one,
-such as `dict.extra`, is an ordinary module name.
+first use. `@defm` with a standard-library module name is `` `domain ``. A
+dotted name below one, such as `dict.extra`, is an ordinary module name.
 
 Every activation has a **current scope**. A word belonging to a module runs with
 that module's image as its current scope; every other word, whether a session
@@ -778,16 +777,18 @@ The language offers no guarantees about stale images being reaped.
 `import` consumes a module-name symbol and a list of attribute symbols, then
 publishes those attributes under the same names in the current environment.
 
-`import` validates every symbol and resolves every public attribute against one
-module generation before publishing the first name. A missing or private
-attribute is `` `undefined-word ``, malformed operand are `` `type ``, and
-malformed name domains are `` `domain ``.
+`import` validates the spelling of every operand before publishing the first
+name: a malformed operand is `` `type `` and a malformed name is `` `domain ``.
+It does not load the module and does not check the attributes. Both happen when
+an imported word is reached, where a missing or private attribute is
+`` `undefined-word ``.
 
 Imports behave like a simple alias (as opposed to capturing or republishing the
-actual contents of the aliased word). This makes import cycles theoretically
-possible, so they're checked and produce a `` `domain `` error if found.
-Because they behave like simple aliases for the qualified word, this also means
-that there's no loading-order dependency between modules.
+actual contents of the aliased word). This makes import cycles possible; an
+imported word whose aliases never reach a definition is a `` `domain `` error
+where it is reached. Because an import is only an alias for the qualified word,
+there's no loading-order dependency between modules, and modules may import
+from each other.
 
 A qualified name looks like `module-name "." word`, where `word` can't contain
 any dots but `module-name` can. Core words aren't in their own module, but the
@@ -797,13 +798,6 @@ reference to any core word that's been shadowed in the current scope.
 `qualify` is the way to dynamically construct qualified names at runtime. It canstructs a symbol from any module name symbol (including `core`) and a binding symbol.  
 
 Qualified names can be resolved and executed with `execute`.
-
-``name `short alias`` binds `short` in the current scope as an alias of the
-module name `name`, as `def` binds a word: a module's alias belongs to its image
-and is legal only during construction, and a top-level alias belongs to the
-session. A qualified word written in that scope whose module part is exactly
-`short` refers to `name` instead, resolved at each call, so the alias follows
-reload. An alias is never a word or an export, and no other scope sees it.
 
 ### Tests
 

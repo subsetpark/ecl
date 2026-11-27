@@ -592,7 +592,7 @@ pub fn build(b: *std.Build) void {
         },
         .{
             .step_name = "fuzz-completion",
-            .test_name = "fuzz: completion survives prefixes definitions aliases and reloads",
+            .test_name = "fuzz: completion survives prefixes definitions and reloads",
             .description = "Fuzz completion across live mutation and reloads",
         },
         .{

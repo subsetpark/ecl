@@ -190,9 +190,8 @@ const ModuleSealDriver = struct {
                 .pending => {},
                 .item => |entry| {
                     const owned = via.image();
-                    // Shadowing in a shipped module is deliberate, and a
-                    // module alias is not a word, so it shadows nothing.
-                    if (owned.provenance() != .standard_library and entry.value != .module)
+                    // Shadowing in a shipped module is deliberate.
+                    if (owned.provenance() != .standard_library)
                         fiber.warnCoreShadowing(entry.key, owned.moduleName());
                 },
                 .complete => {

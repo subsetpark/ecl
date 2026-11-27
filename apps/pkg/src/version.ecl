@@ -128,7 +128,7 @@
   (keep-larger) fold1
   first) `max def
 
- `pkg.test.support `t alias
+ `pkg.test.support (equal raises raises-containing documented) importp
 
  ### defp trichotomy
  (a b -- count : "Count the less-than and equality relations holding for a pair.")
@@ -162,14 +162,14 @@
  (-- : "Prove strict total ordering over generated and SemVer reference corpora.")
  ([7 0] 24 4 rand.ints nip [8 3] reshape ((str) each "." str.join) each
   dup ("-alpha.1" cat) each cat
-  dup distinct len 16 t.equal
-  dup pairs-of (apply trichotomy) each (1 =) all? 1 t.equal
-  (dup pkg.version.less?) each (0 =) all? 1 t.equal
+  dup distinct len 16 equal
+  dup pairs-of (apply trichotomy) each (1 =) all? 1 equal
+  (dup pkg.version.less?) each (0 =) all? 1 equal
   ["1.0.0-alpha" "1.0.0-alpha.1" "1.0.0-alpha.beta"
    "1.0.0-beta" "1.0.0-beta.2" "1.0.0-beta.11" "1.0.0-rc.1"
    "1.0.0" "1.0.1" "1.1.0" "2.0.0"]
-  ascending-flags (1 =) all? 1 t.equal
-  ["1.0.0" "1.0.0-alpha"] ascending-flags (1 =) all? 0 t.equal)
+  ascending-flags (1 =) all? 1 equal
+  ["1.0.0" "1.0.0-alpha"] ascending-flags (1 =) all? 0 equal)
  `ordering-laws test
 
  ### test grammar
@@ -177,33 +177,33 @@
  (("1.0.0+build" "1.0.1" pkg.version.less?)
   `domain
   "build metadata"
-  t.raises-containing
-  ("1.01.0" "1.2.0" pkg.version.less?) `domain "leading zero" t.raises-containing
+  raises-containing
+  ("1.01.0" "1.2.0" pkg.version.less?) `domain "leading zero" raises-containing
   ("1.0.0-01" "1.2.0" pkg.version.less?)
   `domain
   "leading zero"
-  t.raises-containing
+  raises-containing
   ("1.0" "1.2.0" pkg.version.less?)
   `domain
   "major.minor.patch"
-  t.raises-containing
+  raises-containing
   ("1.0.0.0" "1.2.0" pkg.version.less?)
   `domain
   "major.minor.patch"
-  t.raises-containing
+  raises-containing
   ("1.0.0-" "1.2.0" pkg.version.less?)
   `domain
   "prerelease identifier"
-  t.raises-containing
+  raises-containing
   ("1.0.0-a..b" "1.2.0" pkg.version.less?)
   `domain
   "prerelease identifier"
-  t.raises-containing
+  raises-containing
   ("1.0.0-a_b" "1.2.0" pkg.version.less?)
   `domain
   "prerelease identifier"
-  t.raises-containing
-  "1.0.0-a-b" "1.0.0-a-c" pkg.version.less? 1 t.equal)
+  raises-containing
+  "1.0.0-a-b" "1.0.0-a-c" pkg.version.less? 1 equal)
  `grammar test
 
  ### test malformed-operands
@@ -211,31 +211,31 @@
  ((5 "1.2.0" pkg.version.less?)
   `type
   "a package version is a string"
-  t.raises-containing
+  raises-containing
   ("1.2.0" 5 pkg.version.less?)
   `type
   "a package version is a string"
-  t.raises-containing
-  ("1.2.0" "nope" pkg.version.less?) `domain t.raises)
+  raises-containing
+  ("1.2.0" "nope" pkg.version.less?) `domain raises)
  `malformed-operands test
 
  ### test maximum
  (-- : "Return an input member that no other version exceeds.")
- (["1.2.0" "1.5.0" "1.10.0" "1.5.0"] pkg.version.max "1.10.0" t.equal
-  ["1.0.0-rc.1" "1.0.0" "1.0.0-alpha"] pkg.version.max "1.0.0" t.equal
-  ["0.1.0"] pkg.version.max "0.1.0" t.equal
+ (["1.2.0" "1.5.0" "1.10.0" "1.5.0"] pkg.version.max "1.10.0" equal
+  ["1.0.0-rc.1" "1.0.0" "1.0.0-alpha"] pkg.version.max "1.0.0" equal
+  ["0.1.0"] pkg.version.max "0.1.0" equal
   ["2.0.0" "1.9.9" "2.0.0-rc.1"] dup pkg.version.max
   (|corpus max|
-   corpus max (swap pkg.version.less?) cons each (1 =) any? not 1 t.equal
-   corpus max (match?) cons each (1 =) any? 1 t.equal)
+   corpus max (swap pkg.version.less?) cons each (1 =) any? not 1 equal
+   corpus max (match?) cons each (1 =) any? 1 equal)
   apply
-  ([] pkg.version.max) `shape "at least one version" t.raises-containing
-  (5 pkg.version.max) `type "list of version strings" t.raises-containing
-  (["9.0.0" "1.0"] pkg.version.max) `domain t.raises)
+  ([] pkg.version.max) `shape "at least one version" raises-containing
+  (5 pkg.version.max) `type "list of version strings" raises-containing
+  (["9.0.0" "1.0"] pkg.version.max) `domain raises)
  `maximum test
 
  ### test documentation
  (-- : "Require documentation for every package-version export.")
- ((pkg.version.validate pkg.version.less? pkg.version.max) t.documented)
+ ((pkg.version.validate pkg.version.less? pkg.version.max) documented)
  `documentation test
 ) `pkg.version @defm

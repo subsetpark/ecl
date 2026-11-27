@@ -100,8 +100,8 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         try std.testing.expect(std.mem.startsWith(u8, qualified, name));
         const source = try std.fmt.allocPrint(
             allocator,
-            "`{s} ({s}) import",
-            .{ name, qualified[name.len + 1 ..] },
+            "`{s} ({s}) import `{s} effect pop",
+            .{ name, qualified[name.len + 1 ..], qualified[name.len + 1 ..] },
         );
         defer allocator.free(source);
         try expectOk(&runtime, source);

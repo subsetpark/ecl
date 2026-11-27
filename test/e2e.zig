@@ -1149,7 +1149,7 @@ test "e2e: hot reload all access paths acceptance" {
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout = "11\n21\n31\n12\n22\n32\n",
+        .stdout = "11\n21\n12\n22\n",
         .stderr = "",
     });
 }
@@ -1255,7 +1255,7 @@ test "e2e: direct load and ECL_PATH acceptance" {
     var empty_environment = std.process.Environ.Map.init(allocator);
     defer empty_environment.deinit();
     var no_implicit_cwd = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "`stats (answer) import" },
+        .argv = &.{ exe, "-e", "`stats (answer) import answer" },
         .cwd = .{ .dir = module_directory },
         .environ_map = &empty_environment,
     });

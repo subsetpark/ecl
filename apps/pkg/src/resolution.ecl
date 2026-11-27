@@ -146,11 +146,11 @@
  (lock -- text : "Write deterministic portable resolution data ending in a newline.")
  (validate canonical str "\n" cat) `write def
 
- `pkg.test.support `t alias
+ `pkg.test.support (equal) importp
 
  ### defp rejected
  (quotation -- : "Require malformed or incompatible metadata to fail.")
- (@attempt result.err? 1 t.equal) `rejected defp
+ (@attempt result.err? 1 equal) `rejected defp
 
  ### setp empty-lock
  {format 3 root "project" root-requires {} packages {} requires {"project" {}}}
@@ -179,18 +179,18 @@
 
  ### test round-trip
  (-- : "Portable locks preserve exact pins and canonicalize all dictionary ordering.")
- (locked pkg.resolution.write pkg.resolution.read locked t.equal
-  locked pkg.resolution.write "\n" str.ends? 1 t.equal
-  locked `packages at "foo" at `source at `url at "https://example.com/foo.tgz" t.equal
-  empty-lock pkg.resolution.validate empty-lock t.equal
+ (locked pkg.resolution.write pkg.resolution.read locked equal
+  locked pkg.resolution.write "\n" str.ends? 1 equal
+  locked `packages at "foo" at `source at `url at "https://example.com/foo.tgz" equal
+  empty-lock pkg.resolution.validate empty-lock equal
   locked `root-requires locked `root-requires at dict.pairs reverse dict.from-pairs put
-  pkg.resolution.write locked pkg.resolution.write t.equal)
+  pkg.resolution.write locked pkg.resolution.write equal)
  `round-trip test
 
  ### test compatibility
  (-- : "Normal synchronization keeps the locked graph and refuses changed dependency inputs.")
- (locked manifest pkg.resolution.compatible locked t.equal
-  locked manifest `version "2.0.0" put pkg.resolution.compatible locked t.equal
+ (locked manifest pkg.resolution.compatible locked equal
+  locked manifest `version "2.0.0" put pkg.resolution.compatible locked equal
   (locked manifest `requires {} put pkg.resolution.compatible) rejected
   (locked manifest `name "another" put pkg.resolution.compatible) rejected
   (locked manifest `requires {} "api" requirement `source
@@ -206,7 +206,7 @@
    commit "0123456789abcdef0123456789abcdef01234567"} put put put
   (|git-lock| git-lock `root-requires
    {} "api" git-lock `packages at "foo" at `package "foo" put put put)
-  apply dup pkg.resolution.write pkg.resolution.read t.equal
+  apply dup pkg.resolution.write pkg.resolution.read equal
   (locked `packages {} "foo" selection `source
    {kind archive url "https://example.com/different.tgz"} put put put
    pkg.resolution.validate) rejected
@@ -218,7 +218,7 @@
  ### test selected-manifest
  (-- : "A higher locked selection is allowed, but its own dependency edges must match.")
  (locked `packages {} "foo" selection `version "1.1.0" put put put
-  dup manifest pkg.resolution.compatible t.equal
+  dup manifest pkg.resolution.compatible equal
   locked {format 2 name "foo" version "1.0.0" sources [] requires {}}
   pkg.resolution.check-manifest
   (locked {format 2 name "foo" version "9.0.0" sources [] requires {}}

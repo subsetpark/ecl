@@ -96,8 +96,6 @@ pub const VisibleNameCursor = struct {
                 .{ .item = intern.bindingId(entry.key) }
             else
                 .pending,
-            // A module alias is private to its scope and is not a word.
-            .module => .pending,
         };
     }
 

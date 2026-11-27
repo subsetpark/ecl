@@ -15,10 +15,8 @@ BindingName.
 > state of its own, and a generation is nothing but an image published under
 > a name.
 >
-> It deliberately abstracts over source spelling and name validation,
-> including module aliases, which are lexical: a scope's alias rewrites a
-> qualified word's module part before the call, so the registry holds no
-> alias names. It also abstracts over construction-body evaluation (including
+> It deliberately abstracts over source spelling and name validation. It
+> also abstracts over construction-body evaluation (including
 > the refusal of a body that leaves values on its stack), concrete and nested
 > values, error construction and propagation, task and unit ownership,
 > scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects.

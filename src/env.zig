@@ -644,28 +644,24 @@ pub const Executable = opaque {
     }
 };
 
-/// A name's entry in a directory: a definition, a name alias that every
-/// later binding or lookup follows through the registry, or a module alias.
-/// An alias freezes the mapping, never the target it selects.
+/// A name's entry in a directory: a definition, or a name alias that every
+/// later binding or lookup follows through the registry. An alias freezes
+/// the mapping, never the target it selects.
 pub const Entry = union(enum) {
     definition: *Definition,
     alias: Alias,
-    /// `name -> module`: a qualified word written in this scope whose module
-    /// part is exactly this name denotes `module` instead. Private to the scope,
-    /// never a word, and followed at every binding or lookup.
-    module: intern.ModuleName,
 
     pub fn retain(self: Entry) void {
         switch (self) {
             .definition => |definition| if (definition.lifetime == .counted) definition.retain(),
-            .alias, .module => {},
+            .alias => {},
         }
     }
 
     pub fn release(self: Entry, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .definition => |definition| if (definition.lifetime == .counted) definition.release(releases),
-            .alias, .module => {},
+            .alias => {},
         }
     }
 };

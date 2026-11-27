@@ -39,11 +39,6 @@ pub fn moduleId(name: ModuleName) u32 {
     return @backingInt(name) & ~dotted_module_mask;
 }
 
-pub fn moduleBindingName(name: ModuleName) ?BindingName {
-    if (@backingInt(name) & dotted_module_mask != 0) return null;
-    return @fromBackingInt(@intCast(moduleId(name)));
-}
-
 pub fn qualifiedName(module: ModuleName, binding: BindingName) QualifiedName {
     return @fromBackingInt(@intCast((@as(u64, @backingInt(module)) << 32) | bindingId(binding)));
 }

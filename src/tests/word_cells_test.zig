@@ -93,17 +93,58 @@ test "word cells: an unresolved word in a body fails where it is reached" {
 }
 
 test "word cells: an import of a missing attribute fails where the word is reached" {
-    // PENDING: Patch 3
-    // Import an attribute its module does not export. Expect the import to
-    // succeed and `undefined-word` when the imported word is reached.
-    return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
+    defer runtime.deinit();
+    // The import publishes a name the module lacks, a private one, and one
+    // of a module that is registered nowhere.
+    try expectOk(&runtime, "(1 `one set 2 `hidden setp) `m @defm");
+    try expectOk(&runtime, "`m (one missing hidden) import `nowhere (lost) import");
+    try expectStack(&runtime, "one", "1");
+    try expectErrorContains(&runtime, "missing", &.{ "kind undefined-word", "word missing" });
+    try expectErrorContains(&runtime, "hidden", &.{ "kind undefined-word", "word hidden" });
+    try expectErrorContains(&runtime, "lost", &.{ "kind undefined-word", "word lost" });
+    // In a module too: the body registers, and the failure is the call's.
+    try expectOk(&runtime, "(`m (missing) importp (\"ran\" io.print missing) `f def) `user @defm");
+    try std.testing.expectEqualStrings("", output.written());
+    try expectErrorContains(&runtime, "user.f", &.{ "kind undefined-word", "word missing", "trace (`missing `user.f)" });
+    try std.testing.expectEqualStrings("ran\n", output.written());
+    // The name follows its module: a registration that adds the attribute
+    // gives the imported word a definition.
+    try expectOk(&runtime, "(1 `one set 3 `missing set) `m @defm");
+    try expectStack(&runtime, "missing", "3");
 }
 
 test "word cells: two modules may import from each other" {
-    // PENDING: Patch 3
-    // Map two module sources that each import a word of the other. Expect
-    // both to load in either order and each to run the other's word.
-    return error.SkipZigTest;
+    // Each order of first use loads the pair from the other end.
+    for ([_][2][]const u8{ .{ "left.total right.total", "11 111" }, .{ "right.total left.total", "111 11" } }) |order| {
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        try inputs.temporary.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.modules",
+            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
+                "{path \"left.ecl\" kind ecl exports [\"left\"]} " ++
+                "{path \"right.ecl\" kind ecl exports [\"right\"]}]}}}",
+        });
+        try inputs.temporary.dir.writeFile(std.testing.io, .{
+            .sub_path = "left.ecl",
+            .data = "(`right (ten) import (1) `one def (one ten +) `total def) `left @defm\n",
+        });
+        try inputs.temporary.dir.writeFile(std.testing.io, .{
+            .sub_path = "right.ecl",
+            .data = "(`left (one) import (10) `ten def (ten one + 100 +) `total def) `right @defm\n",
+        });
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectStack(&runtime, order[0], order[1]);
+    }
 }
 
 test "word cells: a quotation applied in another source reaches a module only its own source may see" {

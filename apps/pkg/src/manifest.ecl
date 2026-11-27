@@ -175,7 +175,7 @@
   "{{format 2 name {} version {} sources {} requires {}}}\n" str.format)
  `write def
 
- `pkg.test.support `t alias
+ `pkg.test.support (equal raises raises-containing) importp
 
  ### setp manifest-text
  "{format 2 name \"my.proj\" version \"0.1.0\" sources [\"**/*\"] requires {\"foo\" {package \"foo\" version \"1.2.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
@@ -183,33 +183,33 @@
 
  ### test read-and-validate
  (-- : "Read canonical manifests and enforce their declared schema.")
- (manifest-text pkg.manifest.read `name at "my.proj" t.equal
+ (manifest-text pkg.manifest.read `name at "my.proj" equal
   "# a comment\n{format 2 name \"a\" version \"0.1.0\" sources [] requires {}}"
-  pkg.manifest.read `requires at dict.size 0 t.equal
-  manifest-text parse first dup pkg.manifest.validate match? 1 t.equal
-  ("{format 2" pkg.manifest.read) `parse t.raises
-  ("{} {}" pkg.manifest.read) `shape "exactly one form" t.raises-containing
-  ("" pkg.manifest.read) `shape "exactly one form" t.raises-containing
-  ("[1 2]" pkg.manifest.read) `type "a manifest is a dict" t.raises-containing
+  pkg.manifest.read `requires at dict.size 0 equal
+  manifest-text parse first dup pkg.manifest.validate match? 1 equal
+  ("{format 2" pkg.manifest.read) `parse raises
+  ("{} {}" pkg.manifest.read) `shape "exactly one form" raises-containing
+  ("" pkg.manifest.read) `shape "exactly one form" raises-containing
+  ("[1 2]" pkg.manifest.read) `type "a manifest is a dict" raises-containing
   ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {} require {}}"
    pkg.manifest.read)
   `domain
   "exactly the keys"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"a\" version \"0.1.0\"}" pkg.manifest.read)
   `domain
   "exactly the keys"
-  t.raises-containing
+  raises-containing
   ("{format 1 name \"a\" version \"0.1.0\" sources [] requires {}}"
    pkg.manifest.read)
   `domain
   "migrate format 1"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"My.Proj\" version \"0.1.0\" sources [] requires {}}"
    pkg.manifest.read)
   `domain
   "lowercase segments"
-  t.raises-containing)
+  raises-containing)
  `read-and-validate test
 
  ### test globs-and-requirements
@@ -218,42 +218,42 @@
    pkg.manifest.read)
   `domain
   "portable glob strings"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"a\" version \"0.1.0\" sources [\"src/prefix**/*.ecl\"] requires {}}"
    pkg.manifest.read)
   `domain
   "portable glob strings"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"http://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
    pkg.manifest.read)
   `domain
   "HTTPS"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-ABC\"}}}"
    pkg.manifest.read)
   `domain
   "lowercase hex"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"foo\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}"
    pkg.manifest.read)
   `domain
   "require itself"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"a\" version \"0.1.0\" sources [] requires {\"foo\" {package \"foo\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"foo.bar\" {package \"foo.bar\" version \"1.0.0\" source {kind archive url \"https://e.com/g.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
    pkg.manifest.read)
   `domain
   "require itself"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"p\" version \"0.1.0\" sources [] requires {\"p-\" {package \"p-\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {package \"p.a\" version \"1.0.0\" source {kind archive url \"https://e.com/g.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
    pkg.manifest.read)
   `domain
   "require itself"
-  t.raises-containing
+  raises-containing
   ("{format 2 name \"p\" version \"0.1.0\" sources [] requires {\"p0\" {package \"p0\" version \"1.0.0\" source {kind archive url \"https://e.com/f.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"} \"p.a\" {package \"p.a\" version \"1.0.0\" source {kind archive url \"https://e.com/g.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"}}}"
    pkg.manifest.read)
   `domain
   "require itself"
-  t.raises-containing)
+  raises-containing)
  `globs-and-requirements test
 
  ### test writing
@@ -266,7 +266,7 @@
     "b"
     {package "b" version "1.0.0" source {kind archive url "https://e.com/b.tgz"}
      hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
-  dup pkg.manifest.write pkg.manifest.read match? 1 t.equal
+  dup pkg.manifest.write pkg.manifest.read match? 1 equal
   {format 2 name "a" version "0.1.0" sources ["**/*"]
    requires
    {"z"
@@ -277,6 +277,6 @@
      hash "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}
   pkg.manifest.write
   "{format 2 name \"a\" version \"0.1.0\" sources (\"**/*\") requires {\"z\" {package \"z\" version \"2.0.0\" source {kind archive url \"https://e.com/z.tgz\"} hash \"sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"} \"b\" {package \"b\" version \"1.0.0\" source {kind archive url \"https://e.com/b.tgz\"} hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}}\n"
-  t.equal)
+  equal)
  `writing test
 ) `pkg.manifest @defm

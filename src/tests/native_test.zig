@@ -1142,12 +1142,11 @@ test "native: a discovered artifact publishes its complete table atomically" {
 
     try expectOk(
         &runtime,
-        "`sample (increment) import 40 sample.increment 41 increment `sample `s alias 42 s.increment",
+        "`sample (increment) import 40 sample.increment 41 increment",
     );
-    try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
+    try std.testing.expectEqual(@as(usize, 2), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 41), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
-    try std.testing.expectEqual(@as(i64, 43), runtime.stackItems()[2].int);
 
     const exports = [_][]const u8{
         "sample.increment",          "sample.discard",        "sample.twin",
@@ -1281,13 +1280,12 @@ test "native: a rejected artifact publishes nothing and never selects a later ca
         defer runtime_inputs.deinit();
         var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, search);
         defer runtime.deinit();
-        try expectErrorContains(&runtime, "`sample (increment) import", &.{ "kind io", case.message, broken });
+        try expectErrorContains(&runtime, "`sample (increment) import 1 increment", &.{ "kind io", case.message, broken });
         var completion = try runtime.completionCandidates("sample.");
         defer completion.deinit();
         try std.testing.expectEqual(@as(usize, 0), completion.items().len);
-        // Under the qualified-miss auto-load ruling a bare qualified
-        // reference loads its module exactly as `import` does, so it reports the
-        // same rejection rather than an undefined word.
+        // A qualified reference loads its module as the imported word did,
+        // so it reports the same rejection rather than an undefined word.
         try expectErrorContains(&runtime, "sample.increment", &.{ "kind io", case.message });
     }
 }

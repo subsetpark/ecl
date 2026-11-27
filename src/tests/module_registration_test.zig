@@ -335,7 +335,7 @@ test "module sources: formatter and standard modules use @defm" {
     // Every embedded standard module is registration-driven, enumerated from
     // the manifest rather than by hand so a new module is covered the day it
     // ships. A module whose source registered nothing under its own name would
-    // make `import` report that it registered nothing under the requested name.
+    // fail the first resolution of a word imported from it.
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -343,8 +343,8 @@ test "module sources: formatter and standard modules use @defm" {
     for (stdlib.names(), support.stdlib_exports) |name, qualified| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "`{s} ({s}) import",
-            .{ name, qualified[name.len + 1 ..] },
+            "`{s} ({s}) import `{s} effect pop",
+            .{ name, qualified[name.len + 1 ..], qualified[name.len + 1 ..] },
         );
         defer std.testing.allocator.free(source);
         expectOk(&runtime, source) catch |failed| {
