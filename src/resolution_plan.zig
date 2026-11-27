@@ -1,4 +1,4 @@
-//! The decisions one finite-iteration call keeps for the word positions of its
+//! What one finite-iteration call remembers for the word positions of its
 //! quotation, stored so that no step does work in proportion to the quotation.
 const std = @import("std");
 const heap = @import("heap.zig");
@@ -8,18 +8,15 @@ const Value = value.Value;
 const Header = value.ListHandle;
 const IdiomRequest = machine.IdiomRequest;
 
-/// What one finite-iteration call has decided for a word position of its
-/// quotation, kept for the rest of the call.
-pub const PlanEntry = struct {
-    /// For a word that offers a phrase to idiom recognition, the first phrase
-    /// it offered in the call and what recognition made of it.
-    offered: ?OfferedMatch = null,
-};
+/// What a word position of the quotation holds: for a word that offers a
+/// phrase to idiom recognition, the first phrase it offered in the latest
+/// publication it ran in and what recognition made of it.
+pub const PlanEntry = ?OfferedMatch;
 
 /// The registry entry whose pattern an offered phrase matched, or none, with
 /// what the match captured from the phrase. Whether the entry applies still
 /// depends on each application's operands.
-const OfferedMatch = struct {
+pub const OfferedMatch = struct {
     /// Which recognition the phrase was offered to: a dispatched word at one
     /// position may offer the same phrase to a different one.
     request: IdiomRequest,
@@ -29,13 +26,16 @@ const OfferedMatch = struct {
     constant: ?Value,
     active_word: ?u32,
     active_index: ?u32,
+    /// The publication the phrase's words were read under. A match says
+    /// what they denoted then, so it answers only while this is current.
+    publication: u64,
 };
 
-/// The decisions one finite-iteration call has made for the words of its
-/// quotation. A word's binding, and the idiom match of a phrase it was
-/// offered, are decided at its first execution in the call and reused by every
-/// later application, so the call is atomic under its bindings: a replacement
-/// made while it runs takes effect at its next call.
+/// What one finite-iteration call remembers for the words of its quotation:
+/// the idiom match of a phrase a word offered, reused by every later
+/// application in the same publication. Each word still resolves when it is
+/// reached, so a redefinition made while the call runs reaches its next
+/// element.
 pub const ResolutionPlan = struct {
     /// Borrowed: the combinator owns its quotation for the whole call.
     code: *Header,
@@ -107,7 +107,7 @@ const PlanTree = struct {
     fn page(self: *PlanTree, slot: *?*Page) error{OutOfMemory}!*Page {
         if (slot.*) |held| return held;
         const fresh = try self.allocator.create(Page);
-        fresh.* = @splat(.{});
+        fresh.* = @splat(null);
         slot.* = fresh;
         return fresh;
     }
@@ -134,7 +134,7 @@ const PlanTree = struct {
 
     fn retirePage(self: *PlanTree, releases: *heap.ReleaseDomain, held: *Page) void {
         for (held) |*planned| {
-            if (planned.offered) |offered| releases.releaseHeader(offered.phrase);
+            if (planned.*) |offered| releases.releaseHeader(offered.phrase);
         }
         self.allocator.destroy(held);
     }

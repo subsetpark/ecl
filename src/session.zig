@@ -557,7 +557,7 @@ pub const Session = enum(usize) {
         const host = core.host_owner.cleanup();
         const closing_native_owner = core.native_owner.closeCalls();
         core.scheduler.deinit(&core.root_tasks);
-        if (core.root_scope) |root_scope| root_scope.retire(core.releaseDomain());
+        if (core.root_scope) |root_scope| allocator.destroy(root_scope);
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
         const services = core.inherited.runtime();

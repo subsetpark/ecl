@@ -1315,6 +1315,13 @@ test "idioms: an offered phrase answered from the call-site cache sees a redefin
     );
 }
 
+test "idioms: a phrase matched earlier in an iteration sees a redefinition" {
+    // The inner `(+)` is offered at one position once per outer element, so
+    // the later offers are answered from what the iteration remembers.
+    // Redefining `+` after the first must still reach the second and third.
+    try expectFreshStack("[1 2 3] (pop [1 2 3] 0 (+) fold (-) `+ def) each", "[6 -6 -6]");
+}
+
 fn expectFreshStack(source: []const u8, expected: []const u8) !void {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);

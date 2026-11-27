@@ -48,20 +48,6 @@ pub fn documentationHeader(document: *const DocumentationString) *value.ListHand
 }
 
 pub const Visibility = enum { public, private };
-/// Where a definition was published. A module definition records only its own
-/// module-local name; its module's scope supplies the module name. Baking a slot
-/// here would put a cycle in the value heap.
-pub const BindingOrigin = union(enum) {
-    top,
-    module_local: struct { trace_word: intern.BindingName },
-
-    pub fn traceWord(self: BindingOrigin) ?intern.BindingName {
-        return switch (self) {
-            .top => null,
-            .module_local => |local| local.trace_word,
-        };
-    }
-};
 pub const ValidatedEffect = struct {
     quotation: *EffectQuotation,
     /// The named before slots: exactly what the word consumes, or the minimum
@@ -356,35 +342,43 @@ pub const ModulePublication = union(enum) {
     },
     native: struct {
         callable: NativeCallable,
-        visibility: Visibility,
         effect: ValidatedEffect,
         doc: *DocumentationString,
     },
-    /// A primitive published as a module word. `Binding` already had this
-    /// arm; only the publication typestate was missing, which is why a
-    /// primitive-backed module was unrepresentable.
+    /// A primitive published as a module word.
     builtin: struct {
         primitive: PrimitiveImpl,
-        visibility: Visibility,
         effect: ?ValidatedEffect = null,
         doc: *DocumentationString,
     },
 };
 
-/// Who keeps a definition alive. Core definitions live as long as the `Env`.
-/// Every other definition is counted: the session's directory or a module
-/// image owns one reference, and replacement can make it unreachable from
-/// any directory while activations still hold it.
-pub const Lifetime = enum { static, counted };
+/// A module as running code refers to it: the scope of the module's name,
+/// which fixes same-module dispatch and diagnostic spelling, and the source
+/// one registration of the module was made under. It holds nothing of an
+/// image.
+pub const ModuleRoot = struct {
+    scope: *Scope,
+    provenance: SourceId,
 
-/// The root a definition belongs to. A module's definition carries what an
-/// activation of it runs as, by value: the scope of the module's name and
-/// the source one registration of the module was made under. It holds
-/// nothing of the image that owns it.
+    pub fn name(self: ModuleRoot) intern.ModuleName {
+        return self.scope.moduleName().?;
+    }
+};
+
+/// The root a definition belongs to, which also says who keeps it alive. A
+/// core definition lives as long as the `Env`. Every other definition is
+/// counted: the session's directory or a module image owns one reference,
+/// and replacement can make it unreachable from any directory while
+/// activations still hold it.
+///
+/// A module's definition carries what an activation of it runs as, by value,
+/// and its own name in the module, which with the module's name is how a
+/// trace identifies it.
 pub const DefinitionRoot = union(enum) {
     core,
     session,
-    module: struct { scope: *Scope, provenance: SourceId },
+    module: struct { home: ModuleRoot, name: intern.BindingName },
 };
 
 /// Where a failure inside a word is reported. A `caller` word is a helper,
@@ -400,10 +394,8 @@ pub const Definition = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     refs: std.atomic.Value(u32) = .init(1),
     allocator: std.mem.Allocator,
-    lifetime: Lifetime,
     sealed: Code,
     visibility: Visibility = .public,
-    origin: BindingOrigin = .top,
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
     source: ?reader_types.SourceSlice = null,
@@ -425,7 +417,6 @@ pub const Definition = struct {
 
     pub const Metadata = struct {
         visibility: Visibility = .public,
-        origin: BindingOrigin = .top,
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
         source: ?reader_types.SourceSlice = null,
@@ -437,7 +428,6 @@ pub const Definition = struct {
     /// metadata value.
     pub fn create(
         allocator: std.mem.Allocator,
-        lifetime: Lifetime,
         callback: Callback,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
@@ -445,7 +435,7 @@ pub const Definition = struct {
             .builtin => |primitive| .{ .builtin = primitive },
             .native => |callable| .{ .native = callable },
         };
-        const result = try allocate(allocator, lifetime, sealed, metadata);
+        const result = try allocate(allocator, sealed, metadata);
         if (callback == .native) callback.native.instance.retain();
         return result;
     }
@@ -454,20 +444,18 @@ pub const Definition = struct {
     /// metadata value. `body` is retained here; the caller keeps its own.
     pub fn createSource(
         allocator: std.mem.Allocator,
-        lifetime: Lifetime,
         body: *value.ListHandle,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
-        const result = try allocate(allocator, lifetime, .{ .source = .{ .code = body, .owner = .static } }, metadata);
+        const result = try allocate(allocator, .{ .source = .{ .code = body, .owner = .static } }, metadata);
         // A counted definition's activations hold the definition itself.
-        if (lifetime == .counted) result.sealed.source.owner = .{ .definition = result };
+        if (result.counted()) result.sealed.source.owner = .{ .definition = result };
         heap.incRef(body);
         return result;
     }
 
     fn allocate(
         allocator: std.mem.Allocator,
-        lifetime: Lifetime,
         sealed: Code,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
@@ -477,10 +465,8 @@ pub const Definition = struct {
         if (metadata.source) |source| source.retain();
         result.* = .{
             .allocator = allocator,
-            .lifetime = lifetime,
             .sealed = sealed,
             .visibility = metadata.visibility,
-            .origin = metadata.origin,
             .effect = metadata.effect,
             .doc = metadata.doc,
             .source = metadata.source,
@@ -515,19 +501,29 @@ pub const Definition = struct {
         };
     }
 
-    pub fn traceWord(self: *const Definition) ?intern.BindingName {
-        return self.origin.traceWord();
+    inline fn counted(self: *const Definition) bool {
+        return self.root != .core;
     }
 
+    /// Takes one reference. Nothing for a core definition.
     pub fn retain(self: *Definition) void {
-        std.debug.assert(self.lifetime == .counted);
+        if (self.counted()) self.hold();
+    }
+
+    /// `retain` of a definition known to be counted.
+    inline fn hold(self: *Definition) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
 
-    /// Drops one counted reference; the last schedules bounded retirement.
+    /// Drops one reference; the last schedules bounded retirement. Nothing
+    /// for a core definition.
     pub fn release(self: *Definition, releases: *heap.ReleaseDomain) void {
-        std.debug.assert(self.lifetime == .counted);
+        if (self.counted()) self.drop(releases);
+    }
+
+    /// `release` of a definition known to be counted.
+    inline fn drop(self: *Definition, releases: *heap.ReleaseDomain) void {
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old != 0);
         if (old != 1) return;
@@ -535,9 +531,9 @@ pub const Definition = struct {
         releases.retire(self, &self.retirement);
     }
 
-    /// Retires a static definition with its owning table.
+    /// Retires a core definition with its owning table.
     pub fn retireStatic(self: *Definition, releases: *heap.ReleaseDomain) void {
-        std.debug.assert(self.lifetime == .static);
+        std.debug.assert(!self.counted());
         releases.retire(self, &self.retirement);
     }
 
@@ -584,19 +580,22 @@ pub fn executesWord(body: *value.ListHandle) bool {
 /// secures the callee's owner before the caller's is released.
 pub const Owner = union(enum) {
     static,
+    /// Always a counted definition.
     definition: *Definition,
 
-    pub fn retain(self: Owner) void {
+    // Inline, with the counted halves: every call of a source word takes
+    // and drops its owner.
+    pub inline fn retain(self: Owner) void {
         switch (self) {
             .static => {},
-            .definition => |definition| definition.retain(),
+            .definition => |definition| definition.hold(),
         }
     }
 
-    pub fn release(self: Owner, releases: *heap.ReleaseDomain) void {
+    pub inline fn release(self: Owner, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .static => {},
-            .definition => |definition| definition.release(releases),
+            .definition => |definition| definition.drop(releases),
         }
     }
 
@@ -652,14 +651,14 @@ pub const Entry = union(enum) {
 
     pub fn retain(self: Entry) void {
         switch (self) {
-            .definition => |definition| if (definition.lifetime == .counted) definition.retain(),
+            .definition => |definition| definition.retain(),
             .alias => {},
         }
     }
 
     pub fn release(self: Entry, releases: *heap.ReleaseDomain) void {
         switch (self) {
-            .definition => |definition| if (definition.lifetime == .counted) definition.release(releases),
+            .definition => |definition| definition.release(releases),
             .alias => {},
         }
     }
@@ -680,8 +679,6 @@ pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
 /// aliases, so it holds definitions alone.
 pub const CoreMap = poll.FixedMap(intern.BindingName, *Definition);
 
-const ScopeAllocation = enum { embedded, heap };
-
 /// Which root a scope is. A session or core-building scope denotes the one
 /// directory of its kind; a module root is the one scope of a module name,
 /// which the `Env` owns and every registration of the name shares.
@@ -699,15 +696,11 @@ pub const ModuleIdentity = struct {
 };
 
 pub const Scope = struct {
-    allocator: std.mem.Allocator,
     storage: ScopeStorage,
-    refs: std.atomic.Value(u32) = .init(1),
-    allocation: ScopeAllocation = .embedded,
-    retirement: heap.ReleaseDomain.Retirement = .{},
-    retirement_state: ?RetireCursor.State = null,
-    /// Names this scope for as long as the process runs, which its address
-    /// does not: a scope freed unpublished leaves its address to the next one.
-    /// A cache that outlives a scope keys on this, never on the pointer.
+    /// Identifies this scope for as long as the process runs, which its
+    /// address does not: a scope freed unpublished leaves its address to the
+    /// next one. A cache that outlives a scope keys on this, never on the
+    /// pointer.
     serial: u64,
 
     var next_serial: std.atomic.Value(u64) = .init(1);
@@ -724,116 +717,8 @@ pub const Scope = struct {
         };
     }
 
-    pub const RetireCursor = struct {
-        scope: *Scope,
-        state: State,
-
-        const State = union(enum) {
-            destroy,
-            complete,
-        };
-
-        pub fn init(scope: *Scope) RetireCursor {
-            const old = scope.refs.fetchSub(1, .release);
-            std.debug.assert(old != 0);
-            if (old != 1) return .{ .scope = scope, .state = .complete };
-            _ = scope.refs.load(.acquire);
-            return .{ .scope = scope, .state = .destroy };
-        }
-
-        pub fn advance(self: *RetireCursor) bool {
-            return switch (self.state) {
-                .destroy => {
-                    const allocator = self.scope.allocator;
-                    switch (self.scope.allocation) {
-                        .heap => allocator.destroy(self.scope),
-                        .embedded => {},
-                    }
-                    self.state = .complete;
-                    return true;
-                },
-                .complete => true,
-            };
-        }
-    };
-
-    /// Teardown owner for scopes embedded in a larger allocation. The
-    /// embedding allocation is the scope's storage authority: it must remain
-    /// present until every holder has released, and only then may the owner
-    /// reference be consumed.
-    pub const EmbeddedTeardownCursor = struct {
-        scope: *Scope,
-        state: State = .waiting_for_children,
-
-        const State = union(enum) {
-            waiting_for_children,
-            retiring: RetireCursor,
-            complete,
-        };
-
-        pub fn init(scope: *Scope) EmbeddedTeardownCursor {
-            std.debug.assert(scope.allocation == .embedded);
-            return .{ .scope = scope };
-        }
-
-        pub fn advance(self: *EmbeddedTeardownCursor) bool {
-            return switch (self.state) {
-                .waiting_for_children => result: {
-                    if (self.scope.refs.load(.acquire) != 1) break :result false;
-                    self.state = .{ .retiring = self.scope.retireCursor() };
-                    break :result false;
-                },
-                .retiring => |*cursor| if (cursor.advance()) result: {
-                    self.state = .complete;
-                    break :result true;
-                } else false,
-                .complete => true,
-            };
-        }
-    };
-
-    fn direct(allocator: std.mem.Allocator, storage: ScopeStorage) Scope {
-        return .{
-            .allocator = allocator,
-            .storage = storage,
-            .serial = next_serial.fetchAdd(1, .monotonic),
-        };
-    }
-
-    pub fn retain(self: *Scope) void {
-        const old = self.refs.fetchAdd(1, .monotonic);
-        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-    }
-
-    pub fn retireCursor(self: *Scope) RetireCursor {
-        return .init(self);
-    }
-
-    pub fn retire(self: *Scope, releases: *heap.ReleaseDomain) void {
-        const cursor = self.retireCursor();
-        if (cursor.state == .complete) return;
-        std.debug.assert(self.allocation == .heap);
-        self.retirement_state = cursor.state;
-        releases.retire(self, &self.retirement);
-    }
-
-    pub fn advanceRetirement(
-        _: *heap.ReleaseDomain,
-        _: std.mem.Allocator,
-        self: *Scope,
-    ) bool {
-        var cursor = RetireCursor{ .scope = self, .state = self.retirement_state.? };
-        if (cursor.advance()) return true;
-        self.retirement_state = cursor.state;
-        return false;
-    }
-
-    /// Drops a root scope that was never really used: `replaceRoot`
-    /// overwriting a freshly built one before the fiber executed anything.
-    pub fn releaseTrivial(self: *Scope) void {
-        const old = self.refs.fetchSub(1, .release);
-        std.debug.assert(old == 1);
-        _ = self.refs.load(.acquire);
+    fn direct(storage: ScopeStorage) Scope {
+        return .{ .storage = storage, .serial = next_serial.fetchAdd(1, .monotonic) };
     }
 };
 
@@ -937,9 +822,9 @@ pub const Root = union(enum) {
     module: intern.ModuleName,
 };
 
-/// The source a word was written in, as the owner of sources encodes it. `env`
+/// The source a word was written in, or a module was registered under. `env`
 /// stores and compares it and never interprets it.
-pub const SourceId = enum(u64) { _ };
+pub const SourceId = @import("modules.zig").RegistrationProvenance;
 
 /// Identifies one cell of the Session's `Env`: the link of a word occurrence.
 /// Issued from 1, never reused, and always below `value.quote_flag`.
@@ -1465,7 +1350,6 @@ pub const Env = enum(usize) {
         var issued = backing.modules_last;
         while (issued) |cell| {
             issued = cell.previous;
-            cell.scope.releaseTrivial();
             allocator.destroy(cell);
         }
         backing.scopes.deinit(allocator);
@@ -1500,7 +1384,7 @@ pub const Env = enum(usize) {
         errdefer allocator.destroy(module);
         module.* = .{
             .cell = .{ .id = .none, .root = .{ .module = name } },
-            .scope = Scope.direct(allocator, .{ .module_root = .{ .name = name, .id = .none } }),
+            .scope = Scope.direct(.{ .module_root = .{ .name = name, .id = .none } }),
             .previous = backing.modules_last,
         };
         // The cell is complete before its id exists: `register` is the one
@@ -1592,14 +1476,15 @@ pub const Env = enum(usize) {
         return .{ environment, BuildingEnv.init(environment) };
     }
 
-    pub fn sessionRoot(_: *Env, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .session);
+    /// A session root. Its holder owns the storage and frees it once no
+    /// fiber runs in it.
+    pub fn sessionRoot(_: *Env) Scope {
+        return Scope.direct(.session);
     }
 
     pub fn createSessionRoot(self: *Env, allocator: std.mem.Allocator) error{OutOfMemory}!*Scope {
         const root = try allocator.create(Scope);
-        root.* = self.sessionRoot(allocator);
-        root.allocation = .heap;
+        root.* = self.sessionRoot();
         return root;
     }
 };
@@ -1657,7 +1542,7 @@ pub const BuildingEnv = enum(usize) {
             else
                 null;
             defer if (effect_value) |item| releases.releaseValue(item);
-            const created = try Definition.create(allocator, .static, .{ .builtin = definition.primitive }, .{
+            const created = try Definition.create(allocator, .{ .builtin = definition.primitive }, .{
                 // assertStaticBuiltin checked this text against the same grammar.
                 .effect = if (effect_value) |item| ValidatedEffect.parse(item.list).? else null,
                 .doc = documentation(document_value.list).?,
@@ -1704,9 +1589,9 @@ pub const BuildingEnv = enum(usize) {
 
     /// The root the bootstrap Fiber evaluates the prelude in. Its storage is the
     /// core publisher, which refuses once core is frozen.
-    pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
+    pub fn rootScope(self: *BuildingEnv) Scope {
         var environment = self.target();
-        return Scope.direct(allocator, .{ .core_build = .init(environment.privateState()) });
+        return Scope.direct(.{ .core_build = .init(environment.privateState()) });
     }
 
     /// Freezes core.

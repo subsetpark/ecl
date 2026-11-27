@@ -676,9 +676,10 @@ context.
 Cells are appended and neither move nor die before the `Env`, and their ids
 are issued monotonically below the link's flag bits. Reading a cell from its
 id is an index, with no hash and no lock; finding the cell for a place is a
-keyed lookup that only producers of links pay. A source is an opaque value to
-`Env`: the registry encodes a registration provenance into it and is the only
-decoder.
+keyed lookup that only producers of links pay. A source is a registration
+provenance, one word wherever it is stored: a cell, a module's definitions,
+and an execution site hold the same value, which `Env` compares and never
+interprets.
 
 What a spelling is as a word is a function of its bytes: a plain name, `core.`
 and a name, a module name and a binding name, or none of these. The intern
@@ -851,7 +852,10 @@ it becomes readable only in a publication, which advances the counter first.
 An activation runs in one root, and its `ExecutionSite` identifies it by that
 root's scope. The scope is where the activation's own definitions land. `Env`
 owns one scope per module name for the life of the Session, recording the
-name and the scope id words written in the module carry. When an activation's
+name and the scope id words written in the module carry. A scope is identity
+and nothing else: it is not counted, and nothing retires it. A session root's
+scope belongs to the Session or the fiber that made it, which outlives every
+activation running there. When an activation's
 scope is a module's, that module is the one whose code is running, and the
 site derives it from the scope instead of carrying it: an activation cannot
 run in one module's scope as another module, or as none.
@@ -1497,7 +1501,9 @@ the core or standard-library modules.
 Shadowing, escaped code from another module, wrong literal shape, or any other
 mismatch selects the combinator's generic path. A quotation is checked when it
 is offered, against the definitions current then, since user scopes can
-change.
+change. An iteration over a finite collection remembers what recognition made
+of a phrase its quotation offered, and that answer, like every other a fiber
+keeps, is good for one value of the publication counter.
 
 Every site uses one matcher over one table. Recognition always happens when a
 frozen word executes, whether the code around it was written inline, passed to

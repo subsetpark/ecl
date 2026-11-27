@@ -72,7 +72,7 @@ pub const Resolver = struct {
     work: Work = .none,
     /// The module and binding a qualified lookup is of: the word's own
     /// spelling, then each alias followed.
-    target: ?env.Alias = null,
+    target: ?Target = null,
     /// The registration whose directory is being read: the word's own
     /// module, or the module a qualified name selected.
     generation: ?modules.GenerationLease = null,
@@ -86,12 +86,10 @@ pub const Resolver = struct {
     hops: u64 = 0,
     hop_power: u64 = 1,
 
+    const Target = struct { module: intern.ModuleName, binding: intern.BindingName };
+
     /// Everything the next hop's result depends on.
-    const Hop = struct {
-        module: intern.ModuleName,
-        binding: intern.BindingName,
-        provenance: modules.RegistrationProvenance,
-    };
+    const Hop = struct { target: Target, provenance: modules.RegistrationProvenance };
 
     const Phase = enum {
         begin,
@@ -136,7 +134,7 @@ pub const Resolver = struct {
                 break :cell .{
                     .name = word.name,
                     .root = environment.scopeOf(place.root),
-                    .written = .fromSourceId(place.source),
+                    .written = place.source,
                     .spelling = environment.spelling(id),
                 };
             },
@@ -219,12 +217,9 @@ pub const Resolver = struct {
             self.root = .core;
             return self.beginCore(context, alias.binding);
         }
-        self.target = alias;
-        const hop: Hop = .{
-            .module = alias.module,
-            .binding = alias.binding,
-            .provenance = self.provenance(),
-        };
+        const target: Target = .{ .module = alias.module, .binding = alias.binding };
+        self.target = target;
+        const hop: Hop = .{ .target = target, .provenance = self.provenance() };
         if (self.saved_hop) |saved| if (std.meta.eql(saved, hop)) return self.miss(.alias_cycle);
         self.hops += 1;
         if (self.hops == self.hop_power) {
@@ -239,14 +234,7 @@ pub const Resolver = struct {
         if (self.generation) |*lease| lease.deinit();
         self.generation = null;
         self.work.deinit();
-        self.work = .{ .acquisition = machine.ModuleLookupCursor.initIn(
-            &context.view,
-            context.registry,
-            context.project,
-            context.libraries,
-            self.provenance(),
-            self.target.?.module,
-        ) };
+        self.work = .{ .acquisition = .initIn(context, self.provenance(), self.target.?.module) };
         self.phase = .acquire;
         return .pending;
     }
@@ -337,7 +325,7 @@ pub const Resolver = struct {
 pub fn sourceOf(environment: *const env.Env, word: value.Symbol) modules.RegistrationProvenance {
     return switch (env.wordTarget(word.slot)) {
         .unlinked, .local => .ordinary,
-        .cell => |id| .fromSourceId(environment.place(id).source),
+        .cell => |id| environment.place(id).source,
     };
 }
 

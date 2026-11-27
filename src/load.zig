@@ -32,7 +32,6 @@ pub const QualifiedLoadContinuation = union(enum) {
     dispatch: struct {
         word: value.Symbol,
         site: ?ErrorSite,
-        trace_parent: ?intern.TraceWord,
     },
     load_only,
 };
@@ -156,7 +155,7 @@ pub fn verifyAfterLoad(via: *Loading, after: AfterLoad) MachineError!bool {
         const names = fiber.inherited.module_snapshot.?.artifactModules(artifact_id);
         if (names.len == 0) {
             fiber.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
-            lease.finish();
+            lease.deinit();
             return false;
         }
         break :name names[0];
@@ -411,7 +410,7 @@ const AutoLoadDriver = struct {
         via: *Loading,
         loading: *heap.Owned(modules.LoadingLease),
     ) MachineError!WorkProgress {
-        loading.borrowMut().finish();
+        loading.borrowMut().deinit();
         return continueSourceRequest(via, self, self.request);
     }
     fn notFound(self: *AutoLoadDriver, via: *Loading) MachineError {
@@ -549,7 +548,7 @@ const AutoLoadDriver = struct {
                             );
                         },
                         .matched => |match| {
-                            loading.borrowMut().finish();
+                            loading.borrowMut().deinit();
                             const target: MappedTarget = .{
                                 .scope_name = match.scope_name,
                                 .root = match.root,
@@ -591,7 +590,7 @@ const AutoLoadDriver = struct {
                         begin.cursor.deinit();
                         self.state.borrowMut().* = .{ .mapped_root = .{ .target = target, .loading = .init(lease) } };
                         if (fiber.inherited.module_snapshot.?.artifactCommitted(target.artifact_id)) {
-                            self.state.borrowMut().mapped_root.loading.borrowMut().finish();
+                            self.state.borrowMut().mapped_root.loading.borrowMut().deinit();
                             if (self.request == .source) return .completed;
                             self.state.borrowMut().mapped_root.loading.deinit(fiber.releases, fiber.allocator);
                             self.state.borrowMut().* = .{ .committed = .init(fiber.inherited.registry.acquireCursor(self.request.module.name)) };
@@ -739,7 +738,7 @@ const AutoLoadDriver = struct {
                     .source => .{ .source = switch (access.origin) {
                         .search_path => .{ .provenance = .ordinary, .artifact = null },
                         .mapped => |mapped| .{
-                            .provenance = .{ .source = fiber.inherited.module_snapshot.?.sourceScope(mapped.artifact_id) },
+                            .provenance = .source(fiber.inherited.module_snapshot.?.sourceScope(mapped.artifact_id)),
                             .artifact = mapped.artifact_id,
                         },
                     } },
@@ -943,7 +942,7 @@ const AutoLoadDriver = struct {
         const next = NativeLoadDriver{
             .name = self.request.module.name,
             .request = self.request.module.operation,
-            .provenance = if (transfer.disposition.native) |id| .{ .source = fiber.inherited.module_snapshot.?.sourceScope(id) } else .ordinary,
+            .provenance = if (transfer.disposition.native) |id| .source(fiber.inherited.module_snapshot.?.sourceScope(id)) else .ordinary,
             .loading = .init(transfer.loading.take()),
             .path = .init(transfer.path.take()),
             .state = .init(.{ .validate = .init(loader) }),
@@ -1143,7 +1142,7 @@ const NativeLoadDriver = struct {
                     var cursor = commit.cursor;
                     self.state.borrowMut().* = next;
                     cursor.deinit(fiber.releases, fiber.allocator);
-                    if (self.provenance == .source) fiber.inherited.module_snapshot.?.commitArtifact(self.loading.borrowMut().artifactCommit());
+                    if (self.provenance.sourceScope() != null) fiber.inherited.module_snapshot.?.commitArtifact(self.loading.borrowMut().artifactCommit());
                     return verifyPublishedModule(
                         via,
                         self,
@@ -1266,7 +1265,7 @@ const SourceDriver = struct {
             .call => |source| source,
             .load => |load| load.source,
         };
-        return if (mapped) |source| .{ .source = source } else .ordinary;
+        return if (mapped) |source| .source(source) else .ordinary;
     }
 
     /// Activates a source that fits its first slice before observing cancellation.
@@ -1634,11 +1633,7 @@ fn continueQualifiedRequest(
         .replay, .load_only => .completed,
         .dispatch => |dispatch_request| continuation: {
             fiber.retireDriver(driver);
-            try via.dispatchAfterLoad(
-                dispatch_request.word,
-                dispatch_request.site,
-                dispatch_request.trace_parent,
-            );
+            try via.dispatchAfterLoad(dispatch_request.word, dispatch_request.site);
             break :continuation .detached;
         },
     };
@@ -1653,7 +1648,7 @@ fn verifyPublishedModule(
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
     const fiber = via.fiber();
-    loading.borrowMut().finish();
+    loading.borrowMut().deinit();
     const registry = fiber.inherited.registry;
     const next = QualifiedRegistrationDriver{
         .path = .init(path.take()),
@@ -1704,7 +1699,7 @@ const QualifiedRegistrationDriver = struct {
                 defer lease.deinit();
                 if (self.artifact) |artifact| {
                     const expected_source = fiber.inherited.module_snapshot.?.sourceScope(artifact);
-                    const valid_origin = switch (lease.provenance()) {
+                    const valid_origin = switch (lease.provenance().kind()) {
                         .source => |source| source == expected_source,
                         .ordinary, .root_scope, .standard_library => false,
                     };
@@ -1738,7 +1733,7 @@ const QualifiedRegistrationDriver = struct {
             const lease = owned.borrowMut();
             if (self.artifact != null)
                 fiber.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
-            lease.finish();
+            lease.deinit();
         }
         return continueSourceRequest(via, self, self.request);
     }

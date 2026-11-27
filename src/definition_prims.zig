@@ -398,7 +398,6 @@ const DefineDriver = struct {
                 const root: env.DefinitionRoot = if (self.scope.storage == .session) .session else .core;
                 const definition = try env.Definition.createSource(
                     fiber.allocator,
-                    if (root == .session) .counted else .static,
                     env.quotationHeader(body),
                     .{
                         .effect = self.annotation.borrow().effect,
@@ -442,10 +441,6 @@ const DefineDriver = struct {
                 switch (cursor.advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.DuplicateTest => return fiber.fail(.domain, "duplicate test name in module"),
-                    error.Frozen => return fiber.fail(
-                        .domain,
-                        "module test catalogs are immutable after registration",
-                    ),
                 }) {
                     .pending => _ = work.spend(),
                     .complete => return .completed,

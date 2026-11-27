@@ -264,7 +264,7 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
 /// builtin, and the given primitive when one is given.
 fn wordMatches(fiber: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) error{OutOfMemory}!bool {
     if (!plainWord(word.slot)) return false;
-    return liveWord(try fiber.peekWord(word), primitive) != null;
+    return try fiber.trustedBuiltin(word, primitive) != null;
 }
 
 /// A following word, which the phrase consumes instead of dispatching. It
@@ -272,19 +272,7 @@ fn wordMatches(fiber: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl)
 /// the phrase reports.
 fn followingWord(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.TraceWord {
     if (!plainWord(word.slot)) return null;
-    return liveWord(try fiber.peekWord(word), null);
-}
-
-/// Resolves `word` where the phrase runs and returns its trace word only when
-/// it is the trusted binding expected. A word that resolves to nothing a plain
-/// word may run is simply not that binding;
-/// generic execution reports any error.
-fn liveWord(peeked: ?machine.PeekedWord, primitive: ?env.PrimitiveImpl) ?intern.TraceWord {
-    const resolved = peeked orelse return null;
-    if (resolved.origin != .core and resolved.origin != .standard_library) return null;
-    const code = resolved.definition.code();
-    if (code != .builtin or (primitive != null and code.builtin != primitive.?)) return null;
-    return resolved.trace_word;
+    return fiber.trustedBuiltin(word, null);
 }
 
 /// Matches an offered quotation against one entry's pattern, checking each
@@ -330,10 +318,11 @@ pub fn tryApply(
     // A quotation of any length may be a scalar program.
     if (entries.len == 0 and candidate.context == .lex_cmp)
         return fallback(fiber);
-    // Inside a finite iteration's call the phrase's words keep their bindings,
-    // so the phrase it offered before matches the same way again.
+    // Within one publication the phrase's words denote what they did, so the
+    // phrase a finite iteration offered before matches the same way again.
     const planned = try fiber.planEntry();
-    if (planned) |entry| if (entry.offered) |offered| if (offered.request == request and offered.phrase == candidate.phrase.list)
+    if (planned) |entry| if (entry.*) |offered| if (offered.request == request and offered.phrase == candidate.phrase.list and
+        offered.publication == fiber.currentPublication())
         return applyMatched(fiber, candidate.phrase, offered.entry, .{
             .constant = offered.constant,
             .active_word = offered.active_word,
@@ -600,8 +589,8 @@ const Attribution = struct {
 };
 
 /// Matches an offered phrase against the registry entries of its context and
-/// length, records the match in the running finite iteration's plan when it
-/// has room, then applies the matched entry or declines. The work is bounded
+/// length, records the match in the running finite iteration's plan, then
+/// applies the matched entry or declines. The work is bounded
 /// by the registry's shape and each pattern word is one slot read, so the
 /// whole match runs where the combinator applies.
 fn matchOffered(
@@ -613,6 +602,7 @@ fn matchOffered(
     planned: ?*machine.PlanEntry,
 ) MachineError!void {
     var capture: Capture = .{};
+    const publication = fiber.currentPublication();
     const matched: ?u16 = for (entries) |index| {
         if (try matchPhrase(fiber, candidate.phrase, index)) |found| {
             capture = found;
@@ -622,9 +612,15 @@ fn matchOffered(
     if (matched == null) if (try recognizeProgram(fiber, candidate)) |program| {
         return applyRecognized(fiber, candidate.phrase, .{ .program = &program }, .{});
     };
-    if (planned) |entry| if (entry.offered == null) {
+    // The plan keeps the first phrase a position offers in a publication.
+    // Words read under different publications say nothing together.
+    const kept = if (planned) |entry| if (entry.*) |held| held.publication == publication else false else true;
+    if (!kept and fiber.currentPublication() == publication) {
+        const entry = planned.?;
+        if (entry.*) |outdated| fiber.releases.releaseHeader(outdated.phrase);
         heap.retainValue(candidate.phrase);
-        entry.offered = .{
+        entry.* = .{
+            .publication = publication,
             .request = request,
             .phrase = candidate.phrase.list,
             .entry = matched,
@@ -632,7 +628,7 @@ fn matchOffered(
             .active_word = capture.active_word,
             .active_index = capture.active_index,
         };
-    };
+    }
     return applyMatched(fiber, candidate.phrase, matched, capture, fallback);
 }
 
@@ -723,7 +719,7 @@ fn compileProgram(fiber: *Fiber, code: Value, inputs: u8) error{OutOfMemory}!?nu
     var walker: lower.Walker(ProgramCompiler) = .{ .fiber = fiber, .mode = &compiler, .visited = &visited };
     for (walker.open(inputs), 0..) |*slot, input| slot.* = .{ .payload = @intCast(input) };
     const publication = fiber.currentPublication();
-    walker.run(code.list, fiber.applicationSite(), 0) catch |err| switch (err) {
+    walker.run(code.list, fiber.current.?.site.scope, 0) catch |err| switch (err) {
         error.Unread, error.Exhausted => return null,
         error.OutOfMemory => |oom| return oom,
     };
@@ -814,7 +810,8 @@ const ProgramCompiler = struct {
         _: *ProgramCompiler,
         _: *Fiber,
         _: *usize,
-        _: @FieldType(machine.SummaryTarget, "source"),
+        _: machine.SummaryTarget.Source,
+        _: *env.Scope,
     ) lower.Stop!lower.Counts {
         return error.Unread;
     }

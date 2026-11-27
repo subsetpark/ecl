@@ -10,12 +10,14 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
+const modules = @import("modules.zig");
 const intern = @import("intern.zig");
 const combinators = @import("combinators.zig");
 const stack_summary = @import("stack_summary.zig");
 
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
+const place = stack_summary.place;
 
 /// Where one form of a flattened list was written: the quotation and its
 /// position there. A form the rewrite inserted has the position of the word
@@ -23,8 +25,6 @@ const Fiber = machine.Fiber;
 pub const Origin = struct {
     code: *Header,
     index: u32,
-    /// The rewrite put this form here; no one wrote it.
-    inserted: bool = false,
     /// Some list of the word this form runs in has forms after it: the
     /// form's own, or one whose combinator applied the quotation it is in,
     /// out to the body of the innermost inlined word, or to the whole list
@@ -93,6 +93,10 @@ pub const Flattened = struct {
     bodies: []*Header,
     /// The publication it was built in.
     publication: u64,
+    /// The site the original ran at when it was flattened: its root, by
+    /// serial as a summary holds it, and the provenance it registers under.
+    scope: u64,
+    provenance: modules.RegistrationProvenance,
     /// The lowest height of the fiber's evaluations at which one began
     /// running this list: the evaluation and everything it leads to, the
     /// frames it suspends beneath and the call sites recorded from it, stand
@@ -147,17 +151,9 @@ pub const Cache = struct {
     /// The most records that may wait at once.
     const max_waiting = 128;
 
-    const Entry = struct {
-        /// Null for an empty place. Held, so the address stays this list's.
-        code: ?*Header = null,
-        scope: u64 = 0,
-        provenance: u64 = 0,
-        record: ?*Flattened = null,
-    };
-
-    pub const Known = struct { flattened: ?*Flattened };
-
-    entries: []Entry = &.{},
+    /// The records by the list each was made from, as written, which the
+    /// record holds: so the address stays that list's.
+    entries: []?*Flattened = &.{},
     /// The publication every present entry was made in.
     publication: u64 = 0,
     /// Records by the flattened code they own, one per place: an evaluation
@@ -179,56 +175,44 @@ pub const Cache = struct {
 
     const plain_capacity = 256;
 
-    fn plainPlace(code: *const Header) usize {
-        return @intCast((@as(u64, @intFromPtr(code)) >> 4) *% 0x9E3779B97F4A7C15 >> (64 - std.math.log2(plain_capacity)));
-    }
-
     /// Whether `code` is known to have nothing to flatten in `publication`.
     pub inline fn isPlain(self: *const Cache, code: *const Header, publication: u64) bool {
-        return self.plain_publication == publication and self.plain.len != 0 and self.plain[plainPlace(code)] == code;
+        return self.plain_publication == publication and self.plain.len != 0 and self.plain[place(code, plain_capacity)] == code;
     }
 
     /// Notes that `code` has nothing to flatten in `publication`.
     pub fn notePlain(self: *Cache, allocator: std.mem.Allocator, code: *const Header, publication: u64) error{OutOfMemory}!void {
-        if (self.plain.len == 0) {
-            const plain = try allocator.alloc(?*const Header, plain_capacity);
-            @memset(plain, null);
-            self.plain = plain;
-        }
+        try stack_summary.ensurePlaces(?*const Header, allocator, &self.plain, plain_capacity, null);
         if (self.plain_publication != publication) {
             @memset(self.plain, null);
             self.plain_publication = publication;
         }
-        self.plain[plainPlace(code)] = code;
+        self.plain[place(code, plain_capacity)] = code;
     }
 
-    fn place(code: *const Header) usize {
-        return @intCast((@as(u64, @intFromPtr(code)) >> 4) *% 0x9E3779B97F4A7C15 >> (64 - std.math.log2(capacity)));
-    }
-
-    /// The place `code` holds in the table, or the first empty one on its
-    /// probe: null only when the table is full of other lists. Where a list
-    /// lands depends on its address, so a collision moves it along rather
-    /// than refusing it, and what the table admits depends on the count of
-    /// lists alone.
-    fn entryFor(entries: []Entry, code: *const Header) ?*Entry {
-        var index = place(code);
+    /// The place the record made from `code` holds in the table, or the
+    /// first empty one on its probe: null only when the table is full of
+    /// other lists. Where a list lands depends on its address, so a collision
+    /// moves it along rather than refusing it, and what the table admits
+    /// depends on the count of lists alone.
+    fn entryFor(entries: []?*Flattened, code: *const Header) ?*?*Flattened {
+        var index = place(code, capacity);
         for (0..capacity) |_| {
             const entry = &entries[index];
-            if (entry.code == null or entry.code == code) return entry;
+            const held = entry.* orelse return entry;
+            if (held.original == code) return entry;
             index = (index + 1) & (capacity - 1);
         }
         return null;
     }
 
-    /// What the fiber made of `code` at `site` in `publication`, if it has
-    /// looked.
-    pub inline fn find(self: *const Cache, code: *const Header, site: machine.ExecutionSite, publication: u64) ?Known {
+    /// What the fiber made of `code` at `site` in `publication`: null when
+    /// it has not looked, or made nothing of it there.
+    pub inline fn find(self: *const Cache, code: *const Header, site: machine.ExecutionSite, publication: u64) ?*Flattened {
         if (self.publication != publication or self.entries.len == 0) return null;
-        const entry = entryFor(self.entries, code) orelse return null;
-        if (entry.code != code or entry.scope != site.scope.serial or
-            entry.provenance != @backingInt(site.registration_provenance.sourceId())) return null;
-        return .{ .flattened = entry.record };
+        const flattened = (entryFor(self.entries, code) orelse return null).* orelse return null;
+        if (flattened.scope != site.scope.serial or flattened.provenance != site.registration_provenance) return null;
+        return flattened;
     }
 
     /// The record that owns the flattened list `code`, if it is one. The
@@ -241,9 +225,9 @@ pub const Cache = struct {
     }
 
     fn search(self: *Cache, code: *const Header) ?*Flattened {
-        const slot = &self.by_code[place(code)];
+        const slot = &self.by_code[place(code, capacity)];
         if (slot.*) |flattened| if (flattened.code == code) return flattened;
-        for (self.entries) |entry| if (entry.record) |flattened| if (flattened.code == code) {
+        for (self.entries) |entry| if (entry) |flattened| if (flattened.code == code) {
             slot.* = flattened;
             return flattened;
         };
@@ -258,8 +242,8 @@ pub const Cache = struct {
     /// `record` for a caller that may not write: it reads the same places and
     /// remembers nothing.
     pub fn recordOf(self: *const Cache, code: *const Header) ?*const Flattened {
-        if (self.by_code[place(code)]) |flattened| if (flattened.code == code) return flattened;
-        for (self.entries) |entry| if (entry.record) |flattened| if (flattened.code == code) return flattened;
+        if (self.by_code[place(code, capacity)]) |flattened| if (flattened.code == code) return flattened;
+        for (self.entries) |entry| if (entry) |flattened| if (flattened.code == code) return flattened;
         var waiting = self.waiting;
         while (waiting) |flattened| : (waiting = flattened.retired) if (flattened.code == code) return flattened;
         return null;
@@ -277,58 +261,39 @@ pub const Cache = struct {
         publication: u64,
         height: usize,
     ) error{OutOfMemory}!bool {
-        if (self.entries.len == 0) {
-            const entries = try allocator.alloc(Entry, capacity);
-            @memset(entries, .{});
-            self.entries = entries;
-        }
+        try stack_summary.ensurePlaces(?*Flattened, allocator, &self.entries, capacity, null);
         self.sweep(allocator, releases, height);
         if (self.publication != publication) {
             var staying: usize = 0;
-            for (self.entries) |entry| if (entry.record) |flattened| {
+            for (self.entries) |entry| if (entry) |flattened| {
                 if (height >= flattened.lowest) staying += 1;
             };
             if (staying > max_waiting - self.waiting_count) return false;
-            for (self.entries) |*entry| self.vacate(releases, entry);
+            for (self.entries) |*entry| self.vacate(entry);
             self.sweep(allocator, releases, height);
             self.publication = publication;
         }
         const entry = entryFor(self.entries, code) orelse return false;
-        return entry.code == null;
+        return entry.* == null;
     }
 
-    /// Records the flattened form of `code`, which the table then owns. The
-    /// caller has asked `admits`.
-    pub fn remember(
-        self: *Cache,
-        code: *Header,
-        site: machine.ExecutionSite,
-        publication: u64,
-        made: *Flattened,
-    ) void {
-        std.debug.assert(self.publication == publication);
-        const entry = entryFor(self.entries, code).?;
-        std.debug.assert(entry.code == null);
-        heap.incRef(code);
-        self.by_code[place(made.code)] = made;
-        entry.* = .{
-            .code = code,
-            .scope = site.scope.serial,
-            .provenance = @backingInt(site.registration_provenance.sourceId()),
-            .record = made,
-        };
+    /// Records `made`, which the table then owns. The caller has asked
+    /// `admits` for the list it was made from, in its publication.
+    pub fn remember(self: *Cache, made: *Flattened) void {
+        std.debug.assert(self.publication == made.publication);
+        const entry = entryFor(self.entries, made.original).?;
+        std.debug.assert(entry.* == null);
+        self.by_code[place(made.code, capacity)] = made;
+        entry.* = made;
     }
 
     /// Empties a place, putting its record on the waiting chain.
-    fn vacate(self: *Cache, releases: *heap.ReleaseDomain, entry: *Entry) void {
-        const held = entry.code orelse return;
-        releases.releaseHeader(held);
-        if (entry.record) |flattened| {
-            flattened.retired = self.waiting;
-            self.waiting = flattened;
-            self.waiting_count += 1;
-        }
-        entry.* = .{};
+    fn vacate(self: *Cache, entry: *?*Flattened) void {
+        const flattened = entry.* orelse return;
+        flattened.retired = self.waiting;
+        self.waiting = flattened;
+        self.waiting_count += 1;
+        entry.* = null;
     }
 
     /// Retires every waiting record the fiber, now at `height`, has come
@@ -342,7 +307,7 @@ pub const Cache = struct {
             }
             link.* = flattened.retired;
             self.waiting_count -= 1;
-            const slot = &self.by_code[place(flattened.code)];
+            const slot = &self.by_code[place(flattened.code, capacity)];
             if (slot.* == flattened) slot.* = null;
             if (self.last == flattened) self.last = null;
             flattened.destroy(allocator, releases);
@@ -353,7 +318,7 @@ pub const Cache = struct {
     /// record is still running. The table holds at most `capacity` records
     /// and the chain at most `max_waiting`.
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
-        for (self.entries) |*entry| self.vacate(releases, entry);
+        for (self.entries) |*entry| self.vacate(entry);
         while (self.waiting) |flattened| {
             self.waiting = flattened.retired;
             flattened.destroy(allocator, releases);
@@ -366,7 +331,7 @@ pub const Cache = struct {
 
 /// A list longer than this runs as written, so looking at a list is bounded
 /// by a constant rather than by the program.
-const max_forms = 128;
+const max_forms = stack_summary.read_bounds.max_forms;
 /// The most forms a flattened list holds.
 const max_flat = 512;
 /// The most phrases one list has flattened in it.
@@ -374,7 +339,7 @@ const max_guards = 64;
 /// How far a rewrite descends through quotation literals.
 const max_depth = 8;
 /// Forms one rewrite may visit across the quotations it descends into.
-const max_visited = 1024;
+const max_visited = stack_summary.read_bounds.max_visited;
 
 /// The flattened form of `code` run at `site`, or null when it runs as
 /// written: nothing in it is a combinator applied to quotation literals, it
@@ -388,7 +353,7 @@ pub inline fn of(fiber: *Fiber, site: machine.ExecutionSite, code: *Header) erro
     if (!heap.readFromSource(code)) return null;
     const publication = fiber.currentPublication();
     if (fiber.flattened.isPlain(code, publication)) return null;
-    if (fiber.flattened.find(code, site, publication)) |known| return known.flattened;
+    if (fiber.flattened.find(code, site, publication)) |flattened| return flattened;
     return make(fiber, site, code, publication);
 }
 
@@ -413,22 +378,22 @@ noinline fn make(fiber: *Fiber, site: machine.ExecutionSite, code: *Header, publ
         try fiber.flattened.notePlain(fiber.allocator, code, publication);
         return null;
     }
-    const flattened = try rewrite.finish(code, publication);
+    const flattened = try rewrite.finish(code, site, publication);
     // Resolving words may have taken the table to another publication.
     if (!try fiber.flattened.admits(fiber.allocator, fiber.releases, code, publication, fiber.height())) {
         flattened.destroy(fiber.allocator, fiber.releases);
         return null;
     }
-    fiber.flattened.remember(code, site, publication, flattened);
+    fiber.flattened.remember(flattened);
     return flattened;
 }
 
 /// What a quotation a phrase applies consumes and leaves: its remembered
 /// summary, or a read under a rewrite's own bounds when there is none, which
 /// a quotation longer than a summary is kept for needs.
-fn counted(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{OutOfMemory}!?stack_summary.Summary {
-    if (try stack_summary.of(fiber, site, quotation)) |summary| return summary;
-    return stack_summary.read(fiber, site, quotation, .{ .max_forms = max_forms, .max_visited = max_visited });
+fn counted(fiber: *Fiber, scope: *env.Scope, quotation: *Header) error{OutOfMemory}!?stack_summary.Summary {
+    if (try stack_summary.of(fiber, scope, quotation)) |summary| return summary;
+    return stack_summary.read(fiber, scope, quotation);
 }
 
 /// One rewrite in progress: the forms of the flattened list so far, where
@@ -500,9 +465,7 @@ const Rewrite = struct {
     /// Appends a lowered operation the rewrite inserts for the phrase whose
     /// word stands at `at`.
     fn operation(self: *Rewrite, name: u32, operand: u32, at: Origin) bool {
-        var origin = at;
-        origin.inserted = true;
-        return self.emit(.{ .symbol = .{ .name = name, .slot = env.localOperandSlot(operand) } }, origin);
+        return self.emit(.{ .symbol = .{ .name = name, .slot = env.localOperandSlot(operand) } }, at);
     }
 
     /// What a list being appended stands in.
@@ -621,7 +584,7 @@ const Rewrite = struct {
                 if (form.symbol.name == words.drop) locals.drop(operand);
             };
             // A word without a summary may leave a local bound.
-            if (called and locals.bound != 0 and !try stack_summary.wordHasSummary(self.fiber, site, form.symbol)) locals.forget();
+            if (called and locals.bound != 0 and !try stack_summary.wordHasSummary(self.fiber, site.scope, form.symbol)) locals.forget();
             top_count = 0;
             if (!self.emit(form, origin)) return false;
         }
@@ -669,7 +632,7 @@ const Rewrite = struct {
         ends_list: bool,
     ) error{OutOfMemory}!?bool {
         const last = within.tail and ends_list;
-        const shape: Shape = switch (try self.fiber.summaryTarget(word, site)) {
+        const shape: Shape = switch (try self.fiber.summaryTarget(word, site.scope)) {
             .none => return null,
             .source => |source| return self.inline_(pending, word, at, site, depth, last, source),
             .builtin => |builtin| switch (combinators.flow(builtin.primitive)) {
@@ -703,14 +666,14 @@ const Rewrite = struct {
         // An applied quotation runs under the provenance `applied` gives it.
         // Run in place it would keep the enclosing list's, so a list whose
         // provenance applying would change keeps its phrases as written.
-        if (!std.meta.eql(applied_site.registration_provenance, site.registration_provenance)) return null;
+        if (applied_site.registration_provenance != site.registration_provenance) return null;
         // A quotation with a summary leaves no local bound. `dip` holds its
         // protected value in a local across its quotation, so it needs that;
         // a cleave or spread has it of every quotation already.
         // A measured word needs what its quotation consumes, which a summary
         // says before the quotation runs.
         const applied_summary: ?stack_summary.Summary = switch (shape) {
-            .apply, .dip, .above, .below => try counted(self.fiber, applied_site, applied[0].literal),
+            .apply, .dip, .above, .below => try counted(self.fiber, site.scope, applied[0].literal),
             .cleave, .spread, .cleave_list, .spread_list => null,
         };
         const neutral = switch (shape) {
@@ -786,7 +749,7 @@ const Rewrite = struct {
                         .apply, .dip, .above, .below => unreachable,
                     }
                     for (quotations.items[0..quotations.count], 0..) |quotation, index| {
-                        const summary = try counted(self.fiber, applied_site, quotation) orelse break :expanded false;
+                        const summary = try counted(self.fiber, site.scope, quotation) orelse break :expanded false;
                         quotations.consumed[index] = summary.consumed;
                         quotations.produced[index] = summary.produced;
                     }
@@ -864,10 +827,9 @@ const Rewrite = struct {
         site: machine.ExecutionSite,
         depth: usize,
         last: bool,
-        source: @FieldType(machine.SummaryTarget, "source"),
+        source: machine.SummaryTarget.Source,
     ) error{OutOfMemory}!?bool {
-        if (source.site.scope != site.scope or
-            !std.meta.eql(source.site.registration_provenance, site.registration_provenance)) return null;
+        if (source.home) |home| if (home.scope != site.scope or home.provenance != site.registration_provenance) return null;
         if (source.attribution != .own) return null;
         // A qualified word may have to be loaded where it is called.
         if (std.mem.indexOfScalar(u8, intern.get(word.name), '.') != null) return null;
@@ -906,7 +868,7 @@ const Rewrite = struct {
             self.inlining[self.inlining_count] = source.code;
             self.inlining_count += 1;
             defer self.inlining_count -= 1;
-            if (!try self.body(source.code, arguments, source.site, depth + 1, .{ .continues = false, .tail = last, .word = @intCast(entered) })) break :expanded false;
+            if (!try self.body(source.code, arguments, site, depth + 1, .{ .continues = false, .tail = last, .word = @intCast(entered) })) break :expanded false;
             // The arguments are pushed inside the expansion, so the opening
             // binding needs beneath the guard only what they do not supply.
             self.guards[row].needed = @intCast(opening -| arguments.len);
@@ -921,7 +883,7 @@ const Rewrite = struct {
         }
         pending.count = 0;
         // Whether the word leaves a local bound is its summary's to say.
-        return try stack_summary.wordHasSummary(self.fiber, site, word);
+        return try stack_summary.wordHasSummary(self.fiber, site.scope, word);
     }
 
     /// The quotations of a cleave or spread, with what each consumes and
@@ -993,7 +955,7 @@ const Rewrite = struct {
 
     /// Builds the record: the flattened list, holding every value in it, and
     /// the tables beside it.
-    fn finish(self: *Rewrite, original: *Header, publication: u64) error{OutOfMemory}!*Flattened {
+    fn finish(self: *Rewrite, original: *Header, site: machine.ExecutionSite, publication: u64) error{OutOfMemory}!*Flattened {
         const allocator = self.fiber.allocator;
         const origins = try allocator.dupe(Origin, self.origins[0..self.count]);
         errdefer allocator.free(origins);
@@ -1024,6 +986,8 @@ const Rewrite = struct {
             .chain = chain,
             .bodies = bodies,
             .publication = publication,
+            .scope = site.scope.serial,
+            .provenance = site.registration_provenance,
         };
         return record;
     }

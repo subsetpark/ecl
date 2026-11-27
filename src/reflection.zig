@@ -30,7 +30,7 @@ pub const VisibleNameRoot = union(enum) {
     /// The names of a module's current registration, held by the lease the
     /// cursor owns.
     image: struct {
-        entries: ?env.NameMap.RawEntryCursor,
+        entries: env.NameMap.RawEntryCursor,
         lease: modules.GenerationLease,
     },
     /// Core's names alone.
@@ -75,7 +75,7 @@ pub const VisibleNameCursor = struct {
             .root = root,
             .own = switch (root) {
                 .session => |*view| if (view.sessionEntries()) |cursor| .{ .session = cursor } else null,
-                .image => |image| if (image.entries) |cursor| .{ .image = cursor } else null,
+                .image => |image| .{ .image = image.entries },
                 .core => null,
             },
         };

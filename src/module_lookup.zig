@@ -1,5 +1,6 @@
 //! Named module observation: which registry, catalog, and embedded library a
 //! module name is looked up in, and in what order.
+const binder = @import("binder.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const modules = @import("modules.zig");
@@ -44,9 +45,10 @@ pub const ModuleLookupCursor = struct {
         return result;
     }
 
-    /// A lookup whose public registry reads come from `view`.
-    pub fn initIn(view: *const modules.View, registry: *modules.Registry, project: ?*const map_state.Snapshot, libraries: EmbeddedLibraries, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
-        var result: ModuleLookupCursor = .{ .registry = registry, .view = view.clone(), .libraries = libraries, .project = project, .context = context, .name = name, .state = .complete };
+    /// A lookup, as the source `context`, within one resolution: its public
+    /// registry reads come from the resolution's view.
+    pub fn initIn(resolution: *const binder.Context, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
+        var result: ModuleLookupCursor = .{ .registry = resolution.registry, .view = resolution.view.clone(), .libraries = resolution.libraries, .project = resolution.project, .context = context, .name = name, .state = .complete };
         result.beginPublic();
         return result;
     }

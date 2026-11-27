@@ -243,8 +243,8 @@ fn expectInvalidPrelude(source: []const u8) !void {
         source,
     ));
     // A failed prelude leaves core unfrozen: it still accepts a definition.
-    const definition = try env.Definition.create(allocator, .static, .{ .builtin = stillWritable }, .{ .root = .core });
-    var scope = building.rootScope(allocator);
+    const definition = try env.Definition.create(allocator, .{ .builtin = stillWritable }, .{ .root = .core });
+    var scope = building.rootScope();
     try scope.storage.core_build.publish(try intern.internNamespace("still-writable"), definition);
 }
 

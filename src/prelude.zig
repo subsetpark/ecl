@@ -55,7 +55,7 @@ pub fn installSource(
         source_name,
         source,
         &diag,
-        environment.linker(environment.coreScopeId(), modules.RegistrationProvenance.sourceId(.standard_library)),
+        environment.linker(environment.coreScopeId(), .standard_library),
     );
     defer {
         while (!ingestion.advanceRetirement())
@@ -93,7 +93,7 @@ pub fn installSource(
         .own,
     );
     defer fiber.deinit();
-    fiber.replaceRootScope(building.rootScope(allocator));
+    fiber.replaceRootScope(building.rootScope());
     machine.run(&fiber, root_header) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Ecl => {
