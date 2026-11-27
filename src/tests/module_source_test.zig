@@ -953,27 +953,6 @@ test "loader: ECL_PATH modules import from each other" {
     try std.testing.expectEqual(@as(i64, 12), runtime.stackItems()[0].int);
 }
 
-test "loader: one quotation rechecks direct visibility in each scope" {
-    var inputs = try runtime_fixture.Fixture.init();
-    defer inputs.deinit();
-    try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {" ++
-        "\"root\" {root \".\" visible [\"alpha\" \"beta\"] sources [] artifacts []} " ++
-        "\"alpha\" {root \".\" visible [\"secret\"] sources [] artifacts [{path \"alpha.ecl\" kind ecl exports [\"alpha\"]}]} " ++
-        "\"beta\" {root \".\" visible [] sources [] artifacts [{path \"beta.ecl\" kind ecl exports [\"beta\"]}]} " ++
-        "\"secret\" {root \".\" visible [] sources [] artifacts [{path \"secret.ecl\" kind ecl exports [\"secret\"]}]}}}");
-    try writeInput(&inputs, "alpha.ecl", "secret.answer pop ((2 swap times pop pop) `run def) `alpha @defm");
-    try writeInput(&inputs, "beta.ecl", "((2 swap times pop pop) `run def) `beta @defm");
-    try writeInput(&inputs, "secret.ecl", "((42) `answer def) `secret @defm");
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
-    defer runtime.deinit();
-    try expectErrorContains(&runtime, "secret.answer", &.{"not visible"});
-    try expectOk(&runtime, "(secret.answer) dup alpha.run (beta.run) cons @attempt `err at `kind at");
-    try std.testing.expectEqualStrings("undefined-word", intern.get(runtime.stackItems()[0].symbol.name));
-    try expectErrorContains(&runtime, "secret.answer", &.{"not visible"});
-}
-
 test "loader: without maps malformed package state does not affect ECL_PATH" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();

@@ -15,9 +15,8 @@ const modules = @import("modules.zig");
 /// Open addressing with linear probing, kept at most half full and grown by
 /// doubling up to a bound, beyond which it starts over empty; so a lookup
 /// expects one probe and every operation, including growth and invalidation,
-/// is bounded by that bound. Entries are placed by name alone: scope slots
-/// are numbered process-wide, so hashing them would make which entries
-/// collide, and so what a fiber allocates, depend on unrelated Sessions.
+/// is bounded by that bound. Entries are placed by name alone and compared
+/// by name and link, which is the id of a cell of the Session's `Env`.
 pub const WordResolutions = struct {
     const initial_capacity = 64;
     const max_capacity = 4096;

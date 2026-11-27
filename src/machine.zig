@@ -1526,15 +1526,14 @@ pub const Loading = opaque {
     }
 
     /// Dispatches the word a completed load was started for, by explicit
-    /// lookup under the provenance that asked for it.
+    /// lookup.
     pub fn dispatchAfterLoad(
         self: *Loading,
         word: value.Symbol,
         site: ?ErrorSite,
         trace_parent: ?intern.TraceWord,
-        provenance: modules.RegistrationProvenance,
     ) error{OutOfMemory}!void {
-        return self.fiber().dispatchAfterLoad(word, site, trace_parent, provenance);
+        return self.fiber().dispatchAfterLoad(word, site, trace_parent);
     }
 
     /// Puts back the symbol operand a primitive consumed before its module
@@ -2272,29 +2271,38 @@ pub const Fiber = struct {
     pub fn currentScope(self: *const Fiber) *env.Scope {
         return self.current.?.scope();
     }
-    /// Links words written into `scope`, a root, to that root. An image's
-    /// cell carries its owner anchor, so a word that escapes the image proves
-    /// the image live before reading its directory.
-    pub fn rootLinker(self: *Fiber, scope: *env.Scope) error{OutOfMemory}!env.SymbolLinker {
-        return switch (scope.storage) {
-            .session => self.environment.linker(self.environment.sessionScopeId()),
-            .core_build => self.environment.linker(self.environment.coreScopeId()),
-            .module_root => self.environment.linker((try self.environment.scopeCell(
+    /// Links words written into `scope`, a root, by code of `provenance`. An
+    /// image's cell carries its owner anchor, so a word that escapes the
+    /// image proves the image live before reading its directory.
+    pub fn rootLinker(
+        self: *Fiber,
+        scope: *env.Scope,
+        provenance: modules.RegistrationProvenance,
+    ) error{OutOfMemory}!env.SymbolLinker {
+        const root = switch (scope.storage) {
+            .session => self.environment.sessionScopeId(),
+            .core_build => self.environment.coreScopeId(),
+            .module_root => (try self.environment.scopeCell(
                 scope,
                 modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access),
-            )).id),
+            )).id,
         };
+        return self.environment.linker(root, provenance.sourceId());
     }
-    /// The word `name` linked to its slot in the running activation's root, as
-    /// a word built at run time on that activation's behalf is.
+    /// The word `name` as the running activation would have written it: in
+    /// that activation's root, by its source.
     pub fn linkedWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = try self.rootLinker(self.currentScope());
+        const linker = try self.rootLinker(self.currentScope(), self.current.?.site.registration_provenance);
         return .{ .name = name, .slot = try linker.link(name) };
     }
-    /// The word `name` linked to its core slot, as a word the implementation
-    /// builds for itself is: it means core's binding wherever it runs.
+    /// The word `name` linked to core as standard-library source, as a word
+    /// the implementation builds for itself is: it means core's binding
+    /// wherever it runs.
     pub fn coreWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = self.environment.linker(self.environment.coreScopeId());
+        const linker = self.environment.linker(
+            self.environment.coreScopeId(),
+            modules.RegistrationProvenance.sourceId(.standard_library),
+        );
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The root a definition, removal, or import writes. Refused inside a
@@ -2544,8 +2552,9 @@ pub const Fiber = struct {
     }
 
     /// A reflection primitive already consumed its symbol before discovering
-    /// a cold qualified module. Restore that operand and rewind the primitive
-    /// call, then use the same loader/retry protocol as executable dispatch.
+    /// a cold qualified module. Restore that operand, link included, and
+    /// rewind the primitive call, then use the same loader/retry protocol as
+    /// executable dispatch.
     pub fn retryQualifiedOperandAfterLoad(
         self: *Fiber,
         requested: value.Symbol,
@@ -2557,17 +2566,17 @@ pub const Fiber = struct {
             .unknown_module_prefix => |prefix| {
                 try load.prepareQualified(
                     .of(self),
-                    prefix,
-                    .{ .qualified = requested.name, .context = self.current.?.site.registration_provenance, .continuation = .replay },
+                    prefix.bytes,
+                    .{ .qualified = requested.name, .context = prefix.searcher, .continuation = .replay },
                     .{ .operand = requested },
                 );
                 return .detached;
             },
-            .unregistered_module => |name| {
+            .unregistered_module => |module| {
                 try self.replayOperand(requested);
-                try self.autoLoadModule(name, .{
+                try self.autoLoadModule(module.name, .{
                     .qualified = requested.name,
-                    .context = self.current.?.site.registration_provenance,
+                    .context = module.searcher,
                     .continuation = .replay,
                 });
                 return .detached;
@@ -2605,9 +2614,10 @@ pub const Fiber = struct {
         );
     }
 
-    /// A named module lookup as the running activation sees it.
-    pub fn moduleLookup(self: *Fiber, name: intern.ModuleName) ModuleLookupCursor {
-        return .init(self.inherited.registry, self.inherited.module_snapshot, self.inherited.libraries(), self.current.?.site.registration_provenance, name);
+    /// A named module lookup as the source that wrote `operand`, the symbol
+    /// that refers to the module, sees it.
+    pub fn moduleLookup(self: *Fiber, operand: value.Symbol, name: intern.ModuleName) ModuleLookupCursor {
+        return .init(self.inherited.registry, self.inherited.module_snapshot, self.inherited.libraries(), binder.sourceOf(self.environment, operand), name);
     }
 
     /// A mapped source file registers only the modules its artifact exports;
@@ -3475,7 +3485,6 @@ pub const Fiber = struct {
             .registry = self.inherited.registry,
             .project = self.inherited.module_snapshot,
             .libraries = self.inherited.libraries(),
-            .provenance = self.current.?.site.registration_provenance,
         };
     }
 
@@ -3518,7 +3527,6 @@ pub const Fiber = struct {
                 .registry = self.inherited.registry,
                 .project = self.inherited.module_snapshot,
                 .libraries = self.inherited.libraries(),
-                .provenance = provenance,
             };
             defer context.deinit();
             var resolver = binder.Resolver.init(&context, word);
@@ -3595,7 +3603,7 @@ pub const Fiber = struct {
             .resolved => |definition| definition,
             .missed => return null,
         };
-        if (remember) try self.rememberResolution(word, context.view.publication, context.provenance, found);
+        if (remember) try self.rememberResolution(word, context.view.publication, self.current.?.site.registration_provenance, found);
         return peeked(found, word);
     }
 
@@ -3802,14 +3810,17 @@ pub const Fiber = struct {
         continuation: load.QualifiedLoadContinuation,
     ) MachineError!void {
         self.active_word = .plain(word.name);
-        const request = load.QualifiedLoadRequest{
-            .qualified = word.name,
-            .context = self.current.?.site.registration_provenance,
-            .continuation = continuation,
-        };
         switch (miss) {
-            .unknown_module_prefix => |prefix| try load.prepareQualified(.of(self), prefix, request, .none),
-            .unregistered_module => |name| try self.autoLoadModule(name, request),
+            .unknown_module_prefix => |prefix| try load.prepareQualified(
+                .of(self),
+                prefix.bytes,
+                .{ .qualified = word.name, .context = prefix.searcher, .continuation = continuation },
+                .none,
+            ),
+            .unregistered_module => |module| try self.autoLoadModule(
+                module.name,
+                .{ .qualified = word.name, .context = module.searcher, .continuation = continuation },
+            ),
             .unresolved => |chain| return self.failUnbound(word, .{ .unresolved = chain }),
             .retired => return self.failUnbound(word, .retired),
             .alias_cycle => return self.failUnbound(word, .alias_cycle),
@@ -3956,14 +3967,12 @@ pub const Fiber = struct {
             .activation = .none,
         };
     }
-    fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite, trace_parent: ?intern.TraceWord, provenance: modules.RegistrationProvenance) error{OutOfMemory}!void {
+    fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite, trace_parent: ?intern.TraceWord) error{OutOfMemory}!void {
         self.active_word = .plain(word.name);
-        var context = self.resolutionContext(self.inherited.registry.view());
-        context.provenance = provenance;
         try self.startDriver(LookupDispatchDriver{
             .word = word,
             .site = site,
-            .context = .init(context),
+            .context = .init(self.resolutionContext(self.inherited.registry.view())),
             .resolver = .none,
         });
         if (site) |at| self.setWorkDriverSite(at.code, at.index);
@@ -4593,10 +4602,10 @@ const LookupDispatchDriver = struct {
                         const counted = definition.lifetime == .counted;
                         if (counted) definition.retain();
                         defer if (counted) definition.release(fiber.releases);
-                        try fiber.rememberResolution(
+                        if (fiber.current) |current| try fiber.rememberResolution(
                             word,
                             self.context.borrow().view.publication,
-                            self.context.borrow().provenance,
+                            current.site.registration_provenance,
                             definition,
                         );
                         const site = self.site;

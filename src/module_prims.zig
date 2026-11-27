@@ -5,6 +5,7 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
+const binder = @import("binder.zig");
 const machine = @import("machine.zig");
 const modules = @import("modules.zig");
 const definition_prims = @import("definition_prims.zig");
@@ -351,7 +352,7 @@ fn words(fiber: *Fiber) MachineError!void {
 }
 
 fn exportsWord(fiber: *Fiber) MachineError!void {
-    const requested = try fiber.popSymbol();
+    const requested = try fiber.popWord();
     try fiber.startDriver(ExportsDriver.init(fiber, requested));
 }
 
@@ -361,7 +362,8 @@ fn exportsWord(fiber: *Fiber) MachineError!void {
 const ExportsDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     allocator: std.mem.Allocator,
-    requested: u32,
+    /// The operand as written: its link says whose view finds the module.
+    requested: value.Symbol,
     found: heap.Owned(poll_api.ChunkList(u32)),
     state: heap.Owned(State),
 
@@ -406,8 +408,8 @@ const ExportsDriver = struct {
         }
     };
 
-    fn init(fiber: *Fiber, requested: u32) ExportsDriver {
-        const core_requested = intern.isReservedRegistryBytes(intern.get(requested));
+    fn init(fiber: *Fiber, requested: value.Symbol) ExportsDriver {
+        const core_requested = intern.isReservedRegistryBytes(intern.get(requested.name));
         return .{
             .allocator = fiber.allocator,
             .requested = requested,
@@ -415,7 +417,7 @@ const ExportsDriver = struct {
             .state = .init(if (core_requested)
                 .{ .core_names = .init(reflection.VisibleNameCursor.init(.core, fiber.environment)) }
             else
-                .{ .validate = .init(requested) }),
+                .{ .validate = .init(requested.name) }),
         };
     }
 
@@ -439,7 +441,7 @@ const ExportsDriver = struct {
                         return fiber.fail(.domain, "exports requires a valid module name");
                     self.replace(fiber, .{ .acquire = .{
                         .name = module_name,
-                        .cursor = .init(fiber.moduleLookup(module_name)),
+                        .cursor = .init(fiber.moduleLookup(self.requested, module_name)),
                     } });
                 },
             },
@@ -456,8 +458,8 @@ const ExportsDriver = struct {
                     const module_name = acquire.name;
                     fiber.retireDriver(self);
                     return fiber.retryQualifiedOperandAfterLoad(
-                        .{ .name = requested },
-                        .{ .unregistered_module = module_name },
+                        requested,
+                        .{ .unregistered_module = .{ .name = module_name, .searcher = binder.sourceOf(fiber.environment, requested) } },
                     );
                 },
             },
@@ -490,7 +492,7 @@ const ExportsDriver = struct {
                 const names = fill.names.borrow().items();
                 const filled = fill.values.borrow().len();
                 if (filled != names.len) {
-                    fill.values.borrowMut().appendOwned(value.datum(.{ .symbol = .{ .name = names[filled] } }));
+                    fill.values.borrowMut().appendOwned(value.datum(.{ .symbol = try fiber.linkedWord(names[filled]) }));
                     continue;
                 }
                 const materializer = list.ValueMaterializer.initOwned(self.allocator, fill.values.take());
@@ -506,8 +508,8 @@ const ExportsDriver = struct {
 };
 
 fn moduleDocWord(fiber: *Fiber) MachineError!void {
-    const requested = try fiber.popSymbol();
-    try fiber.startDriver(ModuleDocDriver{ .requested = requested, .validation = .init(requested) });
+    const requested = try fiber.popWord();
+    try fiber.startDriver(ModuleDocDriver{ .requested = requested, .validation = .init(requested.name) });
 }
 
 /// Read one module generation's documentation and normalize it as `doc`
@@ -515,7 +517,8 @@ fn moduleDocWord(fiber: *Fiber) MachineError!void {
 /// auto-load, so the replay finds it registered.
 const ModuleDocDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    requested: u32,
+    /// The operand as written: its link says whose view finds the module.
+    requested: value.Symbol,
     validation: intern.ModuleNameCursor,
     acquire: heap.Owned(machine.ModuleLookupCursor) = .none,
     name: ?intern.ModuleName = null,
@@ -535,8 +538,8 @@ const ModuleDocDriver = struct {
                         const module_name = self.name.?;
                         fiber.retireDriver(self);
                         return fiber.retryQualifiedOperandAfterLoad(
-                            .{ .name = requested },
-                            .{ .unregistered_module = module_name },
+                            requested,
+                            .{ .unregistered_module = .{ .name = module_name, .searcher = binder.sourceOf(fiber.environment, requested) } },
                         );
                     });
                     defer generation.deinit(fiber.releases, fiber.allocator);
@@ -553,7 +556,7 @@ const ModuleDocDriver = struct {
                     if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                         return fiber.fail(.domain, "`core` is a qualifier, not a documented module");
                     self.name = name;
-                    self.acquire = .init(fiber.moduleLookup(name));
+                    self.acquire = .init(fiber.moduleLookup(self.requested, name));
                 },
             }
         }

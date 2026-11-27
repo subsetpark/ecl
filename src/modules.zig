@@ -646,6 +646,32 @@ pub const RegistrationProvenance = union(enum) {
         };
     }
 
+    /// This provenance as the source a word's cell records. The variant is
+    /// the two low bits, which a source scope's address leaves clear.
+    pub fn sourceId(self: RegistrationProvenance) env.SourceId {
+        return @fromBackingInt(switch (self) {
+            .ordinary => 0,
+            .standard_library => 1,
+            .root_scope => |scope| 2 | (@as(u64, @backingInt(scope)) << 2),
+            .source => |source| tagged: {
+                const address: u64 = @intFromPtr(source);
+                std.debug.assert(address & 3 == 0);
+                break :tagged address | 3;
+            },
+        });
+    }
+
+    /// The provenance `sourceId` encoded.
+    pub fn fromSourceId(id: env.SourceId) RegistrationProvenance {
+        const raw = @backingInt(id);
+        return switch (@as(u2, @truncate(raw))) {
+            0 => .ordinary,
+            1 => .standard_library,
+            2 => .{ .root_scope = @fromBackingInt(@intCast(raw >> 2)) },
+            3 => .{ .source = @ptrFromInt(@as(usize, @intCast(raw & ~@as(u64, 3)))) },
+        };
+    }
+
     /// The provenance of a quotation this code applies as a value (`apply`,
     /// `@attempt`, a combinator). The value may have come from any caller, so
     /// embedded trust stays with embedded code and never passes to it.

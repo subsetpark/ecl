@@ -875,12 +875,12 @@ comptime {
     heap.requireOpaqueMutation(CorePublisher);
 }
 
-/// A scope's stable public name. A word occurrence carries one of these rather
-/// than a pointer, because it has four bytes to spend and not eight. Zero means
-/// "no written-in scope" and resolves in core.
+/// A scope's stable public name: what a word's cell records as its root,
+/// rather than a pointer. Zero means "no written-in scope" and resolves in
+/// core.
 ///
-/// Ids are issued monotonically and never recycled. A word token holds a bare
-/// integer and takes no reference, so a reused id would let a stale token
+/// Ids are issued monotonically and never recycled. A cell holds a bare
+/// integer and takes no reference, so a reused id would let a stale word
 /// resolve into an unrelated scope — a silent wrong answer, which is worse than
 /// any failure this design can otherwise produce. Ids are consumed by core, the
 /// session, and module images, so the space is spent on registrations and
@@ -926,15 +926,128 @@ pub const Liveness = union(enum) {
     fresh_pin,
 };
 
-/// How a producer of symbol occurrences links each one to the root it writes
-/// into. A reader that links nothing carries none, and every symbol it
-/// produces resolves in core.
-pub const SymbolLinker = struct {
-    root: ScopeId,
+/// The source a word was written in, as the owner of sources encodes it. `env`
+/// stores and compares it and never interprets it.
+pub const SourceId = enum(u64) { _ };
 
+/// Identifies one cell of the Session's `Env`: the link of a word occurrence.
+/// Issued from 1, never reused, and always below `value.quote_flag`.
+pub const CellId = enum(u32) { _ };
+
+/// Where a linked word was written: the root it resolves in, the source
+/// whose view of the module map it resolves under, and its spelling.
+pub const Place = struct {
+    root: ScopeId,
+    name: u32,
+    source: SourceId,
+};
+
+/// The cells of one `Env`: one per distinct place, appended and never moved
+/// or freed before the `Env`.
+///
+/// A cell is read by id with no lock and no hash: ids index shelves that
+/// double in size, so a shelf never relocates and an id decodes to a shelf
+/// and an offset by its leading bit. A cell is complete before its id is
+/// returned, and an id reaches another thread only through a synchronized
+/// hand-off of the symbol that carries it.
+///
+/// The cell of a place is found, or minted, under `mutex`, through a hash
+/// trie threaded through the cells themselves: each cell heads up to four
+/// subtrees, chosen by successive two-bit digits of the place's hash. A
+/// lookup therefore walks a path logarithmic in the number of cells, and
+/// nothing is ever rehashed or relocated.
+const CellTable = struct {
+    const first_shelf_bits = 6;
+    const shelf_count = @bitSizeOf(u32) - @clz(value.quote_flag) - first_shelf_bits;
+
+    const Cell = struct {
+        place: Place,
+        /// The cells heading the subtrees below this one; zero where none.
+        children: [4]u32 = @splat(0),
+    };
+
+    mutex: std.Io.Mutex = .init,
+    shelves: [shelf_count]std.atomic.Value(?[*]Cell) = @splat(.init(null)),
+    /// The id the next minted cell takes.
+    next: u32 = 1,
+    /// The cell heading the trie; zero while there is none.
+    head: u32 = 0,
+
+    comptime {
+        // The last id below the flag bits falls in the last shelf.
+        if (coordinates(value.quote_flag - 1).shelf != shelf_count - 1)
+            @compileError("cell shelves do not cover the link's id space");
+    }
+
+    fn coordinates(raw: u32) struct { shelf: usize, offset: usize } {
+        const biased = raw + (1 << first_shelf_bits);
+        const top: u5 = @intCast(@bitSizeOf(u32) - 1 - @clz(biased));
+        return .{ .shelf = top - first_shelf_bits, .offset = biased - (@as(u32, 1) << top) };
+    }
+
+    fn shelfLength(shelf: usize) usize {
+        return @as(usize, 1) << @intCast(shelf + first_shelf_bits);
+    }
+
+    /// The cell `raw` identifies. `raw` was issued by this table.
+    fn at(self: *const CellTable, raw: u32) *Cell {
+        const where = coordinates(raw);
+        return &self.shelves[where.shelf].load(.acquire).?[where.offset];
+    }
+
+    fn hash(place: Place) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hasher, place);
+        return hasher.final();
+    }
+
+    fn findOrMint(self: *CellTable, allocator: std.mem.Allocator, place: Place) error{OutOfMemory}!CellId {
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        var link: *u32 = &self.head;
+        var digits = hash(place);
+        while (link.* != 0) : (digits <<= 2) {
+            const cell = self.at(link.*);
+            if (std.meta.eql(cell.place, place)) return @fromBackingInt(link.*);
+            link = &cell.children[@intCast(digits >> 62)];
+        }
+        const raw = self.next;
+        if (raw >= value.quote_flag) return error.OutOfMemory;
+        const where = coordinates(raw);
+        const shelf = self.shelves[where.shelf].load(.acquire) orelse fresh: {
+            const cells = try allocator.alloc(Cell, shelfLength(where.shelf));
+            self.shelves[where.shelf].store(cells.ptr, .release);
+            break :fresh cells.ptr;
+        };
+        shelf[where.offset] = .{ .place = place };
+        self.next = raw + 1;
+        link.* = raw;
+        return @fromBackingInt(raw);
+    }
+
+    fn deinit(self: *CellTable, allocator: std.mem.Allocator) void {
+        for (&self.shelves, 0..) |*shelf, index| if (shelf.load(.acquire)) |cells|
+            allocator.free(cells[0..shelfLength(index)]);
+        self.* = undefined;
+    }
+};
+
+/// How a producer of symbol occurrences links each one to the place it is
+/// written in: a root and a source. A reader that links nothing carries
+/// none, and every symbol it produces resolves in core.
+pub const SymbolLinker = struct {
+    state: *EnvState,
+    root: ScopeId,
+    source: SourceId,
+
+    /// The link of the word `name` written here: the id of its cell, minted
+    /// on first use.
     pub fn link(self: SymbolLinker, name: u32) error{OutOfMemory}!u32 {
-        _ = name;
-        return @backingInt(self.root);
+        const id = try self.state.word_cells.findOrMint(
+            self.state.host.allocator(),
+            .{ .root = self.root, .name = name, .source = self.source },
+        );
+        return @backingInt(id);
     }
 };
 
@@ -1086,10 +1199,10 @@ const ScopeIndex = Directory(ScopeId, ScopeCell);
 
 /// A locals operation the reader lowered `|...|` into carries its count or
 /// index in the link field with this flag set: one form per bind, read, or
-/// drop. It denotes no root. Scope ids stay below it.
+/// drop. It denotes no place. Cell ids stay below it.
 pub const local_operand_flag: u32 = 1 << 30;
 
-/// See `value.quote_flag`. Scope ids stay below it. A locals operation carries
+/// See `value.quote_flag`. Cell ids stay below it. A locals operation carries
 /// it only once it has been stored as data, where it pushes itself.
 pub const quote_flag: u32 = value.quote_flag;
 
@@ -1121,8 +1234,8 @@ pub const WordTarget = union(enum) {
     unlinked,
     /// A lowered locals operation, with its count or index.
     local: u32,
-    /// The root the word was written in.
-    root: ScopeId,
+    /// The cell recording where the word was written.
+    cell: CellId,
 };
 
 /// A quoted occurrence's target is its link's: the flag says how it runs, not
@@ -1131,7 +1244,7 @@ pub fn wordTarget(raw_occurrence: u32) WordTarget {
     const raw = unquoted(raw_occurrence);
     if (raw == 0) return .unlinked;
     if (localOperand(raw)) |operand| return .{ .local = operand };
-    return .{ .root = @fromBackingInt(raw) };
+    return .{ .cell = @fromBackingInt(raw) };
 }
 
 const core_capacity_hint: usize = 2048;
@@ -1147,6 +1260,7 @@ const EnvState = struct {
     cells: std.ArrayList(*ScopeCell) = .empty,
     cells_mutex: std.Io.Mutex = .init,
     scopes: ScopeIndex = .{},
+    word_cells: CellTable = .{},
     locals_words: intern.LocalsWords,
     idiom_names: idioms.Names,
 
@@ -1224,6 +1338,7 @@ pub const Env = enum(usize) {
         for (backing.cells.items) |cell| allocator.destroy(cell);
         backing.cells.deinit(allocator);
         backing.scopes.deinit(allocator);
+        backing.word_cells.deinit(allocator);
         allocator.destroy(backing);
         self.* = .consumed;
     }
@@ -1252,9 +1367,16 @@ pub const Env = enum(usize) {
         return heap.hostDomain(self.privateState().host);
     }
 
-    /// Links words written into the root `root` identifies.
-    pub fn linker(_: *const Env, root: ScopeId) SymbolLinker {
-        return .{ .root = root };
+    /// Links words written into the root `root` identifies by the source
+    /// `source`.
+    pub fn linker(self: *const Env, root: ScopeId, source: SourceId) SymbolLinker {
+        return .{ .state = self.privateState(), .root = root, .source = source };
+    }
+
+    /// Where the word whose link is `id` was written. An index: no hash and
+    /// no lock.
+    pub fn place(self: *const Env, id: CellId) Place {
+        return self.privateState().word_cells.at(@backingInt(id)).place;
     }
 
     /// The cell for one module root, created on first use. The scope retires
@@ -1535,4 +1657,40 @@ test "env: issued scope ids leave their reserved high bits clear" {
         try std.testing.expect(raw > previous);
         previous = raw;
     }
+}
+
+test "env: a root, source and name link to one cell below the flag bits" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var container = try Env.init(&host);
+    defer container.deinit();
+
+    const here: SourceId = @fromBackingInt(1);
+    const elsewhere: SourceId = @fromBackingInt(2);
+    const session = container.linker(container.sessionScopeId(), here);
+    // Enough names to spill past the first shelves of the table.
+    const names = 1000;
+    var previous: u32 = 0;
+    for (1..names + 1) |name| {
+        const link = try session.link(@intCast(name));
+        try std.testing.expect(link > previous);
+        try std.testing.expect(link < value.quote_flag);
+        try std.testing.expectEqual(WordTarget{ .cell = @fromBackingInt(link) }, wordTarget(link | quote_flag));
+        previous = link;
+    }
+    for (1..names + 1) |name| {
+        const link = try session.link(@intCast(name));
+        try std.testing.expect(link <= previous);
+        const written = container.place(@fromBackingInt(link));
+        try std.testing.expectEqual(container.sessionScopeId(), written.root);
+        try std.testing.expectEqual(here, written.source);
+        try std.testing.expectEqual(@as(u32, @intCast(name)), written.name);
+    }
+    // Another source, and another root, write the same name somewhere else.
+    const other_source = try container.linker(container.sessionScopeId(), elsewhere).link(1);
+    const other_root = try container.linker(container.coreScopeId(), here).link(1);
+    try std.testing.expect(other_source > previous);
+    try std.testing.expect(other_root > other_source);
+    try std.testing.expectEqual(elsewhere, container.place(@fromBackingInt(other_source)).source);
+    try std.testing.expectEqual(container.coreScopeId(), container.place(@fromBackingInt(other_root)).root);
 }

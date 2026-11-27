@@ -1254,9 +1254,24 @@ const SourceDriver = struct {
             self.text.borrow().sourceName(),
             self.text.borrow().source(),
             &self.diag,
-            try fiber.rootLinker(fiber.lexicalScope()),
+            try fiber.rootLinker(fiber.lexicalScope(), self.sourceProvenance(fiber)),
         );
         self.state = .{ .ingesting = ingestion };
+    }
+
+    /// The provenance of the source being read: what its words are written
+    /// by, and what its code registers under once it runs. Text read as
+    /// data, and a session unit outside any mapped file, are written by the
+    /// code that reads them.
+    fn sourceProvenance(self: *const SourceDriver, fiber: *machine.Fiber) modules.RegistrationProvenance {
+        const mapped: ?*const map_state.SourceScope = switch (self.completion.borrow()) {
+            .push => return fiber.current.?.site.registration_provenance,
+            .register => |register| return register.provenance,
+            .session => |source| source orelse return fiber.current.?.site.applied().registration_provenance,
+            .call => |source| source,
+            .load => |load| load.source,
+        };
+        return if (mapped) |source| .{ .source = source } else .ordinary;
     }
 
     /// Activates a source that fits its first slice before observing cancellation.
@@ -1326,21 +1341,14 @@ const SourceDriver = struct {
                 switch (self.completion.borrowMut().*) {
                     .push => try fiber.pushBorrowed(.{ .list = root_header }),
                     .load => |load| {
-                        const provenance: modules.RegistrationProvenance = if (load.source) |context|
-                            .{ .source = context }
-                        else
-                            .ordinary;
                         heap.incRef(root_header);
-                        try via.openLoad(root_header, load.word, provenance);
+                        try via.openLoad(root_header, load.word, self.sourceProvenance(fiber));
                     },
-                    .call, .session => |source| {
+                    .call, .session => {
+                        const provenance = self.sourceProvenance(fiber);
                         heap.incRef(root_header);
                         try fiber.callProgramOwned(root_header, .owned);
-                        if (source) |context| {
-                            fiber.current.?.site.registration_provenance = .{ .source = context };
-                        } else if (self.completion.borrow() == .call) {
-                            fiber.current.?.site.registration_provenance = .ordinary;
-                        }
+                        fiber.current.?.site.registration_provenance = provenance;
                     },
                     .register => |*register| {
                         heap.incRef(root_header);
@@ -1693,7 +1701,6 @@ fn continueQualifiedRequest(
                 dispatch_request.word,
                 dispatch_request.site,
                 dispatch_request.trace_parent,
-                request.context,
             );
             break :continuation .detached;
         },

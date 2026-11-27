@@ -1482,7 +1482,7 @@ const ArchiveFixture = struct {
     }
 
     fn linker(self: *ArchiveFixture) env.SymbolLinker {
-        return self.environment.linker(self.environment.coreScopeId());
+        return self.environment.linker(self.environment.coreScopeId(), @fromBackingInt(0));
     }
 
     /// Reads one source and absorbs it, returning the archive-owned root.

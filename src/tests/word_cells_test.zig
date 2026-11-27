@@ -147,44 +147,136 @@ test "word cells: two modules may import from each other" {
     }
 }
 
+/// A module map in which two sources differ in what they may see: the
+/// session's scope may refer to `shared` and `blind`, and `blind`'s scope to
+/// nothing. `blind` imports a word of `shared` all the same, and holds words
+/// that apply, build, and hand out symbols on behalf of a caller; `guest.ecl`
+/// is a second file of `blind`'s scope.
+const ViewFixture = struct {
+    inputs: runtime_fixture.Fixture,
+    backing: test_heap.SessionHeap,
+    runtime: session.Session,
+
+    fn init(self: *ViewFixture) !void {
+        self.inputs = try runtime_fixture.Fixture.init();
+        errdefer self.inputs.deinit();
+        const dir = self.inputs.temporary.dir;
+        try dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.modules",
+            .data = "{format 1 local \"root\" scopes {" ++
+                "\"root\" {root \".\" visible [\"shared\" \"blind\"] sources [] artifacts []} " ++
+                "\"shared\" {root \".\" visible [] sources [] artifacts [" ++
+                "{path \"shared.ecl\" kind ecl exports [\"shared\"]}]} " ++
+                "\"blind\" {root \".\" visible [] sources [] artifacts [" ++
+                "{path \"blind.ecl\" kind ecl exports [\"blind\"]} " ++
+                "{path \"guest.ecl\" kind ecl exports [\"guest\"]}]}}}",
+        });
+        try dir.writeFile(std.testing.io, .{
+            .sub_path = "shared.ecl",
+            .data = "(: \"Shared words.\") ((42) `answer def) `shared @defm\n",
+        });
+        try dir.writeFile(std.testing.io, .{
+            .sub_path = "blind.ecl",
+            .data = "(`shared (answer) import " ++
+                "(apply) `run def " ++
+                "((shared.answer)) `quotation def " ++
+                "(`shared `answer qualify) `build def " ++
+                "(`shared) `module-name def " ++
+                "(exports) `names def " ++
+                "(module-doc) `document def) `blind @defm\n",
+        });
+        try dir.writeFile(std.testing.io, .{ .sub_path = "guest.ecl", .data = "() `guest @defm\n" });
+        self.backing = .init;
+        errdefer test_heap.retire(&self.backing);
+        self.runtime = try session.Session.init(self.backing.allocator(), &.{}, self.inputs.inputs(.{}), .cooperative, .evaluate);
+    }
+
+    fn deinit(self: *ViewFixture) void {
+        self.runtime.deinit();
+        test_heap.retire(&self.backing);
+        self.inputs.deinit();
+    }
+};
+
+const hidden_module: []const []const u8 = &.{ "kind undefined-word", "not visible" };
+
 test "word cells: a quotation applied in another source reaches a module only its own source may see" {
-    // PENDING: Patch 6
-    // Under a module map, a source that may see module `m` passes a quotation
-    // with a dotted `m.` word to code of a source that may not. Expect the
-    // quotation to run `m`'s word there.
-    return error.SkipZigTest;
+    var fixture: ViewFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    // The quotation is written by the session, which may see `shared`, and
+    // applied by a word of `blind`, which may not. The module is cold, so
+    // the load is requested on the quotation's behalf too.
+    try expectStack(runtime, "(shared.answer) blind.run", "42");
+    try expectStack(runtime, "(shared.answer 1 +) blind.run", "43");
 }
 
 test "word cells: a quotation applied in another source does not gain the modules that source may see" {
-    // PENDING: Patch 6
-    // A source that may not see module `m` passes a quotation with a dotted
-    // `m.` word to code of a source that may. Expect `undefined-word` when
-    // the quotation is applied.
-    return error.SkipZigTest;
+    var fixture: ViewFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    // The quotation is written in `blind` and applied by the session.
+    try expectErrorContains(runtime, "blind.quotation apply", hidden_module);
+    // Visibility, not load state, decides: the session reaches the module,
+    // and the quotation still does not.
+    try expectStack(runtime, "shared.answer", "42");
+    try expectErrorContains(runtime, "blind.quotation apply", hidden_module);
 }
 
 test "word cells: a qualified symbol built at run time resolves as the code that built it" {
-    // PENDING: Patch 6
-    // Code of one source builds a dotted symbol with `symbol` and hands it to
-    // another source to `execute`. Expect the module visibility of the source
-    // that built it.
-    return error.SkipZigTest;
+    var fixture: ViewFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    // Built by the session and run by `blind`.
+    try expectStack(runtime, "`shared `answer qualify (execute) blind.run", "42");
+    try expectStack(runtime, "\"shared.answer\" symbol (execute) blind.run", "42");
+    // Built by `blind` and run by the session.
+    try expectErrorContains(runtime, "blind.build execute", hidden_module);
 }
 
 test "word cells: a session import resolves as the source of the word that uses it" {
-    // PENDING: Patch 6
-    // Two sources write into the session root with different module
-    // visibility, and one imports a module word. Expect a use of the imported
-    // word to resolve under the visibility of the source the use is written
-    // in.
-    return error.SkipZigTest;
+    var fixture: ViewFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    try expectOk(runtime, "`shared (answer) import");
+    // A second source writes a use of the imported word into the session
+    // root: a unit read from a file of `blind`'s scope.
+    switch (try runtime.runUnit("guest.ecl", "(answer) `guest-answer def")) {
+        .ok => {},
+        .incomplete => return error.UnexpectedIncomplete,
+        .err => |failure| {
+            runtime.release(failure);
+            return error.UnexpectedLanguageError;
+        },
+    }
+    try expectStack(runtime, "answer", "42");
+    try expectStack(runtime, "(answer) `own-answer def own-answer", "42");
+    try expectErrorContains(runtime, "guest-answer", &.{ "kind undefined-word", "word answer" });
+    // An import a module holds resolves as that module's source, whoever
+    // reaches it and whether or not the module it refers to has loaded.
+    try expectErrorContains(runtime, "blind.answer", hidden_module);
 }
 
 test "word cells: exports resolves its module as the source of its operand" {
-    // PENDING: Patch 6
-    // A source that may see module `m` passes the symbol `m` to code of a
-    // source that may not, which calls `exports` on it. Expect `m`'s exports.
-    return error.SkipZigTest;
+    var fixture: ViewFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    // The module name is written by the session and handed to a word of
+    // `blind` that asks for its exports and its documentation.
+    try expectStack(runtime, "`shared blind.names", "(`answer)");
+    try expectStack(runtime, "`shared blind.document", "\"Shared words.\"");
+    // A name written in `blind` finds nothing, whoever asks.
+    try expectErrorContains(runtime, "blind.module-name exports", hidden_module);
+    try expectErrorContains(runtime, "blind.module-name module-doc", hidden_module);
+    // A returned name counts as written by the code that called `exports`:
+    // run as a word, it resolves in that code's root.
+    try expectOk(runtime, "(7) `answer def");
+    try expectStack(runtime, "`shared exports 0 at execute", "7");
 }
 
 test "word cells: a reload reaches a plain word of the module that has already run" {

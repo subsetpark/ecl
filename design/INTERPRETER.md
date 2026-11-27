@@ -76,7 +76,7 @@ concatenative array programs.
 | --- | --- | --- |
 | Program representation | Quotations remain ordinary lists; there is no retained AST or bytecode | Extends Joy's program-as-quotation model; conventional AST and bytecode pipelines mark the neighboring design space |
 | Evaluation | One first-order loop over explicit tagged frames | A defunctionalized abstract machine, closest in spirit to CEK-style evaluators, adapted to a concatenative operand stack |
-| Binding | Each reader-created word occurrence carries one scope identity | Uses the placement principle of scope-carrying identifiers, scaled to one parent-chain scope because ecl has no macro-expansion scope sets |
+| Binding | Each reader-created word occurrence carries the id of one cell, which records its scope identity | Uses the placement principle of scope-carrying identifiers, scaled to one parent-chain scope because ecl has no macro-expansion scope sets |
 | Data performance | Recursive semantic pervasion with specialized flat leaves and typed kernels | Applies the APL/J/K array instinct while preserving one semantics across physical representations |
 | Memory | Precise atomic reference counts, ownership passing, copy-on-write, and uniqueness reuse | Shares the reuse insight of precise-RC systems such as Perceus; structural acyclicity keeps precise counting sufficient |
 | Fast phrases | Guarded recognition of a closed set of source phrases | Shares the dispatch economics of interpreter superinstructions; each recognition is ephemeral and the source definition remains authoritative |
@@ -645,15 +645,21 @@ occurrence is reached. Knowing where a name resolves is fixed by the
 occurrence; selecting which definition it denotes is decided against the
 current definitions.
 
-### The word occurrence carries its root
+### The word occurrence carries its cell
 
 Definitions live in roots: the session, each module image, and core. A word's
-link is the `ScopeId` of the root its text was written in. The reader links
-each occurrence as it reads it; a module construction body is relinked to its
-image; a word built at run time links to the root of the activation that built
-it, and one the implementation builds for itself links to nothing and means
-core. Copying, moving, or splicing a word copies its link, so a single
-quotation may contain words from several roots.
+link is the id of a cell in a table the Session's `Env` owns. A cell records
+where the word was written: the `ScopeId` of the root, the source whose text
+it came from, and its spelling. One root, source, and spelling always yield
+the same cell, so a link stands for a place rather than for one occurrence.
+`Env` is the only minter of cells, and every producer of words obtains links
+through a linker built for one root and one source. The reader links each
+occurrence as it reads it, with the source being read; a module construction
+body is relinked to its image and that image's source; a word built at run
+time is linked as the activation that built it would have written it; and one
+the implementation builds for itself links to nothing and means core. Copying,
+moving, or splicing a word copies its link, so a single quotation may contain
+words from several places.
 
 This is a syntactic closure that captures resolution context and no values:
 
@@ -667,11 +673,18 @@ syntactic closures and Flatt's scope-carrying identifiers, but ecl has no macro
 expansion and no nested scopes, so one root per identifier is the whole
 context.
 
-Scope ids are issued monotonically and never reused, because a word holds a
+Cells are appended and neither move nor die before the `Env`, and their ids
+are issued monotonically below the link's flag bits. Reading a cell from its
+id is an index, with no hash and no lock; finding the cell for a place is a
+keyed lookup that only producers of links pay. A source is an opaque value to
+`Env`: the registry encodes a registration provenance into it and is the only
+decoder.
+
+Scope ids are issued monotonically and never reused, because a cell holds a
 bare id and no reference. Core and the session each have one id for the life of
-the `Env`; an image's id identifies its cell, which goes empty when an unpublished
-image is discarded, so resolving a word written there is a definite failure
-rather than a fallback.
+the `Env`; an image's id identifies its scope cell, which goes empty when an
+unpublished image is discarded, so resolving a word written there is a definite
+failure rather than a fallback.
 
 ### Definitions are immutable
 
@@ -705,6 +718,15 @@ directory and core, or, for a dotted spelling, a module registration and its
 public entry; `core.` selects core alone. A name alias is followed through the
 same resolver, as the module holding it would resolve it; Brent's algorithm
 detects a cycle without bounding the length of an acyclic chain.
+
+Whose view of the module map finds a module is a property of the word, never
+of the site resolving it: the source its cell records, the image's own source
+for a word written in an image, and the holding module's source along an alias
+chain. A word with no cell has no source. A primitive that takes a module name
+keeps the operand's link and looks the module up as that symbol's source. A
+miss that a load might cure reports the view it searched under, and the load
+asks as that view, so a load can succeed only where the lookup that follows it
+will.
 
 The resolver has one mode and no construction state: it answers with a
 published definition or a miss, and nothing that is not yet published is
@@ -781,7 +803,11 @@ entered: a root fiber and module construction set it, and a task clears it,
 because a task runs in its spawner's root without owning it. Everything else,
 every combinator application and `@attempt` included, inherits it unchanged,
 so whether a word may define never depends on which combinator reached it.
-Where a word resolves is carried by the word.
+
+A site's registration provenance is authority, not lookup context: it says
+what the running code may register, and it is the source recorded for the
+words that code builds at run time. Where a word resolves, and which modules
+it may reach, is carried by the word.
 
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.

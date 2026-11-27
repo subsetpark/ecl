@@ -46,7 +46,7 @@ pub fn begin(
         modules.anchorHandle(home, fiber.module_access),
     );
     var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-        try fiber.archive.rescopeCursor(body.take(), fiber.environment.linker(image_cell.id)),
+        try fiber.archive.rescopeCursor(body.take(), fiber.environment.linker(image_cell.id, home.registrationProvenance().sourceId())),
     );
     defer cursor.deinit(fiber.releases, fiber.allocator);
     try via.startDriver(ConstructionDriver{

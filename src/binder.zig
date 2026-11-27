@@ -1,5 +1,6 @@
-//! Name resolution. A word occurrence carries the root it was written in, and
-//! resolves there against one captured publication view when it is reached.
+//! Name resolution. A word occurrence carries the root and the source it was
+//! written in, and resolves there, under that source's view of the module
+//! map, against one captured publication view when it is reached.
 //! Nothing resolves a word before then: a definition is published without
 //! its body being read, so a word that resolves to nothing fails its call.
 const std = @import("std");
@@ -24,9 +25,6 @@ pub const Context = struct {
     registry: *modules.Registry,
     project: ?*const map_state.Snapshot,
     libraries: machine.EmbeddedLibraries,
-    /// The provenance a qualified name written outside any module resolves
-    /// under.
-    provenance: modules.RegistrationProvenance,
 
     pub fn deinit(self: *Context) void {
         self.view.deinit();
@@ -40,9 +38,12 @@ pub const Miss = union(enum) {
     unresolved: LookupChain,
     /// The dotted prefix has never been interned, so nothing can be registered
     /// under it yet; loading may make it resolvable.
-    unknown_module_prefix: []const u8,
-    /// A well-formed qualified name whose module is not registered.
-    unregistered_module: intern.ModuleName,
+    unknown_module_prefix: struct { bytes: []const u8, searcher: modules.RegistrationProvenance },
+    /// A well-formed qualified name whose module is not registered, or not
+    /// one `searcher` may refer to. A load that follows asks as `searcher`,
+    /// the view the lookup searched under, so it fails where the lookup
+    /// would miss again.
+    unregistered_module: struct { name: intern.ModuleName, searcher: modules.RegistrationProvenance },
     /// The word was written in an image that has since been torn down.
     retired,
     /// Following name aliases did not reach a definition.
@@ -69,6 +70,8 @@ pub const Resolver = struct {
 
     name: u32,
     root: Root,
+    /// The source the word was written in.
+    written: modules.RegistrationProvenance,
     phase: Phase = .dot,
     work: Work = .none,
     dot_index: usize = 0,
@@ -139,7 +142,7 @@ pub const Resolver = struct {
     pub fn init(context: *const Context, word: value.Symbol) Resolver {
         const root: Root = switch (env.wordTarget(word.slot)) {
             .unlinked, .local => .core,
-            .root => |id| switch (context.environment.scopeOf(id)) {
+            .cell => |id| switch (context.environment.scopeOf(context.environment.place(id).root)) {
                 .unscoped, .core => .core,
                 .session => .session,
                 .cell => |cell| .{ .image = cell },
@@ -149,6 +152,7 @@ pub const Resolver = struct {
         return .{
             .name = word.name,
             .root = root,
+            .written = sourceOf(context.environment, word),
             .work = .{ .dot = intern.lastDotCursor(intern.get(word.name)) },
         };
     }
@@ -245,7 +249,7 @@ pub const Resolver = struct {
         const hop: Hop = .{
             .module = alias.module,
             .binding = alias.binding,
-            .provenance = self.provenance(context),
+            .provenance = self.provenance(),
         };
         if (self.saved_hop) |saved| if (std.meta.eql(saved, hop)) return self.miss(.alias_cycle);
         self.hops += 1;
@@ -273,16 +277,17 @@ pub const Resolver = struct {
             context.registry,
             context.project,
             context.libraries,
-            self.provenance(context),
+            self.provenance(),
             self.prefix.?,
         ) };
         self.phase = .acquire;
         return .pending;
     }
 
-    /// The provenance a qualified name resolves under: the image's own for a
-    /// word written in one, otherwise the resolving site's.
-    fn provenance(self: *const Resolver, context: *const Context) modules.RegistrationProvenance {
+    /// The provenance a qualified name resolves under: the holder's along an
+    /// alias chain, the image's own for a word written in one, and otherwise
+    /// the source the word was written in. Where the word runs plays no part.
+    fn provenance(self: *const Resolver) modules.RegistrationProvenance {
         if (self.owner_provenance) |owner| return owner;
         switch (self.root) {
             .image => |cell| if (cell.scope.load(.acquire)) |scope| {
@@ -292,7 +297,7 @@ pub const Resolver = struct {
             },
             else => {},
         }
-        return context.provenance;
+        return self.written;
     }
 
     pub fn advance(self: *Resolver, context: *const Context) Progress {
@@ -319,9 +324,10 @@ pub const Resolver = struct {
             .prefix => switch (self.work.atom.advance()) {
                 .pending => .pending,
                 .complete => |maybe_prefix| {
-                    const prefix = maybe_prefix orelse return self.miss(.{
-                        .unknown_module_prefix = self.spelling()[0..self.dot_index],
-                    });
+                    const prefix = maybe_prefix orelse return self.miss(.{ .unknown_module_prefix = .{
+                        .bytes = self.spelling()[0..self.dot_index],
+                        .searcher = self.provenance(),
+                    } });
                     self.work = .{ .module_validation = .init(prefix) };
                     self.phase = .prefix_validate;
                     return .pending;
@@ -362,8 +368,10 @@ pub const Resolver = struct {
                 .pending => .pending,
                 .complete => |maybe_generation| {
                     self.work.deinit();
-                    const generation = maybe_generation orelse
-                        return self.miss(.{ .unregistered_module = self.prefix.? });
+                    const generation = maybe_generation orelse return self.miss(.{ .unregistered_module = .{
+                        .name = self.prefix.?,
+                        .searcher = self.provenance(),
+                    } });
                     self.generation = generation;
                     const export_name = self.export_name orelse return self.miss(.{ .unresolved = .qualified });
                     self.work = .{ .export_lookup = generation.lookupCursor(export_name) };
@@ -402,7 +410,7 @@ pub const Resolver = struct {
                 .pending => .pending,
                 .complete => |maybe_entry| {
                     if (maybe_entry) |entry| {
-                        self.owner_provenance = self.provenance(context);
+                        self.owner_provenance = self.provenance();
                         return self.follow(context, entry, false);
                     }
                     return self.beginCore(context, @fromBackingInt(self.name));
@@ -412,6 +420,15 @@ pub const Resolver = struct {
         };
     }
 };
+
+/// The source `word` was written in: what its cell records, and no source for
+/// a word that carries no cell.
+pub fn sourceOf(environment: *const env.Env, word: value.Symbol) modules.RegistrationProvenance {
+    return switch (env.wordTarget(word.slot)) {
+        .unlinked, .local => .ordinary,
+        .cell => |id| .fromSourceId(environment.place(id).source),
+    };
+}
 
 /// The occurrence a form executes as a word, or null when the form is data:
 /// a value, a quoted symbol, or a lowered locals operation.
