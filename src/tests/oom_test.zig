@@ -82,18 +82,11 @@ const MapScratch = struct {
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.modules",
             .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-                "{path \"probe.ecl\" kind ecl exports [\"helper\" \"mapprobe\"]} " ++
-                "{path \"deferred.ecl\" kind ecl exports [\"deferprobe\" \"deferlater\"]}]}}}",
+                "{path \"probe.ecl\" kind ecl exports [\"helper\" \"mapprobe\"]}]}}}",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "probe.ecl",
             .data = "((42) `answer def) `helper @defm ((helper.answer) `answer def) `mapprobe @defm",
-        });
-        // Imports from a module declared later in its own file, which the
-        // load records and then validates before committing.
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "deferred.ecl",
-            .data = "(`deferlater (seven) importp (seven) `answer def) `deferprobe @defm ((7) `seven def) `deferlater @defm",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -646,17 +639,17 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-module.ecl",
         "*file* pop " ++
             "(1 `x setp ( -- n ) (x) `get def) `allocation-module @defm " ++
-            "`allocation-module (get) import get pop `allocation-module `short alias short.get pop " ++
+            "`allocation-module (get) import get pop " ++
             "(2 `x setp ( -- n ) (x) `get def) `allocation-module @defm get pop " ++
             "(((dup) `f def) `bad @defm) @attempt pop " ++
             // A construction that leaves a value behind is refused, and that
             // refusal allocates its error.
             "((21 1 +) `oom-leftover @defm) @attempt pop " ++
             // Calls, failures inside calls, and reloads each have their own
-            // allocation-failure paths through registration. A body that refers to
-            // an undefined word fails its group's seal; an explicit lookup
-            // fails only when it runs.
-            "(((missing) `f def) `oom-unbound @defm) @attempt pop " ++
+            // allocation-failure paths through registration. A module whose
+            // body refers to an undefined word seals; that word and an explicit
+            // lookup fail only when they run.
+            "((missing) `f def) `oom-unbound @defm (oom-unbound.f) @attempt pop " ++
             "((1) `bump def (`missing execute) `boom def (7) `peek def) `oom-calls @defm " ++
             "oom-calls.bump pop (oom-calls.boom) @attempt pop " ++
             "oom-calls.peek 7 match? pop " ++
@@ -674,7 +667,11 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         // failed body releases its candidate; its failure propagates, so the
         // probe observes it as a result.
         "((1) `one def) `oom-left @defm ((1) `one def) `oom-right @defm " ++
-            "((2) `one def) `oom-left @defm ((\"x\" fail) `oom-failed @defm) @attempt pop",
+            "((2) `one def) `oom-left @defm ((\"x\" fail) `oom-failed @defm) @attempt pop " ++
+            // A word's cell is filled when the word first resolves, stored
+            // by a definition of its name, and emptied by a registration.
+            "(1) `oom-cell def oom-cell pop (2) `oom-cell def oom-cell pop " ++
+            "`oom-left (one) import one pop ((3) `one def) `oom-left @defm one pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();
@@ -749,7 +746,7 @@ const StdlibSurface = enum {
     source_declarations,
     host_metadata,
     mapped_module,
-    deferred_import,
+    module_body_import,
     root_source_preload,
     random,
     dict,
@@ -792,6 +789,20 @@ fn stdlibSessionAllocationProbe(
         try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "suite.ecl",
             .data = "((1) `answer test) `helper @defm\n",
+        });
+    }
+    if (surface == .module_body_import) {
+        // The first module's body records an import from a module declared
+        // later in the same artifact, so the import runs while the artifact
+        // loads and its word resolves when `answer` first reaches it.
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.modules",
+            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
+                "{path \"imports.ecl\" kind ecl exports [\"importprobe\" \"importlater\"]}]}}}",
+        });
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "imports.ecl",
+            .data = "(`importlater (seven) importp (seven) `answer def) `importprobe @defm ((7) `seven def) `importlater @defm",
         });
     }
     // Paths and source strings are borrowed test scaffolding outside Session
@@ -881,10 +892,10 @@ fn stdlibSessionAllocationProbe(
             "oom-lock-tier.ecl",
             "mapprobe.answer pop",
         ),
-        .deferred_import => try runOk(
+        .module_body_import => try runOk(
             &runtime,
-            "oom-deferred-import.ecl",
-            "deferprobe.answer pop",
+            "oom-module-body-import.ecl",
+            "importprobe.answer pop",
         ),
         .random => try runOk(
             &runtime,
@@ -1722,9 +1733,9 @@ test "oom: standard-library and host: module map: artifact loading propagates ev
     try checkStdlibSurface(.mapped_module);
 }
 
-test "oom: standard-library and host: module map: deferred module-body imports propagate every allocation failure" {
+test "oom: standard-library and host: module map: module-body imports propagate every allocation failure" {
     try requireSelectedOomTest(@src());
-    try checkStdlibSurface(.deferred_import);
+    try checkStdlibSurface(.module_body_import);
 }
 
 test "oom: standard-library and host: module map: local source preload propagates every allocation failure" {

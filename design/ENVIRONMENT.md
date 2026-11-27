@@ -16,9 +16,10 @@ ECL calls Zig extensions through `ecl-native`.
 ### Embedded standard library
 
 Every module listed in `STDLIB.md` ships inside the `ecl` binary. Embedded
-modules load lazily at the first qualified reference or import. Loading needs
-no filesystem access and works with no `ECL_PATH`, and it is not observable: an
-embedded module means the same thing before and after it loads.
+modules load lazily, when a qualified or imported word of one is first
+reached. Loading needs no filesystem access and works with no `ECL_PATH`, and
+it is not observable: an embedded module means the same thing before and after
+it loads.
 
 Embedded modules use ECL source, linked native descriptors, builtin word
 tables, or registered built-in capabilities. The transport is an implementation
@@ -73,7 +74,8 @@ or explicitly selected map fails Session construction, without falling back.
 Every scope has exactly `root`, `visible`, `sources`, and `artifacts` fields.
 Scope names are nonempty strings. Visibility includes the scope itself and
 only the explicitly listed direct edges; it is checked even for loaded
-modules. Missing, duplicate, or self visibility edges are invalid. Exported
+modules. A qualified name is checked against the scope of the source it was
+written in, wherever the code containing it runs. Missing, duplicate, or self visibility edges are invalid. Exported
 module names and artifact paths must be unique across the map. Artifacts in
 different scopes may reuse relative filenames when their roots differ.
 Artifact paths are relative, without empty, dot, parent, glob, or drive

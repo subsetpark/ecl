@@ -198,9 +198,9 @@ test "modules: *module* reports the running module's name" {
             "left.name right.name",
         "left right",
     );
-    // An alias resolves to its module, so the call reports that module's
-    // name rather than the spelling used at the call site.
-    try expectStack(&runtime, "`left `short alias short.name", "left");
+    // An imported word runs as its module, so it reports that module's
+    // name rather than the scope that imported it.
+    try expectStack(&runtime, "`left (name) import name", "left");
 
     // A module's code runs as that module wherever it runs: under `@attempt`
     // and in a task the module spawns alike.
@@ -257,8 +257,6 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "base.utils base.utils.f", "1 41");
     try expectStack(&runtime, "`base.utils `f qualify dup type swap execute", "symbol 41");
     try expectStack(&runtime, "`base.utils 1 (`f) (`g) if qualify execute", "41");
-    try expectOk(&runtime, "`base.utils `utils alias");
-    try expectStack(&runtime, "utils.g", "42");
     try expectOk(&runtime, "`base.utils (g) import");
     try expectStack(&runtime, "g", "42");
     try expectOk(&runtime, "((43) `f def) `base.utils @defm");
@@ -282,13 +280,11 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     try expectStack(&runtime, "shadow.host.indices", "[1 2]");
     try expectStack(&runtime, "7 shadow.host.where", "shadowed");
     try expectErrorContains(&runtime, "core.no-such-binding", &.{ "kind undefined-word", "scope core" });
-    // Core is a scope, not a registration: nothing may publish under its name
-    // as a module or an alias, and it is not a module to
-    // alias or import from.
+    // Core is a scope, not a registration: nothing may publish under its
+    // name as a module, and a name imported from it resolves as `core.x`.
     try expectErrorContains(&runtime, "() `core @defm", &.{ "kind domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "`shadow.host `core alias", &.{ "kind domain", "alias name" });
-    try expectErrorContains(&runtime, "`core `short alias", &.{ "kind domain", "core qualifier, not a module" });
-    try expectErrorContains(&runtime, "`core (dup) import", &.{ "kind undefined-word", "scope qualified" });
+    try expectStack(&runtime, "`core (swap) import 1 2 swap", "2 1");
+    try expectErrorContains(&runtime, "`core (no-such-binding) import no-such-binding", &.{ "kind undefined-word", "scope core" });
     // The reservation is the whole name, not a segment: a dotted name under it
     // registers, resolves, and qualifies like any other module.
     try expectOk(&runtime, "((1) `f def) `core.utils @defm");
@@ -339,7 +335,7 @@ test "modules: removed identity builtin has no reservation and names validate by
 const churn_cycle = "((\"a module string\" [1 2 3] {k v}) `peek def) `churn @defm " ++
     "`churn.peek execute pop pop pop";
 
-test "concurrency: repeated construct reload cycles grow no faster than registrations" {
+test "concurrency: repeated construct reload cycles keep live memory bounded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -349,12 +345,15 @@ test "concurrency: repeated construct reload cycles grow no faster than registra
         defer runtime.deinit();
         // Both batches run as one fiber each and differ by a single source
         // character, so their fixed per-fiber costs are the same and the only
-        // variable is how many construct/reload cycles ran. A Session keeps
-        // every published image, so ten times the cycles may cost ten times
-        // the retained images, and no more.
+        // variable is how many construct/reload cycles ran. A replaced image
+        // is reclaimed with its definitions, so ten times the cycles must
+        // retain nothing more.
         const small = "[1] 20 take (pop " ++ churn_cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ churn_cycle ++ ") for";
-        try expectStack(&runtime, small, "");
+        // Images replaced within one turn are reclaimed when it ends, so the
+        // larger batch has more code alive at once. Warm with it: the index
+        // of source positions keeps its pages at their high-water mark.
+        try expectStack(&runtime, large, "");
         const before_small = counting.total_requested_bytes;
         try expectStack(&runtime, small, "");
         const after_small = counting.total_requested_bytes;
@@ -369,7 +368,7 @@ test "concurrency: repeated construct reload cycles grow no faster than registra
         // actually exceeded so a recurrence arrives with its numbers.
         const small_growth = after_small -| before_small;
         const large_growth = after_large -| after_small;
-        std.testing.expect(large_growth <= small_growth * 10 * 2 + 4096) catch |err| {
+        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
             std.debug.print(
                 "settled memory: before={d} after_small={d} after_large={d} " ++
                     "small_growth={d} large_growth={d}\n",
@@ -386,10 +385,10 @@ test "concurrency: applying an escaped quotation races reload" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // A quotation that escaped `racer` refers to the image it was written in, and
-    // spawned tasks bind and apply it while a concurrent `@defm` replaces that
-    // image. The Session keeps the replaced image, so each task resolves the
-    // escaped words against it while the registry publishes the new one.
+    // A quotation that escaped `racer` refers to the module by name, and
+    // spawned tasks apply it while a concurrent `@defm` replaces the
+    // registration: each task resolves the escaped word in whichever
+    // registration is current when it reaches it.
     //
     // Its name places it in the `concurrency:` tier so it runs under ThreadSanitizer and
     // at eight workers. The assertions are deliberately weak: failures stay
@@ -404,7 +403,7 @@ test "concurrency: applying an escaped quotation races reload" {
 // The `concurrency:` prefix is load-bearing: the TSan and 8-worker tiers
 // select on it.
 
-test "concurrency: escaped quotations keep running old code across a concurrent reload" {
+test "concurrency: escaped quotations follow a concurrent reload" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -412,26 +411,31 @@ test "concurrency: escaped quotations keep running old code across a concurrent 
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
-        // The quotation escapes its module, so its words are linked to the
-        // image it was written in. Tasks bind and apply it while a reload
-        // replaces that image; the Session keeps the replaced image, so every
-        // task runs the old code, and the allocator checks that nothing the
-        // reload published or retired leaks.
+        // The quotation escapes its module, and its words refer to the
+        // module by name. Tasks apply it while a reload replaces the
+        // registration, so each runs the old word or the new one; the
+        // allocator checks that nothing the reload published or retired
+        // leaks.
         try expectOk(
             &runtime,
             "((1) `k def ((k)) `q def) `goner @defm goner.q `gone set",
         );
+        // Every task completes with one of the two definitions' results; a
+        // failure inside any of them leaves a 0 here.
         try expectStack(
             &runtime,
             "[1] 64 take (pop ((gone apply) @attempt) @spawn) each " ++
-                "((2) `k def ((k)) `q def) `goner @defm (task.await) each pop",
-            "",
+                "((2) `k def ((k)) `q def) `goner @defm (task.await) each " ++
+                "(`ok at first `ok at first [1 2] swap has?) all?",
+            "1",
         );
+        // Once the reload has completed, the quotation runs the new word.
+        try expectStack(&runtime, "gone apply", "2");
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
-test "concurrency: a reload that drops a word leaves escaped quotations running old code" {
+test "concurrency: a reload that drops a word leaves escaped quotations undefined" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -439,22 +443,28 @@ test "concurrency: a reload that drops a word leaves escaped quotations running 
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
-        // The reload drops `q`, while tasks are still applying a quotation
-        // written in the old image. The Session keeps that image, so its words
-        // still resolve there.
+        // The reload drops `k`, while tasks are still applying a quotation
+        // that calls it: each task reaches the word before the reload or
+        // fails on it after.
         try expectOk(
             &runtime,
             "((1) `k def ((k)) `q def) `reloaded @defm reloaded.q `held set",
         );
+        // Every task completes, and its attempt holds either the old word's
+        // result or the undefined-word error for `k`; any other failure
+        // leaves a 0 here.
         try expectStack(
             &runtime,
             "[1] 64 take (pop ((held apply) @attempt) @spawn) each " ++
-                "((2) `k def) `reloaded @defm (task.await) each pop",
-            "",
+                "((2) `j def) `reloaded @defm (task.await) each " ++
+                "(`ok at first dup `ok has? (`ok at first 1 =) " ++
+                "(`err at dup `kind at `undefined-word match? swap `word at `k match? and) if) all?",
+            "1",
         );
-        // The replacement is what callers now reach; the escaped quotation went
-        // on meaning what it meant, for as long as anything held it.
-        try expectStack(&runtime, "reloaded.k", "2");
+        // The replacement is what callers now reach, and the escaped
+        // quotation's word has no definition in it.
+        try expectStack(&runtime, "reloaded.j", "2");
+        try expectErrorContains(&runtime, "held apply", &.{ "kind undefined-word", "word k", "scope module" });
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }

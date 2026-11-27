@@ -55,7 +55,7 @@ pub fn installSource(
         source_name,
         source,
         &diag,
-        environment.linker(environment.coreScopeId()),
+        environment.linker(environment.coreScopeId(), modules.RegistrationProvenance.sourceId(.standard_library)),
     );
     defer {
         while (!ingestion.advanceRetirement())

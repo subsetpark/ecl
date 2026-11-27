@@ -46,8 +46,6 @@
  (pattern path -- bool : "Match portable source globs; ** spans zero or more complete components.")
  ("/" str.split swap "/" str.split swap ("**" match?) (segment) matches) `matches? def
 
- `pkg.test.support `t alias
-
  ### defp check
  (pattern path expected -- : "Assert source-pattern selection independently of the matcher.")
  (|pattern path expected|

@@ -70,7 +70,7 @@
   first lock swap path lock (node) cons each " -> " str.join
   module ": " cat swap cat "\n" cat) `why def
 
- `pkg.test.support `t alias
+ `pkg.test.support (equal) importp
 
  ### defp selection
  (-- selection : "Supply an inert exact source identity for report fixtures.")
@@ -91,8 +91,8 @@
  (-- : "Render sorted direct edges and one canonical shortest path through a shared dependency.")
  (lock pkg.report.tree
   "demo\nalpha -> charlie 1.0.0\nbravo -> charlie 1.0.0\ndemo -> alpha 1.0.0\ndemo -> bravo 1.0.0\n"
-  t.equal
-  lock "charlie.api" pkg.report.why "charlie.api: demo -> alpha 1.0.0 -> charlie 1.0.0\n" t.equal
-  lock "missing.api" pair (pkg.report.why) cat @attempt result.err? 1 t.equal) `canonical-reports
+  equal
+  lock "charlie.api" pkg.report.why "charlie.api: demo -> alpha 1.0.0 -> charlie 1.0.0\n" equal
+  lock "missing.api" pair (pkg.report.why) cat @attempt result.err? 1 equal) `canonical-reports
  test
 ) `pkg.report @defm

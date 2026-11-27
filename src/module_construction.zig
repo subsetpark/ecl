@@ -1,5 +1,5 @@
-//! Module construction: re-scoping a `@defm` body, binding the group it
-//! stages against one view, sealing the image, and publishing it.
+//! Module construction: re-scoping a `@defm` body, sealing the image it
+//! stages, and publishing it.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -7,7 +7,6 @@ const intern = @import("intern.zig");
 const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
-const binder = @import("binder.zig");
 const machine = @import("machine.zig");
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
@@ -30,24 +29,20 @@ pub fn begin(
     defer body.deinit(fiber.releases, fiber.allocator);
     const registry = fiber.inherited.registry;
     const word = fiber.active_word;
-    var candidate = try registry.createImage(name, fiber.current.?.site.registration_provenance);
+    const scope = try fiber.environment.moduleScope(name);
+    var candidate = try registry.createImage(scope, fiber.current.?.site.registration_provenance);
     errdefer candidate.deinit();
     if (doc) |document| candidate.document(document);
-    // Every word in the body refers to the image. A specialized leaf holds no
-    // symbol and no container, so it opens the boundary unchanged in this
-    // step; any other body is re-scoped, which is user-sized and therefore
-    // ordinary resumable scheduler work: the driver holds the candidate
-    // image and the source body until the copy is finished and the
-    // boundary can open.
+    // Every word in the body refers to the module by name. A specialized
+    // leaf holds no symbol and no container, so it opens the boundary
+    // unchanged in this step; any other body is re-scoped, which is
+    // user-sized and therefore ordinary resumable scheduler work: the driver
+    // holds the candidate image and the source body until the copy is
+    // finished and the boundary can open.
     if (body.borrow().kind() != .generic_spine)
         return via.openImageBoundary(&candidate, word, body.take());
-    const home = candidate.executionHome(fiber.module_access);
-    const image_cell = try fiber.environment.scopeCell(
-        home.scope(fiber.module_access),
-        modules.anchorHandle(home, fiber.module_access),
-    );
     var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-        try fiber.archive.rescopeCursor(body.take(), fiber.environment.linker(image_cell.id)),
+        try fiber.archive.rescopeCursor(body.take(), fiber.rootLinker(scope, candidate.provenance())),
     );
     defer cursor.deinit(fiber.releases, fiber.allocator);
     try via.startDriver(ConstructionDriver{
@@ -142,49 +137,28 @@ const ConstructionDriver = struct {
 
 /// Begins sealing the module whose construction boundary is the top frame. A
 /// module body defines words and keeps no state, so a residual operand window
-/// is refused before anything is bound. Otherwise every staged body binds
-/// against the complete group, and only once all of them have bound is any
-/// sealed: a module load in between restarts the seal against a view that
-/// holds the loaded module. A placeholder evaluation at the image's site is the
-/// caller such a load suspends and returns to.
+/// is refused before anything is sealed.
 pub fn startSeal(via: *Construction) MachineError!void {
-    const fiber = via.fiber();
     const image = try via.beginSeal();
-    var context = fiber.resolutionContext(fiber.inherited.registry.view());
-    context.group = .{
-        .image_scope = image.executionHome(fiber.module_access).scope(fiber.module_access).cellId(),
-        .module = image.moduleName(),
-        .directory = null,
-    };
-    try via.startDriver(ModuleSealDriver{
-        .context = .init(context),
-        .phase = .init(.{ .group = image.groupCursor() }),
-    });
+    try via.startDriver(ModuleSealDriver{ .phase = .init(.{ .group = image.groupCursor() }) });
 }
 
-/// Binds a module group's reserved bodies against one view, then seals them
-/// together. Each bound body is staged on its own reserved definition, which
-/// the image under construction owns: a failure or a restart leaves nothing
-/// for this driver to release, and image rollback retires each definition in
-/// constant work.
+/// Turns a module's staged names into its directory, warns of the core words
+/// the directory shadows, and hands the sealed image to registration. The
+/// image under construction owns every staged definition, so a failure leaves
+/// nothing for this driver to release.
 const ModuleSealDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    context: heap.Owned(binder.Context),
     phase: heap.Owned(Phase),
 
     const Phase = union(enum) {
         group: modules.GroupCursor,
-        validate: struct {
-            entries: env.GroupMap.RawEntryCursor,
-            current: ?struct { reservation: *env.Reservation, cursor: binder.ValidationCursor } = null,
-        },
-        seal: modules.SealCursor,
+        shadows: env.NameMap.RawEntryCursor,
 
         pub fn deinit(self: *Phase) void {
             switch (self.*) {
                 .group => |*cursor| cursor.deinit(),
-                .validate => |*validate| if (validate.current) |*current| current.cursor.deinit(),
-                .seal => |*cursor| cursor.deinit(),
+                .shadows => {},
             }
             self.* = undefined;
         }
@@ -204,61 +178,18 @@ const ModuleSealDriver = struct {
             }) {
                 .pending => {},
                 .complete => {
-                    const owned = via.image();
-                    self.context.borrowMut().group.?.directory = owned.groupDirectory();
                     cursor.deinit();
-                    self.phase.borrowMut().* = .{ .validate = .{ .entries = owned.groupEntries() } };
+                    self.phase.borrowMut().* = .{ .shadows = via.image().entries() };
                 },
             },
-            .validate => |*validate| {
-                if (validate.current) |*current| {
-                    const result = switch (current.cursor.advance(self.context.borrowMut(), work)) {
-                        .pending => continue,
-                        .complete => |result| result,
-                    };
-                    const reservation = current.reservation;
-                    switch (result) {
-                        .valid => {
-                            current.cursor.deinit();
-                            validate.current = null;
-                        },
-                        .failed => |failure| {
-                            const code = reservation.quotation();
-                            const word = heap.valuesConst(code)[failure.index].symbol;
-                            fiber.retireDriver(self);
-                            const unbound = fiber.failUnbound(word, failure.miss);
-                            fiber.setFailureSite(code, failure.index);
-                            return unbound;
-                        },
-                    }
-                    continue;
-                }
-                switch (validate.entries.advance()) {
-                    .pending => {},
-                    .item => |entry| {
-                        const owned = via.image();
-                        // Shadowing in a shipped module is deliberate, and a
-                        // module alias is not a word, so it shadows nothing.
-                        if (owned.provenance() != .standard_library and entry.value != .module)
-                            fiber.warnCoreShadowing(entry.key, owned.moduleName());
-                        switch (entry.value) {
-                            .reserved => |reservation| validate.current = .{
-                                .reservation = reservation,
-                                .cursor = binder.ValidationCursor.init(fiber.releases, reservation.quotation()),
-                            },
-                            .definition, .alias, .module => {},
-                        }
-                    },
-                    .complete => self.phase.borrowMut().* = .{ .seal = via.image().sealCursor() },
-                }
-            },
-            // Every body validated against one view; seal them together.
-            .seal => |*cursor| switch (cursor.advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                // Every body was validated, never sealed as a literal.
-                error.UnboundWord => unreachable,
-            }) {
+            .shadows => |*entries| switch (entries.advance()) {
                 .pending => {},
+                .item => |entry| {
+                    const owned = via.image();
+                    // Shadowing in a shipped module is deliberate.
+                    if (owned.provenance() != .standard_library)
+                        fiber.warnCoreShadowing(entry.key, owned.moduleName());
+                },
                 .complete => {
                     fiber.retireDriver(self);
                     var built = via.closeBoundary();

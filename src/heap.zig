@@ -1652,16 +1652,6 @@ pub const HostCleanup = opaque {
     pub fn allocator(self: *const HostCleanup) std.mem.Allocator {
         return hostDomain(self).allocator;
     }
-
-    /// Runs the final parked-block walk. See
-    /// `ReleaseDomain.reclaimTombstones` for why this is teardown-only and why
-    /// the destructor comes from the caller.
-    pub fn reclaimTombstones(
-        self: *const HostCleanup,
-        destroy: *const fn (std.mem.Allocator, *ReleaseDomain.TombstoneNode) void,
-    ) void {
-        hostDomain(self).reclaimTombstones(destroy);
-    }
 };
 
 /// Root runtime owners store one opaque host capability and derive resources
@@ -1806,23 +1796,6 @@ pub const ReleaseDomain = struct {
         advance_fn: ?*const fn (*ReleaseDomain, std.mem.Allocator, *anyopaque) bool = null,
     };
 
-    /// The bare list link of one parked allocation: something refers to that
-    /// allocation without holding a reference, so it must outlive the contents
-    /// it owned.
-    ///
-    /// The link lives inside the parked block, so parking allocates nothing and
-    /// cannot fail — retirement runs on release-domain workers, where an
-    /// allocation failure has no caller to report to. Same reason `Retirement`
-    /// is embedded rather than boxed.
-    ///
-    /// Deliberately just the link, with no extent and no per-node destructor.
-    /// Both were measured: carrying (ptr, len, alignment) costs 32 bytes a node
-    /// and a per-node callback 16, against a parked-anchor budget of roughly 32
-    /// bytes total. `reclaimTombstones` takes one destructor from its caller
-    /// instead, which keeps this module type-blind at zero per-node cost.
-    pub const TombstoneNode = struct {
-        next: ?*TombstoneNode = null,
-    };
     const Wake = struct {
         context: *anyopaque,
         wake_fn: *const fn (*anyopaque, WakeReason) void,
@@ -1854,7 +1827,6 @@ pub const ReleaseDomain = struct {
     // Includes the active drainer's owner, not just linked nodes. Continuation
     // requeueing carries the same charge until that owner finishes.
     pending_owners: std.atomic.Value(usize) = .init(0),
-    tombstones: std.atomic.Value(?*TombstoneNode) = .init(null),
     prefer_retirement: bool = false,
     wake: ?Wake = null,
     /// Registration metadata is one state: a callback can exist only together
@@ -1870,43 +1842,6 @@ pub const ReleaseDomain = struct {
 
     pub fn init(allocator: std.mem.Allocator) ReleaseDomain {
         return .{ .allocator = allocator };
-    }
-
-    /// Parks one allocation until the final teardown walk.
-    ///
-    /// Infallible and thread-safe by construction: the node is inside the
-    /// parked memory, and a single exchange both publishes it and yields the
-    /// predecessor to link to. Writing `next` after the exchange is safe only
-    /// because nothing pops this list until teardown, when execution has
-    /// stopped — the list is push-only for its whole useful life.
-    pub fn parkTombstone(self: *ReleaseDomain, node: *TombstoneNode) void {
-        node.next = self.tombstones.swap(node, .acq_rel);
-    }
-
-    /// Frees every parked block, using the one destructor its caller supplies.
-    ///
-    /// One shared destructor rather than one per node: every parked block is
-    /// the same type, so the discrimination would be pure overhead in the
-    /// budget the retention soaks impose. If a second parked type ever appears
-    /// it takes its own list head — it does not turn the node into a
-    /// discriminated one.
-    ///
-    /// Valid only at final host teardown, after execution has provably
-    /// stopped. A parked block is reachable from a scope cell that holds no
-    /// reference to it, so freeing one while any reader could still resolve a
-    /// word is exactly the use-after-free parking exists to prevent. See
-    /// `Session.deinit`, whose order supplies that guarantee: `scheduler.deinit`
-    /// stops execution before any teardown runs, and this walk is last.
-    pub fn reclaimTombstones(
-        self: *ReleaseDomain,
-        destroy: *const fn (std.mem.Allocator, *TombstoneNode) void,
-    ) void {
-        var node = self.tombstones.swap(null, .acq_rel);
-        while (node) |parked| {
-            // The successor is read before the memory holding it is freed.
-            node = parked.next;
-            destroy(self.allocator, parked);
-        }
     }
 
     /// Inline because most released values are immediates, for which the

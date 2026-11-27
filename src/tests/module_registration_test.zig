@@ -4,7 +4,7 @@
 //! resulting image as the registration's new generation. Every test here pins
 //! one publicly observable clause of that contract through the ordinary
 //! `Session` interface — no accessor exposes `ModuleImage`,
-//! `ModuleHome`, `Environment`, or any registry internal.
+//! `Environment`, or any registry internal.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const test_heap = @import("test_heap.zig");
@@ -276,7 +276,7 @@ test "module loader: observation and dispatch require the requested registration
     try std.testing.expectEqualStrings("[42]\n", output.written());
 }
 
-test "module registration: reload history grows no faster than registrations" {
+test "module registration: reloads keep live memory bounded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -286,8 +286,8 @@ test "module registration: reload history grows no faster than registrations" {
         defer runtime.deinit();
 
         // Two registrations and a reload of one while a delayed call runs the
-        // superseded generation. The Session keeps every published image, so
-        // memory grows with registrations; nothing else may accumulate. The
+        // superseded generation. A replaced image is reclaimed once nothing
+        // runs it, so nothing accumulates with the reloads made. The
         // repetition lives inside one fiber, so the measurement sees image and
         // registration retention rather than the per-fiber source provenance
         // every session accumulates.
@@ -298,8 +298,7 @@ test "module registration: reload history grows no faster than registrations" {
             "task.await pop (reuse-right.bump) @spawn task.await pop";
         // Both batches are one fiber each and differ only in the cycle count,
         // so their fixed per-fiber costs cancel and the only variable is how
-        // many define/reload cycles ran. Ten times the cycles may cost ten
-        // times the retained images, and no more.
+        // many define/reload cycles ran.
         const small = "[1] 20 take (pop " ++ cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ cycle ++ ") for";
         try expectOk(&runtime, small);
@@ -310,7 +309,10 @@ test "module registration: reload history grows no faster than registrations" {
         const after_large = counting.total_requested_bytes;
         const small_growth = after_small -| before_small;
         const large_growth = after_large -| after_small;
-        try std.testing.expect(large_growth <= small_growth * 10 * 2 + 4096);
+        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
+            std.debug.print("reload soak: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
+            return err;
+        };
         try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
@@ -335,7 +337,7 @@ test "module sources: formatter and standard modules use @defm" {
     // Every embedded standard module is registration-driven, enumerated from
     // the manifest rather than by hand so a new module is covered the day it
     // ships. A module whose source registered nothing under its own name would
-    // make `import` report that it registered nothing under the requested name.
+    // fail the first resolution of a word imported from it.
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -343,8 +345,8 @@ test "module sources: formatter and standard modules use @defm" {
     for (stdlib.names(), support.stdlib_exports) |name, qualified| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "`{s} ({s}) import",
-            .{ name, qualified[name.len + 1 ..] },
+            "`{s} ({s}) import `{s} effect pop",
+            .{ name, qualified[name.len + 1 ..], qualified[name.len + 1 ..] },
         );
         defer std.testing.allocator.free(source);
         expectOk(&runtime, source) catch |failed| {
@@ -360,42 +362,37 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "[7 0] 6 rand.int nip type", "int");
 }
 
-test "module values: a pushed quotation resolves in the image it was written in" {
+test "module values: a pushed quotation resolves in the module it was written in" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // `(k)` is written inside the module, so it resolves in that image's chain
+    // `(k)` is written inside the module, so it resolves in the module
     // rather than wherever the caller applies it. The session has no `k` at
-    // all, which is what makes the label load-bearing here.
+    // all, which is what makes the word's root load-bearing here.
     try expectOk(&runtime, "((1) `k def ((k)) `q def) `holding @defm holding.q `held set");
     try expectStack(&runtime, "held apply", "1");
 }
 
-test "module values: an escaped quotation refers to the image it was written in" {
+test "module values: an escaped quotation follows its module's registrations" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // A word written in a module body refers to that image. A quotation that
-    // escaped it goes on meaning what it meant, for as long as anything still
-    // holds the image -- redefinition reaches only future calls; existing code
-    // retains its meaning.
+    // A word written in a module body refers to the module by name, so a
+    // quotation that escaped it reads whatever is registered under that name
+    // when it is applied.
     try expectOk(&runtime, "((1) `k def ((k)) `q def) `held-name @defm held-name.q `held set");
     try expectStack(&runtime, "held apply", "1");
 
-    // Replacing the name publishes a new image. Fresh calls through the name
-    // get the new code, which is the whole of what the REPL needs.
+    // Replacing the name reaches fresh calls through the name and the
+    // quotation held from the replaced registration alike.
     try expectOk(&runtime, "((2) `k def ((k)) `q def) `held-name @defm");
     try expectStack(&runtime, "held-name.q apply", "2");
-
-    // The quotation held from the replaced generation is not re-pointed to the
-    // new image: the Session keeps the old image, so it goes on meaning what
-    // it meant.
-    try expectStack(&runtime, "held apply", "1");
+    try expectStack(&runtime, "held apply", "2");
 }
 
-test "module values: an escaped locals body keeps its replaced image" {
+test "module values: an escaped locals body resolves its words in the current registration" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -404,9 +401,11 @@ test "module values: an escaped locals body keeps its replaced image" {
     try expectOk(&runtime, "((1 +) `inc def ((|x| x inc)) `q def ((|x| x)) `r def) `lowered-owner @defm " ++
         "lowered-owner.q `held set lowered-owner.r `plain set");
     try expectStack(&runtime, "7 held apply", "8");
+    try expectOk(&runtime, "((2 +) `inc def) `lowered-owner @defm");
+    try expectStack(&runtime, "7 held apply", "9");
+    // A registration without the word leaves the body's own word undefined.
     try expectOk(&runtime, "((0) `q def) `lowered-owner @defm");
-    // The body's own word refers to the replaced image, which the Session keeps.
-    try expectStack(&runtime, "7 held apply", "8");
-    // Locals alone refer to nothing in the image.
+    try expectErrorContains(&runtime, "7 held apply", &.{ "kind undefined-word", "word inc", "scope module" });
+    // Locals alone refer to nothing in the module.
     try expectStack(&runtime, "7 plain apply", "7");
 }

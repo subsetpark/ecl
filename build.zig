@@ -592,7 +592,7 @@ pub fn build(b: *std.Build) void {
         },
         .{
             .step_name = "fuzz-completion",
-            .test_name = "fuzz: completion survives prefixes definitions aliases and reloads",
+            .test_name = "fuzz: completion survives prefixes definitions and reloads",
             .description = "Fuzz completion across live mutation and reloads",
         },
         .{
@@ -939,6 +939,9 @@ pub fn build(b: *std.Build) void {
             "env: concurrent readers writers and retirement reclaim production snapshots",
             "env: retirement claims coalesce descendant wakes and republish availability",
             "registry: concurrent commits are linearized without lost names",
+            "session: mutation settlement is independent of a busy sole worker",
+            "word cells: reloading a module under running tasks keeps live memory bounded",
+            "word cells: redefinition under running tasks keeps live memory bounded",
             "native:",
             "tar: unpack preserves existing destinations and has one concurrent winner",
             "tar: unpack uses directory leases inside staged generations",
@@ -1185,6 +1188,9 @@ pub fn build(b: *std.Build) void {
             // is a handful of scalar words through the public Session and the
             // whole file costs well under a second.
             "tests.conversion_test.",
+            // Word resolution through the public Session: where a word
+            // resolves and when a definition change reaches running code.
+            "tests.word_cells_test.",
             // Fast families inside sources that also hold heavy tests.
             "env:",
             "modules:",

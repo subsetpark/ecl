@@ -53,7 +53,7 @@ const source_groups = [_]SourceGroup{
     // public surface or a machine-minted view; none shares the machine's
     // file-level exemptions.
     embeddedGroup(true, &.{
-        "error_value.zig", "park.zig", "resolution_plan.zig", "module_lookup.zig", "word_resolutions.zig", "load.zig", "failure.zig", "module_construction.zig", "floor.zig", "stack_summary.zig", "flatten.zig", "lower.zig",
+        "error_value.zig", "park.zig", "resolution_plan.zig", "module_lookup.zig", "load.zig", "failure.zig", "module_construction.zig", "floor.zig", "stack_summary.zig", "flatten.zig", "lower.zig",
     }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -168,6 +168,7 @@ const test_files = [_][]const u8{
     "tests/interleaving_test.zig",
     "tests/mailbox_test.zig",
     "tests/http_server_test.zig",
+    "tests/word_cells_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -234,7 +235,6 @@ pub fn main(init: std.process.Init) !void {
     failed = auditSourceBodies() or failed;
     failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
-    failed = auditConstructionTypestate() or failed;
     failed = auditPreludeLayout() or failed;
     failed = auditHttpServerWriteSink() or failed;
     failed = auditFormalValueKinds() or failed;
@@ -816,23 +816,6 @@ fn auditFilesystemAuthority() bool {
         "step",
         "cwd",
     ) or failed;
-    return failed;
-}
-
-/// A reservation and a sealed definition share storage, and the types keep
-/// them apart: only `Reservation` reads the reserved member of
-/// `Definition.body_state` and only `Definition` the sealed one. Zig fields
-/// cannot be private, so accessing that field outside `env.zig` would bypass
-/// both handles; this confinement is the audit's.
-fn auditConstructionTypestate() bool {
-    var failed = false;
-    const body_state = [_][]const []const u8{&.{ ".", "body_state" }};
-    for (source_groups) |group| {
-        for (group.files, group.sources) |name, text| {
-            if (std.mem.eql(u8, name, "env.zig")) continue;
-            failed = auditTokens(name, text, &body_state) or failed;
-        }
-    }
     return failed;
 }
 

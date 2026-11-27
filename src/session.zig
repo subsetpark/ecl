@@ -378,7 +378,7 @@ pub const Session = enum(usize) {
         var environment, var building = try env.Env.initBuilding(host_owner);
         errdefer environment.deinit();
         try prims.install(&building);
-        var registry = try modules.Registry.init(host_owner.cleanup());
+        var registry = try modules.Registry.init(host_owner.cleanup(), environment.claimCells());
         errdefer registry.deinit();
         host.net_limits.validate() catch return diagnostic.fail("network limits are invalid", .{});
         const net_configuration = host.net_limits.encode();
@@ -557,9 +557,9 @@ pub const Session = enum(usize) {
         if (core.test_authority) |*authority| authority.deinit();
         core.registry.deinit();
         core.archive_owner.deinit();
-        // Registry teardown retires images, and an image clears its Env-owned
-        // scope-label cell as it goes. Drain that work before the Env releases
-        // the cells, so no deferred image release ever touches freed memory.
+        // Registry teardown retires images as deferred work. Drain it before
+        // the Env goes, so no deferred image release outlives what the Env
+        // owns.
         host.drain();
         core.environment.deinit();
         // Environment and registry retirement own native image pins. Drain
@@ -575,11 +575,6 @@ pub const Session = enum(usize) {
         // retirement, including reservations inherited by escaped descendants.
         core.filesystem_owner.deinit();
         core.allocator().destroy(core.filesystem_owner);
-        // Last, and only here. A scope cell points to a parked anchor without
-        // holding a reference to it, so the anchor stays valid until execution has
-        // provably stopped -- which `scheduler.deinit` at the top of this
-        // function guarantees, ahead of every teardown below it.
-        host.reclaimTombstones(modules.destroyParkedAnchor);
         allocator.destroy(core.host_owner);
         allocator.destroy(core);
         self.* = .consumed;
@@ -795,18 +790,6 @@ pub const Session = enum(usize) {
         const allocator = self.coreState().allocator();
         return .fromOwned(allocator, try printer.toOwnedString(allocator, item));
     }
-    /// The target of a session module alias spelled `namespace`, if it is one.
-    fn sessionAliasTarget(self: *Session, namespace: []const u8) ?[]const u8 {
-        const id = lookupInterned(namespace) orelse return null;
-        const module = intern.moduleName(id) catch return null;
-        const binding = intern.moduleBindingName(module) orelse return null;
-        var view = self.coreState().registry.view();
-        defer view.deinit();
-        return switch (view.sessionFind(binding) orelse return null) {
-            .module => |target| intern.get(intern.moduleId(target)),
-            .definition, .alias => null,
-        };
-    }
     /// Runs one blocking observation turn without exposing environment,
     /// registry, or reclamation authority. The rendered result owns no lease
     /// and can therefore outlive this Session.
@@ -815,14 +798,9 @@ pub const Session = enum(usize) {
         prefix: []const u8,
     ) error{OutOfMemory}!CompletionSet {
         const dot = lastDot(prefix);
-        // A namespace that is a session module alias completes from its target.
-        const target_bytes: ?[]const u8 = if (dot) |separator|
-            self.sessionAliasTarget(prefix[0..separator]) orelse prefix[0..separator]
-        else
-            null;
         if (dot) |separator| {
             if (separator == 0) return .empty;
-            if (!try self.loadModuleForObservation(target_bytes.?)) return .empty;
+            if (!try self.loadModuleForObservation(prefix[0..separator])) return .empty;
         }
         const core = self.coreState();
         defer core.scheduler.settleRootRetirement();
@@ -835,7 +813,7 @@ pub const Session = enum(usize) {
             // Observation has already resolved the cold module through the
             // ordinary loader, so completion sees one authoritative published
             // generation regardless of transport or prior execution.
-            if (lookupInterned(target_bytes.?)) |namespace_id| {
+            if (lookupInterned(namespace_bytes)) |namespace_id| {
                 if (intern.moduleName(namespace_id) catch null) |module_name| {
                     var acquisition = core.registry.acquireCursor(module_name);
                     defer acquisition.deinit();
@@ -871,21 +849,6 @@ pub const Session = enum(usize) {
             .item => |name| if (std.mem.startsWith(u8, intern.get(name), prefix))
                 try found.append(name),
         };
-        // Session module aliases are not words, but they complete as namespaces.
-        var view = core.registry.view();
-        defer view.deinit();
-        if (view.sessionEntries()) |entries_cursor| {
-            var entries = entries_cursor;
-            while (true) switch (entries.advance()) {
-                .pending => {},
-                .complete => break,
-                .item => |entry| switch (entry.value) {
-                    .module => if (std.mem.startsWith(u8, intern.get(intern.bindingId(entry.key)), prefix))
-                        try found.append(intern.bindingId(entry.key)),
-                    .definition, .alias => {},
-                },
-            };
-        }
         // An embedded module resolves on first mention, so it is a real
         // completion before anything has loaded it. The registry knows only
         // the ones already published, which made the stdlib appear to exist
@@ -1378,7 +1341,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     // Publish through the production candidate/registration boundary. Only
     // setup uses the owning registry; assertions observe public Session output.
     const registry = &runtime.coreState().registry;
-    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, try intern.internModuleName("probe"), .ordinary, .{ .doc = "Scheduler probe words.", .words = &.{
+    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, try runtime.coreState().environment.moduleScope(try intern.internModuleName("probe")), .ordinary, .{ .doc = "Scheduler probe words.", .words = &.{
         .{ .name = "immediate", .primitive = Probe.immediate, .effect = "-- n", .doc = "Return one number." },
         .{ .name = "host-yield", .primitive = Probe.hostYield, .effect = "-- n", .doc = "Yield without parking before returning a number." },
         .{ .name = "empty", .primitive = Probe.empty, .effect = "-- n", .doc = "Violate the output contract immediately." },

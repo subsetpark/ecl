@@ -265,15 +265,13 @@ puts "PASS: $name"
 
 set name "repl pty: dotted completion lists only public exports"
 start_repl $binary $temporary $name
-send "(1 `hidden setp 2 `mean set) `stats @defm `stats `st alias\r"
+send "(1 `hidden setp 2 `mean set) `stats @defm\r"
 expect {
     -re {\r\n\recl> } {}
     timeout { fail_case $name "module setup did not finish" }
     eof { fail_case $name "process exited during module setup" }
 }
 send "stats.\t\r"
-expect_stack $name 2
-send "st.\t\r"
 expect_stack $name 2
 clean_eof $name
 puts "PASS: $name"

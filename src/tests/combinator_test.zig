@@ -1374,11 +1374,21 @@ test "task.cancel-self requests cancellation of the current task" {
     try expectFreshStack("(task.cancel-self 0 100000 (1 +) times) @spawn task.await `err at `kind at", "cancelled");
 }
 
-test "bindings: a unit's cached resolutions follow its own definitions" {
+test "bindings: a redefinition reaches the next use of a word its unit has run" {
     try expectFreshStack("(1 +) `inc def 5 inc inc (10 +) `inc def inc", "17");
     try expectFreshStack("(1 +) `inc def 0 3 (inc) times (10 +) `inc def 3 (inc) times", "33");
     // Shadowing a core word after using it; `core.+` still reaches core.
     try expectFreshStack("1 2 + (pop pop 42) `+ def 1 2 + 1 2 core.+", "3 42 3");
+}
+
+test "bindings: a word the implementation built for itself runs core's binding each time" {
+    // An error's `word` is a symbol the implementation built, so it means
+    // core's word whatever the session defines, the first time it runs and
+    // after; a symbol the session wrote means the session's.
+    try expectFreshStack(
+        "(id) @attempt `err at `word at (pop 42) `id def 5 swap dup (execute) dip execute 5 `id execute",
+        "5 42",
+    );
 }
 
 test "while restores a checkpoint deeper than one turn's budget" {

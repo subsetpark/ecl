@@ -451,29 +451,25 @@ Every word is resolved when it is reached, in the scope that occurrence was
 written in (see [Where a word resolves](#where-a-word-resolves)), against the current definitions and module
 registrations. This holds alike for top-level source, for definition bodies,
 and for every quotation applied at run time, by `apply`, a combinator,
-`@attempt`, or as a task's body. A quotation applied at run time is not checked
-before it runs: an unresolved word fails at that word, after the forms before
-it have run. Nested quotations and quoted words are data and resolve only when
-they are themselves applied.
+`@attempt`, or as a task's body. Nothing is checked before it is reached: an
+unresolved word fails with `` `undefined-word `` at that word, after the forms
+before it have run, and a word that is never reached never fails. Nested
+quotations and quoted words are data and resolve only when they are themselves
+applied.
 
 ### Definition 
 
-Definitions are introduced with the word `def`, and a definition validates its
-body when it is published. Validation records nothing: the body resolves each
-word again whenever it runs.
+Definitions are introduced with the word `def`. Publishing a definition checks
+nothing about the words of its body: the body resolves each word whenever it
+runs. A body may therefore call itself, refer to a word defined later, and
+recurse mutually with another definition, and a word that resolves to nothing
+fails where it is reached, never where it is defined.
 
-A definition written to the session is published as `def` runs. Every word of
-its body outside a nested quotation must already resolve, so the body cannot
-refer forward to a later definition, and a misspelled word fails the
-definition. A qualified word whose module is not registered yet is the other
-exception: its lookup is deferred until the word is reached. The definition's own name, written in the scope it is published
-into, is the exception: it calls the definition itself.
+A definition written to the session is published as `def` runs.
 
-A definition written to a module image is staged by the module's construction
-body and published when the module is sealed. A module's definitions and
-imports are validated together then, so words in one module may refer forward
-and recurse mutually. A staged definition is not visible to runtime lookup
-before its module is sealed.
+A definition written in a module's construction body is staged by the body and
+published when the module is registered. A staged definition is not visible to
+any lookup before then.
 
 A body running when a word it calls is replaced may run the old definition for
 earlier calls and the new one for later ones. There is no historical view: a
@@ -482,11 +478,11 @@ reached. Explicit operations on names — `execute`, `doc`, `effect`, and
 `see` — resolve the supplied symbol in its own scope against the current
 definitions each time they run. 
 
-A word written in a module image resolves in that image, so code written in an
-image keeps reaching that image's definitions after its registration is
-replaced, while a qualified name reaches the registration current when it runs.
-Executing a word written in an image that was never published and has since
-been discarded is a `` `domain `` error.
+A word written in a module resolves in the module as registered when the word
+is reached, as a qualified name does. Re-registering a module therefore reaches
+code of the module that is already running and quotations that escaped it, and
+a word the new registration no longer defines resolves in core or is
+`` `undefined-word `` where it is reached.
 
 A reader-produced aggregate may separately retain **source spans**, which
 record where the aggregate and its reader-built descendants were read. Spans
@@ -1000,7 +996,7 @@ a definition therefore keeps reporting the file that authored its body when
 another file calls it. Runtime-assembled code has no source provenance, so
 `*file*` is `` `domain `` there rather than falling back to its caller.
 `*module*` returns the name of the module whose code is running, the name
-`@defm` published it under even when the call came through an alias, including
+`@defm` published it under even when the call came through an import, including
 a construction body that has not yet published; at the root there is no module
 and it is `` `domain ``. The stars are ordinary word characters with no reader
 meaning, and the convention applies to shipped vocabulary without reserving the
@@ -1016,12 +1012,13 @@ order.
 
 ### Scopes and names
 
-Definitions live in *scopes*. There are three kinds:
+Definitions live in *scopes*, each a place definitions are current in. There
+are three kinds:
 
 ```text
 core           frozen; primitives and the prelude
 session        → core
-module image   → core; sealed at the end of construction
+module         → core; one per module name, holding its current registration
 ```
 
 Thus: depending on where it was written, a user-defined word is resolved first
@@ -1030,16 +1027,17 @@ core if it's not found. If resolution fails it produces an `` `undefined-word ``
 error (see Core evaluation). Names are introduced and replaced, never
 removed. 
 
-Session-authored code may therefore shadow core definitions. A module image
-sees its own public and private bindings followed by core and never sees the
-invoking session. Core and prelude definitions resolve in core. There are no
+Session-authored code may therefore shadow core definitions. A module
+sees the public and private bindings of its current registration followed by
+core and never sees the invoking session. Core and prelude definitions resolve in core. There are no
 other scopes.
 
 `core` is a reserved qualifier. A qualified word whose
 module segment is `core` resolves its binding segment in core alone,
-skipping the session and every module image, so a shadowed core definition
+skipping the session and every module, so a shadowed core definition
 remains reachable: after ``(2 *) `dup def``, `core.dup` still refers to the
-stdlib definition.
+stdlib definition. A name imported from `core` resolves the same way: after
+`` `core (dup) import ``, `dup` refers to core's `dup`.
 
 Shadowing a core name is allowed but reported. When a `def`, `set`, or `import`
 at top level introduces a session name that is also a public core name, a
@@ -1052,14 +1050,13 @@ core word.
 Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
-first use. `@defm` with a standard-library module name is `` `domain ``, as is
-`alias` with one as the alias name. A dotted name below one,
-such as `dict.extra`, is an ordinary module name.
+first use. `@defm` with a standard-library module name is `` `domain ``. A
+dotted name below one, such as `dict.extra`, is an ordinary module name.
 
 Every activation has a **current scope**. A word belonging to a module runs with
-that module's image as its current scope; every other word, whether a session
+that module as its current scope; every other word, whether a session
 definition, a core primitive, or a prelude word, runs in its caller's scope.
-Outside any module word the current scope is the session, or the image under
+Outside any module word the current scope is the session, or the module under
 construction in a module's construction body. The current scope decides where
 definition words write, what `*module*` reports, and the scope a symbol built at
 run time links to. A core word such as `*module*` written in an escaped
@@ -1075,8 +1072,8 @@ An occurrence gets its scope in one of three ways:
 
 - The reader gives a word the scope its source is read into: the session, or
   core for the prelude.
-- `@defm` replaces that scope, for every word in a module body, with the new
-  image (see [Construction and definitions](#construction-and-definitions)).
+- `@defm` gives every word of a module body the module as its scope (see
+  [Construction and definitions](#construction-and-definitions)).
 - A symbol built at run time by `qualify`, `symbol`, `intern`, or native code
   takes the current scope of the activation that built it, so a quotation
   assembled from strings resolves where it was assembled, not where it is
@@ -1114,6 +1111,14 @@ that quotation's semantics, even if the word and the quotation were defined in
 different places (eg., in a module and the session, or in the session and in
 core...). This is the quality of "syntactic closure": quotation *bindings* are
 stable when used as callbacks, even absent of lexical scoping.
+
+The same holds for which modules a word may reach. A qualified word, or one
+that reaches a module through an import, is resolved as the source it was
+written in would resolve it, against the modules that source may refer to.
+Applying a quotation somewhere else changes nothing about which module its
+words reach. A symbol built at run time counts as written by the code that
+built it, and a word that takes a module name resolves it as the source of
+that symbol.
 
 ### Definition annotations
 
@@ -1319,7 +1324,7 @@ registrations. Modules are not values.
 
 ##### Action
 
-> This model is normative for registry names, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, including module aliases, which are lexical: a scope's alias rewrites a qualified word's module part before the call, so the registry holds no alias names. It also abstracts over construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call selects a registry name's current image and a public binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. Explicit lookup performs the same fresh selection each time it runs.
+> This model is normative for registry names, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation. It also abstracts over construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A call selects a registry name's current image and a binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. A qualified call selects a public binding of the module it spells; a scoped call selects any binding of the module its word was written in. Explicit lookup performs the same fresh selection each time it runs.
 
 **`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
 
@@ -1333,7 +1338,7 @@ registrations. Modules are not values.
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under one module name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so unqualified words whose occurrences retain it as their scope keep their meaning; qualified words select the current registration.
+> The model has one kind of module object: an immutable image, published under one module name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. No call begins in a retired image: a word occurrence retains the name of the module it was written in, never an image.
 
 `Call`.
 
@@ -1357,7 +1362,7 @@ registrations. Modules are not values.
 
 **occurrence-name** *occurrence*: `WordOccurrence` ⇒ `BindingName`.
 
-**occurrence-image** *occurrence*: `WordOccurrence` ⇒ `Image`.
+**occurrence-module** *occurrence*: `WordOccurrence` ⇒ `RegistryName`.
 
 **call-invocation?** *invoker*: `InvocationContext` ⇒ `Bool`.
 
@@ -1443,14 +1448,16 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ##### Action
 
-> `Begin scoped call` resolves the name stored in a word occurrence against the image stored in that occurrence. A quotation or word occurrence owns this scope but does not cache a definition. The image must have been published; a retired image still answers. Private definitions are available to same-image scoped resolution without becoming publicly invocable.
+> `Begin scoped call` resolves the name stored in a word occurrence against the current image of the module stored in that occurrence. A quotation or word occurrence owns this scope but does not cache a definition or an image. Private definitions are available to scoped resolution, wherever the occurrence is applied, without becoming publicly invocable.
 
 **`Calls`** ↝ Begin scoped call *caller*: `Call`, *occurrence*: `WordOccurrence`, *binding-name*: `BindingName`, **call-active?** *caller*, **occurrence-name** *occurrence* = *binding-name*.
 
 ---
 
-∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, **image-published?** *image*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image*
-*binding-name*, (**public?** *definition* ∨ **call-image** *caller* = **definition-image** *definition*), ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
+**module?** (**occurrence-module** *occurrence*).
+
+∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **image-of** (**occurrence-module** *occurrence*), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image*
+*binding-name*, ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
 #### Chapter 5
 
@@ -1474,7 +1481,7 @@ as top-level ones, so a module word may be unannotated, documentation-only,
 effect-only, or both.
 
 Executing a module body constructs a fresh image. `@defm` creates the image,
-and sets it as the scope for every word in the body. This is how new,
+and gives every word in the body the module as its scope. This is how new,
 bounded scopes are created, without introducing lexical scoping. Instead, each
 module scope has a simple, two-part resolution path: module words are looked up
 first in the module scope, and then in core.
@@ -1492,31 +1499,33 @@ registration can fail (for instance, another call can race to register the
 name)---but if this occurs the module image shouldn't be observable. 
 
 Rerunning `@defm` with the same name publishes a new module image and re-links
-to it from the image registry. Because binding happens within scopes, this
-model has two implications:
+to it from the image registry. A word written in the module and a qualified
+name `m.x` both resolve in the registration current when they are reached, so
+all code is routed to the new image at its next word, code running under the
+predecessor included.
 
-- Code that's running under the predecessor image continues to resolve within
-  itself;
-- Code that reaches the module through a qualified name `m.x` is now routed to
-  the new image.
-
-The language offers no guarantees about stale images being reaped.
+A construction body's own words follow the same rule: they resolve in the
+registration current while the body runs, which is the predecessor during a
+re-registration and core alone the first time a name is registered. What the
+body has staged is not yet registered, so the body cannot call it.
 
 ### Imports and qualified names
 
 `import` consumes a module-name symbol and a list of attribute symbols, then
 publishes those attributes under the same names in the current environment.
 
-`import` validates every symbol and resolves every public attribute against one
-module generation before publishing the first name. A missing or private
-attribute is `` `undefined-word ``, malformed operand are `` `type ``, and
-malformed name domains are `` `domain ``.
+`import` validates the spelling of every operand before publishing the first
+name: a malformed operand is `` `type `` and a malformed name is `` `domain ``.
+It does not load the module and does not check the attributes. Both happen when
+an imported word is reached, where a missing or private attribute is
+`` `undefined-word ``.
 
 Imports behave like a simple alias (as opposed to capturing or republishing the
-actual contents of the aliased word). This makes import cycles theoretically
-possible, so they're checked and produce a `` `domain `` error if found.
-Because they behave like simple aliases for the qualified word, this also means
-that there's no loading-order dependency between modules.
+actual contents of the aliased word). This makes import cycles possible; an
+imported word whose aliases never reach a definition is a `` `domain `` error
+where it is reached. Because an import is only an alias for the qualified word,
+there's no loading-order dependency between modules, and modules may import
+from each other.
 
 A qualified name looks like `module-name "." word`, where `word` can't contain
 any dots but `module-name` can. Core words aren't in their own module, but the
@@ -1526,13 +1535,6 @@ reference to any core word that's been shadowed in the current scope.
 `qualify` is the way to dynamically construct qualified names at runtime. It canstructs a symbol from any module name symbol (including `core`) and a binding symbol.  
 
 Qualified names can be resolved and executed with `execute`.
-
-``name `short alias`` binds `short` in the current scope as an alias of the
-module name `name`, as `def` binds a word: a module's alias belongs to its image
-and is legal only during construction, and a top-level alias belongs to the
-session. A qualified word written in that scope whose module part is exactly
-`short` refers to `name` instead, resolved at each call, so the alias follows
-reload. An alias is never a word or an export, and no other scope sees it.
 
 ### Tests
 

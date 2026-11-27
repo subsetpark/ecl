@@ -27,10 +27,11 @@ pub const VisibleNameRoot = union(enum) {
     /// The session's top-level names in one captured view, which the cursor
     /// owns.
     session: modules.View,
-    /// A published image's names, held by the pin the cursor owns.
+    /// The names of a module's current registration, held by the lease the
+    /// cursor owns.
     image: struct {
         entries: ?env.NameMap.RawEntryCursor,
-        pin: modules.GenerationPin,
+        lease: modules.GenerationLease,
     },
     /// Core's names alone.
     core,
@@ -83,7 +84,7 @@ pub const VisibleNameCursor = struct {
     pub fn deinit(self: *VisibleNameCursor) void {
         switch (self.root) {
             .session => |*view| view.deinit(),
-            .image => |*image| image.pin.deinit(),
+            .image => |*image| image.lease.deinit(),
             .core => {},
         }
         self.* = undefined;
@@ -96,8 +97,6 @@ pub const VisibleNameCursor = struct {
                 .{ .item = intern.bindingId(entry.key) }
             else
                 .pending,
-            // A module alias is private to its scope and is not a word.
-            .module => .pending,
         };
     }
 

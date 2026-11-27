@@ -1142,12 +1142,11 @@ test "native: a discovered artifact publishes its complete table atomically" {
 
     try expectOk(
         &runtime,
-        "`sample (increment) import 40 sample.increment 41 increment `sample `s alias 42 s.increment",
+        "`sample (increment) import 40 sample.increment 41 increment",
     );
-    try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
+    try std.testing.expectEqual(@as(usize, 2), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 41), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
-    try std.testing.expectEqual(@as(i64, 43), runtime.stackItems()[2].int);
 
     const exports = [_][]const u8{
         "sample.increment",          "sample.discard",        "sample.twin",
@@ -1281,13 +1280,12 @@ test "native: a rejected artifact publishes nothing and never selects a later ca
         defer runtime_inputs.deinit();
         var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, search);
         defer runtime.deinit();
-        try expectErrorContains(&runtime, "`sample (increment) import", &.{ "kind io", case.message, broken });
+        try expectErrorContains(&runtime, "`sample (increment) import 1 increment", &.{ "kind io", case.message, broken });
         var completion = try runtime.completionCandidates("sample.");
         defer completion.deinit();
         try std.testing.expectEqual(@as(usize, 0), completion.items().len);
-        // Under the qualified-miss auto-load ruling a bare qualified
-        // reference loads its module exactly as `import` does, so it reports the
-        // same rejection rather than an undefined word.
+        // A qualified reference loads its module as the imported word did,
+        // so it reports the same rejection rather than an undefined word.
         try expectErrorContains(&runtime, "sample.increment", &.{ "kind io", case.message });
     }
 }
@@ -1359,14 +1357,24 @@ test "native: only exact completion mutates the operand stack" {
 
 test "native: the static transport publishes a linked descriptor through the same path" {
     var host = heap.HostOwner.init(std.testing.allocator);
+    // Until the Owner exists, each object releases itself if a later
+    // creation fails, newest first; from then on the block below owns the
+    // whole teardown, whose order the Owner's closing dictates.
+    var torn_down_together = false;
     var environment = try env.Env.init(&host);
-    var registry = try modules.Registry.init(host.cleanup());
+    errdefer if (!torn_down_together) environment.deinit();
+    var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
+    errdefer if (!torn_down_together) {
+        registry.deinit();
+        host.cleanup().drain();
+    };
     const owner = try native_module.Owner.init(host.cleanup());
+    torn_down_together = true;
     defer {
         const closing = owner.closeCalls();
         registry.deinit();
-        // Images clear their Env-owned scope-label cell as they retire, so this
-        // drain must finish before the Env releases the cells.
+        // Images retire as deferred work, so this drain must finish before
+        // the Env frees the scopes they refer to.
         host.cleanup().drain();
         environment.deinit();
         const settled = closing.settle();
@@ -1391,7 +1399,7 @@ test "native: the static transport publishes a linked descriptor through the sam
         },
     };
     defer loaded.releasePin();
-    var publication = try modules.Registry.NativeCandidateCursor.init(&registry, requested, .ordinary, loaded);
+    var publication = try modules.Registry.NativeCandidateCursor.init(&registry, try environment.moduleScope(requested), .ordinary, loaded);
     defer publication.deinit();
     var candidate = while (true) switch (try publication.advance()) {
         .pending => {},

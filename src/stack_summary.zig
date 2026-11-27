@@ -9,7 +9,6 @@ const env = @import("env.zig");
 const machine = @import("machine.zig");
 const lower = @import("lower.zig");
 const prims = @import("prims.zig");
-const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
@@ -36,9 +35,9 @@ const max_values = 32;
 /// effect holds a row and has no rule here, or a combinator whose quotation
 /// is not a literal.
 ///
-/// A word's body is summarized once per resolution of the word and recorded
-/// with it, and a quotation's answer is remembered by the fiber, so either
-/// lasts until a publication and a redefinition is read as redefined.
+/// A word's body is summarized once per definition, and a quotation's answer
+/// is remembered by the fiber; either lasts until a publication, so a
+/// redefinition is read as redefined.
 pub fn of(fiber: *Fiber, site: machine.ExecutionSite, quotation: *Header) error{OutOfMemory}!?Summary {
     if (quotation.length() > max_forms) return null;
     const publication = fiber.currentPublication();
@@ -92,7 +91,7 @@ pub fn wordHasSummary(fiber: *Fiber, site: machine.ExecutionSite, word: value.Sy
     var visited: usize = 0;
     return switch (try fiber.summaryTarget(word, site)) {
         .none => false,
-        .source => |source| try body(fiber, &visited, word, site, source) == .exact,
+        .source => |source| try body(fiber, &visited, source) == .exact,
         .builtin => |builtin| !prims.unsummarizable(builtin.primitive) and
             lower.exact(builtin.effect) != null and !lower.takesQuotation(builtin.effect.?),
     };
@@ -109,12 +108,15 @@ pub fn failDefinitionsChanged(fiber: *Fiber) machine.MachineError {
 /// without a walk. An entry holds its quotation, so the address it is found
 /// by stays that quotation's.
 ///
-/// One entry per place and a fixed number of places: a quotation that lands
-/// on an occupied place replaces what was there, so the fiber holds at most
-/// `capacity` quotations it would otherwise have let go, and every operation
-/// is bounded by that constant.
+/// A fixed number of places, and a quotation is looked for in the `reach`
+/// places from its own, so quotations that share a place each keep an entry
+/// and two of them applied in one loop do not walk afresh on every turn. One
+/// that finds all of those taken replaces the first, so the fiber holds at
+/// most `capacity` quotations it would otherwise have let go, and every
+/// operation is bounded by `reach`.
 pub const Cache = struct {
-    const capacity = 64;
+    const capacity = 128;
+    const reach = 8;
     const Entry = struct {
         /// Null for an empty place.
         quotation: ?*Header = null,
@@ -142,10 +144,24 @@ pub const Cache = struct {
     /// What was read of `quotation` at `site` in `publication`, if anything.
     pub inline fn find(self: *const Cache, quotation: *const Header, site: machine.ExecutionSite, publication: u64) ?Known {
         if (self.publication != publication or self.entries.len == 0) return null;
-        const entry = &self.entries[place(quotation)];
-        if (entry.quotation != quotation or entry.scope != site.scope.serial or
-            entry.provenance != WordResolutions.provenanceKey(site.registration_provenance)) return null;
+        const entry = self.entryFor(quotation, site) orelse return null;
+        if (entry.quotation == null) return null;
         return .{ .summary = if (entry.exact) .{ .consumed = entry.consumed, .produced = entry.produced } else null };
+    }
+
+    /// The entry holding `quotation` at `site`, or the first empty one in
+    /// reach of its place; null when every place in reach holds another.
+    /// Entries leave only all together, so an empty place ends the search.
+    inline fn entryFor(self: *const Cache, quotation: *const Header, site: machine.ExecutionSite) ?*Entry {
+        var index = place(quotation);
+        for (0..reach) |_| {
+            const entry = &self.entries[index];
+            if (entry.quotation == null) return entry;
+            if (entry.quotation == quotation and entry.scope == site.scope.serial and
+                entry.provenance == @backingInt(site.registration_provenance.sourceId())) return entry;
+            index = (index + 1) & (capacity - 1);
+        }
+        return null;
     }
 
     /// Records what a walk in `publication` found, null for no summary.
@@ -167,13 +183,13 @@ pub const Cache = struct {
             self.clear(releases);
             self.publication = publication;
         }
-        const entry = &self.entries[place(quotation)];
+        const entry = self.entryFor(quotation, site) orelse &self.entries[place(quotation)];
         if (entry.quotation) |held| releases.releaseHeader(held);
         heap.incRef(quotation);
         entry.* = .{
             .quotation = quotation,
             .scope = site.scope.serial,
-            .provenance = WordResolutions.provenanceKey(site.registration_provenance),
+            .provenance = @backingInt(site.registration_provenance.sourceId()),
             .exact = summary != null,
             .consumed = if (summary) |found| @intCast(found.consumed) else 0,
             .produced = if (summary) |found| @intCast(found.produced) else 0,
@@ -189,6 +205,93 @@ pub const Cache = struct {
 
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
         self.clear(releases);
+        if (self.entries.len != 0) allocator.free(self.entries);
+        self.* = .{};
+    }
+};
+
+/// What is known of a source definition's stack summary.
+const BodySummary = union(enum) {
+    unread,
+    /// A walk of the body is in progress: a word that reaches itself has no
+    /// summary.
+    reading,
+    none,
+    exact: struct { consumed: u8, produced: u8 },
+};
+
+/// What a fiber has read of the bodies of the source words its summaries
+/// called, all in one publication. A body's summary depends on what the
+/// body's own words denote, which no reader can see change without a
+/// publication, and on the root the body runs in, which decides whether a
+/// module word it calls is behind a checked boundary.
+///
+/// An entry is found by its definition's address and holds no reference.
+/// Invariant: an entry found under the publication value it was recorded
+/// under is of the definition asked about. The recording turn kept its
+/// definition alive, so another definition took the address only after the
+/// record, and a reader can see it only in a publication, which advances the
+/// value before its first visible store: whoever reads the later definition
+/// from a cell or a directory then reads a later value.
+///
+/// One entry per place and a fixed number of places, so every operation is
+/// bounded by that constant. A body that lands on an occupied place replaces
+/// what was there, a walk in progress included: such a walk is then bounded
+/// by the forms it may visit, as every walk is.
+pub const Bodies = struct {
+    const capacity = 64;
+    const Entry = struct {
+        /// Null for an empty place.
+        definition: ?*const env.Definition = null,
+        /// The root the body ran in, by serial as `Cache` holds it.
+        scope: u64 = 0,
+        summary: BodySummary = .unread,
+    };
+
+    entries: []Entry = &.{},
+    /// The publication every present entry was read in.
+    publication: u64 = 0,
+
+    fn place(definition: *const env.Definition) usize {
+        return @intCast((@as(u64, @intFromPtr(definition)) >> 4) *% 0x9E3779B97F4A7C15 >> (64 - std.math.log2(capacity)));
+    }
+
+    fn find(self: *const Bodies, definition: *const env.Definition, scope: u64, publication: u64) BodySummary {
+        if (self.publication != publication or self.entries.len == 0) return .unread;
+        const entry = &self.entries[place(definition)];
+        return if (entry.definition == definition and entry.scope == scope) entry.summary else .unread;
+    }
+
+    /// Records what is known of `definition`'s body, run in the root
+    /// `scope`, in `publication`.
+    fn record(
+        self: *Bodies,
+        allocator: std.mem.Allocator,
+        definition: *const env.Definition,
+        scope: u64,
+        publication: u64,
+        summary: BodySummary,
+    ) error{OutOfMemory}!void {
+        if (self.entries.len == 0) {
+            const entries = try allocator.alloc(Entry, capacity);
+            @memset(entries, .{});
+            self.entries = entries;
+        }
+        if (self.publication != publication) {
+            @memset(self.entries, .{});
+            self.publication = publication;
+        }
+        self.entries[place(definition)] = .{ .definition = definition, .scope = scope, .summary = summary };
+    }
+
+    /// Leaves `definition`'s body, run in `scope`, unread.
+    fn forget(self: *Bodies, definition: *const env.Definition, scope: u64) void {
+        if (self.entries.len == 0) return;
+        const entry = &self.entries[place(definition)];
+        if (entry.definition == definition and entry.scope == scope) entry.* = .{};
+    }
+
+    pub fn deinit(self: *Bodies, allocator: std.mem.Allocator) void {
         if (self.entries.len != 0) allocator.free(self.entries);
         self.* = .{};
     }
@@ -220,37 +323,39 @@ fn summarize(comptime Reader: type, fiber: *Fiber, visited: *usize, code: *Heade
     return .{ .exact = counts };
 }
 
-/// The summary of a source word's body, read from the word's remembered
-/// resolution or walked and recorded there.
+/// The summary of a source word's body, read from what the fiber remembers of
+/// its definition or walked and recorded there. The walk is within one turn,
+/// which is what keeps the definition and its body.
 fn body(
     fiber: *Fiber,
     visited: *usize,
-    word: value.Symbol,
-    site: machine.ExecutionSite,
     source: @FieldType(machine.SummaryTarget, "source"),
 ) error{OutOfMemory}!Result {
-    switch (source.summary) {
+    const publication = fiber.currentPublication();
+    const scope = source.site.scope.serial;
+    switch (fiber.bodies.find(source.definition, scope, publication)) {
         .exact => |counts| return .{ .exact = .{ .consumed = counts.consumed, .produced = counts.produced } },
         .none, .reading => return .none,
         .unread => {},
     }
     if (source.code.length() > max_body_forms) {
-        fiber.recordSummary(word, site, source.definition, .none);
+        try fiber.bodies.record(fiber.allocator, source.definition, scope, publication, .none);
         return .none;
     }
-    // The walk resolves more words, which may let go of this one's
-    // definition, so the body is held across it.
-    heap.incRef(source.code);
-    defer fiber.releases.releaseHeader(source.code);
-    fiber.recordSummary(word, site, source.definition, .reading);
+    try fiber.bodies.record(fiber.allocator, source.definition, scope, publication, .reading);
     // A walk that fails leaves the body unread, not mid-read forever.
-    errdefer fiber.recordSummary(word, site, source.definition, .unread);
+    errdefer fiber.bodies.forget(source.definition, scope);
     const result = try summarize(Kept, fiber, visited, source.code, source.site, 1);
-    fiber.recordSummary(word, site, source.definition, switch (result) {
+    const recorded: BodySummary = switch (result) {
         .exact => |summary| .{ .exact = .{ .consumed = @intCast(summary.consumed), .produced = @intCast(summary.produced) } },
         .none => .none,
         .exhausted => .unread,
-    });
+    };
+    // Words read under different publications say nothing together.
+    if (recorded == .unread or fiber.currentPublication() != publication)
+        fiber.bodies.forget(source.definition, scope)
+    else
+        try fiber.bodies.record(fiber.allocator, source.definition, scope, publication, recorded);
     return result;
 }
 
@@ -284,11 +389,9 @@ fn Counting(comptime bounds: lower.Policy) type {
             _: *Self,
             fiber: *Fiber,
             visited: *usize,
-            word: value.Symbol,
-            site: machine.ExecutionSite,
             target: @FieldType(machine.SummaryTarget, "source"),
         ) (lower.Stop || error{OutOfMemory})!Summary {
-            return switch (try body(fiber, visited, word, site, target)) {
+            return switch (try body(fiber, visited, target)) {
                 .exact => |summary| summary,
                 .none => error.Unread,
                 .exhausted => error.Exhausted,

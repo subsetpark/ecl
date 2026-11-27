@@ -523,7 +523,7 @@
   dict.from-kvs
   root walk-manifest resolved-lock) `resolve-validated defp
 
- `pkg.test.support `t alias
+ `pkg.test.support (equal raises-containing raises-data documented) importp
 
  ### defp pinned-requirement
  (name version -- requirement : "Construct an exact inert fixture pin without network access.")
@@ -554,11 +554,11 @@
  ("project" "1.0.0" {} "alpha" "alpha" "1.0.0" pinned-requirement put
   "bravo" "bravo" "1.0.0" pinned-requirement put edge-manifest
   superseding-catalog pkg.solver.resolve
-  dup `format at 3 t.equal
-  dup `packages at dict.keys dup grade at ["alpha" "bravo"] t.equal
-  dup `packages at "alpha" at `version at "2.0.0" t.equal
-  dup `requires at dict.keys dup grade at ["alpha" "bravo" "project"] t.equal
-  dup pkg.resolution.write pkg.resolution.read t.equal) `selected-reachability test
+  dup `format at 3 equal
+  dup `packages at dict.keys dup grade at ["alpha" "bravo"] equal
+  dup `packages at "alpha" at `version at "2.0.0" equal
+  dup `requires at dict.keys dup grade at ["alpha" "bravo" "project"] equal
+  dup pkg.resolution.write pkg.resolution.read equal) `selected-reachability test
 
  ### defp requirement
  (package version url hash -- requirement : "Construct requirement fixture data.")
@@ -641,18 +641,18 @@
  ("0123456789abcdef0123456789abcdef01234567"
   dup git-graph pkg.solver.resolve
   [packages "c" source commit] at-path
-  "0123456789abcdef0123456789abcdef01234567" t.equal
+  "0123456789abcdef0123456789abcdef01234567" equal
   ("0123456789abcdef0123456789abcdef01234567"
    "1123456789abcdef0123456789abcdef01234567"
    git-graph pkg.solver.resolve)
-  `domain "conflicting Git commits" t.raises-containing)
+  `domain "conflicting Git commits" raises-containing)
  `pinned-git test
 
  ### test resolution
  (-- : "Select every reachable maximum and record all declared minimums.")
  (root catalog pkg.solver.resolve
-  dup `packages at dup dict.size 2 t.equal
-  ["c" version] at-path "1.5.0" t.equal
+  dup `packages at dup dict.size 2 equal
+  ["c" version] at-path "1.5.0" equal
   root catalog pkg.solver.resolve
   dup `requires at dict.vals (dict.pairs) each raze
   swap `packages at
@@ -661,7 +661,7 @@
    entry 1 at `version at pkg.version.less? not)
   cons
   all?
-  1 t.equal)
+  1 equal)
  `resolution test
 
  ### test deterministic-input-order
@@ -678,13 +678,13 @@
   "b" {} "1.0.0" manifest-b put put
   pkg.solver.resolve pkg.resolution.write
   match?
-  1 t.equal
+  1 equal
   root-without-c catalog pkg.solver.resolve `packages at
   root catalog pkg.solver.resolve
   (|packages lock|
-   packages lock `packages at match? 1 t.equal
+   packages lock `packages at match? 1 equal
    lock [requires "app" "c"] at-path
-   {package "c" version "1.2.0"} t.equal)
+   {package "c" version "1.2.0"} equal)
   apply)
  `deterministic-input-order test
 
@@ -699,7 +699,7 @@
    pkg.solver.resolve)
   `domain
   "conflicting hashes"
-  t.raises-containing
+  raises-containing
   ("app" "0.1.0"
    {}
    "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
@@ -724,7 +724,7 @@
    pkg.solver.resolve)
   `domain
   "overlapping prefixes"
-  t.raises-containing
+  raises-containing
   "app" "0.1.0"
   {} "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
   manifest
@@ -739,8 +739,8 @@
   manifest put put
   pair (pkg.solver.resolve) cat @attempt
   `err at
-  dup `kind at `domain t.equal
-  `data at `packages at ("a" "b") t.equal)
+  dup `kind at `domain equal
+  `data at `packages at ("a" "b") equal)
  `conflicts test
 
  ### test malformed-and-missing
@@ -753,16 +753,16 @@
   `domain
   `version
   "not-a-version"
-  t.raises-data
+  raises-data
   (root-without-c {} pkg.solver.resolve)
   `domain
   `version
   "1.0.0"
-  t.raises-data)
+  raises-data)
  `malformed-and-missing test
 
  ### test documentation
  (-- : "Require documentation for package resolution.")
- ((pkg.solver.resolve) t.documented)
+ ((pkg.solver.resolve) documented)
  `documentation test
 ) `pkg.solver @defm

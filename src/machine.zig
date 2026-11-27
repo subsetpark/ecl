@@ -179,12 +179,11 @@ const RootEntry = union(enum) {
     /// The fiber's own root scope.
     own,
     /// A root the fiber does not own: a task in its spawner's, or a Session's
-    /// root fiber in the Session's. The scope's owner outlives the fiber, or
-    /// the fiber pins it.
+    /// root fiber in the Session's. The scope's owner outlives the fiber.
     scope: *env.Scope,
-    /// One registered module generation's own code, under that image's
-    /// provenance. The fiber pins the generation before entering it.
-    image: *modules.ModuleHome,
+    /// One registered module's own code, under the provenance of the
+    /// registration it was read from.
+    module: modules.ModuleRoot,
 };
 /// Who runs a fiber, and so what it may do. A root fiber runs a submission
 /// or a host-driven load and may define. A task fiber runs in its spawner's
@@ -224,7 +223,6 @@ const ErrorDataKey = enum {
     @"destination-path",
     address,
     port,
-    importer,
 };
 const ErrorData = struct {
     key: union(enum) { builtin: ErrorDataKey, symbol: u32 },
@@ -655,7 +653,7 @@ const ModuleBoundary = struct {
     image: modules.OwnedImage,
     /// The construction body `@defm` runs, after re-scoping. A declaration
     /// is module-level only while this is the current activation; quotations
-    /// called by the body may inherit its home but not its declaration site.
+    /// called by the body may inherit its scope but not its declaration site.
     root_code: *Header,
 
     fn deinit(self: ModuleBoundary) void {
@@ -832,10 +830,10 @@ fn encodeApplicationProvenanceTarget(
 
 pub const ExecutionSite = struct {
     /// The current root: where this body's own definitions land, and, when it
-    /// is a module image's root scope, the module whose code is running. A
-    /// module word runs in its image's scope; every other word, and every
-    /// quotation applied as a value, runs in its caller's. Where a word
-    /// resolves is carried by the word itself.
+    /// is a module's scope, the module whose code is running. A module word
+    /// runs in its module's scope; every other word, and every quotation
+    /// applied as a value, runs in its caller's. Where a word resolves is
+    /// carried by the word itself.
     scope: *env.Scope,
     /// Authority carried only while evaluating an embedded source module.
     /// A named module constructed by that source moves it into the immutable
@@ -852,7 +850,7 @@ pub const ExecutionSite = struct {
     fn root(fiber: *Fiber) ExecutionSite {
         const defining = fiber.role != .task;
         return switch (fiber.root_entry) {
-            .image => |home| image(home, fiber.module_access, defining),
+            .module => |home| module(home, defining),
             .own, .scope => .{
                 .scope = fiber.lexicalScope(),
                 .defining = defining,
@@ -864,17 +862,13 @@ pub const ExecutionSite = struct {
         };
     }
 
-    /// Code running as one module image: the image's own definitions, then
-    /// core, under the image's provenance.
-    fn image(
-        home: *modules.ModuleHome,
-        access: *const modules.ExecutionAccess,
-        defining: bool,
-    ) ExecutionSite {
+    /// Code running as one module, under the provenance of the registration
+    /// it belongs to.
+    fn module(home: modules.ModuleRoot, defining: bool) ExecutionSite {
         return .{
-            .scope = home.scope(access),
+            .scope = home.scope,
             .defining = defining,
-            .registration_provenance = home.registrationProvenance(),
+            .registration_provenance = home.provenance,
         };
     }
 
@@ -915,7 +909,6 @@ pub const Application = struct {
     }
 };
 
-const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 const stack_summary = @import("stack_summary.zig");
 const flatten = @import("flatten.zig");
 
@@ -1527,15 +1520,14 @@ pub const Loading = opaque {
     }
 
     /// Dispatches the word a completed load was started for, by explicit
-    /// lookup under the provenance that asked for it.
+    /// lookup.
     pub fn dispatchAfterLoad(
         self: *Loading,
         word: value.Symbol,
         site: ?ErrorSite,
         trace_parent: ?intern.TraceWord,
-        provenance: modules.RegistrationProvenance,
     ) error{OutOfMemory}!void {
-        return self.fiber().dispatchAfterLoad(word, site, trace_parent, provenance);
+        return self.fiber().dispatchAfterLoad(word, site, trace_parent);
     }
 
     /// Puts back the symbol operand a primitive consumed before its module
@@ -1547,11 +1539,6 @@ pub const Loading = opaque {
     /// The embedded or registered standard library named `name`, if any.
     pub fn embeddedLibrary(self: *Loading, name: intern.ModuleName) ?stdlib.Entry {
         return self.fiber().inherited.libraries().find(name);
-    }
-
-    /// Records the module whose deferred import the pending failure is about.
-    pub fn addErrorImporter(self: *Loading, importer: intern.ModuleName) void {
-        self.fiber().pendingFailure().addData(.importer, .{ .symbol = .{ .name = intern.moduleId(importer) } });
     }
 };
 
@@ -1576,12 +1563,8 @@ pub const Fiber = struct {
 
     const LifetimeGuard = struct {
         const State = union(enum) {
-            active: std.ArrayList(modules.GenerationPin),
-            scope: struct {
-                cursor: ?env.Scope.EmbeddedTeardownCursor = null,
-                generation_pins: std.ArrayList(modules.GenerationPin),
-            },
-            pins: std.ArrayList(modules.GenerationPin),
+            active,
+            scope: env.Scope.EmbeddedTeardownCursor,
             complete,
         };
         // Activations point at this address, so it must never move while the
@@ -1592,7 +1575,7 @@ pub const Fiber = struct {
         fn init(allocator: std.mem.Allocator, environment: *env.Env) LifetimeGuard {
             return .{
                 .root_scope = environment.sessionRoot(allocator),
-                .state = .{ .active = .empty },
+                .state = .active,
             };
         }
 
@@ -1602,70 +1585,19 @@ pub const Fiber = struct {
             self.root_scope = root;
         }
 
-        fn pin(
-            self: *LifetimeGuard,
-            allocator: std.mem.Allocator,
-            generation: *modules.ModuleHome,
-            access: *const modules.ExecutionAccess,
-        ) error{OutOfMemory}!void {
-            const pins = &self.state.active;
-            for (pins.items) |pinned| if (pinned.matches(generation, access)) return;
-            var owned_pin = generation.pin(access);
-            errdefer owned_pin.deinit();
-            try pins.append(allocator, owned_pin);
-        }
-
-        /// Takes ownership of a pin acquired elsewhere -- the borrow at
-        /// dispatch. Deduplicates the same way `pin` does, releasing the
-        /// incoming reference when one is already held, so adopting is
-        /// idempotent per owner.
-        fn adopt(
-            self: *LifetimeGuard,
-            allocator: std.mem.Allocator,
-            owned: *modules.GenerationPin,
-        ) error{OutOfMemory}!void {
-            const pins = &self.state.active;
-            for (pins.items) |pinned| if (pinned.sameOwner(owned.*)) {
-                owned.deinit();
-                return;
-            };
-            errdefer owned.deinit();
-            try pins.append(allocator, owned.*);
-            owned.* = .consumed;
-        }
-
         fn rootScope(self: *LifetimeGuard) *env.Scope {
             std.debug.assert(self.state == .active);
             return &self.root_scope;
         }
 
-        fn advanceTeardown(
-            self: *LifetimeGuard,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-        ) bool {
+        fn advanceTeardown(self: *LifetimeGuard) bool {
             return switch (self.state) {
-                .active => |pins| result: {
-                    self.state = .{ .scope = .{
-                        .generation_pins = pins,
-                    } };
+                .active => result: {
+                    self.state = .{ .scope = .init(&self.root_scope) };
                     break :result false;
                 },
-                .scope => |*scope| result: {
-                    _ = releases;
-                    if (scope.cursor == null)
-                        scope.cursor = .init(&self.root_scope);
-                    if (!scope.cursor.?.advance()) break :result false;
-                    const pins = scope.generation_pins;
-                    self.state = .{ .pins = pins };
-                    break :result false;
-                },
-                .pins => |*pins| if (pins.pop()) |pin_value| result: {
-                    var owned_pin = pin_value;
-                    owned_pin.deinit();
-                    break :result false;
-                } else result: {
-                    pins.deinit(allocator);
+                .scope => |*cursor| result: {
+                    if (!cursor.advance()) break :result false;
                     self.state = .complete;
                     break :result true;
                 },
@@ -1673,12 +1605,8 @@ pub const Fiber = struct {
             };
         }
 
-        fn deinit(
-            self: *LifetimeGuard,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-        ) void {
-            while (!self.advanceTeardown(releases, allocator)) {}
+        fn deinit(self: *LifetimeGuard) void {
+            while (!self.advanceTeardown()) {}
             self.* = undefined;
         }
     };
@@ -1689,6 +1617,8 @@ pub const Fiber = struct {
     frames: std.ArrayList(Frame) = .empty,
     stack: std.ArrayList(Value),
     environment: *env.Env,
+    /// The way to the content of `environment`'s word cells.
+    cells: env.WordCells,
     inherited: InheritedContext,
     lifetime: LifetimeGuard,
     archive: *spans.SpanArchive,
@@ -1700,8 +1630,9 @@ pub const Fiber = struct {
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
-    /// What this fiber's code resolved its words to.
-    resolutions: WordResolutions = .{},
+    /// The stack summaries read for the source words this fiber's summaries
+    /// called.
+    bodies: stack_summary.Bodies = .{},
     /// The stack summaries read for the quotations this fiber applied.
     summaries: stack_summary.Cache = .{},
     /// What this fiber made of the code lists it ran.
@@ -1762,6 +1693,7 @@ pub const Fiber = struct {
             .module_access = module_access,
             .stack = stack,
             .environment = environment,
+            .cells = environment.wordCells(),
             .lifetime = .init(allocator, environment),
             .archive = archive,
             .inherited = inherited,
@@ -1812,7 +1744,7 @@ pub const Fiber = struct {
         return switch (self.root_entry) {
             .own => self.rootScope(),
             .scope => |scope| scope,
-            .image => |home| home.scope(self.module_access),
+            .module => |root| root.scope,
         };
     }
 
@@ -1993,9 +1925,9 @@ pub const Fiber = struct {
             self.native == .work_park_resume;
     }
     /// Scheduler-owned teardown of all user-sized fiber cargo. Each fiber
-    /// of budget retires at most one continuation, operand, native owner, or
-    /// generation pin. Array storage is released by `deinit` after this cursor
-    /// reports complete.
+    /// of budget retires at most one continuation, operand, or native owner.
+    /// Array storage is released by `deinit` after this cursor reports
+    /// complete.
     pub fn advanceSchedulerTeardown(self: *Fiber, budget: usize) CleanupProgress {
         std.debug.assert(budget != 0);
         var consumed: usize = 0;
@@ -2045,7 +1977,7 @@ pub const Fiber = struct {
                 },
                 .evaluating, .unwinding, .incomplete, .exit => {},
             }
-            if (!self.lifetime.advanceTeardown(self.releases, self.allocator)) {
+            if (!self.lifetime.advanceTeardown()) {
                 consumed += 1;
                 continue;
             }
@@ -2070,18 +2002,17 @@ pub const Fiber = struct {
     /// the body are still construction, so a body cannot launder a task launch
     /// through code it defines first.
     /// The names `words` lists from where this activation runs: a session
-    /// root's top-level directory, or a published image's.
+    /// root's top-level directory, or the directory of the running module's
+    /// current registration.
     pub fn visibleNameRoot(self: *Fiber) reflection.VisibleNameRoot {
-        const scope = self.currentScope();
-        if (scope.isModuleRoot()) if (modules.homeForModuleRootScope(scope)) |home| {
-            if (home.isPublished()) return .{ .image = .{
-                .entries = home.publishedEntries(),
-                .pin = home.pin(self.module_access),
-            } };
-            return .core;
+        return switch (self.currentScope().storage) {
+            .module_root => |module| {
+                const lease = self.inherited.registry.currentGeneration(module.name) orelse return .core;
+                return .{ .image = .{ .entries = lease.entries(), .lease = lease } };
+            },
+            .core_build => .core,
+            .session => .{ .session = self.inherited.registry.view() },
         };
-        if (scope.storage == .core_build) return .core;
-        return .{ .session = self.inherited.registry.view() };
     }
 
     /// The image under construction whose root is `scope`, found through the
@@ -2092,8 +2023,7 @@ pub const Fiber = struct {
             const boundary = &self.frames.items[@backingInt(frame_index)].boundary;
             switch (boundary.mode) {
                 .module => |*module| {
-                    if (module.image.executionHome(self.module_access).scope(self.module_access) == scope)
-                        return &module.image;
+                    if (module.image.root().scope == scope) return &module.image;
                 },
                 .attempt, .load => {},
             }
@@ -2109,9 +2039,6 @@ pub const Fiber = struct {
             index = boundary.previous_boundary;
         }
         return false;
-    }
-    pub fn pinGeneration(self: *Fiber, generation: *modules.ModuleHome) error{OutOfMemory}!void {
-        try self.lifetime.pin(self.allocator, generation, self.module_access);
     }
 
     /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
@@ -2171,7 +2098,7 @@ pub const Fiber = struct {
     }
 
     pub fn deinit(self: *Fiber) void {
-        self.resolutions.deinit(self.allocator, self.releases);
+        self.bodies.deinit(self.allocator);
         self.summaries.deinit(self.allocator, self.releases);
         if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
@@ -2198,7 +2125,7 @@ pub const Fiber = struct {
         // After every evaluation, frame, driver and failure that could hold a
         // flattened list's code.
         self.flattened.deinit(self.allocator, self.releases);
-        self.lifetime.deinit(self.releases, self.allocator);
+        self.lifetime.deinit();
         self.* = undefined;
     }
 
@@ -2278,29 +2205,34 @@ pub const Fiber = struct {
     pub fn currentScope(self: *const Fiber) *env.Scope {
         return self.current.?.scope();
     }
-    /// Links words written into `scope`, a root, to that root. An image's
-    /// cell carries its owner anchor, so a word that escapes the image proves
-    /// the image live before reading its directory.
-    pub fn rootLinker(self: *Fiber, scope: *env.Scope) error{OutOfMemory}!env.SymbolLinker {
-        return switch (scope.storage) {
-            .session => self.environment.linker(self.environment.sessionScopeId()),
-            .core_build => self.environment.linker(self.environment.coreScopeId()),
-            .module_root => self.environment.linker((try self.environment.scopeCell(
-                scope,
-                modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access),
-            )).id),
+    /// Links words written into `scope`, a root, by code of `provenance`. A
+    /// word written in a module's root refers to the module by name.
+    pub fn rootLinker(
+        self: *Fiber,
+        scope: *env.Scope,
+        provenance: modules.RegistrationProvenance,
+    ) env.SymbolLinker {
+        const root = switch (scope.storage) {
+            .session => self.environment.sessionScopeId(),
+            .core_build => self.environment.coreScopeId(),
+            .module_root => |module| module.id,
         };
+        return self.environment.linker(root, provenance.sourceId());
     }
-    /// The word `name` linked to its slot in the running activation's root, as
-    /// a word built at run time on that activation's behalf is.
+    /// The word `name` as the running activation would have written it: in
+    /// that activation's root, by its source.
     pub fn linkedWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = try self.rootLinker(self.currentScope());
+        const linker = self.rootLinker(self.currentScope(), self.current.?.site.registration_provenance);
         return .{ .name = name, .slot = try linker.link(name) };
     }
-    /// The word `name` linked to its core slot, as a word the implementation
-    /// builds for itself is: it means core's binding wherever it runs.
+    /// The word `name` linked to core as standard-library source, as a word
+    /// the implementation builds for itself is: it means core's binding
+    /// wherever it runs.
     pub fn coreWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = self.environment.linker(self.environment.coreScopeId());
+        const linker = self.environment.linker(
+            self.environment.coreScopeId(),
+            modules.RegistrationProvenance.sourceId(.standard_library),
+        );
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The root a definition, removal, or import writes. Refused inside a
@@ -2324,15 +2256,15 @@ pub const Fiber = struct {
             return null;
         return located.source_name;
     }
-    /// The module whose code is running, if the current root is an image.
-    pub fn currentHome(self: *const Fiber) ?*modules.ModuleHome {
-        return modules.homeForModuleRootScope(self.currentScope());
+    /// The module whose code is running, if the current root is a module's.
+    pub fn currentModule(self: *const Fiber) ?intern.ModuleName {
+        return self.currentScope().moduleName();
     }
     /// Begin publishing one first-class test into the candidate owned by the
     /// immediately enclosing module-construction boundary. Requiring that
     /// boundary to be the top frame distinguishes the construction body's
     /// direct root from quotations or child fibers that merely inherit its
-    /// scope and private home.
+    /// scope.
     pub fn testDeclarationCursor(
         self: *Fiber,
         name: intern.BindingName,
@@ -2350,8 +2282,7 @@ pub const Fiber = struct {
         const candidate = &frame.boundary.mode.module.image;
         if (self.current.?.code != frame.boundary.mode.module.root_code)
             return self.fail(.domain, "test is legal only at a direct module construction root");
-        const home = candidate.executionHome(self.module_access);
-        if (self.currentScope() != home.scope(self.module_access))
+        if (self.currentScope() != candidate.root().scope)
             return self.fail(.domain, "test is legal only at a direct module construction root");
         if (self.inherited.test_execution == null)
             return .discard();
@@ -2550,8 +2481,9 @@ pub const Fiber = struct {
     }
 
     /// A reflection primitive already consumed its symbol before discovering
-    /// a cold qualified module. Restore that operand and rewind the primitive
-    /// call, then use the same loader/retry protocol as executable dispatch.
+    /// a cold qualified module. Restore that operand, link included, and
+    /// rewind the primitive call, then use the same loader/retry protocol as
+    /// executable dispatch.
     pub fn retryQualifiedOperandAfterLoad(
         self: *Fiber,
         requested: value.Symbol,
@@ -2560,63 +2492,18 @@ pub const Fiber = struct {
         if (self.current == null)
             return self.undefinedNameIn(requested.name, .qualified);
         switch (outcome) {
-            .unknown_module_prefix => |prefix| {
-                try load.prepareQualified(
-                    .of(self),
-                    prefix,
-                    .{ .qualified = requested.name, .context = self.current.?.site.registration_provenance, .continuation = .replay },
-                    .{ .operand = requested },
-                );
-                return .detached;
-            },
-            .unregistered_module => |name| {
+            .unregistered_module => |module| {
                 try self.replayOperand(requested);
-                try self.autoLoadModule(name, .{
+                try self.autoLoadModule(module.name, .{
                     .qualified = requested.name,
-                    .context = self.current.?.site.registration_provenance,
+                    .context = module.searcher,
                     .continuation = .replay,
                 });
                 return .detached;
             },
             .unresolved => |chain| return self.undefinedNameIn(requested.name, chain),
-            .retired => return self.failUnbound(requested, .retired),
             .alias_cycle => return self.failUnbound(requested, .alias_cycle),
         }
-    }
-    /// A batch import consumes its module symbol and requested-name list before
-    /// discovering a cold module. Restore both operands, rewind the primitive,
-    /// and share the ordinary qualified-name auto-load/retry path.
-    pub fn retryImportAfterLoad(
-        self: *Fiber,
-        module_id: u32,
-        requested: Value,
-        module_name: intern.ModuleName,
-        requested_word: u32,
-    ) MachineError!WorkProgress {
-        if (self.current == null) {
-            self.releases.releaseValue(requested);
-            return self.undefinedNameIn(requested_word, .qualified);
-        }
-        try self.restoreImportOperands(module_id, requested);
-        self.current.?.rewind(self.active_index);
-        try self.autoLoadModule(module_name, .{
-            .qualified = requested_word,
-            .context = self.current.?.site.registration_provenance,
-            .continuation = .replay,
-        });
-        return .detached;
-    }
-    /// Consumes the requested-name list on both success and allocation
-    /// failure. Keeping the exact stack commit outside the driver-returning
-    /// retry function preserves the WorkProgress output boundary audited for
-    /// every driver.
-    fn restoreImportOperands(self: *Fiber, module_id: u32, requested: Value) error{OutOfMemory}!void {
-        var owned = heap.Owned(Value).init(requested);
-        defer owned.deinit(self.releases, self.allocator);
-        var reservation = try self.reserveStack(2);
-        reservation.pushBorrowed(.{ .symbol = .{ .name = module_id } });
-        reservation.pushOwned(owned.take());
-        std.debug.assert(reservation.complete());
     }
     /// A completed auto-load registers the module before resuming the tagged
     /// qualified operation. The requested spelling also identifies a
@@ -2634,8 +2521,8 @@ pub const Fiber = struct {
 
     /// Standard-library names are reserved, like `core`: only embedded loading
     /// registers them, so a stdlib name means the same module in every scope,
-    /// whether or not it has loaded. User registration, aliasing, and removal
-    /// under one are `'domain`.
+    /// whether or not it has loaded. User registration and removal under one
+    /// are `'domain`.
     pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
         if (provenance == .standard_library) return;
         if (self.inherited.libraries().find(name) == null) return;
@@ -2646,9 +2533,10 @@ pub const Fiber = struct {
         );
     }
 
-    /// A named module lookup as the running activation sees it.
-    pub fn moduleLookup(self: *Fiber, name: intern.ModuleName) ModuleLookupCursor {
-        return .init(self.inherited.registry, self.inherited.module_snapshot, self.inherited.libraries(), self.current.?.site.registration_provenance, name);
+    /// A named module lookup as the source that wrote `operand`, the symbol
+    /// that refers to the module, sees it.
+    pub fn moduleLookup(self: *Fiber, operand: value.Symbol, name: intern.ModuleName) ModuleLookupCursor {
+        return .init(self.inherited.registry, self.inherited.module_snapshot, self.inherited.libraries(), binder.sourceOf(self.environment, operand), name);
     }
 
     /// A mapped source file registers only the modules its artifact exports;
@@ -3478,8 +3366,7 @@ pub const Fiber = struct {
         word: intern.TraceWord,
         body_header: *Header,
     ) MachineError!void {
-        const home = candidate.executionHome(self.module_access);
-        const site = ExecutionSite.image(home, self.module_access, true);
+        const site = ExecutionSite.module(candidate.root(), true);
         const dropped = self.suspendCurrent() catch {
             self.releases.releaseHeader(body_header);
             return error.OutOfMemory;
@@ -3512,74 +3399,81 @@ pub const Fiber = struct {
         return .{
             .environment = self.environment,
             .view = view,
-            .module_access = self.module_access,
             .registry = self.inherited.registry,
             .project = self.inherited.module_snapshot,
             .libraries = self.inherited.libraries(),
-            .provenance = self.current.?.site.registration_provenance,
         };
     }
 
-    /// What a plain word resolves to now, for idiom recognition: the fiber's
-    /// remembered resolution when it has one, otherwise a fresh lookup that
-    /// is not remembered. Only a static definition outlives the lookup, and
-    /// recognition only ever declines, so anything else is simply not a
-    /// match.
-    pub fn peekWord(self: *Fiber, word: value.Symbol) ?PeekedWord {
-        if (binder.executableWord(.{ .symbol = word }) == null) return null;
-        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
-        return self.resolveFresh(word, false);
+    /// The cell of `word`: the one its link identifies, or, for a word the
+    /// implementation built for itself, the cell of its spelling written in
+    /// core by no source, which is the place such a word resolves in. So
+    /// every word that runs has a cell, and one rule answers for it.
+    fn cellOf(self: *Fiber, word: value.Symbol) error{OutOfMemory}!env.CellId {
+        return switch (env.wordTarget(word.slot)) {
+            .cell => |id| id,
+            .unlinked => @fromBackingInt(try self.environment.linker(
+                self.environment.coreScopeId(),
+                modules.RegistrationProvenance.sourceId(.ordinary),
+            ).link(word.name)),
+            .local => unreachable,
+        };
     }
 
-    /// `peekWord`, remembering what a fresh lookup resolves, so a word a
-    /// recognized phrase consumes instead of dispatching is looked up once
-    /// per publication rather than on every recognition.
-    pub fn resolveForRecognition(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
-        if (binder.executableWord(.{ .symbol = word }) == null) return null;
-        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
-        return try self.resolveFresh(word, true);
+    /// What `word` denotes now, for a reader that looks before the word
+    /// runs: what its cell answers, or, when the cell is empty, what one
+    /// resolution against the current view finds, which the registry is
+    /// asked to keep in the cell. The turn is what keeps the definition: it
+    /// is a reader of the directory that owns it.
+    pub inline fn denoted(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?*env.Definition {
+        if (env.isCell(word.slot)) if (self.cells.of(word.slot).definition.load(.seq_cst)) |definition| return definition;
+        return self.resolveDenoted(word);
     }
 
-    /// What a stack summary reads of one word of code running at `site`:
-    /// the word's resolution there, remembered like any dispatch of it, so
-    /// the definition stays held for as long as the remembered entry does. A
+    noinline fn resolveDenoted(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?*env.Definition {
+        const id = try self.cellOf(word);
+        const link = @backingInt(id);
+        if (self.cells.of(link).definition.load(.seq_cst)) |definition| return definition;
+        var context = self.resolutionContext(self.inherited.registry.view());
+        defer context.deinit();
+        var resolver = binder.Resolver.init(&context, .{ .name = word.name, .slot = link });
+        defer resolver.deinit();
+        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+            .resolved => |definition| definition,
+            .missed => return null,
+        };
+        self.inherited.registry.fillCell(&context.view, id, found);
+        return found;
+    }
+
+    /// What a word resolves to now, for idiom recognition.
+    pub fn peekWord(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
+        if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        const definition = try self.denoted(word) orelse return null;
+        const home = modules.definitionModule(definition);
+        return .{
+            .definition = definition,
+            .trace_word = definitionTraceWord(definition, home, word.name),
+            .origin = definitionOrigin(definition, home),
+        };
+    }
+
+    /// What a stack summary reads of one word of code running at `site`. A
     /// summary reads its words before the quotation runs, which may be while
     /// no evaluation is current.
     pub fn summaryTarget(self: *Fiber, word: value.Symbol, site: ExecutionSite) error{OutOfMemory}!SummaryTarget {
         if (binder.executableWord(.{ .symbol = word }) == null) return .none;
-        // Bootstrap remembers nothing, so nothing would hold the definition.
-        if (self.inherited.phase == .bootstrap) return .none;
-        const provenance = site.registration_provenance;
-        const key = WordResolutions.provenanceKey(provenance);
-        const definition = self.resolutions.find(word, self.inherited.registry.currentPublication(), key) orelse fresh: {
-            var context: binder.Context = .{
-                .environment = self.environment,
-                .view = self.inherited.registry.view(),
-                .module_access = self.module_access,
-                .registry = self.inherited.registry,
-                .project = self.inherited.module_snapshot,
-                .libraries = self.inherited.libraries(),
-                .provenance = provenance,
-            };
-            defer context.deinit();
-            var resolver = binder.Resolver.init(&context, word);
-            defer resolver.deinit();
-            const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
-                .resolved => |resolved| resolved,
-                .missed => return .none,
-            };
-            try self.rememberResolution(word, context.view.publication, provenance, found);
-            // A publication since the lookup began means the entry is not
-            // under the current one, and nothing here holds the definition.
-            if (self.resolutions.find(word, self.inherited.registry.currentPublication(), key) != found) return .none;
-            break :fresh found;
-        };
+        const definition = try self.denoted(word) orelse return .none;
+        // Asked after the cell is read: a summary made of words read on both
+        // sides of a store would be kept under a counter value that outlasts
+        // the store. A walk that began earlier fails its own closing check.
+        if (self.inherited.registry.publishing()) return .none;
         // A call that crosses into a module checks the word's declared
         // effect, and that check's failure reports the depth it found: only
         // the call itself can say that.
-        const home = modules.definitionHome(definition);
+        const home = modules.definitionModule(definition);
         if (home) |target| {
-            const crosses = target.scope(self.module_access) != site.scope;
+            const crosses = target.scope != site.scope;
             if (crosses and definitionOrigin(definition, home) != .standard_library) return .none;
         }
         return switch (definition.code()) {
@@ -3588,66 +3482,17 @@ pub const Fiber = struct {
             .source => |executable| .{ .source = .{
                 .definition = definition,
                 .code = executable.code(),
-                .site = if (home) |target| .image(target, self.module_access, site.defining) else site,
-                .summary = self.resolutions.summary(word, self.inherited.registry.currentPublication(), key),
+                .site = if (home) |target| .module(target, site.defining) else site,
                 .trace_word = definitionTraceWord(definition, home, word.name),
                 .attribution = definition.attribution,
             } },
         };
     }
 
-    /// Records the summary of `word`'s body as resolved at `site`.
-    pub fn recordSummary(
-        self: *Fiber,
-        word: value.Symbol,
-        site: ExecutionSite,
-        definition: *const env.Definition,
-        summary: WordResolutions.BodySummary,
-    ) void {
-        self.resolutions.setSummary(
-            word,
-            self.inherited.registry.currentPublication(),
-            WordResolutions.provenanceKey(site.registration_provenance),
-            definition,
-            summary,
-        );
-    }
-
     /// The publication a summary's resolutions were all read under, when it
     /// is still the current one at the end of the walk.
     pub fn currentPublication(self: *const Fiber) u64 {
         return self.inherited.registry.currentPublication();
-    }
-
-    /// Resolves `word` against the current view in one call, remembering the
-    /// result when `remember` is set. The definition is inspected before the
-    /// lookup's lease is released, since a concurrent replacement may retire
-    /// a counted definition afterwards.
-    fn resolveFresh(
-        self: *Fiber,
-        word: value.Symbol,
-        comptime remember: bool,
-    ) if (remember) error{OutOfMemory}!?PeekedWord else ?PeekedWord {
-        var context = self.resolutionContext(self.inherited.registry.view());
-        defer context.deinit();
-        var resolver = binder.Resolver.init(&context, word);
-        defer resolver.deinit();
-        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
-            .resolved => |definition| definition,
-            .missed => return null,
-        };
-        if (remember) try self.rememberResolution(word, context.view.publication, context.provenance, found);
-        return peeked(found, word);
-    }
-
-    fn peeked(definition: *env.Definition, word: value.Symbol) ?PeekedWord {
-        if (definition.lifetime != .static) return null;
-        const home = modules.definitionHome(definition);
-        return .{
-            .definition = definition,
-            .trace_word = definitionTraceWord(definition, home, word.name),
-            .origin = definitionOrigin(definition, home),
-        };
     }
 
     /// The plan of the finite iteration applying the running code, when that
@@ -3781,47 +3626,32 @@ pub const Fiber = struct {
         return .{ .code = origin.code, .index = origin.index };
     }
 
-    /// Runs an occurrence by explicit lookup, against the current publication
-    /// view: incremental top-level source, `execute`, and a word resumed after
-    /// loading. `dispatch` pushes a quoted occurrence instead, and `execute`
-    /// strips the quote before calling here.
+    /// Runs an occurrence: by what its cell answers, or, when the cell is
+    /// empty, by a lookup against the current publication view, in bounded
+    /// steps, that may load a module. `dispatch` pushes a quoted occurrence
+    /// instead, and `execute` strips the quote before calling here.
     pub fn executeWord(self: *Fiber, word: value.Symbol) MachineError!void {
         std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
-        if (self.reusedResolution(word)) |definition| return invokeDefinition(self, definition, word.name);
+        if (env.isCell(word.slot)) if (self.cells.of(word.slot).definition.load(.seq_cst)) |definition|
+            return invokeDefinition(self, definition, word.name);
+        return self.executeUnfilled(word);
+    }
+
+    /// Runs a word whose cell is empty, or that has no link: by its cell if
+    /// that is filled by now, and otherwise by a lookup.
+    noinline fn executeUnfilled(self: *Fiber, word: value.Symbol) MachineError!void {
+        const linked: value.Symbol = .{ .name = word.name, .slot = @backingInt(try self.cellOf(word)) };
+        if (self.cells.of(linked.slot).definition.load(.seq_cst)) |definition|
+            return invokeDefinition(self, definition, word.name);
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
         try self.startDriver(LookupDispatchDriver{
-            .word = word,
+            .word = linked,
             .site = site,
             .context = .init(self.resolutionContext(self.inherited.registry.view())),
             .resolver = .none,
         });
-    }
-
-    /// What this fiber last resolved `word` to, if no publication has
-    /// happened since. Bootstrap resolves every word afresh, since core's
-    /// directory changes without a publication.
-    inline fn reusedResolution(self: *Fiber, word: value.Symbol) ?*env.Definition {
-        if (self.inherited.phase == .bootstrap) return null;
-        return self.resolutions.find(
-            word,
-            self.inherited.registry.currentPublication(),
-            WordResolutions.provenanceKey(self.current.?.site.registration_provenance),
-        );
-    }
-
-    /// Records what an explicit lookup resolved `word` to.
-    fn rememberResolution(self: *Fiber, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance, definition: *env.Definition) error{OutOfMemory}!void {
-        if (self.inherited.phase == .bootstrap) return;
-        return self.resolutions.remember(
-            self.allocator,
-            self.releases,
-            word,
-            publication,
-            WordResolutions.provenanceKey(provenance),
-            definition,
-        );
     }
 
     /// The failure for a word that did not bind and will not after a load.
@@ -3829,7 +3659,6 @@ pub const Fiber = struct {
         self.active_word = .plain(word.name);
         return switch (miss) {
             .unresolved => |chain| self.undefinedWordIn(word.name, chain),
-            .retired => self.failRetiredWord(word.name),
             .alias_cycle => self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)}),
         };
     }
@@ -3843,23 +3672,14 @@ pub const Fiber = struct {
         continuation: load.QualifiedLoadContinuation,
     ) MachineError!void {
         self.active_word = .plain(word.name);
-        const request = load.QualifiedLoadRequest{
-            .qualified = word.name,
-            .context = self.current.?.site.registration_provenance,
-            .continuation = continuation,
-        };
         switch (miss) {
-            .unknown_module_prefix => |prefix| try load.prepareQualified(.of(self), prefix, request, .none),
-            .unregistered_module => |name| try self.autoLoadModule(name, request),
+            .unregistered_module => |module| try self.autoLoadModule(
+                module.name,
+                .{ .qualified = word.name, .context = module.searcher, .continuation = continuation },
+            ),
             .unresolved => |chain| return self.failUnbound(word, .{ .unresolved = chain }),
-            .retired => return self.failUnbound(word, .retired),
             .alias_cycle => return self.failUnbound(word, .alias_cycle),
         }
-    }
-
-    fn failRetiredWord(self: *Fiber, name: u32) MachineError {
-        self.active_word = .plain(name);
-        return self.fail(.domain, "the scope this word was written in has retired");
     }
 
     pub fn raiseOwned(self: *Fiber, raised: Value) MachineError {
@@ -3997,14 +3817,12 @@ pub const Fiber = struct {
             .activation = .none,
         };
     }
-    fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite, trace_parent: ?intern.TraceWord, provenance: modules.RegistrationProvenance) error{OutOfMemory}!void {
+    fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite, trace_parent: ?intern.TraceWord) error{OutOfMemory}!void {
         self.active_word = .plain(word.name);
-        var context = self.resolutionContext(self.inherited.registry.view());
-        context.provenance = provenance;
         try self.startDriver(LookupDispatchDriver{
             .word = word,
             .site = site,
-            .context = .init(context),
+            .context = .init(self.resolutionContext(self.inherited.registry.view())),
             .resolver = .none,
         });
         if (site) |at| self.setWorkDriverSite(at.code, at.index);
@@ -4030,17 +3848,7 @@ pub const Fiber = struct {
             );
         }
         self.active_word = frame.word;
-        const built = &frame.mode.module.image;
-        const home = built.executionHome(self.module_access);
-        const placeholder = try list.fromValuesGeneric(self.allocator, &.{});
-        self.current = .{
-            .code = placeholder.list,
-            .program = .owned,
-            .position = .{ .source = 0 },
-            .site = .image(home, self.module_access, false),
-            .activation = .none,
-        };
-        return built;
+        return &frame.mode.module.image;
     }
     fn closeModuleBoundary(self: *Fiber) modules.OwnedImage {
         releaseCurrent(self);
@@ -4261,6 +4069,10 @@ pub fn runSlice(fiber: *Fiber) MachineError!RunStatus {
     // the previous one already polled cancellation, and a driver's step polls
     // before it draws.
     fiber.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
+    // The turn is a reader of the registry's directories: a definition this
+    // turn reads from one stays valid until the turn ends, replaced or not.
+    const turn = fiber.inherited.registry.enterTurn();
+    defer turn.deinit();
     const status = loop(fiber) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
@@ -4437,14 +4249,19 @@ fn loop(self: *Fiber) MachineError!RunStatus {
         self.active_index = index;
         if (comptime root_execution_metrics_enabled)
             self.root_execution_metrics.logical_transitions += 1;
-        // A word this fiber has resolved in the current publication runs
-        // directly; a quoted or lowered occurrence is a form, as is
-        // everything else, and an unresolved word resolves when dispatched.
+        // A word whose cell is filled runs what the cell answers; a quoted
+        // or lowered occurrence is a form, as is everything else, and a word
+        // with an empty cell or none resolves when dispatched. The turn
+        // keeps the definition read here alive until what runs holds it.
         const dispatched = resolved: {
             const form = formAt(current.code, index);
-            if (form == .symbol and form.symbol.slot & (env.quote_flag | env.local_operand_flag) == 0)
-                if (self.reusedResolution(form.symbol)) |definition|
+            if (form == .symbol and env.isCell(form.symbol.slot)) {
+                const cell = self.cells.of(form.symbol.slot);
+                if (cell.primitive.load(.seq_cst)) |primitive|
+                    break :resolved invokeBuiltin(self, .plain(form.symbol.name), primitive);
+                if (cell.definition.load(.seq_cst)) |definition|
                     break :resolved invokeDefinition(self, definition, form.symbol.name);
+            }
             break :resolved dispatch(self, form);
         };
         dispatched catch |err| switch (err) {
@@ -4616,7 +4433,8 @@ fn invokeBuiltin(self: *Fiber, trace_word: intern.TraceWord, primitive: env.Prim
         return self.installPrimitiveFailure(failure_value);
     }
 }
-/// Resolves one word against the current view and invokes what it finds.
+/// Resolves one word that has a cell against the current view, in bounded
+/// steps, and invokes what it finds.
 const LookupDispatchDriver = struct {
     word: value.Symbol,
     site: ?ErrorSite,
@@ -4644,10 +4462,9 @@ const LookupDispatchDriver = struct {
                         const counted = definition.lifetime == .counted;
                         if (counted) definition.retain();
                         defer if (counted) definition.release(fiber.releases);
-                        try fiber.rememberResolution(
-                            word,
-                            self.context.borrow().view.publication,
-                            self.context.borrow().provenance,
+                        fiber.inherited.registry.fillCell(
+                            &self.context.borrow().view,
+                            env.wordTarget(word.slot).cell,
                             definition,
                         );
                         const site = self.site;
@@ -4700,17 +4517,14 @@ pub const ExplicitLookup = struct {
 pub const Reflected = struct {
     definition: *env.Definition,
     trace_word: intern.TraceWord,
-    home: ?*modules.ModuleHome,
     releases: *heap.ReleaseDomain,
 
     /// Holds a definition the lookup's view kept alive.
     pub fn hold(fiber: *Fiber, definition: *env.Definition, name: u32) Reflected {
         if (definition.lifetime == .counted) definition.retain();
-        const home = modules.definitionHome(definition);
         return .{
             .definition = definition,
-            .trace_word = definitionTraceWord(definition, home, name),
-            .home = home,
+            .trace_word = definitionTraceWord(definition, modules.definitionModule(definition), name),
             .releases = fiber.releases,
         };
     }
@@ -4731,9 +4545,8 @@ pub const SummaryTarget = union(enum) {
     source: struct {
         definition: *const env.Definition,
         code: *Header,
-        /// Where the body runs: the caller's site, or the word's own image.
+        /// Where the body runs: the caller's site, or the word's own module.
         site: ExecutionSite,
-        summary: WordResolutions.BodySummary,
         /// What an activation of the word is traced under, and whose
         /// failure a failure in it is.
         trace_word: intern.TraceWord,
@@ -4749,18 +4562,22 @@ pub const PeekedWord = struct {
 
 const ResolutionOrigin = enum { direct, module, standard_library, core };
 
-fn definitionOrigin(definition: *const env.Definition, home: ?*const modules.ModuleHome) ResolutionOrigin {
-    if (home) |owner| return moduleResolutionOrigin(owner);
+fn definitionOrigin(definition: *const env.Definition, home: ?modules.ModuleRoot) ResolutionOrigin {
+    if (home) |owner| return switch (owner.provenance) {
+        .standard_library => .standard_library,
+        .ordinary, .root_scope, .source => .module,
+    };
     return switch (definition.root) {
         .core => .core,
-        .session, .image => .direct,
+        .session, .module => .direct,
     };
 }
 
-/// How a trace identifies a called definition: a module-local one by its home's spelling,
-/// anything else by the name the call used.
-fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.ModuleHome, name: u32) intern.TraceWord {
-    if (home) |owner| if (definition.traceWord()) |local| return homeTraceWord(owner, local);
+/// How a trace identifies a called definition: a module-local one by its
+/// module's name, during construction as well as after, and anything else by
+/// the name the call used.
+fn definitionTraceWord(definition: *const env.Definition, home: ?modules.ModuleRoot, name: u32) intern.TraceWord {
+    if (home) |owner| if (definition.traceWord()) |local| return .moduleLocal(owner.name(), local);
     return .plain(name);
 }
 
@@ -4769,18 +4586,18 @@ fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.
 /// word's: its effects are reflective metadata, and its arity failures are
 /// those of the code it runs.
 fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) MachineError!void {
-    // A homeless builtin has no effect boundary: the common case, run
+    // A builtin of no module has no effect boundary: the common case, run
     // directly.
-    if (definition.home == null) switch (definition.code()) {
+    const home = modules.definitionModule(definition);
+    if (home == null) switch (definition.code()) {
         .builtin => |primitive| return invokeBuiltin(self, .plain(name), primitive),
         else => {},
     };
-    const home = modules.definitionHome(definition);
     const trace_word = definitionTraceWord(definition, home, name);
     self.active_word = trace_word;
     const origin = definitionOrigin(definition, home);
     const cross_home = if (home) |target|
-        target.scope(self.module_access) != self.current.?.scope()
+        target.scope != self.current.?.scope()
     else
         false;
     const checked = cross_home and origin != .standard_library;
@@ -4802,20 +4619,6 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
             try native_call.begin(self, callable);
         },
     }
-}
-
-fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
-    return switch (home.registrationProvenance()) {
-        .ordinary => .module,
-        .standard_library => .standard_library,
-        .root_scope, .source => .module,
-    };
-}
-
-/// How a module-local definition is spelled when reached through `home`: by
-/// the name the image was built for, during construction as well as after.
-fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) intern.TraceWord {
-    return .moduleLocal(home.name(), local);
 }
 
 pub const LookupChain = enum {
@@ -4848,14 +4651,14 @@ fn scheduleWord(
     self: *Fiber,
     executable: *const env.Executable,
     word: EnteredWord,
-    resolved_home: ?*modules.ModuleHome,
+    resolved_home: ?modules.ModuleRoot,
     effect: ?env.Effect,
 ) MachineError!void {
-    // A module word runs as its image; any other word runs at its caller's
+    // A module word runs as its module; any other word runs at its caller's
     // site. Either way it defines where its caller could, and no further.
     const caller = self.current.?.site;
     const site: ExecutionSite = if (resolved_home) |home|
-        .image(home, self.module_access, caller.defining)
+        .module(home, caller.defining)
     else
         caller;
     const check = if (effect != null) try prepareEffectCheck(self, effect, word.word) else null;
@@ -4867,9 +4670,8 @@ fn scheduleWord(
 /// hold the callee's last reference.
 fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
-    // Held before anything else resolves a word: the fiber's resolution of
-    // this word may be all that keeps its definition, and looking at the
-    // body resolves the body's words, which can let that resolution go.
+    // Held before the turn can end: a definition read from a word's cell
+    // is kept by the turn alone, and the evaluation outlives the turn.
     executable.owner().retain();
     var entered = false;
     defer if (!entered) executable.owner().release(self.releases);
@@ -5099,8 +4901,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
         },
         .boundary => {
             if (self.frames.items[self.frames.items.len - 1].boundary.mode == .module) {
-                // The image stays in its frame until it is sealed: binding the
-                // group may load modules, which run above the frame.
+                // The image stays in its frame until it is sealed.
                 try module_construction.startSeal(.of(self));
                 return true;
             }
@@ -5277,15 +5078,13 @@ pub const Construction = opaque {
 
     /// Begins sealing the module whose construction boundary is the top
     /// frame. A module body defines words and keeps no state, so a residual
-    /// operand window closes the boundary and fails. Otherwise a placeholder
-    /// evaluation at the image's site becomes the caller that a module load
-    /// during the seal suspends and returns to.
+    /// operand window closes the boundary and fails.
     pub fn beginSeal(self: *Construction) MachineError!*modules.OwnedImage {
         return self.fiber().beginModuleSeal();
     }
 
-    /// Closes the construction boundary once its group is bound, and returns
-    /// the image it held.
+    /// Closes the construction boundary once its directory is built, and
+    /// returns the image it held.
     pub fn closeBoundary(self: *Construction) modules.OwnedImage {
         return self.fiber().closeModuleBoundary();
     }

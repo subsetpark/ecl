@@ -113,16 +113,6 @@ pub fn loadSource(via: *Loading, source: *const map_state.SourceScope) MachineEr
     });
 }
 
-/// Interns a qualified miss's unknown module prefix, then loads that module.
-pub fn prepareQualified(
-    via: *Loading,
-    prefix: []const u8,
-    request: QualifiedLoadRequest,
-    restore: QualifiedLoadPreparationDriver.Restore,
-) error{OutOfMemory}!void {
-    return via.startDriver(QualifiedLoadPreparationDriver.init(prefix, request, restore));
-}
-
 /// Parses `source` and pushes its forms as one list. Consumes `source` on
 /// success and failure.
 pub fn parseSource(via: *Loading, source: []u8) MachineError!void {
@@ -171,8 +161,8 @@ pub fn verifyAfterLoad(via: *Loading, after: AfterLoad) MachineError!bool {
         }
         break :name names[0];
     } else after.request.module.name;
-    // The lease stays held through verification: imports deferred onto this
-    // load are checked before it releases.
+    // The lease stays held through verification: an artifact commits only
+    // once every module it declares is found registered.
     try via.startDriver(QualifiedRegistrationDriver{
         .path = .init(path.take()),
         .acquisition = .init(fiber.inherited.registry.acquireCursor(first_name)),
@@ -884,7 +874,12 @@ const AutoLoadDriver = struct {
         // The candidate is created before ownership moves: struct-literal
         // fields evaluate in order, so a failure here would otherwise
         // strand the lease and path this driver had already taken.
-        const publication = try modules.Registry.BuiltinCandidateCursor.init(fiber.inherited.registry, self.request.module.name, .standard_library, module);
+        const publication = try modules.Registry.BuiltinCandidateCursor.init(
+            fiber.inherited.registry,
+            try fiber.environment.moduleScope(self.request.module.name),
+            .standard_library,
+            module,
+        );
         // No errdefer: from here nothing fails until `startDriver`, which
         // disposes the whole uninstalled driver's owned fields itself.
         const next = BuiltinLoadDriver{
@@ -985,7 +980,7 @@ const BuiltinLoadDriver = struct {
                     defer built.deinit();
                     const sealed = built.sealLiteralGroup() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.Duplicate, error.UnboundWord => return fiber.fail(
+                        error.Duplicate => return fiber.fail(
                             .contract,
                             "builtin module declares an invalid word",
                         ),
@@ -1086,7 +1081,7 @@ const NativeLoadDriver = struct {
             .loaded => |*instance| {
                 const publication = try modules.Registry.NativeCandidateCursor.init(
                     fiber.inherited.registry,
-                    self.name,
+                    try fiber.environment.moduleScope(self.name),
                     self.provenance,
                     instance.borrow(),
                 );
@@ -1096,7 +1091,10 @@ const NativeLoadDriver = struct {
                 } };
                 return .stepped;
             },
-            .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
+            .definitions => |*definitions| switch (definitions.publication.borrowMut().advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnboundWord => return self.failLoad(via, "native module declares an invalid word"),
+            }) {
                 .pending => return .stepped,
                 .complete => |candidate| {
                     // Sealing can fail; until it succeeds the instance and
@@ -1105,7 +1103,7 @@ const NativeLoadDriver = struct {
                     defer built.deinit();
                     const sealed = built.sealLiteralGroup() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.Duplicate, error.UnboundWord => return self.failLoad(via, "native module declares an invalid word"),
+                        error.Duplicate => return self.failLoad(via, "native module declares an invalid word"),
                     };
                     // Shadowing in a shipped module is deliberate.
                     if (self.provenance != .standard_library) {
@@ -1251,9 +1249,24 @@ const SourceDriver = struct {
             self.text.borrow().sourceName(),
             self.text.borrow().source(),
             &self.diag,
-            try fiber.rootLinker(fiber.lexicalScope()),
+            fiber.rootLinker(fiber.lexicalScope(), self.sourceProvenance(fiber)),
         );
         self.state = .{ .ingesting = ingestion };
+    }
+
+    /// The provenance of the source being read: what its words are written
+    /// by, and what its code registers under once it runs. Text read as
+    /// data, and a session unit outside any mapped file, are written by the
+    /// code that reads them.
+    fn sourceProvenance(self: *const SourceDriver, fiber: *machine.Fiber) modules.RegistrationProvenance {
+        const mapped: ?*const map_state.SourceScope = switch (self.completion.borrow()) {
+            .push => return fiber.current.?.site.registration_provenance,
+            .register => |register| return register.provenance,
+            .session => |source| source orelse return fiber.current.?.site.applied().registration_provenance,
+            .call => |source| source,
+            .load => |load| load.source,
+        };
+        return if (mapped) |source| .{ .source = source } else .ordinary;
     }
 
     /// Activates a source that fits its first slice before observing cancellation.
@@ -1323,21 +1336,14 @@ const SourceDriver = struct {
                 switch (self.completion.borrowMut().*) {
                     .push => try fiber.pushBorrowed(.{ .list = root_header }),
                     .load => |load| {
-                        const provenance: modules.RegistrationProvenance = if (load.source) |context|
-                            .{ .source = context }
-                        else
-                            .ordinary;
                         heap.incRef(root_header);
-                        try via.openLoad(root_header, load.word, provenance);
+                        try via.openLoad(root_header, load.word, self.sourceProvenance(fiber));
                     },
-                    .call, .session => |source| {
+                    .call, .session => {
+                        const provenance = self.sourceProvenance(fiber);
                         heap.incRef(root_header);
                         try fiber.callProgramOwned(root_header, .owned);
-                        if (source) |context| {
-                            fiber.current.?.site.registration_provenance = .{ .source = context };
-                        } else if (self.completion.borrow() == .call) {
-                            fiber.current.?.site.registration_provenance = .ordinary;
-                        }
+                        fiber.current.?.site.registration_provenance = provenance;
                     },
                     .register => |*register| {
                         heap.incRef(root_header);
@@ -1607,64 +1613,6 @@ const FileSourceDriver = struct {
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-/// Resumable boundary between a qualified miss and module loading. A prefix
-/// absent from the intern table is external, runtime-sized input; preserving
-/// this cursor as its own driver keeps both insertion and module-name
-/// validation inside scheduler safe points.
-const QualifiedLoadPreparationDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-
-    const Restore = union(enum) {
-        none,
-        operand: value.Symbol,
-    };
-
-    cursor: intern.InternModuleNameCursor,
-    request: QualifiedLoadRequest,
-    restore: Restore,
-
-    fn init(
-        prefix: []const u8,
-        request: QualifiedLoadRequest,
-        restore: Restore,
-    ) QualifiedLoadPreparationDriver {
-        return .{
-            .cursor = intern.internModuleNameCursor(prefix),
-            .request = request,
-            .restore = restore,
-        };
-    }
-
-    pub fn advance(
-        via: *Loading,
-        self: *QualifiedLoadPreparationDriver,
-    ) MachineError!WorkProgress {
-        const fiber = via.fiber();
-        const work = fiber.workBudget();
-        while (work.spend()) switch (try self.cursor.advance()) {
-            .pending => {},
-            .complete => |maybe_name| {
-                const name = maybe_name orelse return switch (self.restore) {
-                    .none => fiber.undefinedWordIn(self.request.qualified, .qualified),
-                    .operand => fiber.undefinedNameIn(self.request.qualified, .qualified),
-                };
-                const request = self.request;
-                const restore = self.restore;
-                switch (restore) {
-                    .none => {},
-                    .operand => |requested| {
-                        try via.replayOperand(requested);
-                    },
-                }
-                fiber.retireDriver(self);
-                try autoLoadModule(via, name, request);
-                return .detached;
-            },
-        };
-        return .stepped;
-    }
-};
-
 /// After an auto-load, the requested module must actually be registered.
 /// Checking that is what bounds the operation: a source that registered
 /// nothing, or a different name, fails once here instead of starting another
@@ -1690,7 +1638,6 @@ fn continueQualifiedRequest(
                 dispatch_request.word,
                 dispatch_request.site,
                 dispatch_request.trace_parent,
-                request.context,
             );
             break :continuation .detached;
         },
@@ -1718,9 +1665,8 @@ fn verifyPublishedModule(
     return .detached;
 }
 
-/// Verifies what a completed load registered before releasing its lease:
-/// every module the load was expected to register, then every import a
-/// module body deferred onto this load. An artifact commits only after both.
+/// Verifies that a completed load registered every module it was expected
+/// to before releasing its lease. An artifact commits only after that.
 const QualifiedRegistrationDriver = struct {
     path: heap.Owned(Value),
     acquisition: heap.Owned(modules.Registry.AcquireCursor),
@@ -1728,36 +1674,9 @@ const QualifiedRegistrationDriver = struct {
     loading: ?heap.Owned(modules.LoadingLease) = null,
     artifact: ?map_state.ArtifactId = null,
     module_index: usize = 0,
-    /// The active name lookup of the `.resolving` phase. It is a direct field,
-    /// not a phase payload, so cancelling the driver releases its pin.
-    resolving_cursor: ?heap.Owned(modules.ModuleNameLookupCursor) = null,
-    phase: union(enum) {
-        declared,
-        /// The index of the deferred import whose module is being acquired.
-        deferred: usize,
-        /// The deferred import whose name is being looked up.
-        resolving: usize,
-    } = .declared,
 
     pub fn advance(via: *Loading, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
-        switch (self.phase) {
-            .declared => {},
-            .deferred => |index| return self.acquireDeferred(via, index),
-            .resolving => |index| {
-                const cursor = if (self.resolving_cursor) |*owned| owned else unreachable;
-                switch (cursor.borrowMut().advance()) {
-                    .pending => return .stepped,
-                    .complete => |maybe_entry| {
-                        const public = if (maybe_entry) |entry| modules.entryIsPublic(entry) else false;
-                        cursor.deinit(fiber.releases, fiber.allocator);
-                        self.resolving_cursor = null;
-                        if (!public) return self.failDeferred(via, index);
-                        return self.nextDeferred(via, index + 1);
-                    },
-                }
-            },
-        }
         switch (self.acquisition.borrowMut().advance()) {
             .pending => return .stepped,
             .complete => |maybe_generation| {
@@ -1808,50 +1727,9 @@ const QualifiedRegistrationDriver = struct {
                         return .stepped;
                     }
                 }
-                return self.nextDeferred(via, 0);
+                return self.complete(via);
             },
         }
-    }
-
-    fn deferredImports(self: *const QualifiedRegistrationDriver) []const modules.DeferredImport {
-        const loading = if (self.loading) |*owned| owned.borrow() else return &.{};
-        return loading.deferredImports();
-    }
-
-    /// A deferred target is always a module this load registers, so it is
-    /// read from the main registry directly: the importer's own lookup would
-    /// not see an artifact that has yet to commit.
-    fn nextDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError!WorkProgress {
-        const fiber = via.fiber();
-        const deferred = self.deferredImports();
-        if (index == deferred.len) return self.complete(via);
-        self.acquisition.deinit(fiber.releases, fiber.allocator);
-        self.acquisition = .init(fiber.inherited.registry.acquireCursor(deferred[index].module));
-        self.phase = .{ .deferred = index };
-        return .stepped;
-    }
-
-    fn acquireDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError!WorkProgress {
-        switch (self.acquisition.borrowMut().advance()) {
-            .pending => return .stepped,
-            .complete => |maybe_generation| {
-                var lease = maybe_generation orelse return self.failDeferred(via, index);
-                defer lease.deinit();
-                const binding = self.deferredImports()[index].binding;
-                self.resolving_cursor = .init(lease.lookupCursor(binding));
-                self.phase = .{ .resolving = index };
-                return .stepped;
-            },
-        }
-    }
-
-    fn failDeferred(self: *QualifiedRegistrationDriver, via: *Loading, index: usize) MachineError {
-        const fiber = via.fiber();
-        const deferred = self.deferredImports()[index];
-        const failure = fiber.undefinedNameIn(deferred.qualified, .qualified);
-        via.addErrorImporter(deferred.importer);
-        fiber.addErrorPath(self.path.borrow());
-        return failure;
     }
 
     fn complete(self: *QualifiedRegistrationDriver, via: *Loading) MachineError!WorkProgress {

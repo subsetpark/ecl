@@ -171,7 +171,7 @@ test "module names: intern and validation share one resumable cursor" {
     try std.testing.expectEqualStrings(spelling, intern.get(intern.moduleId(name)));
 }
 
-test "module: an unknown long module prefix remains cancellable while it is interned" {
+test "module names: a long qualified spelling is decided in bounded steps as it is interned" {
     const allocator = std.testing.allocator;
     const prefix = try allocator.alloc(u8, 70_000);
     defer allocator.free(prefix);
@@ -182,38 +182,40 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     defer allocator.free(qualified_bytes);
     @memcpy(qualified_bytes[0..prefix.len], prefix);
     @memcpy(qualified_bytes[prefix.len..], ".missing");
-    const qualified = try intern.intern(qualified_bytes);
 
-    // Load task operations before the timed scenario. Cooperative FIFO
-    // scheduling alternates the two tasks' slices. The target resolves the
-    // long qualified word across its first slices and advances one prefix-
-    // interning slice before yielding part-way through name validation. The
-    // canceller first spends one dispatch-fuel quantum and a half on empty
-    // iterations, which costs it one extra slice, so its cancellation request
-    // lands after that interning slice and before the target's next one.
-    // Measured window: delays from one to two quanta cancel mid-interning;
-    // three let the target finish.
-    const source =
-        "(execute) cons @spawn dup `target set " ++
-        "(1536 () times task.cancel) cons @spawn task.await pop target task.await";
-
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
-    defer runtime.deinit();
-    try expectOk(&runtime, "task.pending pop");
-    try runtime.pushOwned(.{ .symbol = .{ .name = qualified } });
-    try expectOk(&runtime, source);
-
-    var lookup = intern.lookupCursor(prefix);
-    const interned = while (true) switch (lookup.advance()) {
-        .pending => {},
-        .complete => |found| break found,
+    var cursor = intern.insertionCursor(qualified_bytes);
+    var pending: usize = 0;
+    const qualified = while (true) switch (try cursor.advance()) {
+        .pending => pending += 1,
+        .complete => |id| break id,
     };
-    var rendered = try runtime.stackDisplay();
-    defer rendered.deinit();
-    try std.testing.expect(interned != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "kind cancelled") != null);
+    // Every pass over the spelling is taken in steps: finding it, storing
+    // it, and deciding its module part.
+    try std.testing.expect(pending > 3 * 256);
+    const parts = intern.spelling(qualified).qualified;
+    try std.testing.expectEqualStrings(prefix, intern.get(intern.moduleId(parts.module)));
+    try std.testing.expectEqualStrings("missing", intern.get(intern.bindingId(parts.binding)));
+    try std.testing.expectEqual(intern.Spelling.plain, intern.spelling(intern.moduleId(parts.module)));
+}
+
+test "module names: a spelling is one kind of word, and so is each of its parts" {
+    try std.testing.expectEqual(intern.Spelling.plain, intern.spelling(try intern.intern("spelled-plain")));
+    try std.testing.expectEqualStrings(
+        "spelled-core",
+        intern.get(intern.bindingId(intern.spelling(try intern.intern("core.spelled-core")).core)),
+    );
+    const nested = intern.spelling(try intern.intern("spelled.a.b.word")).qualified;
+    try std.testing.expectEqualStrings("spelled.a.b", intern.get(intern.moduleId(nested.module)));
+    try std.testing.expectEqualStrings("word", intern.get(intern.bindingId(nested.binding)));
+    // The module part is a spelling too, decided before the whole.
+    const outer = intern.spelling(intern.moduleId(nested.module)).qualified;
+    try std.testing.expectEqualStrings("spelled.a", intern.get(intern.moduleId(outer.module)));
+    try std.testing.expectEqualStrings("b", intern.get(intern.bindingId(outer.binding)));
+    // `core` qualifies one segment; a longer name under it is a module's.
+    const under_core = intern.spelling(try intern.intern("core.spelled.word")).qualified;
+    try std.testing.expectEqualStrings("core.spelled", intern.get(intern.moduleId(under_core.module)));
+    for ([_][]const u8{ ".spelled", "spelled.", "spelled..word", "spelled.:.word", "spelled.--" }) |bytes|
+        try std.testing.expectEqual(intern.Spelling.malformed, intern.spelling(try intern.intern(bytes)));
 }
 
 test "module: long definition names stay within the cancellation bound" {
@@ -365,18 +367,21 @@ const redefinition_churn = "(dup 0 = (pop) ((1) `churned def 1 - churn) if) `chu
 /// state. Each size therefore runs twice and keeps its smaller growth: a
 /// doubling lands in at most one of the pair, while retention per
 /// redefinition would show in both.
-fn expectChurnBounded(runtime: *session.Session, counting: anytype, large: usize) !void {
+fn expectChurnBounded(runtime: *session.Session, counting: anytype, large: usize, settle: ?[]const u8) !void {
     var buffer: [32]u8 = undefined;
     const large_churn = try std.fmt.bufPrint(&buffer, "{d} churn", .{large});
     try expectOk(runtime, redefinition_churn);
     try expectOk(runtime, "64 churn");
+    if (settle) |unit| try expectOk(runtime, unit);
     var small_growth: usize = std.math.maxInt(usize);
     var large_growth: usize = std.math.maxInt(usize);
     for (0..2) |_| {
         const before_small = counting.total_requested_bytes;
         try expectOk(runtime, "64 churn");
+        if (settle) |unit| try expectOk(runtime, unit);
         const after_small = counting.total_requested_bytes;
         try expectOk(runtime, large_churn);
+        if (settle) |unit| try expectOk(runtime, unit);
         const after_large = counting.total_requested_bytes;
         small_growth = @min(small_growth, after_small -| before_small);
         large_growth = @min(large_growth, after_large -| after_small);
@@ -397,7 +402,7 @@ test "session: public definition mutation settles retirement every turn" {
         defer runtime.deinit();
         // A replaced top-level definition nothing still holds is reclaimed,
         // so redefining one name settles to bounded live memory.
-        try expectChurnBounded(&runtime, &counting, 1024);
+        try expectChurnBounded(&runtime, &counting, 1024, null);
         try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
@@ -452,7 +457,14 @@ test "session: mutation settlement is independent of a busy sole worker" {
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
         defer runtime.deinit();
         try expectOk(&runtime, "((1) () while) @spawn");
-        try expectChurnBounded(&runtime, &counting, 4096);
+        // The spinner never stops. Its running turn is a reader, so what a
+        // churn supersedes during that turn waits for the turn to end. Each
+        // measurement therefore follows a unit that awaits two tasks: the
+        // sole worker reaches them only by ending the spinner's turn, and
+        // pays the retirement that turn's end released on its way. The unit
+        // publishes nothing.
+        const worker_turns = "(1) @spawn task.await pop (1) @spawn task.await pop";
+        try expectChurnBounded(&runtime, &counting, 4096, worker_turns);
         try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
         try expectOk(&runtime, "dup task.cancel task.await pop");
     }
@@ -464,6 +476,7 @@ const registry_commits_per_worker = 50;
 
 const RegistryThreadContext = struct {
     registry: *modules.Registry,
+    environment: *env.Env,
     failed: *std.atomic.Value(bool),
     shared: intern.ModuleName,
     /// One fresh module name per commit, so a lost update loses a name.
@@ -471,7 +484,8 @@ const RegistryThreadContext = struct {
 };
 
 fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool {
-    var candidate = context.registry.createImage(name, .ordinary) catch return false;
+    const scope = context.environment.moduleScope(name) catch return false;
+    var candidate = context.registry.createImage(scope, .ordinary) catch return false;
     defer candidate.deinit();
     var sealed = candidate.sealLiteralGroup() catch return false;
     defer sealed.deinit();
@@ -498,12 +512,12 @@ test "registry: concurrent commits are linearized without lost names" {
     defer host.cleanup().drain();
     var environment = try env.Env.init(&host);
     defer {
-        // Images clear their Env-owned scope-label cell as they
-        // retire, so that work must drain before the Env frees them.
+        // Images retire as deferred work, which must drain before the Env
+        // frees the scopes they refer to.
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
     defer registry.deinit();
     var distinct: [registry_workers][registry_commits_per_worker]intern.ModuleName = undefined;
     for (&distinct, 0..) |*names, worker| {
@@ -515,6 +529,7 @@ test "registry: concurrent commits are linearized without lost names" {
     var failed = std.atomic.Value(bool).init(false);
     const context = RegistryThreadContext{
         .registry = &registry,
+        .environment = &environment,
         .failed = &failed,
         .shared = try intern.internModuleName("shared-module"),
         .distinct = &distinct,
@@ -547,9 +562,10 @@ test "loader: failures and cycles are total" {
         .ecl_path = "test/acceptance/modules",
     }), .default, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "`missing-module (x) import", &.{ "kind undefined-word", "name missing-module.x" });
-    try expectErrorContains(&runtime, "`cycle (x) import", &.{ "kind domain", "recursive auto-load" });
-    try expectErrorContains(&runtime, "`orphan (x) import", &.{
+    // An import loads nothing; each failure belongs to the imported word.
+    try expectErrorContains(&runtime, "`missing-module (x) import x", &.{ "kind undefined-word", "word x" });
+    try expectErrorContains(&runtime, "`cycle (x) import x", &.{ "kind domain", "never reach a definition" });
+    try expectErrorContains(&runtime, "`orphan (x) import x", &.{
         "kind io",
         "registered nothing under that name",
         "path \"test/acceptance/modules/orphan.ecl\"",
@@ -576,12 +592,12 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     defer host.cleanup().drain();
     var environment = try env.Env.init(&host);
     defer {
-        // Images clear their Env-owned scope-label cell as they
-        // retire, so that work must drain before the Env frees them.
+        // Images retire as deferred work, which must drain before the Env
+        // frees the scopes they refer to.
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
     defer registry.deinit();
     const effect_value = try list.fromValuesGeneric(allocator, &.{
         .{ .symbol = .{ .name = try intern.intern("--") } },
@@ -595,7 +611,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     const first_name = try intern.internModuleName("allocation-module");
     const second_name = try intern.internModuleName("allocation-second-module");
     const word_name = try intern.internNamespace("answer");
-    var first = try registry.createImage(first_name, .ordinary);
+    var first = try registry.createImage(try environment.moduleScope(first_name), .ordinary);
     defer first.deinit();
     const constant = try TestBinding.init(allocator);
     defer releases.releaseValue(constant.body);
@@ -610,7 +626,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     try modules.testing.register(&registry, &first_sealed);
     var lease = modules.testing.acquire(&registry, first_name).?;
     defer lease.deinit();
-    var second = try registry.createImage(first_name, .ordinary);
+    var second = try registry.createImage(try environment.moduleScope(first_name), .ordinary);
     defer second.deinit();
     try second.stageDefinition(word_name, .{ .word = .{
         .body = env.quotation(constant.body.list).?,
@@ -621,7 +637,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var second_sealed = try second.sealLiteralGroup();
     defer second_sealed.deinit();
     try modules.testing.register(&registry, &second_sealed);
-    var third = try registry.createImage(second_name, .ordinary);
+    var third = try registry.createImage(try environment.moduleScope(second_name), .ordinary);
     defer third.deinit();
     try third.stageDefinition(word_name, constant.module(effect, .public));
     var third_sealed = try third.sealLiteralGroup();
@@ -646,11 +662,9 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     const reserved = "module name `dict` is reserved for the standard library";
     // `dict` has not loaded yet: the refusal cannot depend on that.
     try expectErrorContains(&runtime, "((a b -- c) (pop pop 0) `has? def) `dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "`m `dict alias", &.{reserved});
     try expectOk(&runtime, "{a 1} [a] dict.has? [1] match? {kind user msg \"dict did not load\"} assert");
-    // Loaded, it is refused the same way, and an alias cannot claim the name.
+    // Loaded, it is refused the same way.
     try expectErrorContains(&runtime, "() `dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "(`m `dict alias) `m @defm", &.{reserved});
     try expectErrorContains(&runtime, "((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
@@ -671,8 +685,8 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     const reserved = "module name `dict` is reserved for the standard library";
     // `map` applies the caller's quotation under `@attempt`, `either`
     // inline; neither runs it as standard-library code.
-    try expectOk(&runtime, "[] result.ok (`m `dict alias []) result.map `err at `kind at `domain match? " ++
-        "{kind user msg \"alias escaped\"} assert");
+    try expectOk(&runtime, "[] result.ok (() `dict @defm []) result.map `err at `kind at `domain match? " ++
+        "{kind user msg \"registration escaped\"} assert");
     try expectErrorContains(&runtime, "[] result.ok (() `dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
 }

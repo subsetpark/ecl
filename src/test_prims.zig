@@ -292,10 +292,9 @@ const InvocationDriver = struct {
                     defer invocation.deinit();
                     var target = invocation.enter(fiber.module_access);
                     defer target.deinit();
-                    const home = target.home(fiber.module_access);
                     const task = fiber.scheduling().scheduler.spawn(fiber.scheduling().scope, .{
                         .parent_fiber = fiber,
-                        .site = .{ .module = home },
+                        .site = .{ .module = target.root() },
                         .quotation = target.quotation(),
                     }) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,

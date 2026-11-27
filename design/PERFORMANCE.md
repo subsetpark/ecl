@@ -10,6 +10,66 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## Word dispatch reads a cell — 2026-11-27
+
+A word's link is the id of a cell, and the run loop runs what the cell holds:
+the code of a builtin that belongs to no module, or else a definition. It
+reads no publication counter and probes no per-fiber table. Control is master
+`1fdd606f`, where the loop probed the fiber's resolution table at every word.
+
+Zig 0.17.1 ReleaseFast, Apple M4 Max, macOS arm64. Each workload is
+`0 3000000 (BODY) times` with the body's phrase written 4 times and 24 times,
+run through `ecl -e` five times per binary and length, the two binaries
+interleaved in random order. The figure is the difference between the minimum
+instructions retired (`/usr/bin/time -l`) at 24 and at 4 phrases, per phrase
+and iteration, so the loop and process startup cancel.
+
+| Phrase | Master | Cells | Unit |
+|---|---:|---:|---|
+| `id` | 152.2 | 96.3 | instructions per form |
+| `dup pop` | 178.2 | 122.3 | instructions per form |
+| `1 +` | 170.7 | 143.8 | instructions per form |
+| `w`, after ``(id) `w def`` | 607.5 | 537.6 | instructions per call |
+| `m.w`, after ``((id) `w def) `m @defm`` | 622.5 | 581.6 | instructions per call |
+
+A builtin form costs 56 instructions fewer, 37% of `id`. A call of a one-word
+user word costs 70 fewer, the caller's form and the body's, or 11.5%; a module
+word's call 41 fewer, 6.6%. The minima at 24 `id` forms were 12,012,974,529
+instructions on master and 7,993,970,290 with cells. User CPU time moved with
+the counts (5.0 to 3.5 ns per `id` form) but was not the measured quantity.
+
+The read is one load of a shelf address, found by the id's leading bit, and
+one sequentially consistent load of the cell's builtin code. Cell contents are
+sixteen bytes on shelves of their own, four to a cache line, apart from the
+place and spelling a lookup reads. A registration empties every cell it can
+change, so the first use of each word after a reload pays one lookup; that
+cost was not measured, since redefinition is not a performance target.
+
+### Readers other than dispatch
+
+`execute`, idiom recognition, and stack summaries read the same cell, and a
+fiber keeps no table of resolutions. Same method and machine, 1,000,000
+iterations; "before" is the tree in which only dispatch read cells and those
+readers still probed the fiber's table.
+
+| Phrase | Master | Before | After | Repeats |
+|---|---:|---:|---:|---|
+| `dup execute`, the symbol written as `` `id `` | 461.5 | 320.6 | 313.6 | 4 and 24 |
+| `dup execute`, the symbol an error's `word` | 472.5 | 1181.7 | 564.6 | 4 and 24 |
+| `(1 2 3) (dup *) each pop` | 7182.9 | 7108.8 | 7056.4 | 1 and 3 |
+| `3 (dup *) (1 +) bi pop pop` | 2273.3 | 1977.0 | 1942.0 | 1 and 3 |
+| `3 (sq) (inc) bi pop pop`, two user words | 3279.9 | 2931.6 | 2896.6 | 1 and 3 |
+| `1 2 (1 +) dip pop pop` | 1469.5 | 1293.8 | 1273.8 | 1 and 3 |
+
+A symbol the implementation built for itself has no link, so running it finds
+its cell by a keyed lookup under the cell table's lock each time: 92
+instructions more than master's table probe, and half of what resolving it
+afresh cost. The combinator rows are taken at 1 and 3 repeats because a
+quotation's summary is remembered in 64 places found by the quotation's
+address: at 24 repeats 48 quotations share them, some are read again on every
+iteration, and the count moved by up to 4% between runs of one binary and
+by 13% between two builds, with where the lists were allocated.
+
 ## Aggregation as `group-by`, `table.at`, and `each` — 2026-11-22
 
 `table.aggregate` is gone. Aggregation is composed: `group-by dict.vals
