@@ -135,13 +135,15 @@ pub fn Publisher(comptime T: type) type {
             return self.readers[other].load(.seq_cst) == 0;
         }
 
-        /// Writer-locked, and only when `mayRotate`: flips the epoch, takes
-        /// `pending` (what the owner has superseded since the last flip) as
-        /// the draining list, and returns the previous draining list, which
-        /// no reader holds any more.
+        /// Writer-locked, and only when `mayRotate` held under the same
+        /// lock: flips the epoch, takes `pending` (what the owner has
+        /// superseded since the last flip) as the draining list, and returns
+        /// the previous draining list, which no reader holds any more. The
+        /// count is not read a second time: a reader that read the epoch
+        /// before the last flip may count itself under the epoch flipped to
+        /// at any instant, which the proof above allows.
         pub fn rotate(self: *Self, pending: ?*T) ?*T {
             const epoch = self.epoch.load(.seq_cst);
-            std.debug.assert(self.readers[1 - epoch].load(.seq_cst) == 0);
             const reclaimable = self.draining_list;
             self.draining_list = pending;
             self.epoch.store(1 - epoch, .seq_cst);

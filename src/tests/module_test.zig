@@ -171,7 +171,7 @@ test "module names: intern and validation share one resumable cursor" {
     try std.testing.expectEqualStrings(spelling, intern.get(intern.moduleId(name)));
 }
 
-test "module: an unknown long module prefix remains cancellable while it is interned" {
+test "module names: a long qualified spelling is decided in bounded steps as it is interned" {
     const allocator = std.testing.allocator;
     const prefix = try allocator.alloc(u8, 70_000);
     defer allocator.free(prefix);
@@ -182,38 +182,40 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     defer allocator.free(qualified_bytes);
     @memcpy(qualified_bytes[0..prefix.len], prefix);
     @memcpy(qualified_bytes[prefix.len..], ".missing");
-    const qualified = try intern.intern(qualified_bytes);
 
-    // Load task operations before the timed scenario. Cooperative FIFO
-    // scheduling alternates the two tasks' slices. The target resolves the
-    // long qualified word across its first slices and advances one prefix-
-    // interning slice before yielding part-way through name validation. The
-    // canceller first spends one dispatch-fuel quantum and a half on empty
-    // iterations, which costs it one extra slice, so its cancellation request
-    // lands after that interning slice and before the target's next one.
-    // Measured window: delays from one to two quanta cancel mid-interning;
-    // three let the target finish.
-    const source =
-        "(execute) cons @spawn dup `target set " ++
-        "(1536 () times task.cancel) cons @spawn task.await pop target task.await";
-
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
-    defer runtime.deinit();
-    try expectOk(&runtime, "task.pending pop");
-    try runtime.pushOwned(.{ .symbol = .{ .name = qualified } });
-    try expectOk(&runtime, source);
-
-    var lookup = intern.lookupCursor(prefix);
-    const interned = while (true) switch (lookup.advance()) {
-        .pending => {},
-        .complete => |found| break found,
+    var cursor = intern.insertionCursor(qualified_bytes);
+    var pending: usize = 0;
+    const qualified = while (true) switch (try cursor.advance()) {
+        .pending => pending += 1,
+        .complete => |id| break id,
     };
-    var rendered = try runtime.stackDisplay();
-    defer rendered.deinit();
-    try std.testing.expect(interned != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "kind cancelled") != null);
+    // Every pass over the spelling is taken in steps: finding it, storing
+    // it, and deciding its module part.
+    try std.testing.expect(pending > 3 * 256);
+    const parts = intern.spelling(qualified).qualified;
+    try std.testing.expectEqualStrings(prefix, intern.get(intern.moduleId(parts.module)));
+    try std.testing.expectEqualStrings("missing", intern.get(intern.bindingId(parts.binding)));
+    try std.testing.expectEqual(intern.Spelling.plain, intern.spelling(intern.moduleId(parts.module)));
+}
+
+test "module names: a spelling is one kind of word, and so is each of its parts" {
+    try std.testing.expectEqual(intern.Spelling.plain, intern.spelling(try intern.intern("spelled-plain")));
+    try std.testing.expectEqualStrings(
+        "spelled-core",
+        intern.get(intern.bindingId(intern.spelling(try intern.intern("core.spelled-core")).core)),
+    );
+    const nested = intern.spelling(try intern.intern("spelled.a.b.word")).qualified;
+    try std.testing.expectEqualStrings("spelled.a.b", intern.get(intern.moduleId(nested.module)));
+    try std.testing.expectEqualStrings("word", intern.get(intern.bindingId(nested.binding)));
+    // The module part is a spelling too, decided before the whole.
+    const outer = intern.spelling(intern.moduleId(nested.module)).qualified;
+    try std.testing.expectEqualStrings("spelled.a", intern.get(intern.moduleId(outer.module)));
+    try std.testing.expectEqualStrings("b", intern.get(intern.bindingId(outer.binding)));
+    // `core` qualifies one segment; a longer name under it is a module's.
+    const under_core = intern.spelling(try intern.intern("core.spelled.word")).qualified;
+    try std.testing.expectEqualStrings("core.spelled", intern.get(intern.moduleId(under_core.module)));
+    for ([_][]const u8{ ".spelled", "spelled.", "spelled..word", "spelled.:.word", "spelled.--" }) |bytes|
+        try std.testing.expectEqual(intern.Spelling.malformed, intern.spelling(try intern.intern(bytes)));
 }
 
 test "module: long definition names stay within the cancellation bound" {
@@ -515,7 +517,7 @@ test "registry: concurrent commits are linearized without lost names" {
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
     defer registry.deinit();
     var distinct: [registry_workers][registry_commits_per_worker]intern.ModuleName = undefined;
     for (&distinct, 0..) |*names, worker| {
@@ -595,7 +597,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
     defer registry.deinit();
     const effect_value = try list.fromValuesGeneric(allocator, &.{
         .{ .symbol = .{ .name = try intern.intern("--") } },

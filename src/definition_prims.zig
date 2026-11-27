@@ -480,7 +480,7 @@ fn resolveForReflection(
     return switch (outcome) {
         .resolved => |definition| .{ .resolved = machine.Reflected.hold(fiber, definition, requested.name) },
         .missed => |miss| switch (miss) {
-            .unknown_module_prefix, .unregistered_module => {
+            .unregistered_module => {
                 fiber.retireDriver(driver);
                 return .{ .retry = try fiber.retryQualifiedOperandAfterLoad(requested, miss) };
             },

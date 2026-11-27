@@ -871,7 +871,40 @@ pub const CorePublisher = enum(usize) {
 
 comptime {
     heap.requireOpaqueMutation(CorePublisher);
+    heap.requireOpaqueMutation(CellPublisher);
 }
+
+/// Authority to write the cells of one `Env`, claimed once: by the registry
+/// whose directories the cells answer from. The registry calls every method
+/// with its writer lock held, which is what serializes cell stores.
+pub const CellPublisher = enum(usize) {
+    invalid = 0,
+    _,
+
+    fn target(self: CellPublisher) *EnvState {
+        std.debug.assert(self != .invalid);
+        return @ptrFromInt(@backingInt(self));
+    }
+
+    /// Stores what the cell `id` resolved to.
+    pub fn fill(self: CellPublisher, id: CellId, definition: *Definition) void {
+        self.target().word_cells.content(@backingInt(id)).store(definition);
+    }
+
+    /// Stores `definition`, or nothing, in every cell of the session's
+    /// top-level name `name`. Bounded by the sources that wrote the name.
+    pub fn define(self: CellPublisher, name: intern.BindingName, definition: ?*Definition) void {
+        const state = self.target();
+        state.word_cells.storeNamed(state.session_cell.id, name, definition);
+    }
+
+    /// Empties up to `count` cells from `from` that a registration can
+    /// change, and returns the cell to continue from, or null at the end.
+    pub fn emptyRegistered(self: CellPublisher, from: u32, count: u32) ?u32 {
+        const state = self.target();
+        return state.word_cells.emptyRegistered(state.core_cell.id, from, count);
+    }
+};
 
 /// A root's stable public name: what a word's cell records as its root,
 /// rather than a pointer. Zero means "no written-in scope" and resolves in
@@ -920,32 +953,92 @@ pub const Place = struct {
     source: SourceId,
 };
 
+/// What a word's cell answers: the definition its place resolves to now, or
+/// nothing, when the word is resolved by lookup. `primitive` is the code of
+/// a builtin definition that belongs to no module, so running one reads no
+/// definition. A cell borrows: a directory or an image owns the definition.
+///
+/// Written only under the registry's writer lock, or by the bootstrap fiber
+/// while it is the only fiber; read by any fiber during a turn, with no
+/// lock. Every load and store is sequentially consistent, by the proof of
+/// `snapshot.Publisher`: a store made in the critical section that
+/// supersedes a directory, followed by a rotation's read of the reader
+/// counts, and a turn's count of itself followed by its load here, are two
+/// store-then-load pairs on different atomics. In one total order either
+/// the turn loads what the store left, or the rotation observes the turn,
+/// so a turn never holds a definition whose last owner is reclaimed under
+/// it. The two fields are stored separately, definition first, and each
+/// is, alone, an answer that was current: a reader that finds the newer
+/// `primitive` finds the newer `definition` after it.
+pub const CellContent = struct {
+    primitive: std.atomic.Value(?PrimitiveImpl) = .init(null),
+    definition: std.atomic.Value(?*Definition) = .init(null),
+
+    fn store(self: *CellContent, definition: ?*Definition) void {
+        const primitive: ?PrimitiveImpl = if (definition) |found| switch (found.sealed) {
+            .builtin => |code| if (found.root == .module) null else code,
+            .source, .native => null,
+        } else null;
+        self.definition.store(definition, .seq_cst);
+        self.primitive.store(primitive, .seq_cst);
+    }
+};
+
+/// A fiber's way to the content of a cell from a word's link: one shift,
+/// one load of a shelf address that never changes once set, and an index.
+pub const WordCells = struct {
+    shelves: *const [@bitSizeOf(u32)]std.atomic.Value(usize),
+
+    /// The content of the cell `link` identifies. `link` is a cell id: not
+    /// zero, and with no flag.
+    pub inline fn of(self: WordCells, link: u32) *const CellContent {
+        const biased = link + CellTable.first_id_bias;
+        // A shelf's address is stored before any id in it is issued, and an
+        // id reaches another thread only through a synchronized hand-off of
+        // the symbol carrying it, which orders that store before this load.
+        const base = self.shelves[@clz(biased)].load(.monotonic);
+        return @ptrFromInt(base +% @as(usize, biased) * @sizeOf(CellContent));
+    }
+};
+
 /// The cells of one `Env`: one per distinct place, appended and never moved
 /// or freed before the `Env`.
 ///
-/// A cell is read by id with no lock and no hash: ids index shelves that
-/// double in size, so a shelf never relocates and an id decodes to a shelf
-/// and an offset by its leading bit. A cell is complete before its id is
-/// returned, and an id reaches another thread only through a synchronized
-/// hand-off of the symbol that carries it.
+/// A cell is in two parts, each on shelves that double in size, so a shelf
+/// never relocates and an id decodes to a shelf and an offset by its leading
+/// bit. What dispatch reads, the content, is sixteen bytes on shelves of its
+/// own, four cells to a cache line; where the word was written and what its
+/// spelling is, which only a lookup reads, is beside it under the same id.
+/// A cell is complete before its id is returned.
 ///
-/// The cell of a place is found, or minted, under `mutex`, through a hash
-/// trie threaded through the cells themselves: each cell heads up to four
-/// subtrees, chosen by successive two-bit digits of the place's hash. A
-/// lookup therefore walks a path logarithmic in the number of cells, and
-/// nothing is ever rehashed or relocated.
+/// The cell of a place is found, or minted, under `mutex`, which the
+/// registry also takes inside its writer lock, never the reverse. A hash trie
+/// threaded through the cells finds the first cell of a root and name: each
+/// such cell heads up to four subtrees, chosen by successive two-bit digits
+/// of the hash, so nothing is ever rehashed or relocated. The cells of one
+/// root and name, one per source that wrote the name there, chain from it.
 const CellTable = struct {
     const first_shelf_bits = 6;
+    const first_id_bias = 1 << first_shelf_bits;
     const shelf_count = @bitSizeOf(u32) - @clz(value.quote_flag) - first_shelf_bits;
 
     const Cell = struct {
         place: Place,
         /// The cells heading the subtrees below this one; zero where none.
         children: [4]u32 = @splat(0),
+        /// What the place's spelling is as a word, copied from the interned
+        /// name when the cell is minted.
+        spelling: intern.Spelling,
+        /// The next cell of the same root and name; zero at the last.
+        next_source: u32 = 0,
     };
 
     mutex: std.Io.Mutex = .init,
     shelves: [shelf_count]std.atomic.Value(?[*]Cell) = @splat(.init(null)),
+    /// Each content shelf's address less the offset of the first biased id
+    /// it holds, at the leading-zero count of those ids: a biased id scaled
+    /// by the content's size and added lands on its content.
+    contents: [@bitSizeOf(u32)]std.atomic.Value(usize) = @splat(.init(0)),
     /// The id the next minted cell takes.
     next: u32 = 1,
     /// The cell heading the trie; zero while there is none.
@@ -958,7 +1051,7 @@ const CellTable = struct {
     }
 
     fn coordinates(raw: u32) struct { shelf: usize, offset: usize } {
-        const biased = raw + (1 << first_shelf_bits);
+        const biased = raw + first_id_bias;
         const top: u5 = @intCast(@bitSizeOf(u32) - 1 - @clz(biased));
         return .{ .shelf = top - first_shelf_bits, .offset = biased - (@as(u32, 1) << top) };
     }
@@ -967,45 +1060,106 @@ const CellTable = struct {
         return @as(usize, 1) << @intCast(shelf + first_shelf_bits);
     }
 
+    fn reader(self: *const CellTable) WordCells {
+        return .{ .shelves = &self.contents };
+    }
+
     /// The cell `raw` identifies. `raw` was issued by this table.
     fn at(self: *const CellTable, raw: u32) *Cell {
         const where = coordinates(raw);
         return &self.shelves[where.shelf].load(.acquire).?[where.offset];
     }
 
-    fn hash(place: Place) u64 {
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHash(&hasher, place);
-        return hasher.final();
+    fn content(self: *const CellTable, raw: u32) *CellContent {
+        return @constCast(self.reader().of(raw));
+    }
+
+    fn hash(root: ScopeId, name: u32) u64 {
+        return std.hash.Wyhash.hash(0, std.mem.asBytes(&[2]u32{ @backingInt(root), name }));
+    }
+
+    /// The link to the first cell of `root` and `name`: zero where there is
+    /// none yet. Under `mutex`.
+    fn named(self: *CellTable, root: ScopeId, name: u32) *u32 {
+        var link: *u32 = &self.head;
+        var digits = hash(root, name);
+        while (link.* != 0) : (digits <<= 2) {
+            const cell = self.at(link.*);
+            if (cell.place.root == root and cell.place.name == name) break;
+            link = &cell.children[@intCast(digits >> 62)];
+        }
+        return link;
     }
 
     fn findOrMint(self: *CellTable, allocator: std.mem.Allocator, place: Place) error{OutOfMemory}!CellId {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        var link: *u32 = &self.head;
-        var digits = hash(place);
-        while (link.* != 0) : (digits <<= 2) {
+        var link = self.named(place.root, place.name);
+        while (link.* != 0) {
             const cell = self.at(link.*);
-            if (std.meta.eql(cell.place, place)) return @fromBackingInt(link.*);
-            link = &cell.children[@intCast(digits >> 62)];
+            if (cell.place.source == place.source) return @fromBackingInt(link.*);
+            link = &cell.next_source;
         }
         const raw = self.next;
         if (raw >= value.quote_flag) return error.OutOfMemory;
         const where = coordinates(raw);
         const shelf = self.shelves[where.shelf].load(.acquire) orelse fresh: {
-            const cells = try allocator.alloc(Cell, shelfLength(where.shelf));
+            const length = shelfLength(where.shelf);
+            const cells = try allocator.alloc(Cell, length);
+            errdefer allocator.free(cells);
+            const contents = try allocator.alloc(CellContent, length);
+            @memset(contents, .{});
             self.shelves[where.shelf].store(cells.ptr, .release);
+            // The shelf holds the biased ids from its own length up.
+            self.contents[@clz(raw + first_id_bias)].store(
+                @intFromPtr(contents.ptr) -% length * @sizeOf(CellContent),
+                .release,
+            );
             break :fresh cells.ptr;
         };
-        shelf[where.offset] = .{ .place = place };
+        shelf[where.offset] = .{ .place = place, .spelling = intern.spelling(place.name) };
         self.next = raw + 1;
         link.* = raw;
         return @fromBackingInt(raw);
     }
 
+    /// Stores `definition`, or nothing, as the answer of every cell of
+    /// `root` and the plain name `name`: one per source that wrote it.
+    fn storeNamed(self: *CellTable, root: ScopeId, name: intern.BindingName, definition: ?*Definition) void {
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        var raw = self.named(root, intern.bindingId(name)).*;
+        while (raw != 0) : (raw = self.at(raw).next_source) self.content(raw).store(definition);
+    }
+
+    /// Empties up to `count` cells from `from` whose answer a registration
+    /// can change: every cell but a name of core, which is a `core.`
+    /// spelling anywhere or a plain one written in core. Returns the cell
+    /// to continue from, or null once every cell issued has been passed.
+    fn emptyRegistered(self: *CellTable, core: ScopeId, from: u32, count: u32) ?u32 {
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        const end = @min(self.next, from +| count);
+        for (from..end) |raw| {
+            const cell = self.at(@intCast(raw));
+            const of_core = switch (cell.spelling) {
+                .core => true,
+                .plain => cell.place.root == core,
+                .qualified, .malformed => false,
+            };
+            if (!of_core) self.content(@intCast(raw)).store(null);
+        }
+        return if (end == self.next) null else end;
+    }
+
     fn deinit(self: *CellTable, allocator: std.mem.Allocator) void {
-        for (&self.shelves, 0..) |*shelf, index| if (shelf.load(.acquire)) |cells|
-            allocator.free(cells[0..shelfLength(index)]);
+        for (&self.shelves, 0..) |*shelf, index| if (shelf.load(.acquire)) |cells| {
+            const length = shelfLength(index);
+            allocator.free(cells[0..length]);
+            const base = self.contents[@clz(@as(u32, @intCast(length)))].load(.monotonic);
+            const contents: [*]CellContent = @ptrFromInt(base +% length * @sizeOf(CellContent));
+            allocator.free(contents[0..length]);
+        };
         self.* = undefined;
     }
 };
@@ -1199,6 +1353,11 @@ pub const WordTarget = union(enum) {
     cell: CellId,
 };
 
+/// Whether a link is the id of a cell: not zero, and with no flag.
+pub inline fn isCell(link: u32) bool {
+    return link -% 1 < quote_flag - 1;
+}
+
 /// A quoted occurrence's target is its link's: the flag says how it runs, not
 /// where its name resolves.
 pub fn wordTarget(raw_occurrence: u32) WordTarget {
@@ -1224,6 +1383,7 @@ const EnvState = struct {
     modules_mutex: std.Io.Mutex = .init,
     scopes: ScopeIndex = .{},
     word_cells: CellTable = .{},
+    cells_claimed: bool = false,
     locals_words: intern.LocalsWords,
     idiom_names: idioms.Names,
 
@@ -1236,6 +1396,10 @@ const EnvState = struct {
         if (existing != null) return error.Duplicate;
         var put = self.core.putCursor(name, definition);
         _ = poll.drive(bool, &put, .{});
+        // The bootstrap fiber is the only fiber while core is built, so
+        // this store races no reader and no other writer. A private
+        // binding is not what a word of its name resolves to.
+        if (definition.visibility == .public) self.word_cells.storeNamed(self.core_cell.id, name, definition);
     }
 };
 
@@ -1364,6 +1528,24 @@ pub const Env = enum(usize) {
     /// no lock.
     pub fn place(self: *const Env, id: CellId) Place {
         return self.privateState().word_cells.at(@backingInt(id)).place;
+    }
+
+    /// A fiber's way to the content of this `Env`'s cells.
+    pub fn wordCells(self: *const Env) WordCells {
+        return self.privateState().word_cells.reader();
+    }
+
+    /// The one authority to write this `Env`'s cells, for its registry.
+    pub fn claimCells(self: *Env) CellPublisher {
+        const backing = self.privateState();
+        std.debug.assert(!backing.cells_claimed);
+        backing.cells_claimed = true;
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
+    }
+
+    /// What the spelling of the word whose link is `id` is.
+    pub fn spelling(self: *const Env, id: CellId) intern.Spelling {
+        return self.privateState().word_cells.at(@backingInt(id)).spelling;
     }
 
     /// The root a word's root id denotes.
@@ -1599,26 +1781,30 @@ test "env: a root, source and name link to one cell below the flag bits" {
     const elsewhere: SourceId = @fromBackingInt(2);
     const session = container.linker(container.sessionScopeId(), here);
     // Enough names to spill past the first shelves of the table.
-    const names = 1000;
+    var names: [1000]u32 = undefined;
+    for (&names, 0..) |*name, index| {
+        var spelled: [16]u8 = undefined;
+        name.* = try intern.intern(try std.fmt.bufPrint(&spelled, "cell-test-{d}", .{index}));
+    }
     var previous: u32 = 0;
-    for (1..names + 1) |name| {
-        const link = try session.link(@intCast(name));
+    for (names) |name| {
+        const link = try session.link(name);
         try std.testing.expect(link > previous);
         try std.testing.expect(link < value.quote_flag);
         try std.testing.expectEqual(WordTarget{ .cell = @fromBackingInt(link) }, wordTarget(link | quote_flag));
         previous = link;
     }
-    for (1..names + 1) |name| {
-        const link = try session.link(@intCast(name));
+    for (names) |name| {
+        const link = try session.link(name);
         try std.testing.expect(link <= previous);
         const written = container.place(@fromBackingInt(link));
         try std.testing.expectEqual(container.sessionScopeId(), written.root);
         try std.testing.expectEqual(here, written.source);
-        try std.testing.expectEqual(@as(u32, @intCast(name)), written.name);
+        try std.testing.expectEqual(name, written.name);
     }
     // Another source, and another root, write the same name somewhere else.
-    const other_source = try container.linker(container.sessionScopeId(), elsewhere).link(1);
-    const other_root = try container.linker(container.coreScopeId(), here).link(1);
+    const other_source = try container.linker(container.sessionScopeId(), elsewhere).link(names[0]);
+    const other_root = try container.linker(container.coreScopeId(), here).link(names[0]);
     try std.testing.expect(other_source > previous);
     try std.testing.expect(other_root > other_source);
     try std.testing.expectEqual(elsewhere, container.place(@fromBackingInt(other_source)).source);

@@ -667,7 +667,11 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         // failed body releases its candidate; its failure propagates, so the
         // probe observes it as a result.
         "((1) `one def) `oom-left @defm ((1) `one def) `oom-right @defm " ++
-            "((2) `one def) `oom-left @defm ((\"x\" fail) `oom-failed @defm) @attempt pop",
+            "((2) `one def) `oom-left @defm ((\"x\" fail) `oom-failed @defm) @attempt pop " ++
+            // A word's cell is filled when the word first resolves, stored
+            // by a definition of its name, and emptied by a registration.
+            "(1) `oom-cell def oom-cell pop (2) `oom-cell def oom-cell pop " ++
+            "`oom-left (one) import one pop ((3) `one def) `oom-left @defm one pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();

@@ -281,9 +281,10 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     try expectStack(&runtime, "7 shadow.host.where", "shadowed");
     try expectErrorContains(&runtime, "core.no-such-binding", &.{ "kind undefined-word", "scope core" });
     // Core is a scope, not a registration: nothing may publish under its
-    // name as a module, and it is not a module to import from.
+    // name as a module, and a name imported from it resolves as `core.x`.
     try expectErrorContains(&runtime, "() `core @defm", &.{ "kind domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "`core (swap) import 1 2 swap", &.{ "kind undefined-word", "word swap", "scope qualified" });
+    try expectStack(&runtime, "`core (swap) import 1 2 swap", "2 1");
+    try expectErrorContains(&runtime, "`core (no-such-binding) import no-such-binding", &.{ "kind undefined-word", "scope core" });
     // The reservation is the whole name, not a segment: a dotted name under it
     // registers, resolves, and qualifies like any other module.
     try expectOk(&runtime, "((1) `f def) `core.utils @defm");

@@ -1358,7 +1358,7 @@ test "native: only exact completion mutates the operand stack" {
 test "native: the static transport publishes a linked descriptor through the same path" {
     var host = heap.HostOwner.init(std.testing.allocator);
     var environment = try env.Env.init(&host);
-    var registry = try modules.Registry.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
     const owner = try native_module.Owner.init(host.cleanup());
     defer {
         const closing = owner.closeCalls();

@@ -35,9 +35,6 @@ pub const Context = struct {
 pub const Miss = union(enum) {
     /// Nothing by that name is visible along the chain searched.
     unresolved: LookupChain,
-    /// The dotted prefix has never been interned, so nothing can be registered
-    /// under it yet; loading may make it resolvable.
-    unknown_module_prefix: struct { bytes: []const u8, searcher: modules.RegistrationProvenance },
     /// A well-formed qualified name whose module is not registered, or not
     /// one `searcher` may refer to. A load that follows asks as `searcher`,
     /// the view the lookup searched under, so it fails where the lookup
@@ -60,7 +57,9 @@ pub const Outcome = union(enum) {
     missed: Miss,
 };
 
-/// Resolves one word occurrence.
+/// Resolves one word occurrence. What the spelling is was decided when it
+/// was interned, so a resolution scans no spelling: it begins at the lookup
+/// its spelling selects.
 pub const Resolver = struct {
     pub const Progress = poll.Progress(Outcome);
 
@@ -68,11 +67,12 @@ pub const Resolver = struct {
     root: env.Root,
     /// The source the word was written in.
     written: modules.RegistrationProvenance,
-    phase: Phase = .dot,
+    spelling: intern.Spelling,
+    phase: Phase = .begin,
     work: Work = .none,
-    dot_index: usize = 0,
-    prefix: ?intern.ModuleName = null,
-    export_name: ?intern.BindingName = null,
+    /// The module and binding a qualified lookup is of: the word's own
+    /// spelling, then each alias followed.
+    target: ?env.Alias = null,
     /// The registration whose directory is being read: the word's own
     /// module, or the module a qualified name selected.
     generation: ?modules.GenerationLease = null,
@@ -94,14 +94,9 @@ pub const Resolver = struct {
     };
 
     const Phase = enum {
-        dot,
-        prefix,
-        prefix_validate,
-        export_name,
-        export_validate,
+        begin,
         acquire,
         export_lookup,
-        core_atom,
         core_lookup,
         own_acquire,
         own_lookup,
@@ -110,10 +105,6 @@ pub const Resolver = struct {
 
     const Work = union(enum) {
         none,
-        dot: intern.LastDotCursor,
-        atom: intern.InternLookupCursor,
-        module_validation: intern.ModuleNameCursor,
-        binding_validation: intern.NamespaceCursor,
         acquisition: machine.ModuleLookupCursor,
         own_acquisition: modules.Registry.AcquireCursor,
         export_lookup: modules.ModuleNameLookupCursor,
@@ -124,22 +115,31 @@ pub const Resolver = struct {
                 .acquisition => |*cursor| cursor.deinit(),
                 .own_acquisition => |*cursor| cursor.deinit(),
                 .export_lookup => |*cursor| cursor.deinit(),
-                .none, .dot, .atom, .module_validation, .binding_validation, .core_lookup => {},
+                .none, .core_lookup => {},
             }
             self.* = .none;
         }
     };
 
     pub fn init(context: *const Context, word: value.Symbol) Resolver {
-        const root: env.Root = switch (env.wordTarget(word.slot)) {
-            .unlinked, .local => .core,
-            .cell => |id| context.environment.scopeOf(context.environment.place(id).root),
-        };
-        return .{
-            .name = word.name,
-            .root = root,
-            .written = sourceOf(context.environment, word),
-            .work = .{ .dot = intern.lastDotCursor(intern.get(word.name)) },
+        const environment = context.environment;
+        return switch (env.wordTarget(word.slot)) {
+            // A word with no cell reads what its interned name records.
+            .unlinked, .local => .{
+                .name = word.name,
+                .root = .core,
+                .written = .ordinary,
+                .spelling = intern.spelling(word.name),
+            },
+            .cell => |id| cell: {
+                const place = environment.place(id);
+                break :cell .{
+                    .name = word.name,
+                    .root = environment.scopeOf(place.root),
+                    .written = .fromSourceId(place.source),
+                    .spelling = environment.spelling(id),
+                };
+            },
         };
     }
 
@@ -161,10 +161,6 @@ pub const Resolver = struct {
 
     fn found(self: *Resolver, definition: *env.Definition) Progress {
         return self.finish(.{ .resolved = definition });
-    }
-
-    fn spelling(self: *const Resolver) []const u8 {
-        return intern.get(self.name);
     }
 
     fn plainChain(self: *const Resolver) LookupChain {
@@ -201,7 +197,7 @@ pub const Resolver = struct {
     }
 
     /// Follows one directory entry: a definition resolves, and an alias
-    /// starts a qualified lookup of its target.
+    /// resolves as the qualified name it records.
     fn follow(self: *Resolver, context: *const Context, entry: env.Entry, require_public: bool) Progress {
         switch (entry) {
             .definition => |definition| {
@@ -213,19 +209,17 @@ pub const Resolver = struct {
         }
     }
 
-    /// Begins the lookup of the export atom after the module part.
-    fn beginExportName(self: *Resolver) Progress {
-        self.work.deinit();
-        self.work = .{ .atom = intern.lookupCursor(self.spelling()[self.dot_index + 1 ..]) };
-        self.phase = .export_name;
-        return .pending;
-    }
-
     fn followAlias(self: *Resolver, context: *const Context, alias: env.Alias, require_public: bool) Progress {
         if (require_public and alias.visibility != .public)
             return self.miss(.{ .unresolved = .qualified });
-        self.prefix = alias.module;
-        self.export_name = alias.binding;
+        // `core` is a scope, not a registration: an alias into it resolves
+        // as the spelling `core.x` does.
+        if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(alias.module)))) {
+            self.work.deinit();
+            self.root = .core;
+            return self.beginCore(context, alias.binding);
+        }
+        self.target = alias;
         const hop: Hop = .{
             .module = alias.module,
             .binding = alias.binding,
@@ -251,7 +245,7 @@ pub const Resolver = struct {
             context.project,
             context.libraries,
             self.provenance(),
-            self.prefix.?,
+            self.target.?.module,
         ) };
         self.phase = .acquire;
         return .pending;
@@ -266,79 +260,28 @@ pub const Resolver = struct {
 
     pub fn advance(self: *Resolver, context: *const Context) Progress {
         return switch (self.phase) {
-            .dot => switch (self.work.dot.advance()) {
-                .pending => .pending,
-                .complete => |maybe_dot| {
-                    const dot_index = maybe_dot orelse return self.beginPlain(context);
-                    const bytes = self.spelling();
-                    if (dot_index == 0 or dot_index + 1 == bytes.len)
-                        return self.miss(.{ .unresolved = .qualified });
-                    self.dot_index = dot_index;
-                    if (intern.isReservedRegistryBytes(bytes[0..dot_index])) {
-                        // `core` is a scope, not a registration.
-                        self.work = .{ .atom = intern.lookupCursor(bytes[dot_index + 1 ..]) };
-                        self.phase = .core_atom;
-                        return .pending;
-                    }
-                    self.work = .{ .atom = intern.lookupCursor(bytes[0..dot_index]) };
-                    self.phase = .prefix;
-                    return .pending;
+            .begin => switch (self.spelling) {
+                .plain => self.beginPlain(context),
+                .core => |binding| core: {
+                    self.root = .core;
+                    break :core self.beginCore(context, binding);
                 },
-            },
-            .prefix => switch (self.work.atom.advance()) {
-                .pending => .pending,
-                .complete => |maybe_prefix| {
-                    const prefix = maybe_prefix orelse return self.miss(.{ .unknown_module_prefix = .{
-                        .bytes = self.spelling()[0..self.dot_index],
-                        .searcher = self.provenance(),
-                    } });
-                    self.work = .{ .module_validation = .init(prefix) };
-                    self.phase = .prefix_validate;
-                    return .pending;
+                .qualified => |parts| qualified: {
+                    self.target = .{ .module = parts.module, .binding = parts.binding };
+                    break :qualified self.beginAcquire(context);
                 },
-            },
-            // The module is acquired before its export name is looked up, so a
-            // qualified miss reports an unregistered module even when the
-            // export atom has never been interned.
-            .prefix_validate => switch (self.work.module_validation.advance()) {
-                .pending => .pending,
-                .complete => |maybe_module| {
-                    self.prefix = maybe_module orelse return self.miss(.{ .unresolved = .qualified });
-                    return self.beginExportName();
-                },
-            },
-            .export_name => switch (self.work.atom.advance()) {
-                .pending => .pending,
-                .complete => |maybe_export| {
-                    const export_id = maybe_export orelse {
-                        // Still acquire the module, so an unregistered one is
-                        // reported (and loaded) as such.
-                        self.export_name = null;
-                        return self.beginAcquire(context);
-                    };
-                    self.work = .{ .binding_validation = .init(export_id) };
-                    self.phase = .export_validate;
-                    return .pending;
-                },
-            },
-            .export_validate => switch (self.work.binding_validation.advance()) {
-                .pending => .pending,
-                .complete => |maybe_binding| {
-                    self.export_name = maybe_binding orelse return self.miss(.{ .unresolved = .qualified });
-                    return self.beginAcquire(context);
-                },
+                .malformed => self.miss(.{ .unresolved = .qualified }),
             },
             .acquire => switch (self.work.acquisition.advance()) {
                 .pending => .pending,
                 .complete => |maybe_generation| {
                     self.work.deinit();
                     const generation = maybe_generation orelse return self.miss(.{ .unregistered_module = .{
-                        .name = self.prefix.?,
+                        .name = self.target.?.module,
                         .searcher = self.provenance(),
                     } });
                     self.generation = generation;
-                    const export_name = self.export_name orelse return self.miss(.{ .unresolved = .qualified });
-                    self.work = .{ .export_lookup = generation.lookupCursor(export_name) };
+                    self.work = .{ .export_lookup = generation.lookupCursor(self.target.?.binding) };
                     self.phase = .export_lookup;
                     return .pending;
                 },
@@ -349,15 +292,6 @@ pub const Resolver = struct {
                     const entry = maybe_entry orelse return self.miss(.{ .unresolved = .qualified });
                     self.owner_provenance = self.generation.?.provenance();
                     return self.follow(context, entry, true);
-                },
-            },
-            .core_atom => switch (self.work.atom.advance()) {
-                .pending => .pending,
-                .complete => |maybe_export| {
-                    const export_id = maybe_export orelse return self.miss(.{ .unresolved = .core });
-                    self.work = .{ .core_lookup = context.environment.coreLookup(@fromBackingInt(export_id)) };
-                    self.phase = .core_lookup;
-                    return .pending;
                 },
             },
             .core_lookup => switch (self.work.core_lookup.advance()) {

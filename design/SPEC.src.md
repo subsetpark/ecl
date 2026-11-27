@@ -470,7 +470,8 @@ other scopes.
 module segment is `core` resolves its binding segment in core alone,
 skipping the session and every module, so a shadowed core definition
 remains reachable: after ``(2 *) `dup def``, `core.dup` still refers to the
-stdlib definition.
+stdlib definition. A name imported from `core` resolves the same way: after
+`` `core (dup) import ``, `dup` refers to core's `dup`.
 
 Shadowing a core name is allowed but reported. When a `def`, `set`, or `import`
 at top level introduces a session name that is also a public core name, a

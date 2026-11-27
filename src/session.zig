@@ -378,7 +378,7 @@ pub const Session = enum(usize) {
         var environment, var building = try env.Env.initBuilding(host_owner);
         errdefer environment.deinit();
         try prims.install(&building);
-        var registry = try modules.Registry.init(host_owner.cleanup());
+        var registry = try modules.Registry.init(host_owner.cleanup(), environment.claimCells());
         errdefer registry.deinit();
         host.net_limits.validate() catch return diagnostic.fail("network limits are invalid", .{});
         const net_configuration = host.net_limits.encode();

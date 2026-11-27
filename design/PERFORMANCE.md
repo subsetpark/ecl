@@ -10,6 +10,41 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## Word dispatch reads a cell — 2026-11-27
+
+A word's link is the id of a cell, and the run loop runs what the cell holds:
+the code of a builtin that belongs to no module, or else a definition. It
+reads no publication counter and probes no per-fiber table. Control is master
+`1fdd606f`, where the loop probed the fiber's resolution table at every word.
+
+Zig 0.17.1 ReleaseFast, Apple M4 Max, macOS arm64. Each workload is
+`0 3000000 (BODY) times` with the body's phrase written 4 times and 24 times,
+run through `ecl -e` five times per binary and length, the two binaries
+interleaved in random order. The figure is the difference between the minimum
+instructions retired (`/usr/bin/time -l`) at 24 and at 4 phrases, per phrase
+and iteration, so the loop and process startup cancel.
+
+| Phrase | Master | Cells | Unit |
+|---|---:|---:|---|
+| `id` | 152.2 | 96.3 | instructions per form |
+| `dup pop` | 178.2 | 122.3 | instructions per form |
+| `1 +` | 170.7 | 143.8 | instructions per form |
+| `w`, after ``(id) `w def`` | 607.5 | 537.6 | instructions per call |
+| `m.w`, after ``((id) `w def) `m @defm`` | 622.5 | 581.6 | instructions per call |
+
+A builtin form costs 56 instructions fewer, 37% of `id`. A call of a one-word
+user word costs 70 fewer, the caller's form and the body's, or 11.5%; a module
+word's call 41 fewer, 6.6%. The minima at 24 `id` forms were 12,012,974,529
+instructions on master and 7,993,970,290 with cells. User CPU time moved with
+the counts (5.0 to 3.5 ns per `id` form) but was not the measured quantity.
+
+The read is one load of a shelf address, found by the id's leading bit, and
+one sequentially consistent load of the cell's builtin code. Cell contents are
+sixteen bytes on shelves of their own, four to a cache line, apart from the
+place and spelling a lookup reads. A registration empties every cell it can
+change, so the first use of each word after a reload pays one lookup; that
+cost was not measured, since redefinition is not a performance target.
+
 ## Aggregation as `group-by`, `table.at`, and `each` — 2026-11-22
 
 `table.aggregate` is gone. Aggregation is composed: `group-by dict.vals

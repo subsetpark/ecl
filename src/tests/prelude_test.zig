@@ -228,7 +228,7 @@ fn expectInvalidPrelude(source: []const u8) !void {
     var environment, var building = try env.Env.initBuilding(&host);
     defer environment.deinit();
     try prims.install(&building);
-    var registry = try modules.Registry.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment.claimCells());
     defer registry.deinit();
     var archive_owner = try spans.SpanArchiveOwner.init(&host);
     defer archive_owner.deinit();

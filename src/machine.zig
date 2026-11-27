@@ -1618,6 +1618,8 @@ pub const Fiber = struct {
     frames: std.ArrayList(Frame) = .empty,
     stack: std.ArrayList(Value),
     environment: *env.Env,
+    /// The way to the content of `environment`'s word cells.
+    cells: env.WordCells,
     inherited: InheritedContext,
     lifetime: LifetimeGuard,
     archive: *spans.SpanArchive,
@@ -1629,7 +1631,8 @@ pub const Fiber = struct {
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
-    /// What this fiber's code resolved its words to.
+    /// What idiom recognition and stack summaries resolved this fiber's
+    /// words to. Dispatch reads cells and never this.
     resolutions: WordResolutions = .{},
     /// The stack summaries read for the quotations this fiber applied.
     summaries: stack_summary.Cache = .{},
@@ -1691,6 +1694,7 @@ pub const Fiber = struct {
             .module_access = module_access,
             .stack = stack,
             .environment = environment,
+            .cells = environment.wordCells(),
             .lifetime = .init(allocator, environment),
             .archive = archive,
             .inherited = inherited,
@@ -2489,15 +2493,6 @@ pub const Fiber = struct {
         if (self.current == null)
             return self.undefinedNameIn(requested.name, .qualified);
         switch (outcome) {
-            .unknown_module_prefix => |prefix| {
-                try load.prepareQualified(
-                    .of(self),
-                    prefix.bytes,
-                    .{ .qualified = requested.name, .context = prefix.searcher, .continuation = .replay },
-                    .{ .operand = requested },
-                );
-                return .detached;
-            },
             .unregistered_module => |module| {
                 try self.replayOperand(requested);
                 try self.autoLoadModule(module.name, .{
@@ -3667,15 +3662,16 @@ pub const Fiber = struct {
         return .{ .code = origin.code, .index = origin.index };
     }
 
-    /// Runs an occurrence by explicit lookup, against the current publication
-    /// view: incremental top-level source, `execute`, and a word resumed after
-    /// loading. `dispatch` pushes a quoted occurrence instead, and `execute`
+    /// Runs an occurrence: by what its cell answers, or by a lookup against
+    /// the current publication view when the cell is empty or the word has
+    /// none. `dispatch` pushes a quoted occurrence instead, and `execute`
     /// strips the quote before calling here.
     pub fn executeWord(self: *Fiber, word: value.Symbol) MachineError!void {
         std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
-        if (self.reusedResolution(word)) |definition| return invokeDefinition(self, definition, word.name);
+        if (env.isCell(word.slot)) if (self.cells.of(word.slot).definition.load(.seq_cst)) |definition|
+            return invokeDefinition(self, definition, word.name);
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
         try self.startDriver(LookupDispatchDriver{
             .word = word,
@@ -3729,12 +3725,6 @@ pub const Fiber = struct {
     ) MachineError!void {
         self.active_word = .plain(word.name);
         switch (miss) {
-            .unknown_module_prefix => |prefix| try load.prepareQualified(
-                .of(self),
-                prefix.bytes,
-                .{ .qualified = word.name, .context = prefix.searcher, .continuation = continuation },
-                .none,
-            ),
             .unregistered_module => |module| try self.autoLoadModule(
                 module.name,
                 .{ .qualified = word.name, .context = module.searcher, .continuation = continuation },
@@ -4311,14 +4301,19 @@ fn loop(self: *Fiber) MachineError!RunStatus {
         self.active_index = index;
         if (comptime root_execution_metrics_enabled)
             self.root_execution_metrics.logical_transitions += 1;
-        // A word this fiber has resolved in the current publication runs
-        // directly; a quoted or lowered occurrence is a form, as is
-        // everything else, and an unresolved word resolves when dispatched.
+        // A word whose cell is filled runs what the cell answers; a quoted
+        // or lowered occurrence is a form, as is everything else, and a word
+        // with an empty cell or none resolves when dispatched. The turn
+        // keeps the definition read here alive until what runs holds it.
         const dispatched = resolved: {
             const form = formAt(current.code, index);
-            if (form == .symbol and form.symbol.slot & (env.quote_flag | env.local_operand_flag) == 0)
-                if (self.reusedResolution(form.symbol)) |definition|
+            if (form == .symbol and env.isCell(form.symbol.slot)) {
+                const cell = self.cells.of(form.symbol.slot);
+                if (cell.primitive.load(.seq_cst)) |primitive|
+                    break :resolved invokeBuiltin(self, .plain(form.symbol.name), primitive);
+                if (cell.definition.load(.seq_cst)) |definition|
                     break :resolved invokeDefinition(self, definition, form.symbol.name);
+            }
             break :resolved dispatch(self, form);
         };
         dispatched catch |err| switch (err) {
@@ -4518,12 +4513,10 @@ const LookupDispatchDriver = struct {
                         const counted = definition.lifetime == .counted;
                         if (counted) definition.retain();
                         defer if (counted) definition.release(fiber.releases);
-                        if (fiber.current) |current| try fiber.rememberResolution(
-                            word,
-                            self.context.borrow().view.publication,
-                            current.site.registration_provenance,
-                            definition,
-                        );
+                        switch (env.wordTarget(word.slot)) {
+                            .cell => |id| fiber.inherited.registry.fillCell(&self.context.borrow().view, id, definition),
+                            .unlinked, .local => {},
+                        }
                         const site = self.site;
                         fiber.retireDriver(self);
                         // A module load ran other code in between, so the
@@ -4728,9 +4721,8 @@ fn scheduleWord(
 /// hold the callee's last reference.
 fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
-    // Held before anything else resolves a word: the fiber's resolution of
-    // this word may be all that keeps its definition, and looking at the
-    // body resolves the body's words, which can let that resolution go.
+    // Held before the turn can end: a definition read from a word's cell
+    // is kept by the turn alone, and the evaluation outlives the turn.
     executable.owner().retain();
     var entered = false;
     defer if (!entered) executable.owner().release(self.releases);

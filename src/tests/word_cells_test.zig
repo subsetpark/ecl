@@ -368,40 +368,137 @@ test "word cells: reloading a module under running tasks keeps live memory bound
 }
 
 test "word cells: a reload reaches a dotted name that has already run" {
-    // PENDING: Patch 12
-    // Session code runs a dotted module word, the module is reloaded with a
-    // different definition, and the same code runs again. Expect the new
-    // definition.
-    return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "((1) `value def) `dotted @defm");
+    // One session word reaches the module by a dotted name on both sides of
+    // its caller's quotation.
+    try expectOk(&runtime, "(|q| dotted.value q apply dotted.value) `around def");
+    try expectStack(&runtime, "() around", "1 1");
+    try expectStack(&runtime, "(((2) `value def) `dotted @defm) around", "1 2");
+    try expectStack(&runtime, "() around", "2 2");
+    // One occurrence, reached again after each registration made between
+    // its runs.
+    try expectStack(
+        &runtime,
+        "[() (((3) `value def) `dotted @defm) (((4) `value def) `dotted @defm)] (apply dotted.value) each",
+        "[2 3 4]",
+    );
+    // An imported name follows the module the same way.
+    try expectOk(&runtime, "`dotted (value) import");
+    try expectStack(
+        &runtime,
+        "[() (((5) `value def) `dotted @defm) (((6) `value def) `dotted @defm)] (apply value) each",
+        "[4 5 6]",
+    );
+    // A registration that drops the word leaves nothing to run.
+    try expectOk(&runtime, "(dotted.value) `again def again pop");
+    try expectOk(&runtime, "((7) `other def) `dotted @defm");
+    try expectErrorContains(&runtime, "again", &.{ "kind undefined-word", "word dotted.value" });
 }
 
 test "word cells: a definition replacing an import reaches a word that has already run" {
-    // PENDING: Patch 12
-    // A session word runs an imported word, then a session definition of the
-    // same name replaces the import. Expect the session word to run the new
-    // definition.
-    return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "((1) `answer def) `answers @defm `answers (answer) import");
+    try expectOk(&runtime, "(|q| answer q apply answer) `around def");
+    try expectStack(&runtime, "() around", "1 1");
+    // The definition is published while `around` is running, between its
+    // two uses of the name.
+    try expectStack(&runtime, "((7) `answer def) around", "1 7");
+    try expectStack(&runtime, "() around", "7 7");
+    // And an import replacing the definition reaches it the same way.
+    try expectStack(&runtime, "(`answers (answer) import) around", "7 1");
+    try expectStack(&runtime, "((8) `answer def) around ((9) `answer def) around", "1 8 8 9");
 }
 
 test "word cells: a session definition shadowing core reaches session code that ran the core word" {
-    // PENDING: Patch 12
-    // A session word runs a core word, then the session defines that name.
-    // Expect the session word to run the session definition.
-    return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
+    defer runtime.deinit();
+    // `around` runs core's `neg`, its caller's quotation, and `neg` again.
+    try expectOk(&runtime, "(|q| 1 neg q apply 1 neg) `around def");
+    try expectStack(&runtime, "() around", "-1 -1");
+    try expectStack(&runtime, "((pop 9) `neg def) around", "-1 9");
+    try expectStack(&runtime, "() around 1 neg 1 core.neg", "9 9 9 -1");
+    // Code written in a module keeps core's word: the session's name is not
+    // in its chain.
+    try expectOk(&runtime, "((1 neg) `negated def) `plain @defm");
+    try expectStack(&runtime, "plain.negated ((pop 8) `neg def) around plain.negated", "-1 9 8 -1");
 }
 
 test "word cells: a reload that adds a name shadows the core word its module's code already ran" {
-    // PENDING: Patch 12
-    // A module word runs a core word, then the module is reloaded with a
-    // definition of that name. Expect the module's code to run the module's
-    // definition.
-    return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
+    defer runtime.deinit();
+    // `run` reaches core's `neg`: its module defines none.
+    try expectOk(&runtime, "((|q| 1 neg q apply 1 neg) `run def) `shadowing @defm");
+    try expectStack(&runtime, "() shadowing.run", "-1 -1");
+    // The reload gives the module a `neg` while `run` is running, and drops
+    // `run` itself, which the activation running it outlives.
+    try expectStack(&runtime, "(((pop 9) `neg def) `shadowing @defm) shadowing.run", "-1 9");
+    // A reload that drops the name again uncovers core's word.
+    try expectOk(&runtime, "((pop 9) `neg def (|q| 1 neg q apply 1 neg) `run def) `shadowing @defm");
+    try expectStack(&runtime, "(((|q| 1 neg) `run def) `shadowing @defm) shadowing.run", "9 -1");
+    // The session's own `neg` was core's throughout.
+    try expectStack(&runtime, "1 neg", "-1");
 }
 
 test "word cells: redefinition under running tasks keeps live memory bounded" {
-    // PENDING: Patch 12
-    // Tasks run a session word while it is redefined many times. Expect
-    // requested memory, once the tasks' turns end and retirement settles,
-    // bounded independently of the number of redefinitions.
-    return error.SkipZigTest;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
+    {
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(counting.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 2 }, .evaluate);
+        defer runtime.deinit();
+        // Two tasks loop on a session word for as long as the root redefines
+        // it, so every definition replaces one that running code has read.
+        // Each batch is one root fiber and two tasks, which end before it
+        // does: the batches differ only in how many definitions they make.
+        const tasks = "((step) () while) @spawn ((step) () while) @spawn ";
+        const stop = " dup task.cancel task.await pop dup task.cancel task.await pop";
+        const small = tasks ++ "[1] 16 take (pop (1) `step def) for" ++ stop;
+        const large = tasks ++ "[1] 256 take (pop (1) `step def) for" ++ stop;
+        try expectOk(&runtime, "(1) `step def");
+        // The larger batch has more replaced definitions alive at once, and
+        // storage sized by that peak stays: warm with it.
+        try expectStack(&runtime, large, "");
+        // Storage that grows by doubling may land in either batch; a pair of
+        // rounds keeps the smaller growth of each, and retention per
+        // definition would show in both.
+        var small_growth: usize = std.math.maxInt(usize);
+        var large_growth: usize = std.math.maxInt(usize);
+        for (0..2) |_| {
+            const before_small = counting.total_requested_bytes;
+            try expectStack(&runtime, small, "");
+            const after_small = counting.total_requested_bytes;
+            try expectStack(&runtime, large, "");
+            const after_large = counting.total_requested_bytes;
+            small_growth = @min(small_growth, after_small -| before_small);
+            large_growth = @min(large_growth, after_large -| after_small);
+        }
+        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
+            std.debug.print("redefinition under tasks: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
+            return err;
+        };
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }

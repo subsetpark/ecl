@@ -1235,6 +1235,13 @@ const RegistryState = struct {
     host: *const heap.HostCleanup,
     writer: std.Io.Mutex = .init,
     directories: DirectoryPublisher,
+    /// The word cells that answer from this registry's directories. Every
+    /// store into one is made with `writer` held.
+    cells: env.CellPublisher,
+    /// How many registrations are between emptying the cells a registration
+    /// can change and committing. While any is, no resolution fills a cell.
+    /// Read and written with `writer` held.
+    fills_closed: u32 = 0,
     loading: std.atomic.Value(?*LoadingNode) = .init(null),
     /// The Session's publication counter. Every edit to the registry
     /// advances it; it holds no snapshot and only keys reuse.
@@ -1250,10 +1257,11 @@ pub const Registry = enum(usize) {
         return @ptrFromInt(@backingInt(self.*));
     }
 
-    /// A Session's registry, which owns the Session's publication counter.
-    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Registry {
+    /// A Session's registry, which owns the Session's publication counter
+    /// and is the one writer of its `Env`'s word cells.
+    pub fn init(host: *const heap.HostCleanup, cells: env.CellPublisher) error{OutOfMemory}!Registry {
         const backing = try host.allocator().create(RegistryState);
-        backing.* = .{ .host = host, .directories = .init(null) };
+        backing.* = .{ .host = host, .directories = .init(null), .cells = cells };
         return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
 
@@ -1555,6 +1563,19 @@ pub const Registry = enum(usize) {
         }
     };
 
+    /// Records that the word of cell `id` resolved to `definition` in
+    /// `resolved`, unless that is no longer what it resolves to: a later
+    /// directory is current, or a registration is emptying cells. A refusal
+    /// is no failure; the word resolves by lookup until a fill lands.
+    /// Constant work under the writer lock.
+    pub fn fillCell(self: *Registry, resolved: *const View, id: env.CellId, definition: *env.Definition) void {
+        const backing = self.privateState();
+        self.lockBlocking();
+        defer self.unlock();
+        if (backing.fills_closed == 0 and backing.directories.isCurrent(resolved.directory.directory))
+            backing.cells.fill(id, definition);
+    }
+
     /// The reader a turn is, for the turn's length.
     pub fn enterTurn(self: *Registry) TurnLease {
         return .{ .registry = self, .reader = self.privateState().directories.enter() };
@@ -1798,6 +1819,15 @@ pub const Registry = enum(usize) {
     /// definition differ only in validation and in which entry changes, so
     /// each is this cursor specialized at compile time.
     ///
+    /// The edit keeps the word cells true to the directory it publishes. A
+    /// definition changes what one session name resolves to, so it empties
+    /// that name's cells, publishes, and stores them, in one critical
+    /// section. A
+    /// registration can change what any name outside core resolves to, so
+    /// before it commits it closes fills and empties those cells, a fixed
+    /// number per step; fills stay closed until it commits or is abandoned,
+    /// so no cell holds an answer read from the directory it replaces.
+    ///
     /// Validation and the build are each one bounded step: lookups and a
     /// persistent map's edit cost its depth, and the candidate shares every
     /// unchanged node with the snapshot. Both outcomes retire the candidate
@@ -1826,14 +1856,23 @@ pub const Registry = enum(usize) {
                 candidate: *Directory,
             };
             const State = union(enum) {
+                /// The next cell a registration has yet to empty.
+                emptying: u32,
                 snapshot,
                 commit: Build,
                 complete,
             };
+            /// Cells emptied in one step, under the writer lock.
+            const cells_per_step = 128;
 
             registry: *Registry,
             request: Request,
-            state: State = .snapshot,
+            state: State = switch (kind) {
+                .register => .{ .emptying = 1 },
+                .define => .snapshot,
+            },
+            /// Whether this registration holds fills closed.
+            closed_fills: bool = false,
 
             pub fn deinit(self: *Self) void {
                 switch (kind) {
@@ -1841,8 +1880,13 @@ pub const Registry = enum(usize) {
                     .define => self.request.entry.release(self.registry.releaseDomain()),
                 }
                 switch (self.state) {
-                    .snapshot, .complete => {},
+                    .emptying, .snapshot, .complete => {},
                     .commit => |*build| self.discard(build),
+                }
+                if (self.closed_fills) {
+                    self.registry.lockBlocking();
+                    self.registry.privateState().fills_closed -= 1;
+                    self.registry.unlock();
                 }
                 self.* = undefined;
             }
@@ -1868,6 +1912,18 @@ pub const Registry = enum(usize) {
 
             pub fn advance(self: *Self) Error!Progress {
                 switch (self.state) {
+                    .emptying => |from| {
+                        const backing = self.registry.privateState();
+                        self.registry.lockBlocking();
+                        if (!self.closed_fills) {
+                            backing.fills_closed += 1;
+                            self.closed_fills = true;
+                        }
+                        const next = backing.cells.emptyRegistered(from, cells_per_step);
+                        self.registry.unlock();
+                        self.state = if (next) |cell| .{ .emptying = cell } else .snapshot;
+                        return .pending;
+                    },
                     .snapshot => return self.beginSnapshot(),
                     .commit => |*build| {
                         self.registry.lockBlocking();
@@ -1889,8 +1945,28 @@ pub const Registry = enum(usize) {
                             .register => {},
                         };
                         build.candidate.previous = @constCast(build.directory.directory);
-                        self.registry.privateState().directories.publish(build.candidate);
-                        _ = self.registry.privateState().publications.fetchAdd(1, .acq_rel);
+                        const backing = self.registry.privateState();
+                        // The name's cells are empty across the publication,
+                        // so a reader finds the old answer, then a lookup's,
+                        // then the new one, and never one beside a directory
+                        // that says otherwise.
+                        if (kind == .define) backing.cells.define(self.request.name, null);
+                        backing.directories.publish(build.candidate);
+                        switch (kind) {
+                            // A definition is what the name's cells answer
+                            // now; an import is followed by lookup.
+                            .define => switch (self.request.entry) {
+                                .definition => |definition| backing.cells.define(self.request.name, definition),
+                                .alias => {},
+                            },
+                            // Nothing was filled since the cells were
+                            // emptied: a restart keeps fills closed.
+                            .register => {
+                                backing.fills_closed -= 1;
+                                self.closed_fills = false;
+                            },
+                        }
+                        _ = backing.publications.fetchAdd(1, .acq_rel);
                         // A writer rotates too, so reclamation advances
                         // while readers overlap without end.
                         const released = self.registry.rotateDirectories();

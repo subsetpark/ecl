@@ -113,16 +113,6 @@ pub fn loadSource(via: *Loading, source: *const map_state.SourceScope) MachineEr
     });
 }
 
-/// Interns a qualified miss's unknown module prefix, then loads that module.
-pub fn prepareQualified(
-    via: *Loading,
-    prefix: []const u8,
-    request: QualifiedLoadRequest,
-    restore: QualifiedLoadPreparationDriver.Restore,
-) error{OutOfMemory}!void {
-    return via.startDriver(QualifiedLoadPreparationDriver.init(prefix, request, restore));
-}
-
 /// Parses `source` and pushes its forms as one list. Consumes `source` on
 /// success and failure.
 pub fn parseSource(via: *Loading, source: []u8) MachineError!void {
@@ -1623,64 +1613,6 @@ const FileSourceDriver = struct {
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-/// Resumable boundary between a qualified miss and module loading. A prefix
-/// absent from the intern table is external, runtime-sized input; preserving
-/// this cursor as its own driver keeps both insertion and module-name
-/// validation inside scheduler safe points.
-const QualifiedLoadPreparationDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-
-    const Restore = union(enum) {
-        none,
-        operand: value.Symbol,
-    };
-
-    cursor: intern.InternModuleNameCursor,
-    request: QualifiedLoadRequest,
-    restore: Restore,
-
-    fn init(
-        prefix: []const u8,
-        request: QualifiedLoadRequest,
-        restore: Restore,
-    ) QualifiedLoadPreparationDriver {
-        return .{
-            .cursor = intern.internModuleNameCursor(prefix),
-            .request = request,
-            .restore = restore,
-        };
-    }
-
-    pub fn advance(
-        via: *Loading,
-        self: *QualifiedLoadPreparationDriver,
-    ) MachineError!WorkProgress {
-        const fiber = via.fiber();
-        const work = fiber.workBudget();
-        while (work.spend()) switch (try self.cursor.advance()) {
-            .pending => {},
-            .complete => |maybe_name| {
-                const name = maybe_name orelse return switch (self.restore) {
-                    .none => fiber.undefinedWordIn(self.request.qualified, .qualified),
-                    .operand => fiber.undefinedNameIn(self.request.qualified, .qualified),
-                };
-                const request = self.request;
-                const restore = self.restore;
-                switch (restore) {
-                    .none => {},
-                    .operand => |requested| {
-                        try via.replayOperand(requested);
-                    },
-                }
-                fiber.retireDriver(self);
-                try autoLoadModule(via, name, request);
-                return .detached;
-            },
-        };
-        return .stepped;
-    }
-};
-
 /// After an auto-load, the requested module must actually be registered.
 /// Checking that is what bounds the operation: a source that registered
 /// nothing, or a different name, fails once here instead of starting another

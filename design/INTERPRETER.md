@@ -12,8 +12,8 @@ performance measurements belong in [PERFORMANCE.md](PERFORMANCE.md).
 
 The interpreter executes the same quotation values that ecl programs
 manipulate as data. Each word resolves when it is reached, against the
-definitions current then; a unit remembers what it resolved until the next
-publication. There is no bytecode, native-code, or JIT-compiled tier. The rest of the
+definitions current then; a cell per place a word is written in holds the
+answer, and publications keep it true. There is no bytecode, native-code, or JIT-compiled tier. The rest of the
 architecture makes that model safe under replacement, array specialization,
 concurrency, cancellation, and live module reload.
 
@@ -374,10 +374,10 @@ spells. A symbol list is always a generic spine, since no leaf holds a link.
 
 Program construction produces ordinary values and never triggers compilation.
 Concatenating quotations produces another ordinary list, runnable as built:
-nothing binds it, and nothing sits beside it. Dispatch resolves each word when
-it is reached, through a resolution the unit remembers for one publication, so
-the language keeps its reflective center and its single value representation
-and a replacement needs no invalidation beyond that publication. ecl still
+nothing binds it, and nothing sits beside it. Dispatch runs what each word's
+cell answers when the word is reached, and a publication keeps the cells it
+can change true, so the language keeps its reflective center and its single
+value representation and a replacement reaches running code. ecl still
 concentrates its optimization budget on the array operations that dominate
 useful data work.
 
@@ -680,6 +680,13 @@ keyed lookup that only producers of links pay. A source is an opaque value to
 `Env`: the registry encodes a registration provenance into it and is the only
 decoder.
 
+What a spelling is as a word is a function of its bytes: a plain name, `core.`
+and a name, a module name and a binding name, or none of these. The intern
+table decides it once, in the bounded steps that intern the spelling and
+before the spelling's id exists, along with each dotted prefix and segment,
+which share the spelling's stored bytes. A cell copies the answer when it is
+minted, and a word with no cell reads it from its name.
+
 Scope ids are issued monotonically and never reused, because a cell holds a
 bare id and no reference. Core, the session, and each module name have one id
 for the life of the `Env`. A module's root is its name, never an image: every
@@ -716,18 +723,21 @@ reclaimed and nothing else holds it. Two rules keep running code safe. Within
 a turn, the turn is a reader of the registry's directories, so whatever it
 read from one stays valid until it ends. Across turns a holder owns a
 reference: an activation running a body holds its definition, a tail call
-secures the callee before it retires the caller, and a fiber's resolutions, a
-flattened list, and reflection each hold the definition they refer to.
+secures the callee before it retires the caller, and what a fiber remembers
+for recognition, a flattened list, and reflection each hold the definition
+they refer to. A word's cell holds none.
 
 ### One resolver, at dispatch
 
 The resolver resolves one word: by its link to a root, then the root's
 directory and core, or, for a dotted spelling, a module registration and its
-public entry; `core.` selects core alone. A module root is looked up by name
+public entry; `core.` selects core alone. It scans no spelling: it begins at
+the lookup the word's spelling was decided to select. A module root is looked up by name
 in the captured snapshot, with no visibility check, and the word in that
 image's directory, private names included; an unregistered name leaves core
 alone. A name alias is followed through the
-same resolver, as the module holding it would resolve it; Brent's algorithm
+same resolver, as the module holding it would resolve it, and one whose module
+is `core` as the spelling `core.x`; Brent's algorithm
 detects a cycle without bounding the length of an acyclic chain.
 
 Whose view of the module map finds a module is a property of the word, never
@@ -750,6 +760,35 @@ a word before it is reached: publishing a definition and sealing a module read
 no body, an unresolved word fails where it is reached, and a body pays only
 for the modules it calls. Explicit lookups — `execute` and reflection — use
 the same resolver against the current view.
+
+### A cell answers what its word resolves to
+
+A cell holds, beside its place, the definition its word resolves to now, or
+nothing; for a builtin that belongs to no module it also holds the builtin's
+code. Invariant: a filled cell holds exactly what the resolver answers for the
+cell's root, source, and name against the current directory, at every instant
+a fiber can read it. A cell borrows. Directories and images own definitions,
+and a turn's standing as a reader is what keeps one read from a cell alive.
+
+The registry is the one writer of cells, by an authority `Env` hands out once,
+and every store is made under its writer lock:
+
+- the first resolution of a linked word fills its cell, unless the directory
+  it resolved against is no longer current or a registration is in progress;
+- a top-level definition empties the session's cells of its name, publishes,
+  and stores them, in one critical section, and an import leaves them empty;
+  and
+- a registration empties every cell it can change, which is every cell but a
+  `core.` name and a plain name written in core, before it commits.
+
+A session name can only change the session's own plain cells of that name: no
+import or dotted name leads into the session. A registration works in bounded
+steps of its own cursor, each emptying a fixed number of cells under the lock.
+It first closes fills, and they stay closed until it commits or is abandoned,
+so no cell holds an answer read from the directory it replaces; a definition
+published meanwhile stores an answer no registration changes. An empty cell
+costs a lookup and nothing else, and refills on its word's next use. Core's
+cells are stored as core is built, by the bootstrap fiber alone.
 
 ### One snapshot is the publication view
 
@@ -774,24 +813,23 @@ retires as its own owner, one per step. A discarded candidate takes the same
 path.
 
 Every publication also advances the Session's publication counter, which its
-registry owns. The counter is never reused and holds no snapshot; it only keys fibers' resolutions. It is
+registry owns. The counter is never reused and holds no snapshot; it only keys what fibers remember. It is
 per Session so that one Session's publications never change what another's
 fibers reuse, and so what a fiber allocates is a function of its own run.
 
-### A fiber remembers what it resolved
+### A fiber remembers what recognition resolved
 
-A fiber keeps what its code resolved, keyed by word and the applying site's
-registration provenance, for one publication: any publication in the Session
-empties it before its next use, which is what makes a replacement visible. It
-uses open addressing, is kept at most half full, and grows by doubling to a
-fixed bound beyond which it starts over, so a lookup expects one probe and
-every maintenance step is bounded. Each entry holds its definition, so a
-definition it hands out outlives the dispatch that retains it. Repeating a
-word costs that probe, in a definition's body as anywhere; a quotation built
-at run time, as `cat` builds one, costs nothing more than a literal one,
-since nothing binds it. An iteration's applications borrow the quotation the
-combinator holds for the whole invocation. The bootstrap fiber keeps no
-resolutions, because core's directory changes without a publication.
+Dispatch reads cells and keeps nothing. Idiom recognition and stack summaries
+read a word before it runs, and a fiber keeps what they resolved, keyed by
+word and the applying site's registration provenance, for one publication:
+any publication in the Session empties it before its next use. It uses open
+addressing, is kept at most half full, and grows by doubling to a fixed bound
+beyond which it starts over, so a lookup expects one probe and every
+maintenance step is bounded. Each entry holds its definition, so a definition
+it hands out outlives the turn that read it. An iteration's applications
+borrow the quotation the combinator holds for the whole invocation. The
+bootstrap fiber keeps no such resolutions, because core's directory changes
+without a publication.
 
 ### An execution site is the current root
 
@@ -1035,10 +1073,13 @@ and frame resumption cannot accidentally dispatch past work installed by the
 continuation.
 
 Dispatch itself has two cases. Non-word forms transfer a retained value to the
-operand stack. A word the unit has resolved in the current publication invokes
-its definition: it schedules a source body, invokes a builtin, or starts a
-native call. Any other word first resolves through the explicit-lookup driver
-and then takes the same invocation path.
+operand stack. A word whose cell is filled runs what the cell answers: a
+builtin of no module straight from the code the cell holds, and any other
+definition by scheduling its source body, invoking its builtin, or starting
+its native call. Dispatch reads no publication counter and no state of the
+fiber but the way to the cells, in every phase, the bootstrap included. A word
+with an empty cell or none first resolves through the explicit-lookup driver,
+which fills the cell, and then takes the same invocation path.
 
 ### Tail position reuses control
 
@@ -1942,16 +1983,21 @@ alive:
 
 - a directory or generation lease, or a lookup's captured view;
 - a module generation pin, taken on an image before its directory is read;
-- a running turn, for what the turn read from a directory;
-- an evaluation's hold on its definition, or a unit's resolutions, each of
-  which holds the definition it refers to; or
+- a running turn, for what the turn read from a directory or a word's cell;
+- an evaluation's hold on its definition, or what a unit remembers for
+  recognition, each of which holds the definition it refers to; or
 - a source slice that retains its backing allocation.
 
 A running turn is itself a reader of the registry's directories. A fiber
 announces one reader when its turn begins and withdraws it on every exit, and
 holds none while parked or queued. Nothing superseded during a turn is
 reclaimed before the turn ends, so what the turn read from a directory needs
-no further evidence within it.
+no further evidence within it. A cell extends that to a pointer read with no
+lease at all: a cell is emptied before the directory owning its answer is
+superseded, in the same critical section or ahead of it, and the store
+and the read are sequentially consistent like the publisher's own, so a turn
+either reads what the store left or is counted by the flip that would reclaim
+what it read.
 
 Directory readers are counted by epoch, so reclamation never needs an instant
 with no reader. The publisher has two epochs, one current, and a reader counts
