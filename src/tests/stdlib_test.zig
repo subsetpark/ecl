@@ -227,8 +227,8 @@ test "stdlib: a body refers to a word of an unregistered module without loading 
         },
         .{
             // A registered module's missing export is still a binding miss.
-            .name = "a loaded module's missing export fails the definition",
-            .source = "[1] result.ok pop (result.nope) `f def 7",
+            .name = "a loaded module's missing export fails where it is called",
+            .source = "[1] result.ok pop (result.nope) `f def f",
             .kind = "undefined-word",
             .word = "result.nope",
         },

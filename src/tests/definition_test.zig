@@ -728,14 +728,13 @@ test "reuse: a result never overwrites a value still observed" {
     });
 }
 
-// Construction-time binding. A quotation's words carry the root they were
-// written in; binding resolves its top-level unquoted words there once, and
-// the executable it produces never retargets.
+// Resolution. A quotation's words carry the root they were written in, and
+// each resolves there when it is reached.
 
-test "binding: top-level source defines then uses, and a definition body cannot forward-reference" {
-    try support.expectStack("(1) `foo def foo", "1");
-    try support.expectErrors(&.{
-        .{ .name = "forward reference", .source = "(later) `early def", .kind = "undefined-word", .word = "later" },
+test "binding: top-level source defines then uses, and a definition body may refer to a later definition" {
+    try support.expectStacks(&.{
+        .{ .name = "define then use", .source = "(1) `foo def foo", .expected = "1" },
+        .{ .name = "forward reference", .source = "(later 1 +) `early def (2) `later def early", .expected = "3" },
     });
 }
 
@@ -867,7 +866,7 @@ test "binding: imports are name aliases followed at every binding" {
     });
 }
 
-test "binding: a module validates as one group when it is sealed" {
+test "binding: a module's definitions are published together when it is sealed" {
     try support.expectStacks(&.{
         .{
             .name = "forward and mutual",
@@ -891,7 +890,11 @@ test "binding: a module validates as one group when it is sealed" {
         },
         // Staged definitions cannot run before the module is sealed.
         .{ .name = "staged", .source = "((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
-        .{ .name = "failed seal publishes nothing", .source = "(((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
+        .{
+            .name = "failed seal publishes nothing",
+            .source = "(((1) `x def (2) `x def) `bad @defm) @attempt pop bad.x",
+            .kind = "undefined-word",
+        },
     });
 }
 

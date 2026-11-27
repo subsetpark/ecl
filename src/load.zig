@@ -985,7 +985,7 @@ const BuiltinLoadDriver = struct {
                     defer built.deinit();
                     const sealed = built.sealLiteralGroup() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.Duplicate, error.UnboundWord => return fiber.fail(
+                        error.Duplicate => return fiber.fail(
                             .contract,
                             "builtin module declares an invalid word",
                         ),
@@ -1096,7 +1096,10 @@ const NativeLoadDriver = struct {
                 } };
                 return .stepped;
             },
-            .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
+            .definitions => |*definitions| switch (definitions.publication.borrowMut().advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnboundWord => return self.failLoad(via, "native module declares an invalid word"),
+            }) {
                 .pending => return .stepped,
                 .complete => |candidate| {
                     // Sealing can fail; until it succeeds the instance and
@@ -1105,7 +1108,7 @@ const NativeLoadDriver = struct {
                     defer built.deinit();
                     const sealed = built.sealLiteralGroup() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.Duplicate, error.UnboundWord => return self.failLoad(via, "native module declares an invalid word"),
+                        error.Duplicate => return self.failLoad(via, "native module declares an invalid word"),
                     };
                     // Shadowing in a shipped module is deliberate.
                     if (self.provenance != .standard_library) {

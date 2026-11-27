@@ -46,8 +46,8 @@ frame machine ───────► environment and module resolution
 ```
 
 Each box is a cooperating runtime boundary. Reading creates ordinary runtime
-values; a definition is validated when it is made, and every word resolves as
-it is reached; a primitive may install a
+values; every word resolves as it is reached, and nothing checks it before
+then; a primitive may install a
 resumable driver; and a driver may yield to the scheduler many times before
 producing a value. The `Session` owns every component for the whole journey.
 
@@ -58,7 +58,7 @@ The main components are these:
 | Session | Lifetime root, persistent operand stack, host services, and unit transaction | `session.zig` |
 | Reader and source archive | Turn source into executable values while retaining optional diagnostic spans | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
-| Names and modules | Resolution at dispatch, validated and immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
+| Names and modules | Resolution at dispatch, immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, load and construct modules, and construct errors | `machine.zig`, `load.zig`, `module_construction.zig`, `failure.zig`, `error_value.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green fibers, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
@@ -678,17 +678,14 @@ rather than a fallback.
 A `Definition` is one closed choice — a source body, an in-tree builtin
 callback, or a validated native callable — together with its effect,
 documentation, visibility, source slice, and module-local name. Nothing about
-it changes once it is sealed; replacing a name publishes a different
-definition. Construction reserves a definition before its body is validated,
-which is what lets a body refer to itself and a module group's members refer to one
-another; sealing installs the body. A reserved definition is reachable only
-from its construction owner, so it can be neither executed nor published.
-
-Construction is a typed boundary. A reserved definition can be referred to by
-validation but is accepted by no execution, publication, or reflection path;
-only sealing yields a definition, so every holder of a definition holds sealed
-code. A module group validates against a construction directory of its own,
-so a published directory never holds an unsealed entry.
+it changes once it is created; replacing a name publishes a different
+definition. A definition is sealed by its constructor, so every holder of one
+holds code that execution, publication, and reflection can read, and a
+directory never holds an entry that is not one. Creating a definition reads
+nothing of its body's words; each resolves when it is reached, so a body may
+call itself or a word defined later. The one check of a body is of a
+host-built module's literal table entry, which is refused when it executes a
+word.
 
 Ownership follows the root. Core's definitions live as long as the `Env`. A
 module image owns its definitions, and the Session keeps every published image
@@ -701,7 +698,7 @@ reclaimed during a Session; the retention of published images is a deliberate
 exception, accepted to avoid an ownership protocol for quotations that escape
 their image, and memory grows with reload history.
 
-### Validation checks a body once; dispatch resolves every time
+### One resolver, at dispatch
 
 The resolver resolves one word: by its link to a root, then the root's
 directory and core, or, for a dotted spelling, a module registration and its
@@ -709,35 +706,32 @@ public entry; `core.` selects core alone. A name alias is followed through the
 same resolver, as the module holding it would resolve it; Brent's algorithm
 detects a cycle without bounding the length of an acyclic chain.
 
-A construction validates each body with it, against one captured publication
-view, so a misspelled word fails the definition rather than its call. A
-construction's own members, and a definition's own name, resolve during
-validation before anything is published. Validation records nothing and holds
-nothing, so abandoning it is constant work. A word referring to a module that is not
-registered passes and resolves when it is reached, loading the module then:
-validation never loads a module, so a body pays only for the modules it calls.
+The resolver has one mode and no construction state: it answers with a
+published definition or a miss, and nothing that is not yet published is
+visible to it.
 
 Every evaluation — top-level source, a definition's body, a quotation applied
 at run time — resolves each word when it is reached, so a definition made by
 one form is visible to the next and a replacement reaches the next dispatch of
 the word anywhere, even partway through a body or an iteration. Nothing checks
-a quotation applied at run time before it runs; an unresolved word fails where
-it is reached. Explicit lookups — `execute` and reflection — use the same
-resolver against the current view.
+a word before it is reached: publishing a definition and sealing a module read
+no body, an unresolved word fails where it is reached, and a body pays only
+for the modules it calls. Explicit lookups — `execute` and reflection — use
+the same resolver against the current view.
 
 ### One snapshot is the publication view
 
 The registry's directory snapshot is the Session's publication view. It maps
 module names to images and the session's top-level names to definitions,
-word aliases, and module aliases. A validation captures one snapshot
-and resolves every session and qualified name against it across scheduler
-turns, so it never checks a body against two publication states. Core's directory is
+word aliases, and module aliases. A resolution captures one snapshot
+and resolves its session and qualified names against it across scheduler
+turns, so it never answers from two publication states. Core's directory is
 fixed when core freezes and an image's when the image is sealed, so neither
 needs capturing.
 
 Every mutation — a top-level definition, an import, an alias, a registration,
-a reload — is one bounded cursor: snapshot the current directory, validate
-against it, build a successor with the edit applied, and publish it under the
+a reload — is one bounded cursor: snapshot the current directory, build a
+successor with the edit applied, and publish it under the
 writer lock if the snapshot is still current; otherwise discard it and start
 over. Concurrent writers therefore cannot lose each other's updates. The
 directory's maps are persistent tries keyed by name identity: a successor
@@ -793,7 +787,7 @@ Where a word resolves is carried by the word.
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.
 
-### A module is one group per generation
+### A module is sealed once per generation
 
 A module image is created with its name, by `@defm` or by a loader that has
 validated the name. The name is part of the image's identity: registration consumes
@@ -802,17 +796,11 @@ registered under a second one. Whatever reports running code's module, `*module*
 qualified spelling, or the private home, reads it from the image. While its construction body runs, `def`, `defp`, `import`,
 `importp`, and `alias` stage names in the image; nothing staged is visible, so the body
 cannot run a definition it has made. When the body completes, the module is
-sealed as one group: the staged names become the image's directory, a name
-staged twice fails construction, and every reserved body is validated against
-that directory and one captured view. A word written in the image resolves in the
-group, and so does a qualified name referring to the module being sealed, when the
-group owns the occurrence or the alias that reached it: no registry entry
-exists for the group yet. A quotation injected from elsewhere was not written
-in the group, so its qualified names reach the registered module. Every body
-is validated before any is sealed, so a failure never leaves half a group
-sealed. The image
+sealed: the staged names become the image's directory, and a name staged
+twice fails construction. Sealing reads no body. The image
 stays in its construction frame throughout, and the frame's unwind discards it
-on failure. A construction body that leaves values on its stack is refused
+on failure, so a failure never registers part of a module. A construction
+body that leaves values on its stack is refused
 before sealing, so no image carries state out of its body.
 
 Module documentation is a property of the image, like its name. A source
@@ -927,7 +915,7 @@ with a 144-byte ceiling.
 
 ### Loading resumes a lookup
 
-Validation never loads. A word referring to an unregistered module suspends the
+A word referring to an unregistered module suspends the
 lookup that reaches it, or a primitive, while
 the loader searches the embedded standard-library manifest, the module map,
 source paths, or native artifacts according to `ENVIRONMENT.md`. The
@@ -1964,10 +1952,8 @@ as ordinary ecl definitions and modules.
 
 `prelude.ecl` is embedded and evaluated during Session construction to populate
 core. It runs through the ordinary frame machine in a root whose
-storage is the core-building authority, so each definition is validated as it
-is made against the core built so far and the prelude needs no forward
-references; core is then frozen before any ordinary unit
-starts. `stdlib.zig` is a compile-time manifest of embedded
+storage is the core-building authority; core is then frozen before any
+ordinary unit starts. `stdlib.zig` is a compile-time manifest of embedded
 source and host-backed modules. Embedded modules win before filesystem search,
 so a stray file cannot silently replace shipped code, and their names are
 reserved like `core`: only embedded loading registers them, so user code can

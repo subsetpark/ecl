@@ -4030,17 +4030,7 @@ pub const Fiber = struct {
             );
         }
         self.active_word = frame.word;
-        const built = &frame.mode.module.image;
-        const home = built.executionHome(self.module_access);
-        const placeholder = try list.fromValuesGeneric(self.allocator, &.{});
-        self.current = .{
-            .code = placeholder.list,
-            .program = .owned,
-            .position = .{ .source = 0 },
-            .site = .image(home, self.module_access, false),
-            .activation = .none,
-        };
-        return built;
+        return &frame.mode.module.image;
     }
     fn closeModuleBoundary(self: *Fiber) modules.OwnedImage {
         releaseCurrent(self);
@@ -5099,8 +5089,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
         },
         .boundary => {
             if (self.frames.items[self.frames.items.len - 1].boundary.mode == .module) {
-                // The image stays in its frame until it is sealed: binding the
-                // group may load modules, which run above the frame.
+                // The image stays in its frame until it is sealed.
                 try module_construction.startSeal(.of(self));
                 return true;
             }
@@ -5277,15 +5266,13 @@ pub const Construction = opaque {
 
     /// Begins sealing the module whose construction boundary is the top
     /// frame. A module body defines words and keeps no state, so a residual
-    /// operand window closes the boundary and fails. Otherwise a placeholder
-    /// evaluation at the image's site becomes the caller that a module load
-    /// during the seal suspends and returns to.
+    /// operand window closes the boundary and fails.
     pub fn beginSeal(self: *Construction) MachineError!*modules.OwnedImage {
         return self.fiber().beginModuleSeal();
     }
 
-    /// Closes the construction boundary once its group is bound, and returns
-    /// the image it held.
+    /// Closes the construction boundary once its directory is built, and
+    /// returns the image it held.
     pub fn closeBoundary(self: *Construction) modules.OwnedImage {
         return self.fiber().closeModuleBoundary();
     }

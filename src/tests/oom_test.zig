@@ -653,9 +653,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // refusal allocates its error.
             "((21 1 +) `oom-leftover @defm) @attempt pop " ++
             // Calls, failures inside calls, and reloads each have their own
-            // allocation-failure paths through registration. A body that refers to
-            // an undefined word fails its group's seal; an explicit lookup
-            // fails only when it runs.
+            // allocation-failure paths through registration. A module whose
+            // body refers to an undefined word seals; that word and an explicit
+            // lookup fail only when they run.
             "(((missing) `f def) `oom-unbound @defm) @attempt pop " ++
             "((1) `bump def (`missing execute) `boom def (7) `peek def) `oom-calls @defm " ++
             "oom-calls.bump pop (oom-calls.boom) @attempt pop " ++

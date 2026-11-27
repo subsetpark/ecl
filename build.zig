@@ -1185,6 +1185,9 @@ pub fn build(b: *std.Build) void {
             // is a handful of scalar words through the public Session and the
             // whole file costs well under a second.
             "tests.conversion_test.",
+            // Word resolution through the public Session: where a word
+            // resolves and when a definition change reaches running code.
+            "tests.word_cells_test.",
             // Fast families inside sources that also hold heavy tests.
             "env:",
             "modules:",

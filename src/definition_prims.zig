@@ -96,9 +96,6 @@ const DefineDriver = struct {
     scope: *env.Scope,
     name: u32,
     item: heap.Owned(Value),
-    /// The annotation this definition consumed, kept so a definition whose
-    /// body needs a module loaded can restore its operands and run again.
-    annotation_value: ?heap.Owned(Value) = null,
     separator: u32,
     colon: u32,
     annotation: heap.Owned(Annotation),
@@ -145,19 +142,8 @@ const DefineDriver = struct {
             binding_name: intern.BindingName,
             source: ?heap.Owned(reader_types.SourceSlice),
         },
-        /// The reserved definition's body validating against the current
-        /// view, with the definition itself standing for a call of its own
-        /// name.
-        validating: struct {
-            binding_name: intern.BindingName,
-            reservation: *env.Reservation,
-            context: heap.Owned(binder.Context),
-            cursor: heap.Owned(binder.ValidationCursor),
-        },
         publishing_session: heap.Owned(modules.Registry.DefineCursor),
         publishing_test: modules.TestDeclarationCursor,
-        /// Ownership has passed to the directory.
-        published,
 
         pub fn deinit(
             self: *State,
@@ -180,30 +166,11 @@ const DefineDriver = struct {
                 .prepare_publish => |*publication| {
                     if (publication.source) |*source| source.deinit(releases, allocator);
                 },
-                .validating => |*validating| {
-                    validating.cursor.deinit(releases, allocator);
-                    validating.context.deinit(releases, allocator);
-                    validating.reservation.discard(releases);
-                },
                 .publishing_session => |*cursor| cursor.deinit(releases, allocator),
-                .validate_name, .source, .publishing_test, .published => {},
+                .validate_name, .source, .publishing_test => {},
             }
         }
     };
-
-    /// A word in the body does not resolve. A definition never
-    /// forward-references: a miss fails at that word.
-    fn bindingMiss(
-        fiber: *Fiber,
-        code: *value.ListHandle,
-        index: u32,
-        word: value.Symbol,
-        miss: binder.Unbound,
-    ) MachineError!machine.WorkProgress {
-        const failure = fiber.failUnbound(word, miss);
-        fiber.setFailureSite(code, index);
-        return failure;
-    }
 
     fn malformed(fiber: *Fiber) MachineError {
         return fiber.fail(.domain, "malformed definition annotation");
@@ -240,8 +207,6 @@ const DefineDriver = struct {
                     else
                         null;
                     fiber.discard(1);
-                    heap.retainValue(scan.candidate.borrow());
-                    self.annotation_value = .init(scan.candidate.borrow());
                     const source = scan.candidate.take();
                     self.state.borrowMut().* = .{ .validate_annotation = .{
                         .context = .{
@@ -412,8 +377,7 @@ const DefineDriver = struct {
                 defer if (owned_source) |*owned| owned.deinit();
                 const source = owned_source;
                 switch (self.scope.storage) {
-                    // A module stages its definitions; the group binds when the
-                    // module is sealed.
+                    // A module stages its definitions until it is sealed.
                     .module_root => {
                         const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
                             .domain,
@@ -432,7 +396,7 @@ const DefineDriver = struct {
                     .session, .core_build => {},
                 }
                 const root: env.DefinitionRoot = if (self.scope.storage == .session) .session else .core;
-                const reservation = try env.Definition.reserve(
+                const definition = try env.Definition.createSource(
                     fiber.allocator,
                     if (root == .session) .counted else .static,
                     env.quotationHeader(body),
@@ -444,58 +408,27 @@ const DefineDriver = struct {
                         .attribution = attribution,
                     },
                 );
-                var context = fiber.resolutionContext(fiber.inherited.registry.view());
-                context.self_reference = .{
-                    .root = if (root == .session) fiber.environment.sessionScopeId() else fiber.environment.coreScopeId(),
-                    .name = intern.bindingId(publication.binding_name),
-                };
-                self.state.borrowMut().* = .{ .validating = .{
-                    .binding_name = publication.binding_name,
-                    .reservation = reservation,
-                    .context = .init(context),
-                    .cursor = .init(binder.ValidationCursor.init(fiber.releases, env.quotationHeader(body))),
-                } };
-            },
-            .validating => |*validating| {
-                const result = switch (validating.cursor.borrowMut().advance(validating.context.borrowMut(), work)) {
-                    .pending => return .stepped,
-                    .complete => |result| result,
-                };
-                switch (result) {
-                    .valid => {
-                        const reservation = validating.reservation;
-                        const name = validating.binding_name;
-                        validating.cursor.deinit(fiber.releases, fiber.allocator);
-                        validating.context.deinit(fiber.releases, fiber.allocator);
-                        const definition = reservation.seal();
-                        switch (self.scope.storage) {
-                            .session => {
-                                // The registry cursor takes the definition's
-                                // first reference.
-                                self.state.borrowMut().* = .{ .publishing_session = .init(
-                                    fiber.inherited.registry.defineCursor(name, .{ .definition = definition }),
-                                ) };
-                            },
-                            .core_build => |publisher| {
-                                self.state.borrowMut().* = .published;
-                                publisher.publish(name, definition) catch |err| {
-                                    definition.retireStatic(fiber.releases);
-                                    return switch (err) {
-                                        error.OutOfMemory => error.OutOfMemory,
-                                        error.Frozen => fiber.fail(.domain, "core is sealed"),
-                                        error.Duplicate => fiber.fail(.domain, "a core name is defined once"),
-                                    };
-                                };
-                                return .completed;
-                            },
-                            .module_root => unreachable,
-                        }
+                const name = publication.binding_name;
+                switch (self.scope.storage) {
+                    .session => {
+                        // The registry cursor takes the definition's first
+                        // reference.
+                        self.state.borrowMut().* = .{ .publishing_session = .init(
+                            fiber.inherited.registry.defineCursor(name, .{ .definition = definition }),
+                        ) };
                     },
-                    .failed => |failure| {
-                        const code = validating.cursor.borrow().code;
-                        const word = heap.valuesConst(code)[failure.index].symbol;
-                        return bindingMiss(fiber, code, failure.index, word, failure.miss);
+                    .core_build => |publisher| {
+                        publisher.publish(name, definition) catch |err| {
+                            definition.retireStatic(fiber.releases);
+                            return switch (err) {
+                                error.OutOfMemory => error.OutOfMemory,
+                                error.Frozen => fiber.fail(.domain, "core is sealed"),
+                                error.Duplicate => fiber.fail(.domain, "a core name is defined once"),
+                            };
+                        };
+                        return .completed;
                     },
+                    .module_root => unreachable,
                 }
             },
             .publishing_session => |*cursor| switch (try cursor.borrowMut().advance()) {
@@ -505,7 +438,6 @@ const DefineDriver = struct {
                     return .completed;
                 },
             },
-            .published => return .completed,
             .publishing_test => |*cursor| {
                 switch (cursor.advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,

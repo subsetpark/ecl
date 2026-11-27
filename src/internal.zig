@@ -130,4 +130,5 @@ test {
     _ = @import("tests/interleaving_test.zig");
     _ = @import("tests/mailbox_test.zig");
     _ = @import("tests/kernel_typed_test.zig");
+    _ = @import("tests/word_cells_test.zig");
 }

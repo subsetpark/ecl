@@ -277,17 +277,6 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
             return self.count_value;
         }
 
-        /// The number of slots, for a bounded walk that must resume at a
-        /// recorded slot.
-        pub fn slotCount(self: *const Self) usize {
-            return self.slots.len;
-        }
-
-        /// The entry in slot `index`, if any.
-        pub fn slotEntry(self: *const Self, index: usize) ?Entry {
-            return self.slots[index];
-        }
-
         pub const RawEntryProgress = StreamProgress(Entry);
         pub const RawEntryCursor = struct {
             slots: []const ?Entry,

@@ -388,21 +388,16 @@ pub const DefinitionRoot = enum { core, session, image };
 /// than at its own body. The definition's body was marked with `helper`.
 pub const Attribution = enum(u8) { own, caller };
 
-/// One immutable, sealed definition. Construction reserves its storage before
-/// its body is validated, so a body may call itself (and a module group's
-/// members one another), but hands out only a `Reservation` for it: a
-/// `*Definition` exists only once sealing has installed the body. So
-/// every holder of a `*Definition` holds sealed code, and execution,
-/// publication, and reflection read it through `code` with no reserved case.
+/// One immutable definition, sealed when it is created: every holder of a
+/// `*Definition` holds code that execution, publication, and reflection read
+/// through `code`. Creating one checks nothing about the words of its body;
+/// each resolves when it is reached.
 pub const Definition = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     refs: std.atomic.Value(u32) = .init(1),
     allocator: std.mem.Allocator,
     lifetime: Lifetime,
-    /// Which member is active is the handle's type: a `Reservation` reads
-    /// `reserved`, a `Definition` reads `sealed`. Safe builds check the
-    /// active member; only this file mentions the field.
-    body_state: BodyState,
+    sealed: Code,
     visibility: Visibility = .public,
     origin: BindingOrigin = .top,
     effect: ?ValidatedEffect = null,
@@ -421,20 +416,10 @@ pub const Definition = struct {
         native: NativeCallable,
     };
 
-    /// A definition sealed at creation: a host callback.
+    /// A host callback a definition runs.
     pub const Callback = union(enum) {
         builtin: PrimitiveImpl,
         native: NativeCallable,
-    };
-
-    const BodyState = union {
-        reserved: Reserved,
-        sealed: Code,
-    };
-
-    /// The quotation awaiting validation and the seal.
-    const Reserved = struct {
-        quotation: *value.ListHandle,
     };
 
     pub const Metadata = struct {
@@ -448,8 +433,8 @@ pub const Definition = struct {
         home: ?*anyopaque = null,
     };
 
-    /// A definition sealed at creation around a host callback, owning one
-    /// reference to each metadata value.
+    /// A definition around a host callback, owning one reference to each
+    /// metadata value.
     pub fn create(
         allocator: std.mem.Allocator,
         lifetime: Lifetime,
@@ -460,28 +445,30 @@ pub const Definition = struct {
             .builtin => |primitive| .{ .builtin = primitive },
             .native => |callable| .{ .native = callable },
         };
-        const result = try allocate(allocator, lifetime, .{ .sealed = sealed }, metadata);
+        const result = try allocate(allocator, lifetime, sealed, metadata);
         if (callback == .native) callback.native.instance.retain();
         return result;
     }
 
-    /// Reserves a definition whose body its construction owner will bind and
-    /// seal. `body` is retained here; the caller keeps its own.
-    pub fn reserve(
+    /// A definition whose code is a quotation, owning one reference to each
+    /// metadata value. `body` is retained here; the caller keeps its own.
+    pub fn createSource(
         allocator: std.mem.Allocator,
         lifetime: Lifetime,
         body: *value.ListHandle,
         metadata: Metadata,
-    ) error{OutOfMemory}!*Reservation {
-        const result = try allocate(allocator, lifetime, .{ .reserved = .{ .quotation = body } }, metadata);
+    ) error{OutOfMemory}!*Definition {
+        const result = try allocate(allocator, lifetime, .{ .source = .{ .code = body, .owner = .static } }, metadata);
+        // A counted definition's activations hold the definition itself.
+        if (lifetime == .counted) result.sealed.source.owner = .{ .definition = result };
         heap.incRef(body);
-        return Reservation.of(result);
+        return result;
     }
 
     fn allocate(
         allocator: std.mem.Allocator,
         lifetime: Lifetime,
-        body_state: BodyState,
+        sealed: Code,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
         const result = try allocator.create(Definition);
@@ -491,7 +478,7 @@ pub const Definition = struct {
         result.* = .{
             .allocator = allocator,
             .lifetime = lifetime,
-            .body_state = body_state,
+            .sealed = sealed,
             .visibility = metadata.visibility,
             .origin = metadata.origin,
             .effect = metadata.effect,
@@ -506,7 +493,7 @@ pub const Definition = struct {
 
     /// What the definition runs.
     pub inline fn code(self: *const Definition) Run {
-        return switch (self.body_state.sealed) {
+        return switch (self.sealed) {
             .source => |*storage| .{ .source = Executable.of(storage) },
             .builtin => |primitive| .{ .builtin = primitive },
             .native => |callable| .{ .native = callable },
@@ -562,7 +549,7 @@ pub const Definition = struct {
         allocator: std.mem.Allocator,
         self: *Definition,
     ) bool {
-        switch (self.body_state.sealed) {
+        switch (self.sealed) {
             .source => |storage| storage.free(releases),
             .builtin => {},
             .native => |callable| callable.instance.releasePin(),
@@ -582,69 +569,15 @@ pub const Definition = struct {
     }
 };
 
-/// A definition under construction: the only handle its construction owner
-/// holds until sealing. Validation can resolve its name in its construction,
-/// and it carries the definition's metadata, but it cannot be executed,
-/// published, or reflected, since none of those accept it. Sealing consumes it and returns
-/// the `*Definition`; a construction that fails discards it instead.
-pub const Reservation = opaque {
-    fn of(definition: *Definition) *Reservation {
-        return @ptrCast(definition);
+/// Whether a quotation executes a word. A literal table entry of a host-built
+/// module is a body that does not.
+pub fn executesWord(body: *value.ListHandle) bool {
+    if (body.kind() != .generic_spine) return false;
+    for (heap.valuesConst(body)[0..@intCast(body.length())]) |form| {
+        if (form == .symbol and !isQuoted(form.symbol.slot) and localOperand(form.symbol.slot) == null) return true;
     }
-
-    fn storage(self: *Reservation) *Definition {
-        return @ptrCast(@alignCast(self));
-    }
-
-    fn storageConst(self: *const Reservation) *const Definition {
-        return @ptrCast(@alignCast(self));
-    }
-
-    pub fn visibility(self: *const Reservation) Visibility {
-        return self.storageConst().visibility;
-    }
-
-    /// The quotation the reservation awaits validation for.
-    pub fn quotation(self: *const Reservation) *value.ListHandle {
-        return self.storageConst().body_state.reserved.quotation;
-    }
-
-    /// Seals the reservation's body as the definition's code, which resolves
-    /// each word as it runs. Its construction has validated the body first.
-    /// Constant work.
-    pub fn seal(self: *Reservation) *Definition {
-        const definition = self.storage();
-        const body = definition.body_state.reserved.quotation;
-        definition.body_state = .{ .sealed = .{ .source = .{
-            .code = body,
-            .owner = switch (definition.lifetime) {
-                .static => .static,
-                .counted => .{ .definition = definition },
-            },
-        } } };
-        return definition;
-    }
-
-    /// Seals a reservation whose body executes no words: a literal table
-    /// entry, which no construction validates. Fails, leaving it reserved,
-    /// when the body has a word to resolve.
-    pub fn sealLiteral(self: *Reservation) error{UnboundWord}!*Definition {
-        const body = self.quotation();
-        if (body.kind() == .generic_spine) for (heap.valuesConst(body)[0..@intCast(body.length())]) |form| {
-            if (form == .symbol and !isQuoted(form.symbol.slot) and localOperand(form.symbol.slot) == null)
-                return error.UnboundWord;
-        };
-        return self.seal();
-    }
-
-    /// Releases a reservation that will never be sealed. Its owner held its
-    /// only reference, and everything it owns releases in constant work.
-    pub fn discard(self: *Reservation, releases: *heap.ReleaseDomain) void {
-        const definition = self.storage();
-        releases.releaseHeader(definition.body_state.reserved.quotation);
-        definition.freeMetadata(releases, definition.allocator);
-    }
-};
+    return false;
+}
 
 /// What a running activation must hold to keep its definition alive. A static
 /// owner needs nothing. A counted definition is retained by each
@@ -680,8 +613,8 @@ pub const Owner = union(enum) {
 /// source provenance, and the owner an activation running it holds. Each word
 /// resolves when it is reached.
 ///
-/// Opaque: its storage is embedded in its owner and reached only through
-/// this handle, so nothing outside sealing can make one.
+/// Opaque: its storage is embedded in its definition and reached only through
+/// this handle, so nothing but creating a definition can make one.
 pub const Executable = opaque {
     const Storage = struct {
         code: *value.ListHandle,
@@ -752,20 +685,6 @@ pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
 /// aliases, so it holds definitions alone.
 pub const CoreMap = poll.FixedMap(intern.BindingName, *Definition);
 
-/// A name in a module group under construction: a reservation the group will
-/// seal, a definition sealed at creation, or an alias. Only the construction
-/// owner reads this directory; sealing builds the published `NameMap` from
-/// it, so a published directory never holds a reservation.
-pub const GroupEntry = union(enum) {
-    reserved: *Reservation,
-    definition: *Definition,
-    alias: Alias,
-    module: intern.ModuleName,
-};
-
-/// A module group's construction directory.
-pub const GroupMap = poll.FixedMap(intern.BindingName, GroupEntry);
-
 const ScopeAllocation = enum { embedded, heap };
 
 /// Which root a scope is. A session or core-building scope denotes the one
@@ -794,12 +713,6 @@ pub const Scope = struct {
     serial: u64,
 
     var next_serial: std.atomic.Value(u64) = .init(1);
-
-    /// The id of a module root's cell, or `.none` if it has never minted one.
-    pub fn cellId(self: *const Scope) ScopeId {
-        const cell = self.label_cell.load(.acquire) orelse return .none;
-        return cell.id;
-    }
 
     pub fn isModuleRoot(self: *const Scope) bool {
         return self.storage == .module_root;

@@ -285,9 +285,9 @@ test "module: privacy module-body contract top-level private and qualified trace
     // A body that leaves a value behind is refused and registers nothing.
     try expectErrorContains(&runtime, "(1) `bad @defm", &.{ "kind domain", "left 1 value" });
     try expectErrorContains(&runtime, "bad.x", &.{"kind undefined-word"});
-    // A word its group cannot bind fails the module's construction.
-    try expectErrorContains(&runtime, "(( -- n ) (missing) `boom def) `trace-module @defm", &.{ "kind undefined-word", "word missing" });
-    try expectErrorContains(&runtime, "trace-module.boom", &.{"kind undefined-word"});
+    // A word that resolves to nothing fails where it is reached.
+    try expectOk(&runtime, "(( -- n ) (missing) `boom def) `trace-module @defm");
+    try expectErrorContains(&runtime, "trace-module.boom", &.{ "kind undefined-word", "word missing" });
     try expectOk(&runtime, "(( n -- n ) (dup 0 > (1 - f 1 +) (pop missing) if) `f def) `recursive @defm");
     try expectErrorContains(&runtime, "2 recursive.f", &.{"trace (`missing `recursive.f `recursive.f `recursive.f)"});
 }
@@ -556,7 +556,7 @@ test "module: a construction body cannot reach session words" {
     // the construction body in the image's chain whatever scope its text was
     // written in, so a bare `k` inside the body is undefined however recently
     // the session defined one, and the module's construction fails.
-    try expectErrorContains(&runtime, "(3) `k def ((k *) `scale def) `body-dep @defm", &.{
+    try expectErrorContains(&runtime, "(3) `k def (k `scale set) `body-dep @defm", &.{
         "kind undefined-word",
         "word k",
     });
@@ -696,7 +696,7 @@ test "loader: @load is one isolated unit and preserves file provenance" {
     try expectOk(&runtime, "\"test/acceptance/load-stack.ecl\" @load");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try expectErrorContains(&runtime, "\"test/acceptance/load-underflow.ecl\" @load", &.{ "kind underflow", "found 0\"" });
-    // A definition that cannot bind fails where it is defined, at its source.
+    // A word that resolves to nothing fails where it is reached, at its source.
     try expectErrorContains(&runtime, "\"test/acceptance/load-provenance.ecl\" @load", &.{ "word missing", "source \"test/acceptance/load-provenance.ecl\"" });
     // A file that keeps stack state is refused, as a module body is.
     try expectErrorContains(&runtime, "\"test/acceptance/load-leftover.ecl\" @load", &.{ "kind domain", "left 1 value" });
@@ -867,7 +867,7 @@ test "module: an undefined word reports the chain its own scope searched" {
     // look.
     try expectOk(&runtime, "((|q| q apply) `invoke def) `m @defm");
     try expectErrorContains(&runtime, "(nope) m.invoke", &.{ "word nope", "scope session" });
-    try expectErrorContains(&runtime, "((missing) `f def) `own @defm", &.{ "word missing", "scope module" });
+    try expectErrorContains(&runtime, "((missing) `f def) `own @defm own.f", &.{ "word missing", "scope module" });
     try expectErrorContains(&runtime, "nope", &.{ "word nope", "scope session" });
 }
 

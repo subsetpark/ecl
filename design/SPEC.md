@@ -451,29 +451,25 @@ Every word is resolved when it is reached, in the scope that occurrence was
 written in (see [Where a word resolves](#where-a-word-resolves)), against the current definitions and module
 registrations. This holds alike for top-level source, for definition bodies,
 and for every quotation applied at run time, by `apply`, a combinator,
-`@attempt`, or as a task's body. A quotation applied at run time is not checked
-before it runs: an unresolved word fails at that word, after the forms before
-it have run. Nested quotations and quoted words are data and resolve only when
-they are themselves applied.
+`@attempt`, or as a task's body. Nothing is checked before it is reached: an
+unresolved word fails with `` `undefined-word `` at that word, after the forms
+before it have run, and a word that is never reached never fails. Nested
+quotations and quoted words are data and resolve only when they are themselves
+applied.
 
 ### Definition 
 
-Definitions are introduced with the word `def`, and a definition validates its
-body when it is published. Validation records nothing: the body resolves each
-word again whenever it runs.
+Definitions are introduced with the word `def`. Publishing a definition checks
+nothing about the words of its body: the body resolves each word whenever it
+runs. A body may therefore call itself, refer to a word defined later, and
+recurse mutually with another definition, and a word that resolves to nothing
+fails where it is reached, never where it is defined.
 
-A definition written to the session is published as `def` runs. Every word of
-its body outside a nested quotation must already resolve, so the body cannot
-refer forward to a later definition, and a misspelled word fails the
-definition. A qualified word whose module is not registered yet is the other
-exception: its lookup is deferred until the word is reached. The definition's own name, written in the scope it is published
-into, is the exception: it calls the definition itself.
+A definition written to the session is published as `def` runs.
 
 A definition written to a module image is staged by the module's construction
-body and published when the module is sealed. A module's definitions and
-imports are validated together then, so words in one module may refer forward
-and recurse mutually. A staged definition is not visible to runtime lookup
-before its module is sealed.
+body and published when the module is sealed. A staged definition is not
+visible to runtime lookup before its module is sealed.
 
 A body running when a word it calls is replaced may run the old definition for
 earlier calls and the new one for later ones. There is no historical view: a
