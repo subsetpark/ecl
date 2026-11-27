@@ -72,6 +72,7 @@ fn startDefm(fiber: *Fiber, name: u32, body_header: *Header) MachineError!void {
         .body = .init(body.take()),
         .validation = .init(name),
         .doc = owned_doc,
+        .provenance = try fiber.dispatchedSource(),
     });
 }
 
@@ -91,6 +92,9 @@ const DefmDriver = struct {
     validation: intern.ModuleNameCursor,
     /// The module's documentation, consumed from beneath the operands.
     doc: heap.Owned(Value) = .none,
+    /// The source the `@defm` occurrence was written in: what the module
+    /// registers under.
+    provenance: modules.RegistrationProvenance,
 
     pub fn advance(fiber: *Fiber, self: *DefmDriver) MachineError!machine.WorkProgress {
         const work = fiber.workBudget();
@@ -103,7 +107,7 @@ const DefmDriver = struct {
                 // name that can never publish must fail before the body runs.
                 if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                     return fiber.fail(.domain, "module name `core` is reserved for the core qualifier");
-                const provenance = fiber.current.?.site.registration_provenance;
+                const provenance = self.provenance;
                 try fiber.refuseReservedModule(name, provenance);
                 try fiber.refuseUnexportedModule(name, provenance);
                 const body = self.body.take();
@@ -115,6 +119,7 @@ const DefmDriver = struct {
                     name,
                     body,
                     if (doc.isPresent()) env.documentation(doc.borrow().list).? else null,
+                    provenance,
                 );
                 return .detached;
             },
@@ -132,7 +137,7 @@ fn moduleNameWord(fiber: *Fiber) MachineError!void {
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    try fiber.pushOwned(.{ .symbol = try fiber.linkedWord(intern.moduleId(name)) });
+    try fiber.pushOwned(.{ .symbol = try fiber.linkedWord(intern.moduleId(name), try fiber.dispatchedSource()) });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names
@@ -302,6 +307,7 @@ fn qualify(fiber: *Fiber) MachineError!void {
     try fiber.startDriver(QualifyDriver{
         .module_validation = .init(module_name),
         .binding_validation = .init(binding),
+        .source = try fiber.dispatchedSource(),
     });
 }
 
@@ -309,6 +315,8 @@ const QualifyDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     module_validation: intern.ModuleNameCursor,
     binding_validation: intern.NamespaceCursor,
+    /// The source of the `qualify` occurrence, which links the result.
+    source: modules.RegistrationProvenance,
     module_name: ?intern.ModuleName = null,
     binding_name: ?intern.BindingName = null,
     cursor: ?heap.Owned(intern.QualifiedCursor) = null,
@@ -342,7 +350,7 @@ const QualifyDriver = struct {
             ));
             switch (try self.cursor.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |word| return .{ .output = .{ .symbol = try fiber.linkedWord(word) } },
+                .complete => |word| return .{ .output = .{ .symbol = try fiber.linkedWord(word, self.source) } },
             }
         }
         return .stepped;
@@ -354,7 +362,7 @@ fn words(fiber: *Fiber) MachineError!void {
 
 fn exportsWord(fiber: *Fiber) MachineError!void {
     const requested = try fiber.popWord();
-    try fiber.startDriver(ExportsDriver.init(fiber, requested));
+    try fiber.startDriver(try ExportsDriver.init(fiber, requested));
 }
 
 /// Collect one module's public names, or core's, then sort them and build the
@@ -365,6 +373,8 @@ const ExportsDriver = struct {
     allocator: std.mem.Allocator,
     /// The operand as written: its link says whose view finds the module.
     requested: value.Symbol,
+    /// The source of the `exports` occurrence, which links the names.
+    source: modules.RegistrationProvenance,
     found: heap.Owned(poll_api.ChunkList(u32)),
     state: heap.Owned(State),
 
@@ -408,11 +418,13 @@ const ExportsDriver = struct {
         }
     };
 
-    fn init(fiber: *Fiber, requested: value.Symbol) ExportsDriver {
+    fn init(fiber: *Fiber, requested: value.Symbol) error{OutOfMemory}!ExportsDriver {
         const core_requested = intern.isReservedRegistryBytes(intern.get(requested.name));
+        const source = try fiber.dispatchedSource();
         return .{
             .allocator = fiber.allocator,
             .requested = requested,
+            .source = source,
             .found = .init(poll_api.ChunkList(u32).init(fiber.allocator)),
             .state = .init(if (core_requested)
                 .{ .core_names = .init(reflection.VisibleNameCursor.init(.core, fiber.environment)) }
@@ -493,7 +505,7 @@ const ExportsDriver = struct {
                 const names = fill.names.borrow().items();
                 const filled = fill.values.borrow().len();
                 if (filled != names.len) {
-                    fill.values.borrowMut().appendOwned(value.datum(.{ .symbol = try fiber.linkedWord(names[filled]) }));
+                    fill.values.borrowMut().appendOwned(value.datum(.{ .symbol = try fiber.linkedWord(names[filled], self.source) }));
                     continue;
                 }
                 const materializer = list.ValueMaterializer.initOwned(self.allocator, fill.values.take());

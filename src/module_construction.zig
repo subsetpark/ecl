@@ -16,13 +16,15 @@ const WorkProgress = machine.WorkProgress;
 
 /// Opens a construction boundary for `@defm`. The name has already been
 /// validated; the body evaluates against a fresh image, and completion
-/// publishes that image under the name. The image retains `doc`; the caller
+/// publishes that image under the name and `provenance`, the source the
+/// `@defm` occurrence was written in. The image retains `doc`; the caller
 /// keeps its own reference. Consumes `body_header` on success and failure.
 pub fn begin(
     via: *Construction,
     name: intern.ModuleName,
     body_header: *Header,
     doc: ?*env.DocumentationString,
+    provenance: modules.RegistrationProvenance,
 ) MachineError!void {
     const fiber = via.fiber();
     var body = heap.Owned(*Header).init(body_header);
@@ -30,7 +32,7 @@ pub fn begin(
     const registry = fiber.inherited.registry;
     const word = fiber.active_word;
     const scope = try fiber.environment.moduleScope(name);
-    var candidate = try registry.createImage(scope, fiber.current.?.site.registration_provenance);
+    var candidate = try registry.createImage(scope, provenance);
     errdefer candidate.deinit();
     if (doc) |document| candidate.document(document);
     // Every word in the body refers to the module by name. A specialized

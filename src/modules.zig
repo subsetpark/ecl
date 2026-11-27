@@ -473,13 +473,6 @@ pub const RegistrationProvenance = enum(u64) {
             .ordinary, .standard_library, .root_scope => null,
         };
     }
-
-    /// The provenance of a quotation this code applies as a value (`apply`,
-    /// `@attempt`, a combinator). The value may have come from any caller, so
-    /// embedded trust stays with embedded code and never passes to it.
-    pub fn applied(self: RegistrationProvenance) RegistrationProvenance {
-        return if (self == .standard_library) .ordinary else self;
-    }
 };
 
 /// Whether an entry is part of its module's public face.

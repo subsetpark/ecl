@@ -830,13 +830,9 @@ pub const ExecutionSite = struct {
     /// The current root: where this body's own definitions land, and, when it
     /// is a module's scope, the module whose code is running. A module word
     /// runs in its module's scope; every other word, and every quotation
-    /// applied as a value, runs in its caller's. Where a word resolves is
-    /// carried by the word itself.
+    /// applied as a value, runs in its caller's. Where a word resolves, and
+    /// what it may register, is carried by the word itself.
     scope: env.ScopeId,
-    /// Authority carried only while evaluating an embedded source module.
-    /// A named module constructed by that source moves it into the immutable
-    /// registration; ordinary source always carries ordinary provenance.
-    registration_provenance: modules.RegistrationProvenance = .ordinary,
     /// Whether definitions may land in `scope`. Set where a root is entered:
     /// true for a root fiber and a module construction body, false for a
     /// task, which runs in its spawner's root without owning it. Everything
@@ -849,39 +845,13 @@ pub const ExecutionSite = struct {
         const defining = fiber.role != .task;
         return switch (fiber.root_entry) {
             .module => |home| module(home, defining),
-            .scope => .{
-                .scope = fiber.lexicalScope(),
-                .defining = defining,
-                .registration_provenance = if (fiber.inherited.module_snapshot) |module_snapshot|
-                    .rootScope(module_snapshot.localScope())
-                else
-                    .ordinary,
-            },
+            .scope => |scope| .{ .scope = scope, .defining = defining },
         };
     }
 
-    /// Code running as one module, under the provenance of the registration
-    /// it belongs to.
+    /// Code running as one module.
     fn module(home: modules.ModuleRoot, defining: bool) ExecutionSite {
-        return .{
-            .scope = home.scope,
-            .defining = defining,
-            .registration_provenance = home.provenance,
-        };
-    }
-
-    /// The site of a quotation this activation applies as a value: a dynamic
-    /// `apply`, a combinator's quotation, an `@attempt` body, or a resumed
-    /// qualified load. It runs in the same root with the same right to
-    /// define. The value may have come from any caller, so it does not
-    /// inherit embedded registration trust; a resumed load sets the
-    /// provenance it registers under itself.
-    pub fn applied(self: ExecutionSite) ExecutionSite {
-        return .{
-            .scope = self.scope,
-            .registration_provenance = self.registration_provenance.applied(),
-            .defining = self.defining,
-        };
+        return .{ .scope = home.scope, .defining = defining };
     }
 };
 
@@ -1494,8 +1464,8 @@ pub const Loading = opaque {
 
     /// Opens one `@load` boundary over a read source. Consumes `body` on
     /// success and failure.
-    pub fn openLoad(self: *Loading, body: *Header, word: intern.TraceWord, provenance: modules.RegistrationProvenance) error{OutOfMemory}!void {
-        return self.fiber().openLoad(body, word, provenance);
+    pub fn openLoad(self: *Loading, body: *Header, word: intern.TraceWord) error{OutOfMemory}!void {
+        return self.fiber().openLoad(body, word);
     }
 
     /// Runs `body` as a registering source in place of the running
@@ -1504,10 +1474,9 @@ pub const Loading = opaque {
     pub fn enterRegistration(
         self: *Loading,
         body: *Header,
-        provenance: modules.RegistrationProvenance,
         after: load.AfterLoad,
     ) error{OutOfMemory}!void {
-        return self.fiber().enterRegistration(body, provenance, after);
+        return self.fiber().enterRegistration(body, after);
     }
 
     /// Dispatches the word a completed load was started for, by explicit
@@ -1583,6 +1552,10 @@ pub const Fiber = struct {
     current: ?Eval = null,
     active_index: u32 = 0,
     active_word: intern.TraceWord = no_word,
+    /// The word being dispatched when it is not the occurrence at
+    /// `active_index`: one `execute` runs, or one a resumed lookup invokes.
+    /// Null otherwise.
+    dispatched: ?value.Symbol = null,
     /// Scratch for spelling one qualified trace word in a diagnostic message.
     /// A module-local word's qualified spelling is never interned, so there is
     /// no string to point at. Written before it is read on
@@ -2131,11 +2104,40 @@ pub const Fiber = struct {
     ) env.SymbolLinker {
         return self.environment.linker(scope, provenance);
     }
-    /// The word `name` as the running activation would have written it: in
-    /// that activation's root, by its source.
-    pub fn linkedWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = self.rootLinker(self.currentScope(), self.current.?.site.registration_provenance);
+    /// The word `name` as the running activation would have written it in
+    /// `source`: in that activation's root.
+    pub fn linkedWord(self: *Fiber, name: u32, source: modules.RegistrationProvenance) error{OutOfMemory}!value.Symbol {
+        const linker = self.rootLinker(self.currentScope(), source);
         return .{ .name = name, .slot = try linker.link(name) };
+    }
+    /// The source of the word being dispatched, which is the authority a
+    /// primitive registers, loads, and links words under: the occurrence the
+    /// running code reached, or the word `execute` or a resumed lookup
+    /// dispatched in its place. A primitive whose work outlives its call
+    /// asks when it is called.
+    pub fn dispatchedSource(self: *Fiber) error{OutOfMemory}!modules.RegistrationProvenance {
+        const word = self.dispatched orelse occurrence: {
+            const current = self.current orelse return self.rootSource();
+            const at = self.written(current.code, self.active_index);
+            const form = formAt(at.code, at.index);
+            if (form != .symbol) return .ordinary;
+            break :occurrence form.symbol;
+        };
+        return self.sourceOf(word);
+    }
+    /// The source a root's own text is written in when it names no file:
+    /// the project's local scope under a module map, and ordinary code
+    /// otherwise.
+    pub fn rootSource(self: *const Fiber) modules.RegistrationProvenance {
+        return if (self.inherited.module_snapshot) |snapshot| .rootScope(snapshot.localScope()) else .ordinary;
+    }
+    /// Runs `word` as the word being dispatched, for a dispatch that does
+    /// not run the occurrence at the current position.
+    pub fn executeAs(self: *Fiber, word: value.Symbol) MachineError!void {
+        const outer = self.dispatched;
+        self.dispatched = word;
+        defer self.dispatched = outer;
+        return self.executeWord(word);
     }
     /// The word `name` linked to core as standard-library source, as a word
     /// the implementation builds for itself is: it means core's binding
@@ -2210,7 +2212,7 @@ pub const Fiber = struct {
     }
     /// The site a combinator's quotation runs at, captured when it launches.
     pub fn applicationSite(self: *const Fiber) ExecutionSite {
-        return self.current.?.site.applied();
+        return self.current.?.site;
     }
     fn installDriver(self: *Fiber, context: anytype) void {
         const Context = @TypeOf(context);
@@ -2395,7 +2397,7 @@ pub const Fiber = struct {
         self.active_word = .plain(intern.moduleId(name));
         try self.autoLoadModule(name, .{
             .qualified = intern.moduleId(name),
-            .context = self.current.?.site.registration_provenance,
+            .context = self.rootSource(),
             .continuation = .load_only,
         });
     }
@@ -3023,7 +3025,7 @@ pub const Fiber = struct {
     /// Runs `quotation` inline with the caller, resolving one form at a time.
     pub fn callProgramOwned(self: *Fiber, quotation: *Header, program: Program) error{OutOfMemory}!void {
         std.debug.assert(program == .owned);
-        const site = self.current.?.site.applied();
+        const site = self.current.?.site;
         const application_tail = self.tailApplicationIndex();
         // An application that selects its quotation for a contract is found
         // by that quotation's own code, so it runs as written.
@@ -3261,8 +3263,9 @@ pub const Fiber = struct {
         name: intern.ModuleName,
         body_header: *Header,
         doc: ?*env.DocumentationString,
+        provenance: modules.RegistrationProvenance,
     ) MachineError!void {
-        return module_construction.begin(.of(self), name, body_header, doc);
+        return module_construction.begin(.of(self), name, body_header, doc, provenance);
     }
     /// Opens one construction boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure, and the image is
@@ -3571,7 +3574,7 @@ pub const Fiber = struct {
         // The body runs in its invoker's scope with its invoker's right to
         // define. A failure restores the stack, not the environment: like IO,
         // a definition the body made survives it.
-        const site = invoker.site.applied();
+        const site = invoker.site;
         try self.openBoundary(
             .attempt,
             @intCast(self.stack.items.len),
@@ -3594,7 +3597,6 @@ pub const Fiber = struct {
         self: *Fiber,
         body: *Header,
         word: intern.TraceWord,
-        provenance: modules.RegistrationProvenance,
     ) error{OutOfMemory}!void {
         const invoker = self.current.?;
         const dropped = self.suspendCurrent() catch {
@@ -3606,8 +3608,7 @@ pub const Fiber = struct {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         }
-        var site = invoker.site.applied();
-        site.registration_provenance = provenance;
+        const site = invoker.site;
         try self.openBoundary(.load, @intCast(self.stack.items.len), word, body);
         self.current = .{
             .code = body,
@@ -3658,11 +3659,10 @@ pub const Fiber = struct {
         _ = owned.take();
         self.noteFrameDepth();
     }
-    fn enterRegistration(self: *Fiber, body: *Header, provenance: modules.RegistrationProvenance, after: load.AfterLoad) error{OutOfMemory}!void {
+    fn enterRegistration(self: *Fiber, body: *Header, after: load.AfterLoad) error{OutOfMemory}!void {
         var continuation = OwnedFrame.init(.{ .qualified_after_load = after });
         defer continuation.deinit(self.releases, self.allocator);
-        var site = self.current.?.site.applied();
-        site.registration_provenance = provenance;
+        const site = self.current.?.site;
         const dropped = (if (after.request.preservesCaller())
             self.suspendCurrentForQualifiedLoad()
         else
@@ -4318,6 +4318,9 @@ const LookupDispatchDriver = struct {
                         if (site) |at| if (fiber.current) |current| if (current.code == at.code) {
                             fiber.active_index = at.index;
                         };
+                        const outer = fiber.dispatched;
+                        fiber.dispatched = word;
+                        defer fiber.dispatched = outer;
                         try invokeDefinition(fiber, definition, word.name);
                         return .detached;
                     },

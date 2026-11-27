@@ -677,9 +677,8 @@ Cells are appended and neither move nor die before the `Env`, and their ids
 are issued monotonically below the link's flag bits. Reading a cell from its
 id is an index, with no hash and no lock; finding the cell for a place is a
 keyed lookup that only producers of links pay. A source is a registration
-provenance, one word wherever it is stored: a cell, a module's definitions,
-and an execution site hold the same value, which `Env` compares and never
-interprets.
+provenance, one word wherever it is stored: a cell and a module's
+definitions hold the same value, which `Env` compares and never interprets.
 
 What a spelling is as a word is a function of its bytes: a plain name, `core.`
 and a name, a module name and a binding name, or none of these. The intern
@@ -866,14 +865,11 @@ the open construction boundary whose image has the current scope, and
 reflection finds the module's current registration by name, in a view it
 holds.
 
-A module word runs in its module's scope, under the provenance its definition
-carries. Every other word runs at its caller's
-site unchanged, and a quotation applied as a value, by `apply`, a combinator,
-`@attempt`, or a resumed load, runs in its caller's root without the caller's
-embedded registration trust. A task runs in its spawner's root; a protected
-test invocation runs as its module, under the provenance of the registration
-its body was read from. A fiber records which of these
-its root activation is as one tagged value.
+A module word runs in its module's scope. Every other word runs at its
+caller's site unchanged, and so does a quotation applied as a value, by
+`apply`, a combinator, `@attempt`, or a resumed load. A task runs in its
+spawner's root; a protected test invocation runs as its module. A fiber
+records which of these its root activation is as one tagged value.
 
 Whether definitions may land is a flag on the site, set only where a root is
 entered: a root fiber and module construction set it, and a task clears it,
@@ -881,10 +877,17 @@ because a task runs in its spawner's root without owning it. Everything else,
 every combinator application and `@attempt` included, inherits it unchanged,
 so whether a word may define never depends on which combinator reached it.
 
-A site's registration provenance is authority, not lookup context: it says
-what the running code may register, and it is the source recorded for the
-words that code builds at run time. Where a word resolves, and which modules
-it may reach, is carried by the word.
+A site carries no authority. What a primitive may register, and the source
+the words it builds at run time are written in, is the source recorded in
+the cell of the word being dispatched: the occurrence the running code
+reached, or, for `execute` and a lookup resumed after a load, the word they
+dispatch in its place, which the fiber records for that one dispatch. A
+primitive whose work outlives its call asks when it is called. Text read
+from a file is linked by the file's provenance as it is read, so its
+`@defm` registers as that file with nothing set on the site that runs it.
+The prelude's words carry standard-library source, so the source audit
+refuses a registering word in the prelude, where a wrapper would lend that
+authority to whatever its caller hands it.
 
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.

@@ -930,6 +930,29 @@ test "loader: a failing mapped artifact publishes no usable module" {
     try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
 }
 
+test "authority: a symbol built in a task links by the source of the word that built it" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {" ++
+        "\"root\" {root \".\" visible [\"alpha\"] sources [] artifacts []} " ++
+        "\"alpha\" {root \".\" visible [\"secret\"] sources [] artifacts [{path \"app.ecl\" kind ecl exports [\"app\"]}]} " ++
+        "\"secret\" {root \".\" visible [] sources [] artifacts [{path \"secret.ecl\" kind ecl exports [\"secret\"]}]}}}");
+    // `intern` is written in `app.ecl`, whose scope may see `secret`; the
+    // task runs in the module's root, and the symbol it builds is linked by
+    // that occurrence's source rather than by the task's root.
+    try writeInput(&inputs, "app.ecl", "((\"secret.answer\" intern execute) `direct def " ++
+        "((\"secret.answer\" intern execute) @spawn task.await) `go def) `app @defm\n");
+    try writeInput(&inputs, "secret.ecl", "((42) `answer def) `secret @defm\n");
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "app.direct app.go", "42 {ok [42]}");
+    // Written at the root, the same request is refused: the root does not
+    // see `secret`.
+    try expectErrorContains(&runtime, "\"secret.answer\" intern execute", &.{"not visible to `root`"});
+}
+
 test "loader: module-body imports do not depend on which file declares the module or where" {
     for ([_][]const u8{ "pair.left.sum", "pair.right.sum" }) |entry| {
         var inputs = try runtime_fixture.Fixture.init();

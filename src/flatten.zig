@@ -10,7 +10,6 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
-const modules = @import("modules.zig");
 const intern = @import("intern.zig");
 const combinators = @import("combinators.zig");
 const stack_summary = @import("stack_summary.zig");
@@ -93,10 +92,8 @@ pub const Flattened = struct {
     bodies: []*Header,
     /// The publication it was built in.
     publication: u64,
-    /// The site the original ran at when it was flattened: its root, and
-    /// the provenance it registers under.
+    /// The root the original ran in when it was flattened.
     scope: env.ScopeId,
-    provenance: modules.RegistrationProvenance,
     /// The lowest height of the fiber's evaluations at which one began
     /// running this list: the evaluation and everything it leads to, the
     /// frames it suspends beneath and the call sites recorded from it, stand
@@ -211,7 +208,7 @@ pub const Cache = struct {
     pub inline fn find(self: *const Cache, code: *const Header, site: machine.ExecutionSite, publication: u64) ?*Flattened {
         if (self.publication != publication or self.entries.len == 0) return null;
         const flattened = (entryFor(self.entries, code) orelse return null).* orelse return null;
-        if (flattened.scope != site.scope or flattened.provenance != site.registration_provenance) return null;
+        if (flattened.scope != site.scope) return null;
         return flattened;
     }
 
@@ -662,11 +659,6 @@ const Rewrite = struct {
         const kept = pending.count - operand_forms;
         const applied = pending.items[kept..pending.count];
         const words = self.fiber.environment.localsWords();
-        const applied_site = site.applied();
-        // An applied quotation runs under the provenance `applied` gives it.
-        // Run in place it would keep the enclosing list's, so a list whose
-        // provenance applying would change keeps its phrases as written.
-        if (applied_site.registration_provenance != site.registration_provenance) return null;
         // A quotation with a summary leaves no local bound. `dip` holds its
         // protected value in a local across its quotation, so it needs that;
         // a cleave or spread has it of every quotation already.
@@ -700,14 +692,14 @@ const Rewrite = struct {
             const inside: Within = .{ .continues = at.continues, .tail = false, .word = within.word };
             const needed: usize = switch (shape) {
                 .apply => apply: {
-                    if (!try self.body(applied[0].literal, &.{}, applied_site, depth + 1, .{ .continues = at.continues, .tail = last, .word = within.word })) break :expanded false;
+                    if (!try self.body(applied[0].literal, &.{}, site, depth + 1, .{ .continues = at.continues, .tail = last, .word = within.word })) break :expanded false;
                     break :apply bound_inputs;
                 },
                 // Bind the protected value, run the quotation beneath where
                 // it stood, and put it back.
                 .dip => dip: {
                     if (!self.operation(words.load, 1, at)) break :expanded false;
-                    if (!try self.body(applied[0].literal, &.{}, applied_site, depth + 1, inside)) break :expanded false;
+                    if (!try self.body(applied[0].literal, &.{}, site, depth + 1, inside)) break :expanded false;
                     if (!self.operation(words.get, 0, at)) break :expanded false;
                     if (!self.operation(words.drop, 1, at)) break :expanded false;
                     break :dip 1 + bound_inputs;
@@ -725,7 +717,7 @@ const Rewrite = struct {
                     for (0..consumed) |local| {
                         if (!self.operation(words.get, @intCast(local), at)) break :expanded false;
                     }
-                    if (!try self.body(applied[0].literal, &.{}, applied_site, depth + 1, inside)) break :expanded false;
+                    if (!try self.body(applied[0].literal, &.{}, site, depth + 1, inside)) break :expanded false;
                     if (!self.operation(words.recheck, 0, at)) break :expanded false;
                     if (shape == .above) for (0..consumed) |local| {
                         if (!self.operation(words.get, @intCast(local), at)) break :expanded false;
@@ -754,8 +746,8 @@ const Rewrite = struct {
                         quotations.produced[index] = summary.produced;
                     }
                     break :counted switch (shape) {
-                        .cleave, .cleave_list => try self.cleave(&quotations, applied_site, depth, at, inside),
-                        .spread, .spread_list => try self.spread(&quotations, applied_site, depth, at, inside),
+                        .cleave, .cleave_list => try self.cleave(&quotations, site, depth, at, inside),
+                        .spread, .spread_list => try self.spread(&quotations, site, depth, at, inside),
                         .apply, .dip, .above, .below => unreachable,
                     } orelse break :expanded false;
                 },
@@ -829,7 +821,7 @@ const Rewrite = struct {
         last: bool,
         source: machine.SummaryTarget.Source,
     ) error{OutOfMemory}!?bool {
-        if (source.home) |home| if (home.scope != site.scope or home.provenance != site.registration_provenance) return null;
+        if (source.home) |home| if (home.scope != site.scope) return null;
         if (source.attribution != .own) return null;
         // A qualified word may have to be loaded where it is called.
         if (std.mem.indexOfScalar(u8, intern.get(word.name), '.') != null) return null;
@@ -987,7 +979,6 @@ const Rewrite = struct {
             .bodies = bodies,
             .publication = publication,
             .scope = site.scope,
-            .provenance = site.registration_provenance,
         };
         return record;
     }

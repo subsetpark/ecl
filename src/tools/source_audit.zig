@@ -236,6 +236,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
+    failed = auditPreludeAuthority() or failed;
     failed = auditHttpServerWriteSink() or failed;
     failed = auditFormalValueKinds() or failed;
     failed = auditWorkBudgetIssuers() or failed;
@@ -561,6 +562,41 @@ fn auditPreludeLayout() bool {
     }
     std.log.info("prelude layout: {d} documented definition blocks", .{definitions});
     return false;
+}
+
+/// The prelude's words carry standard-library source, and a word's source is
+/// the authority a primitive registers and loads under. A prelude wrapper
+/// around a registering word would lend that authority to whatever its caller
+/// hands it, so the prelude never spells one.
+const prelude_forbidden_words = [_][]const u8{ "@defm", "@load" };
+
+fn auditPreludeAuthority() bool {
+    const source = @embedFile("../prelude.ecl");
+    var failed = false;
+    var index: usize = 0;
+    while (index < source.len) {
+        switch (source[index]) {
+            '"' => if (!skipPreludeString(source, &index)) {
+                std.log.err("prelude authority: unterminated string", .{});
+                return true;
+            },
+            '#' => index = std.mem.indexOfScalarPos(u8, source, index, '\n') orelse source.len,
+            '(', ')', ',', '[', ']', '{', '}', '`' => index += 1,
+            else => if (std.ascii.isWhitespace(source[index])) {
+                index += 1;
+            } else {
+                const end = preludeTokenEnd(source, index);
+                const token = source[index..end];
+                const word = if (std.mem.startsWith(u8, token, "core.")) token["core.".len..] else token;
+                for (prelude_forbidden_words) |forbidden| if (std.mem.eql(u8, word, forbidden)) {
+                    std.log.err("prelude authority: the prelude spells `{s}`, which would register under standard-library authority", .{token});
+                    failed = true;
+                };
+                index = end;
+            },
+        }
+    }
+    return failed;
 }
 
 fn validHeaderName(name: []const u8) bool {

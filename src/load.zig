@@ -116,13 +116,17 @@ pub fn loadSource(via: *Loading, source: *const map_state.SourceScope) MachineEr
 /// success and failure.
 pub fn parseSource(via: *Loading, source: []u8) MachineError!void {
     const allocator = via.fiber().allocator;
+    const written = via.fiber().dispatchedSource() catch |err| {
+        allocator.free(source);
+        return err;
+    };
     const source_name = allocator.dupe(u8, "<parse>") catch |err| {
         allocator.free(source);
         return err;
     };
     try via.startDriver(SourceDriver{
         .text = .init(.{ .owned = .{ .source_name = source_name, .source = source } }),
-        .completion = .init(.push),
+        .completion = .init(.{ .push = written }),
     });
 }
 
@@ -1152,7 +1156,9 @@ const NativeLoadDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 const SourceCompletion = union(enum) {
-    push,
+    /// `parse`: the forms are pushed as data, written in the source of the
+    /// `parse` occurrence.
+    push: modules.RegistrationProvenance,
     call: ?*const map_state.SourceScope,
     session: ?*const map_state.SourceScope,
     /// `@load`: the source runs as a stack-isolated unit on an empty stack.
@@ -1251,9 +1257,9 @@ const SourceDriver = struct {
     /// code that reads them.
     fn sourceProvenance(self: *const SourceDriver, fiber: *machine.Fiber) modules.RegistrationProvenance {
         const mapped: ?*const map_state.SourceScope = switch (self.completion.borrow()) {
-            .push => return fiber.current.?.site.registration_provenance,
+            .push => |written| return written,
             .register => |register| return register.provenance,
-            .session => |source| source orelse return fiber.current.?.site.applied().registration_provenance,
+            .session => |source| source orelse return fiber.rootSource(),
             .call => |source| source,
             .load => |load| load.source,
         };
@@ -1326,15 +1332,15 @@ const SourceDriver = struct {
             .activating => |root_header| {
                 switch (self.completion.borrowMut().*) {
                     .push => try fiber.pushBorrowed(.{ .list = root_header }),
+                    // The source's words were linked by its provenance as
+                    // they were read, which is what they register under.
                     .load => |load| {
                         heap.incRef(root_header);
-                        try via.openLoad(root_header, load.word, self.sourceProvenance(fiber));
+                        try via.openLoad(root_header, load.word);
                     },
                     .call, .session => {
-                        const provenance = self.sourceProvenance(fiber);
                         heap.incRef(root_header);
                         try fiber.callProgramOwned(root_header, .owned);
-                        fiber.current.?.site.registration_provenance = provenance;
                     },
                     .register => |*register| {
                         heap.incRef(root_header);
@@ -1346,7 +1352,7 @@ const SourceDriver = struct {
                         };
                         register.loading = null;
                         register.path = null;
-                        try via.enterRegistration(root_header, register.provenance, after);
+                        try via.enterRegistration(root_header, after);
                     },
                 }
                 return .completed;
