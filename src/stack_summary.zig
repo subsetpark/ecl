@@ -29,7 +29,7 @@ const max_depth = 8;
 /// The most a summary may consume or leave.
 const max_values = 32;
 
-/// The summary of a quotation about to run in the root `scope`, or null when any word
+/// The summary of a quotation, or null when any word
 /// leaves the counts to run time: a word that does not resolve, a native
 /// word, a word behind a checked module boundary, a builtin whose
 /// effect holds a row and has no rule here, or a combinator whose quotation
@@ -38,12 +38,12 @@ const max_values = 32;
 /// A word's body is summarized once per definition, and a quotation's answer
 /// is remembered by the fiber; either lasts until a publication, so a
 /// redefinition is read as redefined.
-pub fn of(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMemory}!?Summary {
+pub fn of(fiber: *Fiber, quotation: *Header) error{OutOfMemory}!?Summary {
     if (quotation.length() > max_forms) return null;
     const publication = fiber.currentPublication();
-    if (fiber.summaries.find(quotation, scope, publication)) |known| return known.summary;
+    if (fiber.summaries.find(quotation, publication)) |known| return known.summary;
     var visited: usize = 0;
-    const summary: ?Summary = switch (try summarize(Kept, fiber, &visited, quotation, scope, 0)) {
+    const summary: ?Summary = switch (try summarize(Kept, fiber, &visited, quotation, 0)) {
         .exact => |summary| summary,
         .none => null,
         // A later walk resumes from the bodies this one finished, so the
@@ -52,7 +52,7 @@ pub fn of(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMemo
     };
     // Words read under different publications say nothing together.
     if (fiber.currentPublication() != publication) return null;
-    try fiber.summaries.remember(fiber.allocator, fiber.releases, quotation, scope, publication, summary);
+    try fiber.summaries.remember(fiber.allocator, fiber.releases, quotation, publication, summary);
     return summary;
 }
 
@@ -60,11 +60,11 @@ pub fn of(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMemo
 /// list it looks at and the forms one rewrite may visit.
 pub const read_bounds = .{ .max_forms = 128, .max_visited = 1024 };
 
-/// The summary of a quotation literal about to run in `scope`, read under
+/// The summary of a quotation literal, read under
 /// `read_bounds` and not remembered: for a reader that looks at a list once
 /// and may look at longer quotations than a summary is kept for. A word's
 /// body is read as `of` reads it.
-pub fn read(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMemory}!?Summary {
+pub fn read(fiber: *Fiber, quotation: *Header) error{OutOfMemory}!?Summary {
     if (quotation.length() > read_bounds.max_forms) return null;
     const publication = fiber.currentPublication();
     var visited: usize = 0;
@@ -75,7 +75,7 @@ pub fn read(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMe
         .max_depth = max_depth,
         .branches = true,
     });
-    const summary: Summary = switch (try summarize(Reader, fiber, &visited, quotation, scope, 0)) {
+    const summary: Summary = switch (try summarize(Reader, fiber, &visited, quotation, 0)) {
         .exact => |summary| summary,
         .none, .exhausted => return null,
     };
@@ -84,14 +84,14 @@ pub fn read(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMe
     return summary;
 }
 
-/// Whether `word`, called from code running in `scope`, has a summary. A
+/// Whether `word` has a summary. A
 /// word that has one moves only the values its counts say, and leaves no
 /// local bound.
-pub fn wordHasSummary(fiber: *Fiber, scope: env.ScopeId, word: value.Symbol) error{OutOfMemory}!bool {
+pub fn wordHasSummary(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!bool {
     var visited: usize = 0;
-    return switch (try fiber.summaryTarget(word, scope)) {
+    return switch (try fiber.summaryTarget(word)) {
         .none => false,
-        .source => |source| try body(fiber, &visited, source, source.scope(scope)) == .exact,
+        .source => |source| try body(fiber, &visited, source) == .exact,
         .builtin => |builtin| !prims.unsummarizable(builtin.primitive) and
             lower.exact(builtin.effect) != null and !lower.takesQuotation(builtin.effect.?),
     };
@@ -141,9 +141,6 @@ pub const Cache = struct {
     const Entry = struct {
         /// Null for an empty place.
         quotation: ?*Header = null,
-        /// The root the quotation ran in, which decides whether a module
-        /// word it calls is behind a checked boundary.
-        scope: env.ScopeId = .none,
         exact: bool = false,
         consumed: u8 = 0,
         produced: u8 = 0,
@@ -155,23 +152,23 @@ pub const Cache = struct {
     /// The publication every present entry was read in.
     publication: u64 = 0,
 
-    /// What was read of `quotation` in `scope` in `publication`, if anything.
-    pub inline fn find(self: *const Cache, quotation: *const Header, scope: env.ScopeId, publication: u64) ?Known {
+    /// What was read of `quotation` in `publication`, if anything.
+    pub inline fn find(self: *const Cache, quotation: *const Header, publication: u64) ?Known {
         if (self.publication != publication or self.entries.len == 0) return null;
-        const entry = self.entryFor(quotation, scope) orelse return null;
+        const entry = self.entryFor(quotation) orelse return null;
         if (entry.quotation == null) return null;
         return .{ .summary = if (entry.exact) .{ .consumed = entry.consumed, .produced = entry.produced } else null };
     }
 
-    /// The entry holding `quotation` in `scope`, or the first empty one in
+    /// The entry holding `quotation`, or the first empty one in
     /// reach of its place; null when every place in reach holds another.
     /// Entries leave only all together, so an empty place ends the search.
-    inline fn entryFor(self: *const Cache, quotation: *const Header, scope: env.ScopeId) ?*Entry {
+    inline fn entryFor(self: *const Cache, quotation: *const Header) ?*Entry {
         var index = place(quotation, capacity);
         for (0..reach) |_| {
             const entry = &self.entries[index];
             if (entry.quotation == null) return entry;
-            if (entry.quotation == quotation and entry.scope == scope) return entry;
+            if (entry.quotation == quotation) return entry;
             index = (index + 1) & (capacity - 1);
         }
         return null;
@@ -183,7 +180,6 @@ pub const Cache = struct {
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
         quotation: *Header,
-        scope: env.ScopeId,
         publication: u64,
         summary: ?Summary,
     ) error{OutOfMemory}!void {
@@ -192,12 +188,11 @@ pub const Cache = struct {
             self.clear(releases);
             self.publication = publication;
         }
-        const entry = self.entryFor(quotation, scope) orelse &self.entries[place(quotation, capacity)];
+        const entry = self.entryFor(quotation) orelse &self.entries[place(quotation, capacity)];
         if (entry.quotation) |held| releases.releaseHeader(held);
         heap.incRef(quotation);
         entry.* = .{
             .quotation = quotation,
-            .scope = scope,
             .exact = summary != null,
             .consumed = if (summary) |found| @intCast(found.consumed) else 0,
             .produced = if (summary) |found| @intCast(found.produced) else 0,
@@ -251,8 +246,6 @@ pub const Bodies = struct {
     const Entry = struct {
         /// Null for an empty place.
         definition: ?*const env.Definition = null,
-        /// The root the body ran in, by id as `Cache` holds it.
-        scope: env.ScopeId = .none,
         summary: BodySummary = .unread,
     };
 
@@ -260,19 +253,17 @@ pub const Bodies = struct {
     /// The publication every present entry was read in.
     publication: u64 = 0,
 
-    fn find(self: *const Bodies, definition: *const env.Definition, scope: env.ScopeId, publication: u64) BodySummary {
+    fn find(self: *const Bodies, definition: *const env.Definition, publication: u64) BodySummary {
         if (self.publication != publication or self.entries.len == 0) return .unread;
         const entry = &self.entries[place(definition, capacity)];
-        return if (entry.definition == definition and entry.scope == scope) entry.summary else .unread;
+        return if (entry.definition == definition) entry.summary else .unread;
     }
 
-    /// Records what is known of `definition`'s body, run in the root
-    /// `scope`, in `publication`.
+    /// Records what is known of `definition`'s body in `publication`.
     fn record(
         self: *Bodies,
         allocator: std.mem.Allocator,
         definition: *const env.Definition,
-        scope: env.ScopeId,
         publication: u64,
         summary: BodySummary,
     ) error{OutOfMemory}!void {
@@ -281,14 +272,14 @@ pub const Bodies = struct {
             @memset(self.entries, .{});
             self.publication = publication;
         }
-        self.entries[place(definition, capacity)] = .{ .definition = definition, .scope = scope, .summary = summary };
+        self.entries[place(definition, capacity)] = .{ .definition = definition, .summary = summary };
     }
 
-    /// Leaves `definition`'s body, run in `scope`, unread.
-    fn forget(self: *Bodies, definition: *const env.Definition, scope: env.ScopeId) void {
+    /// Leaves `definition`'s body unread.
+    fn forget(self: *Bodies, definition: *const env.Definition) void {
         if (self.entries.len == 0) return;
         const entry = &self.entries[place(definition, capacity)];
-        if (entry.definition == definition and entry.scope == scope) entry.* = .{};
+        if (entry.definition == definition) entry.* = .{};
     }
 
     pub fn deinit(self: *Bodies, allocator: std.mem.Allocator) void {
@@ -305,15 +296,15 @@ const Result = union(enum) {
     exhausted,
 };
 
-/// The summary of `code` run in `scope` with nothing known beneath it.
-fn summarize(comptime Reader: type, fiber: *Fiber, visited: *usize, code: *Header, scope: env.ScopeId, depth: usize) error{OutOfMemory}!Result {
+/// The summary of `code` with nothing known beneath it.
+fn summarize(comptime Reader: type, fiber: *Fiber, visited: *usize, code: *Header, depth: usize) error{OutOfMemory}!Result {
     var counting: Reader = .{};
     var walker: lower.Walker(Reader) = .{ .fiber = fiber, .mode = &counting, .visited = visited };
     // The values beneath, one more than a summary may consume, so a walk
     // that takes them all has gone too far.
     const floor = max_values + 1;
     @memset(walker.open(floor), .{});
-    walker.run(code, scope, depth) catch |err| switch (err) {
+    walker.run(code, depth) catch |err| switch (err) {
         error.Unread => return .none,
         error.Exhausted => return .exhausted,
         error.OutOfMemory => |oom| return oom,
@@ -323,30 +314,28 @@ fn summarize(comptime Reader: type, fiber: *Fiber, visited: *usize, code: *Heade
     return .{ .exact = counts };
 }
 
-/// The summary of a source word's body run in `ran`, read from what the
+/// The summary of a source word's body, read from what the
 /// fiber remembers of its definition or walked and recorded there. The walk is within one turn,
 /// which is what keeps the definition and its body.
 fn body(
     fiber: *Fiber,
     visited: *usize,
     source: machine.SummaryTarget.Source,
-    ran: env.ScopeId,
 ) error{OutOfMemory}!Result {
     const publication = fiber.currentPublication();
-    const scope = ran;
-    switch (fiber.bodies.find(source.definition, scope, publication)) {
+    switch (fiber.bodies.find(source.definition, publication)) {
         .exact => |counts| return .{ .exact = .{ .consumed = counts.consumed, .produced = counts.produced } },
         .none, .reading => return .none,
         .unread => {},
     }
     if (source.code.length() > max_body_forms) {
-        try fiber.bodies.record(fiber.allocator, source.definition, scope, publication, .none);
+        try fiber.bodies.record(fiber.allocator, source.definition, publication, .none);
         return .none;
     }
-    try fiber.bodies.record(fiber.allocator, source.definition, scope, publication, .reading);
+    try fiber.bodies.record(fiber.allocator, source.definition, publication, .reading);
     // A walk that fails leaves the body unread, not mid-read forever.
-    errdefer fiber.bodies.forget(source.definition, scope);
-    const result = try summarize(Kept, fiber, visited, source.code, ran, 1);
+    errdefer fiber.bodies.forget(source.definition);
+    const result = try summarize(Kept, fiber, visited, source.code, 1);
     const recorded: BodySummary = switch (result) {
         .exact => |summary| .{ .exact = .{ .consumed = @intCast(summary.consumed), .produced = @intCast(summary.produced) } },
         .none => .none,
@@ -354,9 +343,9 @@ fn body(
     };
     // Words read under different publications say nothing together.
     if (recorded == .unread or fiber.currentPublication() != publication)
-        fiber.bodies.forget(source.definition, scope)
+        fiber.bodies.forget(source.definition)
     else
-        try fiber.bodies.record(fiber.allocator, source.definition, scope, publication, recorded);
+        try fiber.bodies.record(fiber.allocator, source.definition, publication, recorded);
     return result;
 }
 
@@ -391,9 +380,8 @@ fn Counting(comptime bounds: lower.Policy) type {
             fiber: *Fiber,
             visited: *usize,
             target: machine.SummaryTarget.Source,
-            scope: env.ScopeId,
         ) (lower.Stop || error{OutOfMemory})!Summary {
-            return switch (try body(fiber, visited, target, scope)) {
+            return switch (try body(fiber, visited, target)) {
                 .exact => |summary| summary,
                 .none => error.Unread,
                 .exhausted => error.Exhausted,

@@ -63,8 +63,8 @@ pub fn Slot(comptime Payload: type) type {
 ///   reader has no use for it;
 /// - `builtin(primitive, word, at, inputs, outputs) bool`, for a builtin
 ///   whose declared effect is exact, false when the reader has no use for it;
-/// - `source(fiber, visited, source, scope) !Counts`, for a source word whose
-///   body runs in `scope`.
+/// - `source(fiber, visited, source) !Counts`, for a source word whose body
+///   the reader reads.
 pub fn Walker(comptime Mode: type) type {
     return struct {
         const Self = @This();
@@ -133,10 +133,10 @@ pub fn Walker(comptime Mode: type) type {
             return .{ .consumed = @intCast(floor - self.low), .produced = @intCast(self.height - self.low) };
         }
 
-        /// Reads `code`, run in the root `scope`, where the stack stands. Its
+        /// Reads `code` where the stack stands. Its
         /// locals are its own: it
         /// reads none of its caller's and leaves none bound.
-        pub fn run(self: *Self, code: *Header, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
+        pub fn run(self: *Self, code: *Header, depth: usize) (Stop || error{OutOfMemory})!void {
             const length: usize = @intCast(code.length());
             if (depth > policy.max_depth) return error.Exhausted;
             self.visited.* += length;
@@ -164,7 +164,7 @@ pub fn Walker(comptime Mode: type) type {
                     try self.local(word.name, count_or_index, outer);
                     continue;
                 }
-                try self.call(word, .{ .code = code, .index = @intCast(index) }, scope, depth);
+                try self.call(word, .{ .code = code, .index = @intCast(index) }, depth);
             }
             // A local left bound stays visible to the caller, which no
             // reader can describe.
@@ -190,18 +190,18 @@ pub fn Walker(comptime Mode: type) type {
             } else return error.Unread;
         }
 
-        fn call(self: *Self, word: value.Symbol, at: At, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
-            switch (try self.fiber.summaryTarget(word, scope)) {
+        fn call(self: *Self, word: value.Symbol, at: At, depth: usize) (Stop || error{OutOfMemory})!void {
+            switch (try self.fiber.summaryTarget(word)) {
                 .none => return error.Unread,
                 .source => |source| {
-                    const read = try self.mode.source(self.fiber, self.visited, source, source.scope(scope));
+                    const read = try self.mode.source(self.fiber, self.visited, source);
                     for (0..read.consumed) |_| _ = try self.pop();
                     for (0..read.produced) |_| try self.push(.{});
                 },
                 .builtin => |builtin| {
                     if (prims.shuffle(builtin.primitive)) |moved| return self.shuffle(moved);
                     if (prims.unsummarizable(builtin.primitive)) return error.Unread;
-                    const declared = exact(builtin.effect) orelse return self.combinator(builtin.primitive, scope, depth);
+                    const declared = exact(builtin.effect) orelse return self.combinator(builtin.primitive, depth);
                     // An exact declared effect says everything, unless the
                     // word runs a quotation where no walk reads it.
                     if (takesQuotation(builtin.effect.?)) return error.Unread;
@@ -240,7 +240,7 @@ pub fn Walker(comptime Mode: type) type {
         /// A combinator applied to quotation literals, read as what it would
         /// run. A quotation consumes what it needed from beneath where it
         /// started and leaves what stands above that.
-        fn combinator(self: *Self, primitive: env.PrimitiveImpl, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
+        fn combinator(self: *Self, primitive: env.PrimitiveImpl, depth: usize) (Stop || error{OutOfMemory})!void {
             // SAFETY: the first `count` are written before they are read.
             var quotations: [combinators.max_counted]*Header = undefined;
             switch (combinators.flow(primitive)) {
@@ -257,15 +257,15 @@ pub fn Walker(comptime Mode: type) type {
                         else => return error.Unread,
                     };
                     return switch (sharing) {
-                        .cleave => self.cleave(quotations[0..count], scope, depth),
-                        .spread => self.spread(quotations[0..count], scope, depth),
+                        .cleave => self.cleave(quotations[0..count], depth),
+                        .spread => self.spread(quotations[0..count], depth),
                     };
                 },
-                .apply => return self.run(try self.operand(), scope, depth + 1),
+                .apply => return self.run(try self.operand(), depth + 1),
                 .dip => {
                     const applied = try self.operand();
                     const protected = try self.pop();
-                    try self.run(applied, scope, depth + 1);
+                    try self.run(applied, depth + 1);
                     return self.push(protected);
                 },
                 .branch => {
@@ -277,12 +277,12 @@ pub fn Walker(comptime Mode: type) type {
                     const start = self.height;
                     const beneath = self.low;
                     self.low = start;
-                    try self.run(otherwise, scope, depth + 1);
+                    try self.run(otherwise, depth + 1);
                     const left = self.counts(start);
                     self.slots = before;
                     self.height = start;
                     self.low = start;
-                    try self.run(then, scope, depth + 1);
+                    try self.run(then, depth + 1);
                     // Which branch runs is data, so the counts are known
                     // only when the branches agree, and the values not at
                     // all.
@@ -298,7 +298,7 @@ pub fn Walker(comptime Mode: type) type {
                     const start = self.height;
                     const beneath = self.low;
                     self.low = start;
-                    try self.run(applied, scope, depth + 1);
+                    try self.run(applied, depth + 1);
                     const reached = self.low;
                     // SAFETY: only the first `count` are read.
                     var results: Items = undefined;
@@ -321,19 +321,19 @@ pub fn Walker(comptime Mode: type) type {
                 .cleave => |count| {
                     if (count > quotations.len) return error.Unread;
                     for (0..count) |index| quotations[count - 1 - index] = try self.operand();
-                    return self.cleave(quotations[0..count], scope, depth);
+                    return self.cleave(quotations[0..count], depth);
                 },
                 .spread => |count| {
                     if (count > quotations.len) return error.Unread;
                     for (0..count) |index| quotations[count - 1 - index] = try self.operand();
-                    return self.spread(quotations[0..count], scope, depth);
+                    return self.spread(quotations[0..count], depth);
                 },
             }
         }
 
         /// Every quotation runs from the same inputs; their results follow
         /// one another in the quotations' order.
-        fn cleave(self: *Self, quotations: []const *Header, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
+        fn cleave(self: *Self, quotations: []const *Header, depth: usize) (Stop || error{OutOfMemory})!void {
             const before = self.slots;
             const start = self.height;
             const beneath = self.low;
@@ -345,7 +345,7 @@ pub fn Walker(comptime Mode: type) type {
                 self.slots = before;
                 self.height = start;
                 self.low = start;
-                try self.run(each, scope, depth + 1);
+                try self.run(each, depth + 1);
                 const left = self.height - self.low;
                 if (left > results.len - count) return error.Unread;
                 @memcpy(results[count..][0..left], self.slots[self.low..self.height]);
@@ -360,7 +360,7 @@ pub fn Walker(comptime Mode: type) type {
 
         /// Each quotation runs on its own inputs, the last on the top of the
         /// stack; their results follow one another in the quotations' order.
-        fn spread(self: *Self, quotations: []const *Header, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
+        fn spread(self: *Self, quotations: []const *Header, depth: usize) (Stop || error{OutOfMemory})!void {
             const beneath = self.low;
             // SAFETY: only the entries from `first` on are read.
             var results: Items = undefined;
@@ -369,7 +369,7 @@ pub fn Walker(comptime Mode: type) type {
             while (index != 0) {
                 index -= 1;
                 self.low = self.height;
-                try self.run(quotations[index], scope, depth + 1);
+                try self.run(quotations[index], depth + 1);
                 const left = self.height - self.low;
                 if (left > first) return error.Unread;
                 first -= left;

@@ -719,7 +719,7 @@ fn compileProgram(fiber: *Fiber, code: Value, inputs: u8) error{OutOfMemory}!?nu
     var walker: lower.Walker(ProgramCompiler) = .{ .fiber = fiber, .mode = &compiler, .visited = &visited };
     for (walker.open(inputs), 0..) |*slot, input| slot.* = .{ .payload = @intCast(input) };
     const publication = fiber.currentPublication();
-    walker.run(code.list, fiber.current.?.site.scope, 0) catch |err| switch (err) {
+    walker.run(code.list, 0) catch |err| switch (err) {
         error.Unread, error.Exhausted => return null,
         error.OutOfMemory => |oom| return oom,
     };
@@ -811,7 +811,6 @@ const ProgramCompiler = struct {
         _: *Fiber,
         _: *usize,
         _: machine.SummaryTarget.Source,
-        _: env.ScopeId,
     ) lower.Stop!lower.Counts {
         return error.Unread;
     }

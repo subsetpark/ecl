@@ -388,9 +388,9 @@ noinline fn make(fiber: *Fiber, site: machine.ExecutionSite, code: *Header, publ
 /// What a quotation a phrase applies consumes and leaves: its remembered
 /// summary, or a read under a rewrite's own bounds when there is none, which
 /// a quotation longer than a summary is kept for needs.
-fn counted(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMemory}!?stack_summary.Summary {
-    if (try stack_summary.of(fiber, scope, quotation)) |summary| return summary;
-    return stack_summary.read(fiber, scope, quotation);
+fn counted(fiber: *Fiber, quotation: *Header) error{OutOfMemory}!?stack_summary.Summary {
+    if (try stack_summary.of(fiber, quotation)) |summary| return summary;
+    return stack_summary.read(fiber, quotation);
 }
 
 /// One rewrite in progress: the forms of the flattened list so far, where
@@ -581,7 +581,7 @@ const Rewrite = struct {
                 if (form.symbol.name == words.drop) locals.drop(operand);
             };
             // A word without a summary may leave a local bound.
-            if (called and locals.bound != 0 and !try stack_summary.wordHasSummary(self.fiber, site.scope, form.symbol)) locals.forget();
+            if (called and locals.bound != 0 and !try stack_summary.wordHasSummary(self.fiber, form.symbol)) locals.forget();
             top_count = 0;
             if (!self.emit(form, origin)) return false;
         }
@@ -629,7 +629,7 @@ const Rewrite = struct {
         ends_list: bool,
     ) error{OutOfMemory}!?bool {
         const last = within.tail and ends_list;
-        const shape: Shape = switch (try self.fiber.summaryTarget(word, site.scope)) {
+        const shape: Shape = switch (try self.fiber.summaryTarget(word)) {
             .none => return null,
             .source => |source| return self.inline_(pending, word, at, site, depth, last, source),
             .builtin => |builtin| switch (combinators.flow(builtin.primitive)) {
@@ -665,7 +665,7 @@ const Rewrite = struct {
         // A measured word needs what its quotation consumes, which a summary
         // says before the quotation runs.
         const applied_summary: ?stack_summary.Summary = switch (shape) {
-            .apply, .dip, .above, .below => try counted(self.fiber, site.scope, applied[0].literal),
+            .apply, .dip, .above, .below => try counted(self.fiber, applied[0].literal),
             .cleave, .spread, .cleave_list, .spread_list => null,
         };
         const neutral = switch (shape) {
@@ -741,7 +741,7 @@ const Rewrite = struct {
                         .apply, .dip, .above, .below => unreachable,
                     }
                     for (quotations.items[0..quotations.count], 0..) |quotation, index| {
-                        const summary = try counted(self.fiber, site.scope, quotation) orelse break :expanded false;
+                        const summary = try counted(self.fiber, quotation) orelse break :expanded false;
                         quotations.consumed[index] = summary.consumed;
                         quotations.produced[index] = summary.produced;
                     }
@@ -875,7 +875,7 @@ const Rewrite = struct {
         }
         pending.count = 0;
         // Whether the word leaves a local bound is its summary's to say.
-        return try stack_summary.wordHasSummary(self.fiber, site.scope, word);
+        return try stack_summary.wordHasSummary(self.fiber, word);
     }
 
     /// The quotations of a cleave or spread, with what each consumes and

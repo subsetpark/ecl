@@ -3358,10 +3358,10 @@ pub const Fiber = struct {
         return definitionTraceWord(definition, word.name);
     }
 
-    /// What a stack summary reads of one word of code running in `scope`. A
-    /// summary reads its words before the quotation runs, which may be while
-    /// no evaluation is current.
-    pub fn summaryTarget(self: *Fiber, word: value.Symbol, scope: env.ScopeId) error{OutOfMemory}!SummaryTarget {
+    /// What a stack summary reads of one word. A summary reads its words
+    /// before the quotation runs, which may be while no evaluation is
+    /// current, and wherever it runs.
+    pub fn summaryTarget(self: *Fiber, word: value.Symbol) error{OutOfMemory}!SummaryTarget {
         if (binder.executableWord(.{ .symbol = word }) == null) return .none;
         const definition = try self.denoted(word) orelse return .none;
         // Asked after the cell is read: a summary made of words read on both
@@ -3371,7 +3371,7 @@ pub const Fiber = struct {
         // A checked call's failure reports the depth it found: only the call
         // itself can say that.
         const home = modules.definitionModule(definition);
-        if (crossesChecked(home, scope)) return .none;
+        if (crossesChecked(self.environment, home, word)) return .none;
         return switch (definition.code()) {
             .native => .none,
             .builtin => |primitive| .{ .builtin = .{ .primitive = primitive, .effect = definition.effect } },
@@ -3531,7 +3531,7 @@ pub const Fiber = struct {
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
         if (env.isCell(word.slot)) if (self.cells.of(word.slot).definition.load(.seq_cst)) |definition|
-            return invokeDefinition(self, definition, word.name);
+            return invokeDefinition(self, definition, word);
         return self.executeUnfilled(word);
     }
 
@@ -3540,7 +3540,7 @@ pub const Fiber = struct {
     noinline fn executeUnfilled(self: *Fiber, word: value.Symbol) MachineError!void {
         const linked: value.Symbol = .{ .name = word.name, .slot = @backingInt(try self.cellOf(word)) };
         if (self.cells.of(linked.slot).definition.load(.seq_cst)) |definition|
-            return invokeDefinition(self, definition, word.name);
+            return invokeDefinition(self, definition, linked);
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
         try self.startDriver(LookupDispatchDriver{ .word = linked, .site = site, .lookup = .init(try .init(self, linked)) });
     }
@@ -4113,7 +4113,7 @@ fn loop(self: *Fiber) MachineError!RunStatus {
                 if (cell.primitive.load(.seq_cst)) |primitive|
                     break :resolved invokeBuiltin(self, .plain(form.symbol.name), primitive);
                 if (cell.definition.load(.seq_cst)) |definition|
-                    break :resolved invokeDefinition(self, definition, form.symbol.name);
+                    break :resolved invokeDefinition(self, definition, form.symbol);
             }
             break :resolved dispatch(self, form);
         };
@@ -4321,7 +4321,7 @@ const LookupDispatchDriver = struct {
                         const outer = fiber.dispatched;
                         fiber.dispatched = word;
                         defer fiber.dispatched = outer;
-                        try invokeDefinition(fiber, definition, word.name);
+                        try invokeDefinition(fiber, definition, word);
                         return .detached;
                     },
                     .missed => |miss| {
@@ -4433,11 +4433,6 @@ pub const SummaryTarget = union(enum) {
         /// failure a failure in it is.
         trace_word: intern.TraceWord,
         attribution: env.Attribution,
-
-        /// The root the body runs in, called from code running in `caller`.
-        pub fn scope(self: Source, caller: env.ScopeId) env.ScopeId {
-            return if (self.home) |home| home.scope else caller;
-        }
     };
 };
 
@@ -4449,13 +4444,19 @@ inline fn ofStandardLibrary(definition: *const env.Definition) bool {
     };
 }
 
-/// Whether a call from code running in `scope` of a word whose module is
-/// `home` crosses into that module under a check of the word's declared
-/// effect. A standard-library word's effects are reflective metadata, and its
-/// arity failures are those of the code it runs.
-inline fn crossesChecked(home: ?modules.ModuleRoot, scope: env.ScopeId) bool {
+/// Whether a call by `word` of a definition whose module is `home` crosses
+/// into that module under a check of the definition's declared effect: when
+/// the word was written anywhere but that module, wherever it runs. A
+/// standard-library word's effects are reflective metadata, and its arity
+/// failures are those of the code it runs.
+inline fn crossesChecked(environment: *const env.Env, home: ?modules.ModuleRoot, word: value.Symbol) bool {
     const owner = home orelse return false;
-    return owner.scope != scope and owner.provenance != .standard_library;
+    if (owner.provenance == .standard_library) return false;
+    const written: env.ScopeId = switch (env.wordTarget(word.slot)) {
+        .cell => |id| environment.place(id).root,
+        .unlinked, .local => environment.coreScopeId(),
+    };
+    return written != owner.scope;
 }
 
 /// How a trace identifies a called definition: a module's by its module's
@@ -4470,7 +4471,8 @@ fn definitionTraceWord(definition: *const env.Definition, name: u32) intern.Trac
 
 /// Invokes one fixed target. A module word's declared effect is a contract
 /// checked where `crossesChecked` says the call crosses into its module.
-fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) MachineError!void {
+fn invokeDefinition(self: *Fiber, definition: *env.Definition, word: value.Symbol) MachineError!void {
+    const name = word.name;
     // One read of the root says both where the word runs and what it is
     // traced as; `definitionTraceWord` is the same rule for other readers.
     var home: ?modules.ModuleRoot = null;
@@ -4488,7 +4490,7 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
         },
     }
     self.active_word = trace_word;
-    const checked = crossesChecked(home, self.current.?.scope());
+    const checked = crossesChecked(self.environment, home, word);
     const cross_home_effect = if (checked) definition.effect else null;
     switch (definition.code()) {
         .source => |executable| try enterBody(self, executable, .{ .word = trace_word, .attribution = definition.attribution }, home, cross_home_effect),

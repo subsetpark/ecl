@@ -1149,9 +1149,11 @@ Annotations are optional everywhere. Module `def`/`defp` accept the same four
 forms as top-level `def`: no annotation, effect only, documentation only, or
 both. A top-level effect is reflective metadata only, whereas a module word's
 declared effect functions as a runtime arity contract, checked dynamically
-against the observed effect when application crosses a module boundary
-(violation: `` `contract ``). An omitted module effect means there is no such
-check. 
+against the observed effect when the word calling it was written outside its
+module (violation: `` `contract ``). Where the calling word was written
+decides, not where it runs: a session quotation that module code applies is
+checked, and a module's own quotation that the session applies is not. An
+omitted module effect means there is no such check. 
 
 #### Variable rows
 

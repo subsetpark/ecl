@@ -257,6 +257,21 @@ test "module annotations retain contracts documentation qualification and shadow
     try expectErrorContains(&runtime, "((a -- b c : \"An intentionally false contract.\") (dup +) `f def) `lies @defm 1 lies.f", "kind contract");
 }
 
+test "contracts: a module call is checked by where its word was written" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // Written in the session, `m.lies` is checked even when module code
+    // applies it.
+    try expectErrorContains(&runtime, "((a -- b c : \"False.\") (dup +) `lies def (apply) `run def) `m @defm " ++
+        "1 (m.lies) m.run", "kind contract");
+    // Written in the module, `lies` is not checked even when the session
+    // applies the quotation holding it.
+    try expectOk(&runtime, "((a -- b c : \"False.\") (dup +) `lies def ((lies)) `q def) `n @defm 1 n.q apply 2 = " ++
+        "{kind user msg \"an unchecked call ran\"} assert");
+}
+
 test "multiline documentation is normalized and see prints annotation and canonical body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();

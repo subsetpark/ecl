@@ -637,7 +637,7 @@ fn countedInputs(
     var inputs: usize = 0;
     for (0..count) |index| {
         if (!quotations.isQuotation(index)) return null;
-        const summary = try stack_summary.of(fiber, fiber.current.?.site.scope, quotations.at(index)) orelse return null;
+        const summary = try stack_summary.of(fiber, quotations.at(index)) orelse return null;
         counts.consumed[index] = @intCast(summary.consumed);
         counts.produced[index] = @intCast(summary.produced);
         inputs = switch (sharing) {
@@ -742,7 +742,7 @@ const CountedCleave = struct {
                 .cleave => step,
                 .spread => total - 1 - step,
             };
-            const again = try stack_summary.of(fiber, self.site.scope, self.quotations.borrow().at(index));
+            const again = try stack_summary.of(fiber, self.quotations.borrow().at(index));
             const same = if (again) |summary|
                 summary.consumed == self.counts.consumed[index] and summary.produced == self.counts.produced[index]
             else

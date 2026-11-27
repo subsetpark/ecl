@@ -838,7 +838,7 @@ pays, so the word then runs as a linked one does.
 
 What these readers get is borrowed for the turn (§9) and is not kept past it.
 What a fiber remembers of a source word across turns holds no definition: the
-summary of the word's body run in one root, in a table of constant size found
+summary of the word's body, in a table of constant size found
 by the definition's address and good for one value of the publication counter. Under
 one value an address read from a cell or a directory is one definition's:
 another definition can take the address only once the first is reclaimed, and
@@ -1054,7 +1054,9 @@ Each variant owns exactly the fields meaningful in that phase. Transitions
 consume one state and construct another, giving continuation modes,
 publication phases, and teardown an exhaustive representation.
 
-Declared effects at a module boundary belong to the language invocation, not
+A module word's call is checked when the word calling it was written outside
+the word's module, wherever it runs: the boundary is fixed by the word, like
+everything else about it. Declared effects at a module boundary belong to the language invocation, not
 to an implementation callback's return. Input contracts are validated before
 execution; the frame stack owns output checking until successful completion.
 Builtin and native invocations retain a suspended caller beneath that check.
@@ -1169,14 +1171,17 @@ through the words that only move them and through locals, and each
 combinator's rule is stated there once. A summary is that walk keeping
 nothing of a value but its place; a scalar program (§7) is the same walk
 keeping a register. Any other word has no
-summary: a word that reaches itself, a native word, and a word behind a checked module
-boundary, whose check reports the depth it found. So does any quotation or
+summary: a word that reaches itself, a native word, and a word whose call is
+checked because it was written outside the module that defines it, whose
+check reports the depth it found. Which words those are is fixed by the words
+themselves, so a summary is a function of the quotation and the publication,
+wherever the quotation runs. So does any quotation or
 body past a constant size, so the walk is bounded by a constant and an absent
 summary is always a correct answer. A summary depends on what the words it
 read resolve to, so nothing keeps one past a publication, and a redefinition,
 of a word or of anything its body reaches, is read as redefined. A body's
-summary is remembered by the fiber for its definition and the root it ran in. A
-quotation's is remembered by the fiber for the site it ran at, in a table of
+summary is remembered by the fiber for its definition. A
+quotation's is remembered by the fiber for the quotation, in a table of
 constant size whose entries hold their quotations: a fiber may keep that many
 quotations alive that it would otherwise have let go. It is an optimization and nothing observes it: what acts
 on one must leave the stack, the failures, and every enclosing floor's
