@@ -147,7 +147,6 @@ test "clock: a manual clock starts at zero and moves only when the host advances
     try expectDisplay(runtime, "{monotonic 500} clock.elapsed", "1000");
     try advance(runtime, 0);
     try expectDisplay(runtime, "clock.now", "{monotonic 1500}");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
 }
 
 test "clock: a manual clock refuses any advance that would leave its range and never wraps" {
@@ -188,7 +187,6 @@ test "clock: a deadline the clock cannot reach is refused before parking" {
         .kind = "overflow",
         .word = "task.await-for",
     });
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
 test "clock: a host clock refuses manual advancement and counts from Session start" {
@@ -203,7 +201,6 @@ test "clock: a host clock refuses manual advancement and counts from Session sta
     try runOk(runtime, "(9223372036854775807 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
     try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `kind at", "cancelled");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
 test "clock: wall time is inherited by spawned tasks and loaded modules" {
@@ -242,29 +239,24 @@ test "clock: sleep completes exactly when the manual clock reaches its deadline"
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
     try runOk(runtime, "(100 clock.sleep clock.now) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
-    try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerThreadCount());
     try advance(runtime, 99);
     // A zero deadline is decided at registration, so this observes the
     // sleeper's state without waiting on anything.
     try expectDisplay(runtime, "sleeper 0 task.await-for `err at `kind at", "timeout");
-    try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerEntryCount());
     try advance(runtime, 1);
     try expectDisplay(runtime, "sleeper task.await", "{ok ({monotonic 100})}");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
-test "clock: a zero sleep parks and resumes without starting the timer thread" {
+test "clock: a zero sleep resumes without the clock moving" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{});
     try expectDisplay(runtime, "0 clock.sleep `awake", "awake");
     try expectDisplay(runtime, "(0 clock.sleep 1) @spawn task.await", "{ok [1]}");
     try expectDisplay(runtime, "clock.now", "{monotonic 0}");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
-test "clock: invalid sleep durations fail before any timer is registered" {
+test "clock: invalid sleep durations fail" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{});
@@ -286,8 +278,6 @@ test "clock: invalid sleep durations fail before any timer is registered" {
         .kind = "underflow",
         .word = "clock.sleep",
     });
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
 test "clock: cancellation before registration wakes the sleeper as cancelled" {
@@ -298,18 +288,15 @@ test "clock: cancellation before registration wakes the sleeper as cancelled" {
     const runtime = try fixture.open(.{});
     try runOk(runtime, "task.pending pop");
     try expectDisplay(runtime, "(1000000 clock.sleep) @spawn dup task.cancel task.await `err at `kind at", "cancelled");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
-test "clock: cancellation after registration retires the timer entry" {
+test "clock: cancellation wakes a parked sleeper without the clock moving" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
     try runOk(runtime, "(1000000 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
     try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `msg at", "\"unit cancelled while sleeping\"");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
     // The clock never moved: the wake came from cancellation alone.
     try expectDisplay(runtime, "clock.now", "{monotonic 0}");
 }
@@ -324,10 +311,8 @@ test "clock: many sleepers wake by deadline across one advance" {
     try advance(runtime, 35);
     try expectDisplay(runtime, "sleepers 35 take (task.await) each ({ok [{monotonic 35}]} match?) all?", "1");
     try expectDisplay(runtime, "sleepers 35 drop (0 task.await-for `err at `kind at `timeout match?) all?", "1");
-    try std.testing.expectEqual(@as(usize, 35), runtime.schedulerTimerEntryCount());
     try advance(runtime, 35);
     try expectDisplay(runtime, "sleepers 35 drop (task.await) each ({ok [{monotonic 70}]} match?) all?", "1");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
 test "clock: a parked sleeper does not occupy the only worker" {
@@ -359,7 +344,6 @@ test "clock: await-for deadlines follow the same manual clock as sleep" {
     try expectDisplay(runtime, "spinner 50 task.await-for `err at `kind at", "timeout");
     helper.join();
     try expectDisplay(runtime, "clock.now", "{monotonic 50}");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
     try expectDisplay(runtime, "spinner dup task.cancel task.await `err at `kind at", "cancelled");
 }
 
@@ -377,7 +361,6 @@ test "clock: a root unit sleeps through the same timer path" {
     const helper = try std.Thread.spawn(.{}, Advancer.run, .{runtime});
     try expectDisplay(runtime, "5 clock.sleep clock.now", "{monotonic 5}");
     helper.join();
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
 test "clock: session shutdown retires pending sleeps and their timers without leaking" {

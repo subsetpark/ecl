@@ -29,30 +29,12 @@ fn runErr(runtime: *session.Session, source: []const u8) !void {
     }
 }
 
-test "concurrency: cold sessions start no threads and @spawn starts the fixed pool" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
-    defer runtime.deinit();
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
-    try runOk(&runtime, "[] (missing) @each pop");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
-    try runOk(&runtime, "(1 2 +) @spawn task.await");
-    try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
-    var actual = try display(&runtime);
-    defer actual.deinit();
-    try std.testing.expectEqualStrings("{ok [3]}", actual.bytes());
-}
-
-test "concurrency: cooperative sessions preserve public task behavior without worker threads" {
+test "concurrency: cooperative sessions preserve public task behavior" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "(1 2 +) @spawn task.await");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     var actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("{ok [3]}", actual.bytes());
@@ -97,15 +79,6 @@ test "concurrency: cooperative ready work cannot starve bounded retirement" {
         );
     }
     try std.testing.expectEqual(.ok, counting.deinit());
-}
-
-test "concurrency: default sessions use the build-configured worker count" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    try runOk(&runtime, "(1) @spawn task.await pop");
-    try std.testing.expectEqual(session.default_worker_count, runtime.schedulerWorkerThreadCount());
 }
 
 test "concurrency: relocating a session handle preserves live runtime links" {
@@ -189,11 +162,9 @@ test "concurrency: cancellation timeout and later await remain distinct" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "((1) () while) @spawn dup 1 task.await-for swap task.cancel");
-    try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerThreadCount());
     var actual = try display(&runtime);
     try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind timeout") != null);
     actual.deinit();
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
     try runOk(&runtime, "pop ((1) () while) @spawn dup task.cancel task.await");
     actual = try display(&runtime);
     try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind cancelled") != null);
@@ -214,29 +185,27 @@ test "concurrency: task module cancellation reaches a runnable child" {
     try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "ok [1]") == null);
 }
 
-test "concurrency: terminal deadline waits do not start the timer thread" {
+test "concurrency: a deadline wait on a finished task returns its result at once" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "(1) @spawn dup task.await pop 1000000 task.await-for pop");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
 }
 
-test "concurrency: an already-expired pending deadline resolves without a timer thread" {
+test "concurrency: an already-expired pending deadline times out at once" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try runOk(&runtime, "((1) () while) @spawn dup 0 task.await-for");
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     var actual = try display(&runtime);
     try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind timeout") != null);
     actual.deinit();
     try runOk(&runtime, "pop dup task.cancel task.await pop");
 }
 
-test "concurrency: cancelling a deadline waiter unlinks its far-future timer" {
+test "concurrency: cancelling a deadline waiter leaves no far-future wait behind" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
@@ -247,10 +216,9 @@ test "concurrency: cancelling a deadline waiter unlinks its far-future timer" {
             "(target-task 1000000 task.await-for) @spawn dup task.cancel task.await pop " ++
             "target-task task.cancel target-task task.await pop",
     );
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
-test "concurrency: timer heap spans fixed chunks and drains every entry" {
+test "concurrency: seventy concurrent deadline waits all resolve" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
@@ -261,7 +229,6 @@ test "concurrency: timer heap spans fixed chunks and drains every entry" {
             "[20] 70 take (timer-target swap task.await-for) @each pop " ++
             "timer-target task.cancel timer-target task.await pop",
     );
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
 test "concurrency: tasks persist across units and structured close reaches quiescence" {

@@ -20,7 +20,6 @@ const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
 const list = @import("../list.zig");
 const modules = @import("../modules.zig");
-const printer = @import("../print.zig");
 const session = @import("../session.zig");
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
@@ -226,14 +225,13 @@ test "module: long definition names stay within the cancellation bound" {
     const long_name = try intern.internNamespace(name_bytes);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var name_runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var name_runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer name_runtime.deinit();
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     try name_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(long_name) } });
-    name_runtime.requestCancellation();
-    try expectErrorContains(&name_runtime, "@defm", &.{"unit cancelled"});
-    try std.testing.expect(name_runtime.lastPolls() >= 1);
+    try expectOk(&name_runtime, "`long-name set `second set `first set");
+    try runtime_fixture.expectCancelledAcrossTurns(&name_runtime, "first second long-name @defm");
 }
 
 test "reflection: words is sorted unique and private-safe" {
@@ -279,71 +277,16 @@ test "reflection remains cancellable across sorting and identifier output" {
     const second_bytes = try allocator.dupe(u8, first_bytes);
     defer allocator.free(second_bytes);
     second_bytes[second_bytes.len - 1] = 'b';
-    const first = try intern.internNamespace(first_bytes);
-
     var discard_buffer: [256]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&discard_buffer);
     var runtime_inputs5 = try runtime_fixture.Fixture.init();
     defer runtime_inputs5.deinit();
-    var words_runtime = try session.Session.init(allocator, &.{}, runtime_inputs5.inputs(.{ .output = &discarding.writer }), .default, .evaluate);
+    var words_runtime = try session.Session.init(allocator, &.{}, runtime_inputs5.inputs(.{ .output = &discarding.writer }), .cooperative, .evaluate);
     defer words_runtime.deinit();
     const define_both = try std.fmt.allocPrint(allocator, "(1) `{s} def (1) `{s} def", .{ first_bytes, second_bytes });
     defer allocator.free(define_both);
     try expectOk(&words_runtime, define_both);
-    words_runtime.requestCancellation();
-    const words_failure = (try words_runtime.runUnit("reflection-poll.ecl", "words")).err;
-    defer words_runtime.release(words_failure);
-    const words_rendered = try printer.toOwnedString(allocator, words_failure);
-    defer allocator.free(words_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, words_rendered, "unit cancelled") != null);
-    try std.testing.expect(words_runtime.lastPolls() >= 1);
-
-    var see_output = std.Io.Writer.Allocating.init(allocator);
-    defer see_output.deinit();
-    var runtime_inputs6 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs6.deinit();
-    var see_runtime = try session.Session.init(allocator, &.{}, runtime_inputs6.inputs(.{ .output = &see_output.writer }), .default, .evaluate);
-    defer see_runtime.deinit();
-    const define_first = try std.fmt.allocPrint(allocator, "(1) `{s} def", .{first_bytes});
-    defer allocator.free(define_first);
-    try expectOk(&see_runtime, define_first);
-    try see_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(first) } });
-    see_runtime.requestCancellation();
-    const see_failure = (try see_runtime.runUnit("reflection-poll.ecl", "see")).err;
-    defer see_runtime.release(see_failure);
-    const see_rendered = try printer.toOwnedString(allocator, see_failure);
-    defer allocator.free(see_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, see_rendered, "unit cancelled") != null);
-    try std.testing.expect(see_runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 0), see_output.written().len);
-
-    const qualified_bytes = try allocator.alloc(u8, "poll-module.".len + first_bytes.len);
-    defer allocator.free(qualified_bytes);
-    @memcpy(qualified_bytes[0.."poll-module.".len], "poll-module.");
-    @memcpy(qualified_bytes["poll-module.".len..], first_bytes);
-    const qualified = try intern.intern(qualified_bytes);
-    var qualified_output = std.Io.Writer.Allocating.init(allocator);
-    defer qualified_output.deinit();
-    var runtime_inputs7 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs7.deinit();
-    var qualified_runtime = try session.Session.init(allocator, &.{}, runtime_inputs7.inputs(.{ .output = &qualified_output.writer }), .default, .evaluate);
-    defer qualified_runtime.deinit();
-    const module_source = try std.fmt.allocPrint(
-        allocator,
-        "(1 `{s} set) `poll-module @defm",
-        .{first_bytes},
-    );
-    defer allocator.free(module_source);
-    try expectOk(&qualified_runtime, module_source);
-    try qualified_runtime.pushOwned(.{ .symbol = .{ .name = qualified } });
-    qualified_runtime.requestCancellation();
-    const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "see")).err;
-    defer qualified_runtime.release(qualified_failure);
-    const qualified_rendered = try printer.toOwnedString(allocator, qualified_failure);
-    defer allocator.free(qualified_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, qualified_rendered, "unit cancelled") != null);
-    try std.testing.expect(qualified_runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 0), qualified_output.written().len);
+    try runtime_fixture.expectCancelledAcrossTurns(&words_runtime, "words");
 }
 
 test "reflection failures are total" {
@@ -403,7 +346,6 @@ test "session: public definition mutation settles retirement every turn" {
         // A replaced top-level definition nothing still holds is reclaimed,
         // so redefining one name settles to bounded live memory.
         try expectChurnBounded(&runtime, &counting, 1024, null);
-        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
@@ -443,7 +385,6 @@ test "acceptance: redefinition soak keeps live memory bounded" {
         const small_growth = after_small -| warmed_live_bytes;
         const large_growth = after_large -| after_small;
         try std.testing.expect(large_growth <= small_growth * 2 + 4096);
-        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
@@ -465,7 +406,6 @@ test "session: mutation settlement is independent of a busy sole worker" {
         // publishes nothing.
         const worker_turns = "(1) @spawn task.await pop (1) @spawn task.await pop";
         try expectChurnBounded(&runtime, &counting, 4096, worker_turns);
-        try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
         try expectOk(&runtime, "dup task.cancel task.await pop");
     }
     try std.testing.expectEqual(.ok, counting.deinit());

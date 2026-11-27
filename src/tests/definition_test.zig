@@ -1,8 +1,5 @@
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
-const value = @import("../value.zig");
-const heap = @import("../heap.zig");
-const list = @import("../list.zig");
 const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
@@ -395,57 +392,13 @@ test "reserved namespace names reject every binding surface but remain readable"
     );
 }
 
-test "long annotation traversal and reflection observe cancellation" {
+test "reflection over a long docstring is cancelled across turns" {
     const allocator = std.testing.allocator;
-    var cleanup = heap.testing.Cleanup.init(allocator);
-    defer cleanup.deinit();
-    var runtime_inputs8 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs8.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs8.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    const marker = try intern.intern("--");
-    const name = try intern.intern("value");
-    const items = try allocator.alloc(value.Value, 70_000);
-    defer allocator.free(items);
-    @memset(items, .{ .symbol = .{ .name = name } });
-    items[0] = .{ .symbol = .{ .name = marker } };
-    const annotation = try list.fromValuesGeneric(allocator, items);
-    try runtime.pushOwned(annotation);
-    const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    try runtime.pushOwned(body);
-    runtime.requestCancellation();
-    try expectErrorContains(&runtime, "`cancelled-definition def", "unit cancelled");
-    try std.testing.expect(runtime.lastPolls() >= 1);
-    runtime.clearCancellation();
-    try expectErrorContains(&runtime, "cancelled-definition", "kind undefined-word");
-
-    var runtime_inputs9 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs9.deinit();
-    var doc_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs9.inputs(.{}), .default, .evaluate);
-    defer doc_runtime.deinit();
-    const doc_codepoints = try allocator.alloc(u32, 70_000);
-    defer allocator.free(doc_codepoints);
-    @memset(doc_codepoints, 'd');
-    const cancellable_doc = try list.fromCodepoints(allocator, doc_codepoints);
-    defer cleanup.releaseValue(cancellable_doc);
-    const doc_annotation = try list.fromValuesGeneric(allocator, &.{
-        .{ .symbol = .{ .name = try intern.intern(":") } },
-        cancellable_doc,
-    });
-    try doc_runtime.pushOwned(doc_annotation);
-    const doc_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    try doc_runtime.pushOwned(doc_body);
-    doc_runtime.requestCancellation();
-    try expectErrorContains(&doc_runtime, "`cancelled-doc def", "unit cancelled");
-    try std.testing.expect(doc_runtime.lastPolls() >= 1);
-    doc_runtime.clearCancellation();
-    try expectErrorContains(&doc_runtime, "cancelled-doc", "kind undefined-word");
-
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var runtime_inputs10 = try runtime_fixture.Fixture.init();
     defer runtime_inputs10.deinit();
-    var reflection_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs10.inputs(.{ .output = &output.writer }), .default, .evaluate);
+    var reflection_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs10.inputs(.{ .output = &output.writer }), .cooperative, .evaluate);
     defer reflection_runtime.deinit();
     const long_doc = try allocator.alloc(u8, 70_000);
     defer allocator.free(long_doc);
@@ -453,27 +406,7 @@ test "long annotation traversal and reflection observe cancellation" {
     const long_definition = try std.fmt.allocPrint(allocator, "(: \"{s}\") (1) `long-doc def", .{long_doc});
     defer allocator.free(long_definition);
     try expectOk(&reflection_runtime, long_definition);
-    reflection_runtime.requestCancellation();
-    try expectErrorContains(&reflection_runtime, "`long-doc see", "unit cancelled");
-    try std.testing.expect(reflection_runtime.lastPolls() >= 1);
-
-    var runtime_inputs11 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs11.deinit();
-    var name_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs11.inputs(.{}), .default, .evaluate);
-    defer name_runtime.deinit();
-    const name_bytes = try allocator.alloc(u8, 70_000);
-    defer allocator.free(name_bytes);
-    @memset(name_bytes, 'n');
-    const long_name = try intern.intern(name_bytes);
-    try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
-    try name_runtime.pushOwned(.{ .symbol = .{ .name = long_name } });
-    name_runtime.requestCancellation();
-    try expectErrorContains(&name_runtime, "def", "unit cancelled");
-    try std.testing.expect(name_runtime.lastPolls() >= 1);
-    name_runtime.clearCancellation();
-    const lookup_source = try std.fmt.allocPrint(allocator, "`{s} doc", .{name_bytes});
-    defer allocator.free(lookup_source);
-    try expectErrorContains(&name_runtime, lookup_source, "kind undefined-word");
+    try runtime_fixture.expectCancelledAcrossTurns(&reflection_runtime, "`long-doc see");
 }
 
 // ── Milestone 10 (one-definition-merge) ──────────────────────────────────────

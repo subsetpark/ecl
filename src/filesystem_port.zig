@@ -791,15 +791,6 @@ const ResolverState = struct {
     }
 };
 
-/// Runs a resolver to completion. Only trusted host-side callers with no
-/// scheduler to yield to use this; drivers step the resolver themselves.
-pub fn resolveBlocking(resolver: *Resolver) error{OutOfMemory}!StepProgress {
-    while (true) switch (try resolver.step()) {
-        .pending => {},
-        else => |terminal| return terminal,
-    };
-}
-
 pub const OpenOutcome = union(enum) {
     file: std.Io.File,
     failed: Reason,
@@ -1361,7 +1352,10 @@ test "resolver confines symlink targets to the root" {
         var resolver = try Resolver.init(std.testing.allocator, io, root, case.path, .{}, case.mode);
         var cleanup = heap.HostOwner.init(std.testing.allocator);
         defer resolver.deinit(cleanup.cleanup());
-        var outcome = try resolveBlocking(&resolver);
+        var outcome = while (true) switch (try resolver.step()) {
+            .pending => {},
+            else => |terminal| break terminal,
+        };
         switch (case.expect) {
             .entry => |name| {
                 try std.testing.expectEqualStrings(name, outcome.complete.entry.name);

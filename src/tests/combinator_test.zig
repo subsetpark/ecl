@@ -28,7 +28,7 @@ fn expectCancelledAfterSetup(
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<combinator-setup>", setup)) {
         .ok => {},
@@ -38,22 +38,18 @@ fn expectCancelledAfterSetup(
         },
         .incomplete => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     runtime.setIdiomMode(mode);
-    runtime.requestCancellation();
-    const failure = switch (try runtime.runUnit("<combinator-cancel>", source)) {
-        .err => |item| item,
-        .ok, .incomplete => return error.TestUnexpectedResult,
-    };
-    defer runtime.release(failure);
-    try support.expectLanguageError(failure, .{
-        .name = source,
-        .source = source,
-        .kind = "cancelled",
-        .message = "unit cancelled",
-    });
-    try std.testing.expect(runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
+    const victim = try std.mem.concat(std.testing.allocator, u8, &.{ "cancel-input ", source });
+    defer std.testing.allocator.free(victim);
+    switch (try runtime.runUnit("<combinator-setup>", "`cancel-input set")) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    try runtime_fixture.expectCancelledAcrossTurns(&runtime, victim);
 }
 
 test "combinators: isolated iteration broadcast reduction and infra" {
@@ -869,23 +865,9 @@ test "empty inline iterations remain cancellable and bounded-frame" {
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
-    runtime.requestCancellation();
-    const failure = switch (try runtime.runUnit("<combinator-cancel>", "70000 () times")) {
-        .err => |item| item,
-        .ok, .incomplete => return error.TestUnexpectedResult,
-    };
-    defer runtime.release(failure);
-    try support.expectLanguageError(failure, .{
-        .name = "cancelled times",
-        .source = "70000 () times",
-        .kind = "cancelled",
-        // Observed where the empty iterations exhaust their fuel, which reports
-        // no word: the loop is between applications, not inside one.
-        .message = "unit cancelled",
-    });
-    try std.testing.expect(runtime.lastPolls() >= 1);
+    try runtime_fixture.expectCancelledAcrossTurns(&runtime, "70000 () times");
 }
 
 test "combinators: vector reductions reuse only accumulators they own" {

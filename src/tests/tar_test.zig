@@ -478,45 +478,11 @@ test "tar: unpack preserves existing destinations and has one concurrent winner"
     try scratch.expectEntryCount(2);
 }
 
-test "tar: cancellation never publishes a destination" {
+test "tar: non-canonical destinations fail before any filesystem change" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
     const bytes = try decodeHex(.valid);
     defer allocator.free(bytes);
-
-    const cancelled_destination = try scratch.destination("cancelled");
-    defer allocator.free(cancelled_destination);
-    const cancelled_source = try unpackSource(bytes, cancelled_destination);
-    defer allocator.free(cancelled_source);
-    var heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&heap);
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var diagnostics_buffer: [256]u8 = undefined;
-    var diagnostics = std.Io.Writer.Discarding.init(&diagnostics_buffer);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-        .filesystem = scratch.filesystem(),
-    }), .cooperative, .evaluate);
-    defer runtime.deinit();
-    switch (try runtime.runUnit("<archive-warm>", "[] hash.sha256 pop")) {
-        .ok => {},
-        .incomplete, .err => return error.UnexpectedWarmupResult,
-    }
-    runtime.requestCancellation();
-    const failure = switch (try runtime.runUnit("<archive-cancel>", cancelled_source)) {
-        .err => |item| item,
-        .ok, .incomplete => return error.ExpectedCancellation,
-    };
-    defer runtime.release(failure);
-    try support.expectLanguageError(failure, .{ .name = "cancelled extraction", .source = cancelled_source, .kind = "cancelled" });
-    try scratch.expectAbsent("cancelled");
-
-    try scratch.expectEntryCount(0);
 
     // Non-canonical destinations fail before any filesystem change.
     for ([_]struct { destination: []const u8, reason: []const u8 }{

@@ -28,20 +28,6 @@ fn expectErr(runtime: *session.Session, source: []const u8) !void {
     }
 }
 
-fn expectErrContains(runtime: *session.Session, source: []const u8, needle: []const u8) !void {
-    const outcome = try runtime.runUnit("<test>", source);
-    switch (outcome) {
-        .err => |failure| {
-            defer runtime.release(failure);
-            var rendered = try runtime.renderValue(failure);
-            defer rendered.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
-        },
-        .ok => return error.ExpectedEclFailure,
-        .incomplete => return error.UnexpectedIncompleteSource,
-    }
-}
-
 test "testing: declaration is legal only at a module construction root" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
@@ -190,7 +176,7 @@ test "testing: large test catalogs remain cancellable" {
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .language_tests);
     defer runtime.deinit();
 
     var source: std.ArrayList(u8) = .empty;
@@ -210,10 +196,7 @@ test "testing: large test catalogs remain cancellable" {
 
     // Walking the catalog repeatedly crosses a kernel quantum, which is where
     // a listing must poll; one listing of 300 entries is well inside one.
-    runtime.requestCancellation();
-    try expectErrContains(&runtime, "300 (tests pop) times", "unit cancelled");
-    try std.testing.expect(runtime.lastPolls() >= 1);
-    runtime.clearCancellation();
+    try runtime_fixture.expectCancelledAcrossTurns(&runtime, "300 (tests pop) times");
     try expectOk(&runtime, "tests len 300 = {kind user} assert");
     try expectOk(&runtime, "300 (tests pop) times");
     try std.testing.expect(runtime.lastPolls() > 1);

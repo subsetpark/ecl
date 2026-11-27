@@ -297,9 +297,6 @@ const InstanceState = struct {
     refs: std.atomic.Value(u32) = .init(1),
     image: ImagePin,
     descriptor: *descriptor_api.ValidatedDescriptor,
-    invocation_count: std.atomic.Value(u64) = .init(0),
-    total_nanoseconds: std.atomic.Value(u64) = .init(0),
-    overrun_count: std.atomic.Value(u64) = .init(0),
     diagnostic_emitted: std.atomic.Value(bool) = .init(false),
     retired_next: ?*InstanceState = null,
     next: ?*InstanceState = null,
@@ -503,10 +500,7 @@ pub const ModuleInstance = opaque {
     }
 
     pub fn recordDuration(self: *ModuleInstance, nanoseconds: u64) bool {
-        _ = self.mutableState().invocation_count.fetchAdd(1, .monotonic);
-        _ = self.mutableState().total_nanoseconds.fetchAdd(nanoseconds, .monotonic);
         if (nanoseconds < 10 * std.time.ns_per_ms) return false;
-        _ = self.mutableState().overrun_count.fetchAdd(1, .monotonic);
         return self.mutableState().diagnostic_emitted.cmpxchgStrong(
             false,
             true,
@@ -546,21 +540,6 @@ const OwnerPhase = enum(u8) { open, closing, settled };
 pub const Owner = opaque {
     fn state(self: *Owner) *OwnerState {
         return @ptrCast(@alignCast(self));
-    }
-
-    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!*Owner {
-        return initWithPortLimits(host, .{}) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.InvalidLimits => unreachable,
-        };
-    }
-
-    pub fn initWithPortLimits(host: *const heap.HostCleanup, limits: native_port.Limits) error{ OutOfMemory, InvalidLimits }!*Owner {
-        return initConfigured(host, limits, &.{}) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.InvalidLimits => error.InvalidLimits,
-            error.InvalidConfiguration => unreachable,
-        };
     }
 
     pub fn initConfigured(host: *const heap.HostCleanup, limits: native_port.Limits, configurations: []const Configuration) error{ OutOfMemory, InvalidLimits, InvalidConfiguration }!*Owner {

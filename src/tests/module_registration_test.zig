@@ -313,7 +313,6 @@ test "module registration: reloads keep live memory bounded" {
             std.debug.print("reload soak: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
             return err;
         };
-        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }

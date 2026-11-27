@@ -9,6 +9,7 @@ const intern = @import("../intern.zig");
 const list = @import("../list.zig");
 const modules = @import("../modules.zig");
 const native_module = @import("../native_module.zig");
+const native_port = @import("../native_port.zig");
 const session = @import("../session.zig");
 const native_sample = @import("native-sample");
 const native_fixture = @import("native_fixture_options");
@@ -1368,7 +1369,7 @@ test "native: the static transport publishes a linked descriptor through the sam
         registry.deinit();
         host.cleanup().drain();
     };
-    const owner = try native_module.Owner.init(host.cleanup());
+    const owner = try native_module.Owner.initConfigured(host.cleanup(), .{}, &.{});
     torn_down_together = true;
     defer {
         const closing = owner.closeCalls();
@@ -3094,12 +3095,10 @@ test "native: admitted input leases settle before finalizer execution" {
 }
 
 test "native: instance work quanta preserve bounds across callback and construction lifetimes" {
-    try std.testing.expectError(error.InvalidLimits, session.NativeWorkQuantum.fromCount(0));
-    try std.testing.expectError(error.InvalidLimits, session.NativeWorkQuantum.fromCount(65537));
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| for ([_]u32{ 1, 256, 65536 }) |amount| {
-        const quantum = try session.NativeWorkQuantum.fromCount(amount);
+    for ([_]bool{ true, false }) |linked| for ([_]native_port.WorkQuantum{ .q64, .q256 }) |quantum| {
+        const amount = quantum.count();
         var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
             .ecl_path = if (linked) null else native_fixture.directory,
             .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .callback_quantum = quantum, .construction_quantum = quantum, .message_limits = .{ .nodes = 65550, .bytes = 525000 }, .builder_slots = 4 } }},

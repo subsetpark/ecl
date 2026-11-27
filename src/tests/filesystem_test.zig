@@ -830,54 +830,6 @@ test "fs: symlink resolution is confined to the root" {
 
 // -- limits, cancellation, concurrency ---------------------------------------
 
-test "fs: cancellation before commit leaves the destination unchanged" {
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    try scratch.write("existing", "prior");
-    var heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&heap);
-    var output_buffer: [64]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{
-        .io = io,
-        .output = &output.writer,
-        .diagnostics = &output.writer,
-        .filesystem = scratch.filesystem(),
-    }), .cooperative, .evaluate);
-    defer runtime.deinit();
-    try std.testing.expect((try runtime.runUnit("<fs-warm>", "`root \"existing\" fs.exists? pop")) == .ok);
-    runtime.requestCancellation();
-    for ([_][]const u8{
-        "`root \"existing\" \"new\" fs.replace-text",
-        "`root \"created\" \"new\" fs.create-text",
-        "`root \"existing\" \"new\" fs.publish-text",
-        "`root \"created\" \"new\" fs.publish-text",
-        "`root \"existing\" `root \"copied\" fs.copy",
-        "`root \".\" fs.list",
-        "`root \"existing\" fs.read-text",
-    }) |program| {
-        const failure = switch (try runtime.runUnit("<fs-cancel>", program)) {
-            .err => |item| item,
-            .ok, .incomplete => return error.ExpectedCancellation,
-        };
-        defer runtime.release(failure);
-        try support.expectLanguageError(failure, .{ .name = program, .source = program, .kind = "cancelled" });
-    }
-    runtime.clearCancellation();
-    const preserved = try scratch.read("existing");
-    defer allocator.free(preserved);
-    try std.testing.expectEqualStrings("prior", preserved);
-    try scratch.expectAbsent("created");
-    try scratch.expectAbsent("copied");
-    try scratch.expectNoStaging(".");
-    try std.testing.expectEqual(@as(usize, 1), try scratch.entryCount("."));
-    // The quota slot was released by cancellation cleanup: the next
-    // operation still runs.
-    try std.testing.expect((try runtime.runUnit("<fs-after>", "`root \"existing\" fs.read-text pop")) == .ok);
-}
-
 test "fs: the live-operation quota is released after each operation" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

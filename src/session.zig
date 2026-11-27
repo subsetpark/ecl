@@ -9,7 +9,6 @@ const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const native_port = @import("native_port.zig");
-pub const NativeWorkQuantum = native_port.WorkQuantum;
 const native_module = @import("native_module.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");
@@ -253,31 +252,25 @@ const SessionCore = struct {
     registry: modules.Registry,
     test_authority: ?modules.TestAuthority,
     native_owner: *native_module.Owner,
-    startup_cwd: []const u8,
     filesystem_owner: *filesystem_port.FilesystemOwner,
     http_owner: *http_service.Owner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
     archive: spans.SpanArchive,
-    host_io: std.Io,
-    tls_trust: ?machine.TlsTrust,
-    wall_clock: machine.WallClock,
-    ecl_path: ?[]u8,
+    /// What every root unit's fiber inherits, built once. The Session owns the
+    /// copied strings and the argument list it borrows.
+    inherited: machine.InheritedContext,
     module_snapshot: ?*map_state.Snapshot,
     local_preload: LocalPreloadState = .idle,
     environ: EnvironSnapshot,
     standard_streams: standard_streams.Devices,
-    arguments: Value,
     console: console_api.Console,
     scheduler: scheduler_api.Scheduler,
     root_tasks: scheduler_api.TaskScope,
     root_scope: ?*env.Scope = null,
-    cancelled: std.atomic.Value(bool) = .init(false),
     requested_exit: ?u8 = null,
     last_polls: u64 = 0,
     last_root_execution_metrics: if (machine.root_execution_metrics_enabled) machine.RootExecutionMetrics else void = if (machine.root_execution_metrics_enabled) .{} else {},
-    idiom_mode: machine.IdiomMode = .automatic,
-    native_diagnostics: bool = false,
 
     fn moduleAccess(self: *const SessionCore) *const modules.ExecutionAccess {
         return @ptrCast(&self.module_access_seal);
@@ -295,6 +288,10 @@ comptime {
     heap.requireSingleHostOwner(SessionCore);
 }
 const OpaqueSessionCore = opaque {};
+
+/// Nothing cancels a root unit: the host runs each one to its end, and a task
+/// is cancelled through its own handle.
+const root_never_cancelled: std.atomic.Value(bool) = .init(false);
 const LocalPreloadState = union(enum) {
     idle,
     cursor: map_state.LocalSourceCursor,
@@ -506,26 +503,18 @@ pub const Session = enum(usize) {
             .registry = registry,
             .test_authority = test_authority,
             .native_owner = native_owner,
-            .startup_cwd = startup_cwd,
             .filesystem_owner = filesystem_owner,
             .http_owner = http_owner,
             .archive_owner = archive_owner,
             .archive = archive,
-            .host_io = host.io,
-            .tls_trust = owned_tls_trust,
-            .wall_clock = switch (clock_policy.wall) {
-                .host => .{ .host = host.io },
-                .fixed => |timestamp| .{ .fixed = timestamp },
-                .anchored => |base| .{ .anchored = base },
-            },
-            .ecl_path = owned_ecl_path,
+            // SAFETY: the devices and the inherited context borrow fields of
+            // this core, so they are initialized on the lines after the core
+            // is; nothing reads either field before that.
+            .inherited = undefined,
             .module_snapshot = owned_module_snapshot,
             .environ = snapshot,
-            // SAFETY: the devices borrow the console, which lives in this
-            // core, so they are initialized on the line after the core is;
-            // nothing reads the field before that.
+            // SAFETY: see `inherited` above.
             .standard_streams = undefined,
-            .arguments = argv.take(),
             .console = console_api.Console.init(
                 host.output,
                 host.diagnostics,
@@ -534,6 +523,30 @@ pub const Session = enum(usize) {
             .root_tasks = root_tasks,
         };
         core.standard_streams = .init(allocator, host.io, host.standard_input, &core.console);
+        core.inherited = .{
+            .registry = &core.registry,
+            .test_observation = if (test_authority) |authority| authority.observation() else null,
+            .test_execution = if (test_authority) |authority| authority.execution() else null,
+            .tls_trust = owned_tls_trust,
+            .ecl_path = owned_ecl_path,
+            .module_snapshot = owned_module_snapshot,
+            .phase = .{ .runtime = .{
+                .native_loader = native_owner.loader(),
+                .console = &core.console,
+                .host_io = host.io,
+                .startup_cwd = startup_cwd,
+                .filesystem_access = filesystem_owner.access(),
+                .http_access = http_owner.access(),
+                .wall_clock = switch (clock_policy.wall) {
+                    .host => .{ .host = host.io },
+                    .fixed => |timestamp| .{ .fixed = timestamp },
+                    .anchored => |base| .{ .anchored = base },
+                },
+                .environ = core.environ.view(),
+                .standard_streams = &core.standard_streams,
+                .arguments = argv.take(),
+            } },
+        };
         core.scheduler.attachRetirement();
         test_authority = null;
         return @fromBackingInt(@intCast(@intFromPtr(core)));
@@ -547,11 +560,12 @@ pub const Session = enum(usize) {
         if (core.root_scope) |root_scope| root_scope.retire(core.releaseDomain());
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
-        core.releaseDomain().releaseValue(core.arguments);
+        const services = core.inherited.runtime();
+        core.releaseDomain().releaseValue(services.arguments);
         core.standard_streams.deinit(core.releaseDomain());
         core.http_owner.deinit();
-        if (core.ecl_path) |path| core.allocator().free(path);
-        if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
+        if (core.inherited.ecl_path) |path| core.allocator().free(path);
+        if (core.inherited.tls_trust) |trust| core.allocator().free(trust.ca_file);
         core.local_preload.deinit();
         if (core.module_snapshot) |module_snapshot| module_snapshot.deinit();
         if (core.test_authority) |*authority| authority.deinit();
@@ -566,7 +580,7 @@ pub const Session = enum(usize) {
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
-        core.allocator().free(core.startup_cwd);
+        core.allocator().free(services.startup_cwd);
         core.environ.deinit();
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
@@ -642,29 +656,8 @@ pub const Session = enum(usize) {
             core.stack,
             &core.environment,
             &core.archive,
-            .{
-                .registry = &core.registry,
-                .test_observation = if (core.test_authority) |authority| authority.observation() else null,
-                .test_execution = if (core.test_authority) |authority| authority.execution() else null,
-                .native_diagnostics = core.native_diagnostics,
-                .tls_trust = core.tls_trust,
-                .ecl_path = core.ecl_path,
-                .module_snapshot = core.module_snapshot,
-                .idiom_mode = core.idiom_mode,
-                .phase = .{ .runtime = .{
-                    .native_loader = core.native_owner.loader(),
-                    .console = &core.console,
-                    .host_io = core.host_io,
-                    .startup_cwd = core.startup_cwd,
-                    .filesystem_access = core.filesystem_owner.access(),
-                    .http_access = core.http_owner.access(),
-                    .wall_clock = core.wall_clock,
-                    .environ = core.environ.view(),
-                    .standard_streams = &core.standard_streams,
-                    .arguments = core.arguments,
-                } },
-            },
-            &core.cancelled,
+            core.inherited,
+            &root_never_cancelled,
             .{ .root = .{ .scheduler = core.scheduler.worker(), .scope = &core.root_tasks } },
             .{ .scope = core.root_scope.? },
         );
@@ -912,17 +905,11 @@ pub const Session = enum(usize) {
             return err;
         };
     }
-    fn requestCancellationForTest(self: *Session) void {
-        self.coreState().cancelled.store(true, .release);
-    }
-    fn clearCancellationForTest(self: *Session) void {
-        self.coreState().cancelled.store(false, .release);
-    }
     fn setIdiomModeForTest(self: *Session, mode: machine.IdiomMode) void {
-        self.coreState().idiom_mode = mode;
+        self.coreState().inherited.idiom_mode = mode;
     }
     pub fn setNativeDiagnostics(self: *Session, enabled: bool) void {
-        self.coreState().native_diagnostics = enabled;
+        self.coreState().inherited.native_diagnostics = enabled;
     }
     pub fn requestedExit(self: *const Session) ?u8 {
         return self.coreState().requested_exit;
@@ -935,12 +922,6 @@ pub const Session = enum(usize) {
     }
     pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeDiagnostics(bytes, true);
-    }
-    fn schedulerWorkerThreadCountForTest(self: *const Session) usize {
-        return self.coreState().scheduler.workerThreadCount();
-    }
-    fn schedulerTimerThreadCountForTest(self: *const Session) usize {
-        return self.coreState().scheduler.timerThreadCount();
     }
     fn schedulerTimerEntryCountForTest(self: *Session) usize {
         return self.coreState().scheduler.timerEntryCount();
@@ -965,11 +946,7 @@ pub const Session = enum(usize) {
     pub const stackItems = testOnly(stackItemsForTest);
     pub const pushBorrowed = testOnly(pushBorrowedForTest);
     pub const pushOwned = testOnly(pushOwnedForTest);
-    pub const requestCancellation = testOnly(requestCancellationForTest);
-    pub const clearCancellation = testOnly(clearCancellationForTest);
     pub const setIdiomMode = testOnly(setIdiomModeForTest);
-    pub const schedulerWorkerThreadCount = testOnly(schedulerWorkerThreadCountForTest);
-    pub const schedulerTimerThreadCount = testOnly(schedulerTimerThreadCountForTest);
     pub const schedulerTimerEntryCount = testOnly(schedulerTimerEntryCountForTest);
     pub const advanceManualClock = testOnly(advanceManualClockForTest);
 };
@@ -1186,6 +1163,8 @@ fn argumentsValue(
     }
     return list.fromValuesGeneric(allocator, items);
 }
+
+/// The text of the symbol a failure dictionary holds under `name`.
 fn dictSymbol(
     allocator: std.mem.Allocator,
     dictionary: Value,

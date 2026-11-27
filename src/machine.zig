@@ -1127,7 +1127,7 @@ pub const IdiomFallback = *const fn (*Fiber) MachineError!void;
 /// Configuration and semantic services inherited by every spawned Fiber.
 /// Keeping this as one value makes addition of a new inherited service an
 /// atomic parent-to-child copy instead of a scheduler-site field checklist.
-const InheritedContext = struct {
+pub const InheritedContext = struct {
     registry: *modules.Registry,
     test_observation: ?*const modules.TestObservationAccess = null,
     test_execution: ?*const modules.TestExecutionAccess = null,

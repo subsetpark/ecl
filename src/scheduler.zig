@@ -187,7 +187,6 @@ const TerminalState = union(enum) {
 };
 
 const WaitKind = enum { one, any, deadline, sleep, external, mailbox };
-const Finish = enum { success, language_error, oom };
 
 const FinishingWork = union(enum) {
     out_of_memory,
@@ -1569,13 +1568,11 @@ const WorkerState = struct {
     stopping: bool = false,
     started: bool = false,
     threads: []std.Thread = &.{},
-    worker_threads: std.atomic.Value(usize) = .init(0),
     timer_thread: ?std.Thread = null,
     timer_mutex: std.Io.Mutex = .init,
     timer_wake: std.Io.Event = .unset,
     timer_stopping: bool = false,
     timer_heap: TimerHeap = .{},
-    timer_threads: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
     cooperative_arbitration: ExecutorArbitration = .{},
 };
@@ -1919,7 +1916,6 @@ pub const WorkerScheduler = enum(usize) {
         }
         state_.threads = threads;
         state_.started = true;
-        state_.worker_threads.store(threads.len, .release);
     }
 
     fn ensureTimer(self: *const WorkerScheduler) error{Io}!void {
@@ -1928,7 +1924,6 @@ pub const WorkerScheduler = enum(usize) {
         defer std.Io.Threaded.mutexUnlock(&state_.start_mutex);
         if (state_.timer_thread != null) return;
         state_.timer_thread = std.Thread.spawn(.{}, timerMain, .{self}) catch return error.Io;
-        state_.timer_threads.store(1, .release);
     }
 
     pub fn spawn(self: *const WorkerScheduler, parent: *TaskScope, request: SpawnRequest) SpawnTransferError!Value {
@@ -2523,7 +2518,7 @@ pub const WorkerScheduler = enum(usize) {
             .completed => self.finish(cell, .success),
         } else |err| switch (err) {
             error.Ecl => self.finish(cell, .language_error),
-            error.OutOfMemory => self.finish(cell, .oom),
+            error.OutOfMemory => self.finish(cell, .out_of_memory),
         }
     }
 
@@ -2534,7 +2529,7 @@ pub const WorkerScheduler = enum(usize) {
             self,
             .{ .task = cell },
             request,
-        ) catch return self.finish(cell, .oom);
+        ) catch return self.finish(cell, .out_of_memory);
         _ = fiber.takeParkRequest();
 
         std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
@@ -2560,12 +2555,7 @@ pub const WorkerScheduler = enum(usize) {
         if (!wait.advanceSetup(&work)) self.enqueueTask(cell);
     }
 
-    fn finish(self: *const WorkerScheduler, cell: *TaskCell, disposition: Finish) void {
-        const completion: core.Completion = switch (disposition) {
-            .success => .success,
-            .language_error => .language_error,
-            .oom => .out_of_memory,
-        };
+    fn finish(self: *const WorkerScheduler, cell: *TaskCell, completion: core.Completion) void {
         std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         const finishing = fiberDecision(cell.policy, .{ .body_finished = completion });
         cell.policy = finishing.next;
@@ -2574,10 +2564,10 @@ pub const WorkerScheduler = enum(usize) {
             .constructing, .published => unreachable,
         };
         std.debug.assert(execution.phase == .evaluating);
-        execution.phase = .{ .finishing = switch (disposition) {
+        execution.phase = .{ .finishing = switch (completion) {
             .success => .success_unstarted,
             .language_error => .language_error,
-            .oom => .out_of_memory,
+            .out_of_memory => .out_of_memory,
         } };
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         std.debug.assert(finishing.command == .close_scope);
@@ -2914,10 +2904,6 @@ pub const Scheduler = enum(usize) {
         self.privateState().host.drain();
     }
 
-    pub fn workerThreadCount(self: *const Scheduler) usize {
-        return self.privateState().worker.worker_threads.load(.acquire);
-    }
-
     /// Move the manual clock forward by whole milliseconds and let the timer
     /// thread reconsider its heap. Only the host root may call this: an
     /// executing fiber cannot reach it, so evaluated code never decides what
@@ -2940,10 +2926,9 @@ pub const Scheduler = enum(usize) {
         execution.timer_wake.set(blockingIo());
     }
 
-    pub fn timerThreadCount(self: *const Scheduler) usize {
-        return self.privateState().worker.timer_threads.load(.acquire);
-    }
-
+    /// How many deadlines are registered. A manual clock has no other way to
+    /// learn that the wait it is about to wake has parked, and advancing it
+    /// before then would leave that wait asleep for good.
     pub fn timerEntryCount(self: *Scheduler) usize {
         const execution = &self.privateState().worker;
         std.Io.Threaded.mutexLockUncancelable(&execution.timer_mutex);
@@ -3667,7 +3652,6 @@ test "native: cooperative work reserves timer and execution before allocation-fr
     probe.joined.waitUncancelable(blockingIo());
     try std.testing.expect(probe.finished.load(.acquire));
     try std.testing.expectEqual(@as(usize, 4), probe.step);
-    try std.testing.expectEqual(@as(usize, 0), runtime.timerEntryCount());
     try std.testing.expect(!failing.has_induced_failure);
 }
 

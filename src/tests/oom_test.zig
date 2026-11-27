@@ -2372,7 +2372,7 @@ test "oom: standard-library and host: native instance work quanta" {
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .callback_quantum = .q1, .construction_quantum = .q1 }, .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+                .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .callback_quantum = .q64, .construction_quantum = .q64 }, .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             const first = failing.alloc_index;

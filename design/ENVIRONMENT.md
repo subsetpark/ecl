@@ -391,8 +391,8 @@ Failure remains observable on repeated shutdown calls. Unsupported shutdown
 raises `` `domain ``, and abortive `port.close` remains available. Cancellation
 never promises to reverse external effects or accepted stream bytes.
 Native instance `port_limits` may select `callback_quantum` and
-`construction_quantum`. `NativeWorkQuantum.fromCount` accepts 1 through 65,536;
-its value representation cannot express a zero or unbounded grant. Defaults stay
+`construction_quantum`. A quantum is 1 through 65,536 work units; its value
+representation cannot express a zero or unbounded grant. Defaults stay
 256 native work units per cooperative turn and 64 host construction units.
 The callback grant is a ceiling for initialization, operations, and joined
 retirement. An operation may share its remaining grant across callback,
