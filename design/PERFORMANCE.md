@@ -45,6 +45,31 @@ place and spelling a lookup reads. A registration empties every cell it can
 change, so the first use of each word after a reload pays one lookup; that
 cost was not measured, since redefinition is not a performance target.
 
+### Readers other than dispatch
+
+`execute`, idiom recognition, and stack summaries read the same cell, and a
+fiber keeps no table of resolutions. Same method and machine, 1,000,000
+iterations; "before" is the tree in which only dispatch read cells and those
+readers still probed the fiber's table.
+
+| Phrase | Master | Before | After | Repeats |
+|---|---:|---:|---:|---|
+| `dup execute`, the symbol written as `` `id `` | 461.5 | 320.6 | 313.6 | 4 and 24 |
+| `dup execute`, the symbol an error's `word` | 472.5 | 1181.7 | 564.6 | 4 and 24 |
+| `(1 2 3) (dup *) each pop` | 7182.9 | 7108.8 | 7056.4 | 1 and 3 |
+| `3 (dup *) (1 +) bi pop pop` | 2273.3 | 1977.0 | 1942.0 | 1 and 3 |
+| `3 (sq) (inc) bi pop pop`, two user words | 3279.9 | 2931.6 | 2896.6 | 1 and 3 |
+| `1 2 (1 +) dip pop pop` | 1469.5 | 1293.8 | 1273.8 | 1 and 3 |
+
+A symbol the implementation built for itself has no link, so running it finds
+its cell by a keyed lookup under the cell table's lock each time: 92
+instructions more than master's table probe, and half of what resolving it
+afresh cost. The combinator rows are taken at 1 and 3 repeats because a
+quotation's summary is remembered in 64 places found by the quotation's
+address: at 24 repeats 48 quotations share them, some are read again on every
+iteration, and the count moved by up to 4% between runs of one binary and
+by 13% between two builds, with where the lists were allocated.
+
 ## Aggregation as `group-by`, `table.at`, and `each` — 2026-11-22
 
 `table.aggregate` is gone. Aggregation is composed: `group-by dict.vals

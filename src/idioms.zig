@@ -262,20 +262,17 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
 
 /// Whether `word`, where the phrase runs, is the core binding expected: a
 /// builtin, and the given primitive when one is given.
-fn wordMatches(fiber: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) bool {
+fn wordMatches(fiber: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) error{OutOfMemory}!bool {
     if (!plainWord(word.slot)) return false;
-    return liveWord(fiber.peekWord(word), primitive) != null;
+    return liveWord(try fiber.peekWord(word), primitive) != null;
 }
 
-/// A following word, resolved as its own dispatch would resolve it: through
-/// the fiber's resolutions, so a phrase that runs on every iteration pays one
-/// probe rather than a full lookup. A word the fiber has not resolved is
-/// looked up in full and remembered, since the phrase consumes it instead of
-/// dispatching it. Either way it must be the core builtin expected; its trace
-/// word is what a fault inside the phrase reports.
+/// A following word, which the phrase consumes instead of dispatching. It
+/// must be the core builtin expected; its trace word is what a fault inside
+/// the phrase reports.
 fn followingWord(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.TraceWord {
     if (!plainWord(word.slot)) return null;
-    return liveWord(try fiber.resolveForRecognition(word), null);
+    return liveWord(try fiber.peekWord(word), null);
 }
 
 /// Resolves `word` where the phrase runs and returns its trace word only when
@@ -292,7 +289,7 @@ fn liveWord(peeked: ?machine.PeekedWord, primitive: ?env.PrimitiveImpl) ?intern.
 
 /// Matches an offered quotation against one entry's pattern, checking each
 /// pattern word's binding where the quotation runs.
-fn matchPhrase(fiber: *Fiber, phrase: Value, index: u16) ?Capture {
+fn matchPhrase(fiber: *Fiber, phrase: Value, index: u16) error{OutOfMemory}!?Capture {
     const entry = registry[index];
     if (phrase != .list or phrase.list.length() != entry.pattern.len) return null;
     const names = &fiber.environment.idiomNames().entries[index];
@@ -308,14 +305,14 @@ fn matchPhrase(fiber: *Fiber, phrase: Value, index: u16) ?Capture {
                 // A quoted occurrence pushes its symbol; it is never the operation.
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
                     actual.symbol.name != names.operation) return null;
-                if (!wordMatches(fiber, actual.symbol, operationPrimitive(entry.operation))) return null;
+                if (!try wordMatches(fiber, actual.symbol, operationPrimitive(entry.operation))) return null;
                 capture.active_word = actual.symbol.name;
                 capture.active_index = @intCast(atom_index);
             },
             .word => {
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
                     actual.symbol.name != names.pattern[atom_index]) return null;
-                if (!wordMatches(fiber, actual.symbol, null)) return null;
+                if (!try wordMatches(fiber, actual.symbol, null)) return null;
             },
         }
     }
@@ -617,7 +614,7 @@ fn matchOffered(
 ) MachineError!void {
     var capture: Capture = .{};
     const matched: ?u16 = for (entries) |index| {
-        if (matchPhrase(fiber, candidate.phrase, index)) |found| {
+        if (try matchPhrase(fiber, candidate.phrase, index)) |found| {
             capture = found;
             break index;
         }
@@ -817,8 +814,6 @@ const ProgramCompiler = struct {
         _: *ProgramCompiler,
         _: *Fiber,
         _: *usize,
-        _: value.Symbol,
-        _: machine.ExecutionSite,
         _: @FieldType(machine.SummaryTarget, "source"),
     ) lower.Stop!lower.Counts {
         return error.Unread;

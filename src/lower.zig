@@ -63,7 +63,7 @@ pub fn Slot(comptime Payload: type) type {
 ///   reader has no use for it;
 /// - `builtin(primitive, word, at, inputs, outputs) bool`, for a builtin
 ///   whose declared effect is exact, false when the reader has no use for it;
-/// - `source(fiber, visited, word, site, source) !Counts`, for a source word.
+/// - `source(fiber, visited, source) !Counts`, for a source word.
 pub fn Walker(comptime Mode: type) type {
     return struct {
         const Self = @This();
@@ -192,7 +192,7 @@ pub fn Walker(comptime Mode: type) type {
             switch (try self.fiber.summaryTarget(word, site)) {
                 .none => return error.Unread,
                 .source => |source| {
-                    const read = try self.mode.source(self.fiber, self.visited, word, site, source);
+                    const read = try self.mode.source(self.fiber, self.visited, source);
                     for (0..read.consumed) |_| _ = try self.pop();
                     for (0..read.produced) |_| try self.push(.{});
                 },

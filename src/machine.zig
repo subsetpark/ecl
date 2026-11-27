@@ -909,7 +909,6 @@ pub const Application = struct {
     }
 };
 
-const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 const stack_summary = @import("stack_summary.zig");
 const flatten = @import("flatten.zig");
 
@@ -1631,9 +1630,9 @@ pub const Fiber = struct {
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
-    /// What idiom recognition and stack summaries resolved this fiber's
-    /// words to. Dispatch reads cells and never this.
-    resolutions: WordResolutions = .{},
+    /// The stack summaries read for the source words this fiber's summaries
+    /// called.
+    bodies: stack_summary.Bodies = .{},
     /// The stack summaries read for the quotations this fiber applied.
     summaries: stack_summary.Cache = .{},
     /// What this fiber made of the code lists it ran.
@@ -2099,7 +2098,7 @@ pub const Fiber = struct {
     }
 
     pub fn deinit(self: *Fiber) void {
-        self.resolutions.deinit(self.allocator, self.releases);
+        self.bodies.deinit(self.allocator);
         self.summaries.deinit(self.allocator, self.releases);
         if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
@@ -3406,58 +3405,65 @@ pub const Fiber = struct {
         };
     }
 
-    /// What a plain word resolves to now, for idiom recognition: the fiber's
-    /// remembered resolution when it has one, otherwise a fresh lookup that
-    /// is not remembered. Recognition reads the definition within the turn
-    /// that looked it up, which is what keeps it: the turn is a reader of
-    /// the directory that owns it.
-    pub fn peekWord(self: *Fiber, word: value.Symbol) ?PeekedWord {
-        if (binder.executableWord(.{ .symbol = word }) == null) return null;
-        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
-        return self.resolveFresh(word, false);
+    /// The cell of `word`: the one its link identifies, or, for a word the
+    /// implementation built for itself, the cell of its spelling written in
+    /// core by no source, which is the place such a word resolves in. So
+    /// every word that runs has a cell, and one rule answers for it.
+    fn cellOf(self: *Fiber, word: value.Symbol) error{OutOfMemory}!env.CellId {
+        return switch (env.wordTarget(word.slot)) {
+            .cell => |id| id,
+            .unlinked => @fromBackingInt(try self.environment.linker(
+                self.environment.coreScopeId(),
+                modules.RegistrationProvenance.sourceId(.ordinary),
+            ).link(word.name)),
+            .local => unreachable,
+        };
     }
 
-    /// `peekWord`, remembering what a fresh lookup resolves, so a word a
-    /// recognized phrase consumes instead of dispatching is looked up once
-    /// per publication rather than on every recognition.
-    pub fn resolveForRecognition(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
-        if (binder.executableWord(.{ .symbol = word }) == null) return null;
-        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
-        return try self.resolveFresh(word, true);
+    /// What `word` denotes now, for a reader that looks before the word
+    /// runs: what its cell answers, or, when the cell is empty, what one
+    /// resolution against the current view finds, which the registry is
+    /// asked to keep in the cell. The turn is what keeps the definition: it
+    /// is a reader of the directory that owns it.
+    pub inline fn denoted(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?*env.Definition {
+        if (env.isCell(word.slot)) if (self.cells.of(word.slot).definition.load(.seq_cst)) |definition| return definition;
+        return self.resolveDenoted(word);
     }
 
-    /// What a stack summary reads of one word of code running at `site`:
-    /// the word's resolution there, remembered like any dispatch of it, so
-    /// the definition stays held for as long as the remembered entry does. A
+    noinline fn resolveDenoted(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?*env.Definition {
+        const id = try self.cellOf(word);
+        const link = @backingInt(id);
+        if (self.cells.of(link).definition.load(.seq_cst)) |definition| return definition;
+        var context = self.resolutionContext(self.inherited.registry.view());
+        defer context.deinit();
+        var resolver = binder.Resolver.init(&context, .{ .name = word.name, .slot = link });
+        defer resolver.deinit();
+        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+            .resolved => |definition| definition,
+            .missed => return null,
+        };
+        self.inherited.registry.fillCell(&context.view, id, found);
+        return found;
+    }
+
+    /// What a word resolves to now, for idiom recognition.
+    pub fn peekWord(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
+        if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        const definition = try self.denoted(word) orelse return null;
+        const home = modules.definitionModule(definition);
+        return .{
+            .definition = definition,
+            .trace_word = definitionTraceWord(definition, home, word.name),
+            .origin = definitionOrigin(definition, home),
+        };
+    }
+
+    /// What a stack summary reads of one word of code running at `site`. A
     /// summary reads its words before the quotation runs, which may be while
     /// no evaluation is current.
     pub fn summaryTarget(self: *Fiber, word: value.Symbol, site: ExecutionSite) error{OutOfMemory}!SummaryTarget {
         if (binder.executableWord(.{ .symbol = word }) == null) return .none;
-        // Bootstrap remembers nothing, so nothing would hold the definition.
-        if (self.inherited.phase == .bootstrap) return .none;
-        const provenance = site.registration_provenance;
-        const key = WordResolutions.provenanceKey(provenance);
-        const definition = self.resolutions.find(word, self.inherited.registry.currentPublication(), key) orelse fresh: {
-            var context: binder.Context = .{
-                .environment = self.environment,
-                .view = self.inherited.registry.view(),
-                .registry = self.inherited.registry,
-                .project = self.inherited.module_snapshot,
-                .libraries = self.inherited.libraries(),
-            };
-            defer context.deinit();
-            var resolver = binder.Resolver.init(&context, word);
-            defer resolver.deinit();
-            const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
-                .resolved => |resolved| resolved,
-                .missed => return .none,
-            };
-            try self.rememberResolution(word, context.view.publication, provenance, found);
-            // A publication since the lookup began means the entry is not
-            // under the current one, and nothing here holds the definition.
-            if (self.resolutions.find(word, self.inherited.registry.currentPublication(), key) != found) return .none;
-            break :fresh found;
-        };
+        const definition = try self.denoted(word) orelse return .none;
         // A call that crosses into a module checks the word's declared
         // effect, and that check's failure reports the depth it found: only
         // the call itself can say that.
@@ -3473,62 +3479,16 @@ pub const Fiber = struct {
                 .definition = definition,
                 .code = executable.code(),
                 .site = if (home) |target| .module(target, site.defining) else site,
-                .summary = self.resolutions.summary(word, self.inherited.registry.currentPublication(), key),
                 .trace_word = definitionTraceWord(definition, home, word.name),
                 .attribution = definition.attribution,
             } },
         };
     }
 
-    /// Records the summary of `word`'s body as resolved at `site`.
-    pub fn recordSummary(
-        self: *Fiber,
-        word: value.Symbol,
-        site: ExecutionSite,
-        definition: *const env.Definition,
-        summary: WordResolutions.BodySummary,
-    ) void {
-        self.resolutions.setSummary(
-            word,
-            self.inherited.registry.currentPublication(),
-            WordResolutions.provenanceKey(site.registration_provenance),
-            definition,
-            summary,
-        );
-    }
-
     /// The publication a summary's resolutions were all read under, when it
     /// is still the current one at the end of the walk.
     pub fn currentPublication(self: *const Fiber) u64 {
         return self.inherited.registry.currentPublication();
-    }
-
-    /// Resolves `word` against the current view in one call, remembering the
-    /// result when `remember` is set.
-    fn resolveFresh(
-        self: *Fiber,
-        word: value.Symbol,
-        comptime remember: bool,
-    ) if (remember) error{OutOfMemory}!?PeekedWord else ?PeekedWord {
-        var context = self.resolutionContext(self.inherited.registry.view());
-        defer context.deinit();
-        var resolver = binder.Resolver.init(&context, word);
-        defer resolver.deinit();
-        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
-            .resolved => |definition| definition,
-            .missed => return null,
-        };
-        if (remember) try self.rememberResolution(word, context.view.publication, self.current.?.site.registration_provenance, found);
-        return peeked(found, word);
-    }
-
-    fn peeked(definition: *env.Definition, word: value.Symbol) ?PeekedWord {
-        const home = modules.definitionModule(definition);
-        return .{
-            .definition = definition,
-            .trace_word = definitionTraceWord(definition, home, word.name),
-            .origin = definitionOrigin(definition, home),
-        };
     }
 
     /// The plan of the finite iteration applying the running code, when that
@@ -3662,48 +3622,32 @@ pub const Fiber = struct {
         return .{ .code = origin.code, .index = origin.index };
     }
 
-    /// Runs an occurrence: by what its cell answers, or by a lookup against
-    /// the current publication view when the cell is empty or the word has
-    /// none. `dispatch` pushes a quoted occurrence instead, and `execute`
-    /// strips the quote before calling here.
+    /// Runs an occurrence: by what its cell answers, or, when the cell is
+    /// empty, by a lookup against the current publication view, in bounded
+    /// steps, that may load a module. `dispatch` pushes a quoted occurrence
+    /// instead, and `execute` strips the quote before calling here.
     pub fn executeWord(self: *Fiber, word: value.Symbol) MachineError!void {
         std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
         if (env.isCell(word.slot)) if (self.cells.of(word.slot).definition.load(.seq_cst)) |definition|
             return invokeDefinition(self, definition, word.name);
+        return self.executeUnfilled(word);
+    }
+
+    /// Runs a word whose cell is empty, or that has no link: by its cell if
+    /// that is filled by now, and otherwise by a lookup.
+    noinline fn executeUnfilled(self: *Fiber, word: value.Symbol) MachineError!void {
+        const linked: value.Symbol = .{ .name = word.name, .slot = @backingInt(try self.cellOf(word)) };
+        if (self.cells.of(linked.slot).definition.load(.seq_cst)) |definition|
+            return invokeDefinition(self, definition, word.name);
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
         try self.startDriver(LookupDispatchDriver{
-            .word = word,
+            .word = linked,
             .site = site,
             .context = .init(self.resolutionContext(self.inherited.registry.view())),
             .resolver = .none,
         });
-    }
-
-    /// What this fiber last resolved `word` to, if no publication has
-    /// happened since. Bootstrap resolves every word afresh, since core's
-    /// directory changes without a publication.
-    inline fn reusedResolution(self: *Fiber, word: value.Symbol) ?*env.Definition {
-        if (self.inherited.phase == .bootstrap) return null;
-        return self.resolutions.find(
-            word,
-            self.inherited.registry.currentPublication(),
-            WordResolutions.provenanceKey(self.current.?.site.registration_provenance),
-        );
-    }
-
-    /// Records what an explicit lookup resolved `word` to.
-    fn rememberResolution(self: *Fiber, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance, definition: *env.Definition) error{OutOfMemory}!void {
-        if (self.inherited.phase == .bootstrap) return;
-        return self.resolutions.remember(
-            self.allocator,
-            self.releases,
-            word,
-            publication,
-            WordResolutions.provenanceKey(provenance),
-            definition,
-        );
     }
 
     /// The failure for a word that did not bind and will not after a load.
@@ -4485,7 +4429,8 @@ fn invokeBuiltin(self: *Fiber, trace_word: intern.TraceWord, primitive: env.Prim
         return self.installPrimitiveFailure(failure_value);
     }
 }
-/// Resolves one word against the current view and invokes what it finds.
+/// Resolves one word that has a cell against the current view, in bounded
+/// steps, and invokes what it finds.
 const LookupDispatchDriver = struct {
     word: value.Symbol,
     site: ?ErrorSite,
@@ -4513,10 +4458,11 @@ const LookupDispatchDriver = struct {
                         const counted = definition.lifetime == .counted;
                         if (counted) definition.retain();
                         defer if (counted) definition.release(fiber.releases);
-                        switch (env.wordTarget(word.slot)) {
-                            .cell => |id| fiber.inherited.registry.fillCell(&self.context.borrow().view, id, definition),
-                            .unlinked, .local => {},
-                        }
+                        fiber.inherited.registry.fillCell(
+                            &self.context.borrow().view,
+                            env.wordTarget(word.slot).cell,
+                            definition,
+                        );
                         const site = self.site;
                         fiber.retireDriver(self);
                         // A module load ran other code in between, so the
@@ -4597,7 +4543,6 @@ pub const SummaryTarget = union(enum) {
         code: *Header,
         /// Where the body runs: the caller's site, or the word's own module.
         site: ExecutionSite,
-        summary: WordResolutions.BodySummary,
         /// What an activation of the word is traced under, and whose
         /// failure a failure in it is.
         trace_word: intern.TraceWord,

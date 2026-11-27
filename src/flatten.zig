@@ -13,7 +13,6 @@ const machine = @import("machine.zig");
 const intern = @import("intern.zig");
 const combinators = @import("combinators.zig");
 const stack_summary = @import("stack_summary.zig");
-const WordResolutions = @import("word_resolutions.zig").WordResolutions;
 
 const Header = value.ListHandle;
 const Fiber = machine.Fiber;
@@ -228,7 +227,7 @@ pub const Cache = struct {
         if (self.publication != publication or self.entries.len == 0) return null;
         const entry = entryFor(self.entries, code) orelse return null;
         if (entry.code != code or entry.scope != site.scope.serial or
-            entry.provenance != WordResolutions.provenanceKey(site.registration_provenance)) return null;
+            entry.provenance != @backingInt(site.registration_provenance.sourceId())) return null;
         return .{ .flattened = entry.record };
     }
 
@@ -315,7 +314,7 @@ pub const Cache = struct {
         entry.* = .{
             .code = code,
             .scope = site.scope.serial,
-            .provenance = WordResolutions.provenanceKey(site.registration_provenance),
+            .provenance = @backingInt(site.registration_provenance.sourceId()),
             .record = made,
         };
     }

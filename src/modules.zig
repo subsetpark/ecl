@@ -658,8 +658,6 @@ pub const SessionNameCursor = Directory.NameMap.RawEntryCursor;
 /// snapshot, not the definitions bound through it.
 pub const View = struct {
     directory: DirectoryLease,
-    /// The publication identity read before the snapshot was captured.
-    publication: u64,
 
     pub fn deinit(self: *View) void {
         self.directory.deinit();
@@ -668,7 +666,7 @@ pub const View = struct {
 
     /// A second hold on the same snapshot.
     pub fn clone(self: *const View) View {
-        return .{ .directory = self.directory.clone(), .publication = self.publication };
+        return .{ .directory = self.directory.clone() };
     }
 
     /// One session top-level name in this snapshot, borrowed while the view
@@ -1265,7 +1263,13 @@ pub const Registry = enum(usize) {
         return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
 
-    /// The Session's publication identity now, for keying fibers' resolutions.
+    /// The Session's publication identity now, for keying what fibers
+    /// remember. It advances before a publication's first store a reader can
+    /// see and again after its last, both under the writer lock. So what a
+    /// reader records under a value read while no publication was in
+    /// progress is outdated before the next one shows, and a reader that
+    /// sees a definition a publication made readable reads a later value
+    /// than any read before that definition existed.
     pub fn currentPublication(self: *const Registry) u64 {
         return self.privateState().publications.load(.acquire);
     }
@@ -1946,6 +1950,7 @@ pub const Registry = enum(usize) {
                         };
                         build.candidate.previous = @constCast(build.directory.directory);
                         const backing = self.registry.privateState();
+                        _ = backing.publications.fetchAdd(1, .acq_rel);
                         // The name's cells are empty across the publication,
                         // so a reader finds the old answer, then a lookup's,
                         // then the new one, and never one beside a directory
@@ -2117,8 +2122,7 @@ pub const Registry = enum(usize) {
 
     /// Captures the current snapshot as one coherent view.
     pub fn view(self: *const Registry) View {
-        const publication = self.currentPublication();
-        return .{ .directory = self.acquireDirectory(), .publication = publication };
+        return .{ .directory = self.acquireDirectory() };
     }
 
     pub const BeginLoadingProgress = poll.Progress(LoadingOutcome);

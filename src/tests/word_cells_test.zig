@@ -359,7 +359,11 @@ test "word cells: reloading a module under running tasks keeps live memory bound
             small_growth = @min(small_growth, after_small -| before_small);
             large_growth = @min(large_growth, after_large -| after_small);
         }
-        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
+        // How far reclamation lags behind the tasks sets the peak of live
+        // code lists, and the span archive's index grows one leaf at a time
+        // with that peak, in whichever batch reaches it. One leaf is allowed;
+        // retention per reload over 240 more reloads would exceed it.
+        std.testing.expect(large_growth <= small_growth + 16384) catch |err| {
             std.debug.print("module reload under tasks: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
             return err;
         };

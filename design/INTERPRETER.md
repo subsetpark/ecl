@@ -723,9 +723,8 @@ reclaimed and nothing else holds it. Two rules keep running code safe. Within
 a turn, the turn is a reader of the registry's directories, so whatever it
 read from one stays valid until it ends. Across turns a holder owns a
 reference: an activation running a body holds its definition, a tail call
-secures the callee before it retires the caller, and what a fiber remembers
-for recognition, a flattened list, and reflection each hold the definition
-they refer to. A word's cell holds none.
+secures the callee before it retires the caller, and a flattened list and
+reflection each hold the definition they refer to. A word's cell holds none.
 
 ### One resolver, at dispatch
 
@@ -812,24 +811,36 @@ could have loaded it remains; it then releases its roots, and each node no other
 retires as its own owner, one per step. A discarded candidate takes the same
 path.
 
-Every publication also advances the Session's publication counter, which its
-registry owns. The counter is never reused and holds no snapshot; it only keys what fibers remember. It is
+Every publication advances the Session's publication counter, which its
+registry owns, before its first store a reader can see and again after its
+last. What a reader keeps under a value read between publications is therefore
+outdated before the next publication shows, and a definition a publication
+makes readable is read under a later value than any read before it existed. The counter is never reused and holds no snapshot; it only keys what fibers remember. It is
 per Session so that one Session's publications never change what another's
 fibers reuse, and so what a fiber allocates is a function of its own run.
 
-### A fiber remembers what recognition resolved
+### Every reader asks the cell
 
-Dispatch reads cells and keeps nothing. Idiom recognition and stack summaries
-read a word before it runs, and a fiber keeps what they resolved, keyed by
-word and the applying site's registration provenance, for one publication:
-any publication in the Session empties it before its next use. It uses open
-addressing, is kept at most half full, and grows by doubling to a fixed bound
-beyond which it starts over, so a lookup expects one probe and every
-maintenance step is bounded. Each entry holds its definition, so a definition
-it hands out outlives the turn that read it. An iteration's applications
-borrow the quotation the combinator holds for the whole invocation. The
-bootstrap fiber keeps no such resolutions, because core's directory changes
-without a publication.
+Dispatch, `execute`, idiom recognition, and stack summaries learn what a word
+denotes one way: from the word's cell, and from the resolver when the cell is
+empty, whose answer the registry is then asked to keep there. A fiber keeps no
+resolution of its own, so no reader can hold an answer the cells have given
+up. Dispatch and `execute` resolve an empty cell in bounded steps and may load
+a module; a reader that looks before the word runs resolves it in one call
+and reads a miss as a word it knows nothing of.
+
+A word with no link has a cell too: the one for its spelling written in core
+by no source, which is the place the resolver gives such a word. It is found,
+or minted, when the word runs, by the keyed lookup every producer of links
+pays, so the word then runs as a linked one does.
+
+What these readers get is borrowed for the turn (§9) and is not kept past it.
+What a fiber remembers of a source word across turns holds no definition: the
+summary of the word's body run in one root, in a table of constant size found
+by the definition's address and good for one value of the publication counter. Under
+one value an address read from a cell or a directory is one definition's:
+another definition can take the address only once the first is reclaimed, and
+it becomes readable only in a publication, which advances the counter first.
 
 ### An execution site is the current root
 
@@ -1159,7 +1170,7 @@ body past a constant size, so the walk is bounded by a constant and an absent
 summary is always a correct answer. A summary depends on what the words it
 read resolve to, so nothing keeps one past a publication, and a redefinition,
 of a word or of anything its body reaches, is read as redefined. A body's
-summary is recorded with the fiber's remembered resolution of the word. A
+summary is remembered by the fiber for its definition and the root it ran in. A
 quotation's is remembered by the fiber for the site it ran at, in a table of
 constant size whose entries hold their quotations: a fiber may keep that many
 quotations alive that it would otherwise have let go. It is an optimization and nothing observes it: what acts
@@ -1984,8 +1995,7 @@ alive:
 - a directory or generation lease, or a lookup's captured view;
 - a module generation pin, taken on an image before its directory is read;
 - a running turn, for what the turn read from a directory or a word's cell;
-- an evaluation's hold on its definition, or what a unit remembers for
-  recognition, each of which holds the definition it refers to; or
+- an evaluation's hold on its definition; or
 - a source slice that retains its backing allocation.
 
 A running turn is itself a reader of the registry's directories. A fiber
