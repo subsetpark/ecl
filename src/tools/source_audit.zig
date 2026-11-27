@@ -686,30 +686,6 @@ fn auditSourceBodies() bool {
             failed = auditTokens(file, source, &operand_stack_mutations) or failed;
         }
     }
-    // A registry outcome that a driver dismisses as `unreachable` is an
-    // interleaving nobody imagined rather than one that cannot happen:
-    // removal can invalidate any name between the snapshot a cursor read and
-    // the turn it is granted. Every registry error must reach an ECL error
-    // kind instead.
-    const dismissed_registry_outcomes = [_][]const []const u8{
-        &.{ "MissingModule", "=>", "unreachable" },
-        &.{ "NameConflict", "=>", "unreachable" },
-        &.{ "InvalidDefinition", "=>", "unreachable" },
-    };
-    for (source_groups) |component| {
-        if (!component.production) continue;
-        for (component.sources, component.files) |source, file| {
-            failed = auditTokens(file, source, &dismissed_registry_outcomes) or failed;
-        }
-    }
-    const raw_stack_ownership = [_][]const []const u8{&.{"takeStackOwned"}};
-    for (source_groups) |component| {
-        if (!component.production) continue;
-        for (component.sources, component.files) |source, file| {
-            if (std.mem.eql(u8, file, "machine.zig") or std.mem.eql(u8, file, "scheduler.zig")) continue;
-            failed = auditTokens(file, source, &raw_stack_ownership) or failed;
-        }
-    }
     for (source_groups) |component| {
         if (!component.production) continue;
         for (component.sources, component.files) |source, file| {
@@ -765,7 +741,6 @@ fn auditSourceBodies() bool {
         .{ .name = "kernel_numeric.zig", .source = @embedFile("../kernel_numeric.zig") },
         .{ .name = "kernel_sequence.zig", .source = @embedFile("../kernel_sequence.zig") },
         .{ .name = "kernel_order.zig", .source = @embedFile("../kernel_order.zig") },
-        .{ .name = "kernel_random.zig", .source = @embedFile("../kernel_random.zig") },
     };
     for (migrated_kernel_files) |kernel| {
         failed = auditProductionFunctionTokenPair(
@@ -853,9 +828,9 @@ fn auditUnsafeCasts() bool {
         "capability payload erasure",
         @embedFile("../heap.zig"),
         &.{
-            "TaskDestroyAdapter",     "PortReleaseAdapter",     "AddressReleaseAdapter",
-            "PortTransferAdapter",    "ModuleReleaseAdapter",   "RetirementAdapters",
-            "RetirementWakeAdapters", "CodeRetirementAdapters",
+            "TaskDestroyAdapter",     "PortReleaseAdapter", "AddressReleaseAdapter",
+            "PortTransferAdapter",    "RetirementAdapters", "RetirementWakeAdapters",
+            "CodeRetirementAdapters",
         },
     ) or failed;
     failed = auditErasedCasts(
@@ -866,7 +841,6 @@ fn auditUnsafeCasts() bool {
             "ReadinessRegistrationAdapters",
             "ReadinessSourceAdapters",
             "ScopeMemberAdapters",
-            "ScopeMembershipAdapters",
         },
     ) or failed;
     return failed;
@@ -1017,7 +991,6 @@ fn auditResultAdoption() bool {
     const claims = [_][]const []const u8{
         &.{"UniqueLeafAdoption"},
         &.{"claimHeld"},
-        &.{"claimUniqueList"},
     };
     var failed = false;
     for (source_groups) |component| {

@@ -55,8 +55,6 @@ pub const Materializer = struct {
     };
 
     allocator: std.mem.Allocator,
-    source_keys: []const Value,
-    source_vals: []const Value,
     check_duplicates: bool,
     keys: []Value,
     vals: []Value,
@@ -133,8 +131,6 @@ pub const Materializer = struct {
     ) Materializer {
         return .{
             .allocator = allocator,
-            .source_keys = keys,
-            .source_vals = vals,
             .check_duplicates = check_duplicates,
             .keys = keys,
             .vals = vals,
@@ -214,12 +210,12 @@ pub const Materializer = struct {
                 self.state = .{ .hash = .{} };
             },
             .hash => |*state| {
-                if (state.index == self.source_keys.len) {
+                if (state.index == self.keys.len) {
                     self.state = .{ .keys = .init(self.allocator, self.keys) };
                     continue;
                 }
                 if (state.cursor == null)
-                    state.cursor = try .init(self.allocator, self.source_keys[state.index]);
+                    state.cursor = try .init(self.allocator, self.keys[state.index]);
                 switch (try state.cursor.?.advance(work)) {
                     .pending => return .pending,
                     .complete => |computed| {
@@ -325,7 +321,7 @@ pub const Materializer = struct {
                 },
             },
             .finish => |state| {
-                var builder = try heap.DictBuilder.init(self.allocator, self.source_keys.len);
+                var builder = try heap.DictBuilder.init(self.allocator, self.keys.len);
                 const header = builder.finish(.{
                     .keys = state.keys.list,
                     .vals = state.vals.list,

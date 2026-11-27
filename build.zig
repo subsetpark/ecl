@@ -169,7 +169,6 @@ pub fn build(b: *std.Build) void {
     archive_fixture_options.addOption([]const u8, "malformed_pax", @embedFile("test/fixtures/archive/malformed-pax.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "malformed", @embedFile("test/fixtures/archive/malformed.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "long_path", "pkg/" ++ (&@as([110]u8, @splat('s'))) ++ ".ecl");
-    archive_fixture_options.addOption([]const u8, "package_valid", @embedFile("test/fixtures/pkg/valid.tgz.hex"));
 
     const malformed_defects = [_][]const u8{
         "wrong-name",
@@ -469,10 +468,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const test_options = namedOptions(b, "test runtime options");
-    test_options.addOption(usize, "default_worker_count", 1);
-    test_options.addOption(bool, "instrument_root_execution", false);
-    configureRuntime(test_mod, native_abi, native_sdk, test_options);
+    configureRuntime(test_mod, native_abi, native_sdk, runtime_options);
     addTestInputs(test_mod, &test_imports, &test_fixture_inputs);
     const tests = addEclTest(b, .{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
@@ -637,7 +633,7 @@ pub fn build(b: *std.Build) void {
             // panics and sanitizer crashes still retain their diagnostics.
             .error_tracing = false,
         });
-        configureRuntime(fuzz_mod, native_abi, native_sdk, test_options);
+        configureRuntime(fuzz_mod, native_abi, native_sdk, runtime_options);
         fuzz_mod.addOptions("native_runtime_options", native_runtime_options);
         const fuzz_tests = b.addTest(.{
             .root_module = fuzz_mod,
@@ -663,7 +659,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .safe,
     });
-    configureRuntime(oom_mod, native_abi, native_sdk, test_options);
+    configureRuntime(oom_mod, native_abi, native_sdk, runtime_options);
     addTestInputs(oom_mod, &.{.{ .name = "native-instance", .module = native_instance }}, &host_fixture_inputs);
     const oom_tests = addEclTest(b, .{
         .root_module = oom_mod,
@@ -922,7 +918,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .safe,
         .sanitize_thread = tsan_supported,
     });
-    configureRuntime(tsan_mod, tsan_native.abi, tsan_native.sdk, test_options);
+    configureRuntime(tsan_mod, tsan_native.abi, tsan_native.sdk, runtime_options);
     const tsan_imports = [_]std.Build.Module.Import{
         .{ .name = "minish", .module = b.dependency("minish", .{ .optimize = .safe }).module("minish") },
         .{ .name = "native-sample", .module = tsan_native.sample },

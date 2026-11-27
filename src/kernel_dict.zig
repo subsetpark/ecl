@@ -341,7 +341,7 @@ fn typedReplacement(comptime kind: value.HeapKind, item: Value) ?heap.LeafElemen
             .char => |codepoint| codepoint,
             else => null,
         },
-        .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
+        .generic_spine, .dict, .task, .port, .address => unreachable,
     };
 }
 

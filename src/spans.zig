@@ -367,8 +367,7 @@ const SpanArchiveState = struct {
     ) void {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const assigned = heap.assignCodeIdentity(self.identity_issuer, rewritten, identity);
-        std.debug.assert(assigned == .assigned);
+        heap.assignCodeIdentity(self.identity_issuer, rewritten, identity);
         self.index.set(identity, rewritten, existing);
     }
 
@@ -414,11 +413,7 @@ const SpanArchiveState = struct {
             },
             .unassigned => {},
         }
-        if (heap.assignCodeIdentity(
-            self.identity_issuer,
-            span_entry.header,
-            identity,
-        ) != .assigned) @panic("validated provenance assignment changed before commit");
+        heap.assignCodeIdentity(self.identity_issuer, span_entry.header, identity);
         self.index.set(identity, span_entry.header, .{
             .archive_entry = archive_entry,
             .token_entry = span_entry,

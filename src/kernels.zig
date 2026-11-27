@@ -33,7 +33,6 @@ comptime {
         support.OrderOp,
         support.DictOp,
         support.TextOp,
-        support.RandomOp,
     };
     for (Registry.entries) |entry| {
         if (entry.following.len == 0) continue;

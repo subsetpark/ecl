@@ -184,17 +184,14 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
         handle: *ListHandle,
         length: usize,
 
-        /// Null when the list is shared, when its element width differs from
-        /// the result's, or when it cannot hold `len_value` elements. A null
-        /// claim retains nothing and leaves the caller's reference untouched.
-        pub fn claim(handle: *ListHandle, len_value: usize) ?Self {
-            return claimHeld(handle, len_value, 1);
-        }
-
-        /// `claim` for a list the caller holds `references` owned references
-        /// to: one call's operands can be the same list, and when every
-        /// reference to it is the call's own, its buffer is still the call's
-        /// alone. The caller adopts one reference and releases the others.
+        /// Null when anyone but the caller holds the list, when its element
+        /// width differs from the result's, or when it cannot hold `len_value`
+        /// elements. A null claim retains nothing and leaves the caller's
+        /// references untouched. The caller holds `references` owned
+        /// references to the list: one call's operands can be the same list,
+        /// and when every reference to it is the call's own, its buffer is
+        /// still the call's alone. The caller adopts one reference and
+        /// releases the others.
         pub fn claimHeld(handle: *ListHandle, len_value: usize, references: u32) ?Self {
             const source_kind = listKind(handle);
             if (leafElementSize(source_kind) != leafElementSize(result_kind)) return null;
@@ -202,20 +199,6 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
             if (capacity(handle) < len_value) return null;
             const unique = claimHeldList(handle, references) orelse return null;
             return .{ .claimed = unique, .handle = handle, .length = len_value };
-        }
-
-        pub fn len(self: *const Self) usize {
-            return self.length;
-        }
-
-        /// The reused buffer read as its original representation, bounded by the
-        /// claimed length. An element is read before its own position is
-        /// stored, so a producer reads its operands here and writes its result
-        /// over them lane by lane.
-        pub fn sourceSlice(self: *const Self, comptime source_kind: HeapKind) []const LeafElement(source_kind) {
-            std.debug.assert(leafElementSize(source_kind) == leafElementSize(result_kind));
-            const items = payloadItems(LeafElement(source_kind), mutableHeader(self.handle));
-            return items[0..self.length];
         }
 
         /// One bounded range of the buffer in the result representation, for
@@ -251,13 +234,6 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
         /// producer already stored hold results.
         pub fn abandon(self: *Self) void {
             self.claimed = null;
-        }
-
-        /// The `heap.Owned` disposal protocol. Abandoning consumes the authority
-        /// and touches no reference.
-        pub fn retire(self: *Self, releases: *ReleaseDomain) void {
-            _ = releases;
-            self.abandon();
         }
     };
 }
@@ -309,8 +285,7 @@ test "leaf capabilities keep roots alive publish once and reuse only unique buff
     var reusable = try ListBuilder(.leaf_i64).init(allocator, 2, 2);
     @memcpy(reusable.items(), &[_]i64{ 4, 5 });
     const reused_input = reusable.finish();
-    var adoption = UniqueLeafAdoption(.leaf_f64).claim(reused_input, 2).?;
-    try std.testing.expectEqualSlices(i64, &.{ 4, 5 }, adoption.sourceSlice(.leaf_i64));
+    var adoption = UniqueLeafAdoption(.leaf_f64).claimHeld(reused_input, 2, 1).?;
     adoption.writeRange(0, &.{ 4.25, 5.25 });
     const reused = adoption.finish();
     defer cleanup.releaseValue(reused);
@@ -327,19 +302,19 @@ test "leaf capabilities keep roots alive publish once and reuse only unique buff
     defer cleanup.domain().releaseHeader(shared);
     incRef(shared);
     defer cleanup.domain().releaseHeader(shared);
-    try std.testing.expect(UniqueLeafAdoption(.leaf_f64).claim(shared, 1) == null);
+    try std.testing.expect(UniqueLeafAdoption(.leaf_f64).claimHeld(shared, 1, 1) == null);
     var narrow_builder = try ListBuilder(.leaf_char1).init(allocator, 1, 1);
     narrow_builder.items()[0] = 'a';
     const narrow = narrow_builder.finish();
     defer cleanup.domain().releaseHeader(narrow);
-    try std.testing.expect(UniqueLeafAdoption(.leaf_i64).claim(narrow, 1) == null);
+    try std.testing.expect(UniqueLeafAdoption(.leaf_i64).claimHeld(narrow, 1, 1) == null);
 
     // An abandoned claim leaves the input exactly as it was.
     var keeper_builder = try ListBuilder(.leaf_i64).init(allocator, 1, 1);
     keeper_builder.items()[0] = 11;
     const keeper = keeper_builder.finish();
     defer cleanup.domain().releaseHeader(keeper);
-    var keeper_claim = UniqueLeafAdoption(.leaf_f64).claim(keeper, 1).?;
+    var keeper_claim = UniqueLeafAdoption(.leaf_f64).claimHeld(keeper, 1, 1).?;
     keeper_claim.abandon();
     try std.testing.expectEqual(HeapKind.leaf_i64, listKind(keeper));
 }
@@ -355,7 +330,7 @@ fn leafCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
     var reader = LeafReader(.leaf_i64).acquire(published.list);
     defer reader.release(cleanup.domain());
     try std.testing.expectEqual(@as(usize, 3), reader.slice().len);
-    var adoption = UniqueLeafAdoption(.leaf_f64).claim(published.list, 3) orelse return;
+    var adoption = UniqueLeafAdoption(.leaf_f64).claimHeld(published.list, 3, 1) orelse return;
     adoption.abandon();
 }
 
@@ -803,28 +778,22 @@ pub fn codeIdentity(
     };
 }
 
-pub const CodeIdentityAssignment = enum {
-    assigned,
-    already_assigned,
-    foreign_namespace,
-    invalid_identity,
-};
-
+/// The caller holds the lock under which it inspected `handle` as unassigned
+/// in `issuer`'s namespace and claimed `identity` from that issuer. A header
+/// that cannot take the identity is a broken archive, in every build mode.
 pub fn assignCodeIdentity(
     issuer: *const CodeIdentityIssuer,
     handle: *ListHandle,
     identity: CodeIdentity,
-) CodeIdentityAssignment {
+) void {
     const raw_identity = @backingInt(identity);
-    if (raw_identity == 0 or raw_identity > max_code_identity)
-        return .invalid_identity;
     const header = headerFromList(handle);
-    if (objectConst(header).provenance_namespace != issuer.constructionNamespace())
-        return .foreign_namespace;
     const implementation = headerImpl(header);
-    if (implementation.identity() != null) return .already_assigned;
+    if (raw_identity == 0 or raw_identity > max_code_identity or
+        objectConst(header).provenance_namespace != issuer.constructionNamespace() or
+        implementation.identity() != null)
+        @panic("code identity assigned to a header that cannot take it");
     implementation.assignIdentity(identity);
-    return .assigned;
 }
 
 pub fn headerFromList(handle: *ListHandle) *Header {
@@ -855,7 +824,7 @@ pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,
-        .dict, .task, .port, .address, .reserved_mask => false,
+        .dict, .task, .port, .address => false,
     });
     return result;
 }
@@ -902,10 +871,6 @@ fn setInitializingLength(header: *InitializingList, new_len: usize) void {
     initializingImpl(header).len = new_len;
 }
 
-fn claimUniqueHeader(header: *Header) ?*UniqueHeader {
-    return claimHeldHeader(header, 1);
-}
-
 /// Unique for a caller that owns exactly `references` of the object's
 /// references and so knows no one else can observe it.
 fn claimHeldHeader(header: *Header, references: u32) ?*UniqueHeader {
@@ -923,11 +888,6 @@ fn claimHeldList(handle: *ListHandle, references: u32) ?*UniqueList {
 /// as it ran has no source to speak of, and usually no second use.
 pub fn readFromSource(handle: *ListHandle) bool {
     return objectConst(headerFromList(handle)).provenance_namespace != .none;
-}
-
-pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {
-    const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
-    return @ptrCast(@alignCast(unique));
 }
 
 pub fn uniqueHeader(header: *UniqueHeader) *Header {
@@ -955,7 +915,7 @@ fn allocObject(
         .leaf_char2,
         .leaf_char4,
         => |list_kind| try allocListObject(LeafElement(list_kind), allocator, capacity_value),
-        .dict, .reserved_mask => try allocator.create(Object),
+        .dict => try allocator.create(Object),
         .task, .port, .address => unreachable,
     };
     obj.* = .{
@@ -982,7 +942,7 @@ fn allocListHeader(
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,
-        .dict, .task, .port, .address, .reserved_mask => false,
+        .dict, .task, .port, .address => false,
     });
     const header = try allocObject(allocator, kind_value, len_value, capacity_value);
     object(header).provenance_namespace = provenance_namespace;
@@ -1002,7 +962,7 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
         .leaf_char1 => u8,
         .leaf_char2 => u16,
         .leaf_char4 => u32,
-        .dict, .task, .port, .address, .reserved_mask => @compileError("a list representation is required"),
+        .dict, .task, .port, .address => @compileError("a list representation is required"),
     };
 }
 
@@ -1020,7 +980,7 @@ pub fn leafElementSize(kind_value: HeapKind) usize {
         .leaf_char1 => @sizeOf(u8),
         .leaf_char2 => @sizeOf(u16),
         .leaf_char4 => @sizeOf(u32),
-        .dict, .task, .port, .address, .reserved_mask => 0,
+        .dict, .task, .port, .address => 0,
     };
 }
 
@@ -1131,7 +1091,7 @@ pub const AnyListBuilder = union(enum) {
             .leaf_char1 => .{ .char1 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char2 => .{ .char2 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char4 => .{ .char4 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
-            .dict, .task, .port, .address, .reserved_mask => unreachable,
+            .dict, .task, .port, .address => unreachable,
         };
     }
 
@@ -2162,7 +2122,6 @@ pub const ReleaseDomain = struct {
             .leaf_char1,
             .leaf_char2,
             .leaf_char4,
-            .reserved_mask,
             => return false,
         }
     }
@@ -2904,7 +2863,7 @@ pub const OwnedValueChain = union(enum) {
 fn ownsNoReferences(header: *const Header) bool {
     return switch (kind(header)) {
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => objectConst(header).provenance_namespace == .none,
-        .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
+        .generic_spine, .dict, .task, .port, .address => false,
     };
 }
 
@@ -2920,7 +2879,7 @@ fn destroyObject(allocator: std.mem.Allocator, header: *Header) void {
         .leaf_char2,
         .leaf_char4,
         => |list_kind| freeListObject(LeafElement(list_kind), allocator, object(header)),
-        .dict, .task, .port, .address, .reserved_mask => {
+        .dict, .task, .port, .address => {
             freeStorage(allocator, header);
             allocator.destroy(object(header));
         },
@@ -2951,7 +2910,6 @@ fn freeStorage(allocator: std.mem.Allocator, header: *Header) void {
             const storage: *AddressStorage = @constCast(addressStorage(@ptrCast(@alignCast(header))));
             allocator.destroy(storage);
         },
-        .reserved_mask => {},
     }
     obj.payload = null;
     obj.capacity = 0;

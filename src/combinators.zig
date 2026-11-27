@@ -1983,7 +1983,7 @@ const StencilBootstrapDriver = struct {
                 self.fill_index += run;
                 return self.fill_index == control.width;
             },
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => return null,
+            .generic_spine, .dict, .task, .port, .address => return null,
         }
     }
 
@@ -2153,7 +2153,7 @@ fn nextWindow(fiber: *Fiber, control: *const StencilControl) error{OutOfMemory}!
                 },
             };
         },
-        .dict, .task, .port, .address, .reserved_mask => unreachable,
+        .dict, .task, .port, .address => unreachable,
     }
 }
 

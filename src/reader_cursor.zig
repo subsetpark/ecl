@@ -1028,15 +1028,22 @@ const Context = struct {
     }
 };
 
-const CollectionProgress = poll.Progress(locals.SpannedValue);
-const CollectionBuilder = struct {
+/// What every stage of one read shares, built once by the cursor that owns
+/// the read. The span table is not among them: its owner holds it by value
+/// and lends a pointer only once its own address is final.
+const Reading = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    context: Context,
-    spans: *reader.SpanTable,
     diag: *reader.Diag,
     provenance_namespace: heap.CodeProvenanceNamespace,
     symbol_linker: ?env.SymbolLinker,
+};
+
+const CollectionProgress = poll.Progress(locals.SpannedValue);
+const CollectionBuilder = struct {
+    reading: Reading,
+    context: Context,
+    spans: *reader.SpanTable,
     state: State = .start,
 
     /// Where a list's elements come from: the context's body, which keeps
@@ -1167,38 +1174,22 @@ const CollectionBuilder = struct {
         }
     };
 
-    fn init(
-        allocator: std.mem.Allocator,
-        releases: *heap.ReleaseDomain,
-        context: Context,
-        spans: *reader.SpanTable,
-        diag: *reader.Diag,
-        provenance_namespace: heap.CodeProvenanceNamespace,
-        symbol_linker: ?env.SymbolLinker,
-    ) CollectionBuilder {
-        return .{
-            .allocator = allocator,
-            .releases = releases,
-            .context = context,
-            .spans = spans,
-            .diag = diag,
-            .provenance_namespace = provenance_namespace,
-            .symbol_linker = symbol_linker,
-        };
+    fn init(reading: Reading, context: Context, spans: *reader.SpanTable) CollectionBuilder {
+        return .{ .reading = reading, .context = context, .spans = spans };
     }
     fn deinit(self: *CollectionBuilder, releases: *heap.ReleaseDomain) void {
         self.retire(releases);
     }
     fn retire(self: *CollectionBuilder, releases: *heap.ReleaseDomain) void {
-        self.state.retire(releases, self.allocator);
+        self.state.retire(releases, self.reading.allocator);
         self.context.retire(releases);
     }
 
     /// Allocates a list's values and spans and starts gathering them.
     fn gatherElements(self: *CollectionBuilder, source: ElementSource, count: usize) error{OutOfMemory}!void {
-        const values = try self.allocator.alloc(Value, count);
-        errdefer self.allocator.free(values);
-        const spans = try self.allocator.alloc(Span, count);
+        const values = try self.reading.allocator.alloc(Value, count);
+        errdefer self.reading.allocator.free(values);
+        const spans = try self.reading.allocator.alloc(Span, count);
         self.state = .{ .gather_elements = .{ .source = source, .values = values, .spans = spans } };
     }
 
@@ -1209,10 +1200,10 @@ const CollectionBuilder = struct {
             .start => result: {
                 const count = self.context.body.count;
                 if (self.context.hasLocals()) {
-                    const body = try self.allocator.alloc(locals.SpannedValue, count);
-                    errdefer self.allocator.free(body);
+                    const body = try self.reading.allocator.alloc(locals.SpannedValue, count);
+                    errdefer self.reading.allocator.free(body);
                     const slots = self.context.slots;
-                    const names = try self.allocator.alloc(
+                    const names = try self.reading.allocator.alloc(
                         locals.Name,
                         if (slots != 0) slots else self.context.names.count,
                     );
@@ -1230,13 +1221,13 @@ const CollectionBuilder = struct {
                     } };
                 } else if (self.context.kind == .dictionary) {
                     if (count % 2 != 0) {
-                        self.diag.set(
+                        self.reading.diag.set(
                             self.context.body.lastItem().?.span,
                             "dictionary literal key is missing its value",
                         );
                         return error.Parse;
                     }
-                    const pairs = try self.allocator.alloc(dict.Pair, count / 2);
+                    const pairs = try self.reading.allocator.alloc(dict.Pair, count / 2);
                     self.state = .{ .gather_pairs = .{ .pairs = pairs, .from = self.context.body.iterator() } };
                 } else try self.gatherElements(.{ .body = self.context.body.iterator() }, count);
                 break :result .pending;
@@ -1253,12 +1244,12 @@ const CollectionBuilder = struct {
                 }
                 if (gather.names_index != gather.names.len) break :result .pending;
                 const lowerer = try locals.LowerCursor.init(
-                    self.allocator,
-                    self.releases,
+                    self.reading.allocator,
+                    self.reading.releases,
                     gather.names,
                     gather.body,
                     self.context.start,
-                    self.diag,
+                    self.reading.diag,
                     self.context.slots == 0,
                 );
                 const body = gather.body;
@@ -1270,8 +1261,8 @@ const CollectionBuilder = struct {
                 .pending => .pending,
                 .complete => |completed| result: {
                     lowering.cursor.deinit();
-                    self.allocator.free(lowering.names);
-                    self.allocator.free(lowering.body);
+                    self.reading.allocator.free(lowering.names);
+                    self.reading.allocator.free(lowering.body);
                     self.state = .{ .scan_lowered_spans = .{ .output = completed } };
                     break :result .pending;
                 },
@@ -1298,7 +1289,7 @@ const CollectionBuilder = struct {
                     .index = scan.index,
                     .writer = .initUniform(
                         self.spans,
-                        self.allocator,
+                        self.reading.allocator,
                         forms[scan.index].value.list,
                         self.context.start,
                     ),
@@ -1333,9 +1324,9 @@ const CollectionBuilder = struct {
                     .values = values,
                     .spans = spans,
                     .materializer = .initCode(
-                        self.allocator,
+                        self.reading.allocator,
                         values,
-                        self.provenance_namespace,
+                        self.reading.provenance_namespace,
                     ),
                 } };
                 break :result .pending;
@@ -1345,14 +1336,14 @@ const CollectionBuilder = struct {
                 .complete => |item| result: {
                     const spans = materialization.spans;
                     materialization.materializer.deinit();
-                    self.allocator.free(materialization.values);
-                    materialization.source.retire(self.allocator);
+                    self.reading.allocator.free(materialization.values);
+                    materialization.source.retire(self.reading.allocator);
                     self.state = .{ .list_spans = .{
                         .spans = spans,
                         .result = item,
                         .writer = .initSource(
                             self.spans,
-                            self.allocator,
+                            self.reading.allocator,
                             item.list,
                             spans,
                             self.context.source_start,
@@ -1368,7 +1359,7 @@ const CollectionBuilder = struct {
                 .complete => result: {
                     const item = span_state.result;
                     span_state.writer.deinit();
-                    self.allocator.free(span_state.spans);
+                    self.reading.allocator.free(span_state.spans);
                     self.state = .complete;
                     break :result .{ .complete = .{ .value = item, .span = self.context.start } };
                 },
@@ -1380,7 +1371,7 @@ const CollectionBuilder = struct {
                     gather.index += 1;
                 }
                 if (gather.index != gather.pairs.len) break :result .pending;
-                const materializer = try dict.Materializer.init(self.allocator, gather.pairs, true);
+                const materializer = try dict.Materializer.init(self.reading.allocator, gather.pairs, true);
                 const pairs = gather.pairs;
                 self.state = .{ .materialize_dict = .{ .pairs = pairs, .materializer = materializer } };
                 break :result .pending;
@@ -1388,12 +1379,12 @@ const CollectionBuilder = struct {
             .materialize_dict => |*materialization| switch (try poll.advanceOne(&materialization.materializer)) {
                 .pending => .pending,
                 .duplicate_key => {
-                    self.diag.set(self.context.start, "dictionary literal contains a duplicate key");
+                    self.reading.diag.set(self.context.start, "dictionary literal contains a duplicate key");
                     return error.Parse;
                 },
                 .complete => |item| result: {
                     materialization.materializer.deinit();
-                    self.allocator.free(materialization.pairs);
+                    self.reading.allocator.free(materialization.pairs);
                     self.state = .complete;
                     break :result .{ .complete = .{ .value = item, .span = self.context.start } };
                 },
@@ -1412,60 +1403,44 @@ const ParserCursor = struct {
         complete,
     };
 
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
+    reading: Reading,
     values: heap.OwnedValueChain,
     tokens: TokenList.Iterator,
     contexts: poll.ChunkStack(Context),
     context_depth: usize = 0,
     output: ?FormList,
     spans: *reader.SpanTable,
-    diag: *reader.Diag,
-    provenance_namespace: heap.CodeProvenanceNamespace,
-    symbol_linker: ?env.SymbolLinker,
     state: State = .reading,
     retirement_phase: enum { state, contexts, storage, complete } = .state,
 
-    fn init(
-        allocator: std.mem.Allocator,
-        releases: *heap.ReleaseDomain,
-        tokens: *const TokenList,
-        spans: *reader.SpanTable,
-        diag: *reader.Diag,
-        provenance_namespace: heap.CodeProvenanceNamespace,
-        symbol_linker: ?env.SymbolLinker,
-    ) error{OutOfMemory}!ParserCursor {
+    fn init(reading: Reading, tokens: *const TokenList, spans: *reader.SpanTable) error{OutOfMemory}!ParserCursor {
         return .{
-            .allocator = allocator,
-            .releases = releases,
-            .values = try .init(releases),
+            .reading = reading,
+            .values = try .init(reading.releases),
             .tokens = tokens.iterator(),
-            .contexts = .init(allocator),
-            .output = .init(allocator),
+            .contexts = .init(reading.allocator),
+            .output = .init(reading.allocator),
             .spans = spans,
-            .diag = diag,
-            .provenance_namespace = provenance_namespace,
-            .symbol_linker = symbol_linker,
         };
     }
     fn deinit(self: *ParserCursor) void {
         switch (self.state) {
-            .scalar => |*scalar| scalar.deinit(self.releases),
-            .collection => |*collection| collection.deinit(self.releases),
+            .scalar => |*scalar| scalar.deinit(self.reading.releases),
+            .collection => |*collection| collection.deinit(self.reading.releases),
             .reading, .complete => {},
         }
         while (self.contexts.pop()) |popped| {
             var context = popped;
-            context.deinit(self.releases);
+            context.deinit(self.reading.releases);
         }
-        self.contexts.retire(self.releases);
+        self.contexts.retire(self.reading.releases);
         if (self.output) |*output| output.deinit();
         self.values.deinit();
         self.* = undefined;
     }
     fn retireCompleted(self: *ParserCursor) void {
         std.debug.assert(self.state == .complete and self.contexts.isEmpty());
-        self.contexts.retire(self.releases);
+        self.contexts.retire(self.reading.releases);
         std.debug.assert(self.output == null);
         self.values.deinit();
     }
@@ -1474,10 +1449,10 @@ const ParserCursor = struct {
             .state => result: {
                 switch (self.state) {
                     .scalar => |*scalar| switch (scalar.*) {
-                        .string => |*builder| builder.retire(self.releases),
-                        else => scalar.deinit(self.releases),
+                        .string => |*builder| builder.retire(self.reading.releases),
+                        else => scalar.deinit(self.reading.releases),
                     },
-                    .collection => |*collection| collection.retire(self.releases),
+                    .collection => |*collection| collection.retire(self.reading.releases),
                     .reading, .complete => {},
                 }
                 self.state = .complete;
@@ -1486,15 +1461,15 @@ const ParserCursor = struct {
             },
             .contexts => if (self.contexts.pop()) |popped| result: {
                 var context = popped;
-                context.retire(self.releases);
+                context.retire(self.reading.releases);
                 break :result false;
             } else result: {
                 self.retirement_phase = .storage;
                 break :result false;
             },
             .storage => result: {
-                self.contexts.retire(self.releases);
-                if (self.output) |*output| output.retire(self.releases);
+                self.contexts.retire(self.reading.releases);
+                if (self.output) |*output| output.retire(self.reading.releases);
                 self.output = null;
                 self.values.deinit();
                 self.retirement_phase = .complete;
@@ -1512,16 +1487,16 @@ const ParserCursor = struct {
         std.debug.assert(self.state == .reading);
         self.state = .{
             .scalar = switch (token.kind) {
-                .atom => .{ .atom = .init(token, self.allocator, self.symbol_linker) },
-                .quoted => .{ .atom = .initQuoted(token, self.allocator, self.symbol_linker) },
+                .atom => .{ .atom = .init(token, self.reading.allocator, self.reading.symbol_linker) },
+                .quoted => .{ .atom = .initQuoted(token, self.reading.allocator, self.reading.symbol_linker) },
                 .character => .{ .character = .init(token) },
-                .string => .{ .string = .init(self.allocator, token, self.provenance_namespace) },
+                .string => .{ .string = .init(self.reading.allocator, token, self.reading.provenance_namespace) },
                 .semicolon => {
-                    self.diag.set(token.span, "`;` is reserved");
+                    self.reading.diag.set(token.span, "`;` is reserved");
                     return error.Parse;
                 },
                 .bar => {
-                    self.diag.set(token.span, "`|` is legal only around a list's leading locals declaration");
+                    self.reading.diag.set(token.span, "`|` is legal only around a list's leading locals declaration");
                     return error.Parse;
                 },
                 .open_paren, .open_square, .open_dict, .close_paren, .close_square, .close_dict => unreachable,
@@ -1537,9 +1512,9 @@ const ParserCursor = struct {
         // unit a transition after the one this step was paid for.
         const progress: ScalarProgress = while (true) {
             const next: ScalarProgress = switch (scalar.*) {
-                .atom => |*builder| try builder.advance(self.diag),
-                .string => |*builder| try builder.advance(self.releases, self.diag, work),
-                .character => |*builder| try builder.advance(self.diag),
+                .atom => |*builder| try builder.advance(self.reading.diag),
+                .string => |*builder| try builder.advance(self.reading.releases, self.reading.diag, work),
+                .character => |*builder| try builder.advance(self.reading.diag),
             };
             if (next != .pending or !work.spend()) break next;
         };
@@ -1549,7 +1524,7 @@ const ParserCursor = struct {
                 const span = switch (scalar.*) {
                     inline else => |builder| builder.token.span,
                 };
-                scalar.deinit(self.releases);
+                scalar.deinit(self.reading.releases);
                 self.state = .reading;
                 try self.appendOwned(.{ .value = item, .span = span });
                 break :result .pending;
@@ -1588,14 +1563,14 @@ const ParserCursor = struct {
         }
         if (token.kind == .bar) {
             if (context.names.count == 0) {
-                self.diag.set(context.locals.names, "a locals declaration must contain at least one name");
+                self.reading.diag.set(context.locals.names, "a locals declaration must contain at least one name");
                 return error.Parse;
             }
             context.locals = .body_with_locals;
             return true;
         }
         if (token.kind != .atom) {
-            self.diag.set(token.span, "local names must be unquoted, unqualified symbols");
+            self.reading.diag.set(token.span, "local names must be unquoted, unqualified symbols");
             return error.Parse;
         }
         try context.names.append(.{ .bytes = token.bytes, .span = token.span });
@@ -1604,14 +1579,14 @@ const ParserCursor = struct {
     fn closeContext(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!void {
         const actual = closeKind(token.kind).?;
         const active = self.contexts.topPtr() orelse {
-            self.diag.setFmt(token.span, "unmatched closing delimiter `{u}`", .{actual});
+            self.reading.diag.setFmt(token.span, "unmatched closing delimiter `{u}`", .{actual});
             return error.Parse;
         };
         if (actual != active.kind.close()) {
             if (actual == '}' and active.kind != .dictionary)
-                self.diag.set(token.span, "unmatched closing delimiter `}`")
+                self.reading.diag.set(token.span, "unmatched closing delimiter `}`")
             else
-                self.diag.setFmt(
+                self.reading.diag.setFmt(
                     token.span,
                     "mismatched delimiter: `{u}` must close with `{u}`, not `{u}`",
                     .{ active.kind.open(), active.kind.close(), actual },
@@ -1621,15 +1596,7 @@ const ParserCursor = struct {
         var context = self.contexts.pop().?;
         context.source_end = token.source_end;
         self.context_depth -= 1;
-        self.state = .{ .collection = .init(
-            self.allocator,
-            self.releases,
-            context,
-            self.spans,
-            self.diag,
-            self.provenance_namespace,
-            self.symbol_linker,
-        ) };
+        self.state = .{ .collection = .init(self.reading, context, self.spans) };
         // SAFETY: CollectionBuilder owns every allocation formerly held by
         // `context`; the moved-from local is never observed again.
         context = undefined;
@@ -1638,10 +1605,10 @@ const ParserCursor = struct {
         if (self.contexts.topPtr() != null and try self.handleLocals(token)) return;
         if (openKind(token.kind)) |kind| {
             if (self.context_depth == max_nesting_depth) {
-                self.diag.set(token.span, "form nesting too deep");
+                self.reading.diag.set(token.span, "form nesting too deep");
                 return error.Parse;
             }
-            try self.contexts.push(.init(self.allocator, kind, token.span, token.source_start));
+            try self.contexts.push(.init(self.reading.allocator, kind, token.span, token.source_start));
             self.context_depth += 1;
             return;
         }
@@ -1665,7 +1632,7 @@ const ParserCursor = struct {
         self.state.scalar.atom.slot = true;
     }
     fn failSlot(self: *ParserCursor, token: Token, comptime message: []const u8) error{Parse} {
-        self.diag.setFmt(token.span, "slot `{s}` " ++ message, .{token.bytes});
+        self.reading.diag.setFmt(token.span, "slot `{s}` " ++ message, .{token.bytes});
         return error.Parse;
     }
     /// `` `x `` reads as one occurrence of the symbol `x` marked quoted: run,
@@ -1674,11 +1641,11 @@ const ParserCursor = struct {
     /// where it was written.
     fn beginQuote(self: *ParserCursor, token: Token) error{Parse}!void {
         if (token.bytes.len == 0) {
-            self.diag.set(token.span, "quote is missing its symbol");
+            self.reading.diag.set(token.span, "quote is missing its symbol");
             return error.Parse;
         }
         if (lexer.classify(token.bytes) != .symbol) {
-            self.diag.setFmt(token.span, "quote must precede a symbol, not `{s}`", .{token.bytes});
+            self.reading.diag.setFmt(token.span, "quote must precede a symbol, not `{s}`", .{token.bytes});
             return error.Parse;
         }
         try self.beginScalar(token);
@@ -1724,7 +1691,7 @@ const ParserCursor = struct {
             }) {
                 .pending => .pending,
                 .complete => |form| result: {
-                    collection.deinit(self.releases);
+                    collection.deinit(self.reading.releases);
                     self.state = .reading;
                     try self.appendOwned(form);
                     break :result .pending;
@@ -1745,13 +1712,9 @@ pub const ReadProgress = poll.Progress(reader.ReadResult);
 /// Owns the complete read pipeline. Advancing it once performs one bounded
 /// lexical, parse, lowering, provenance, or final-copy operation.
 pub const ReadCursor = struct {
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
+    reading: Reading,
     source_name: []const u8,
     source: []const u8,
-    diag: *reader.Diag,
-    provenance_namespace: heap.CodeProvenanceNamespace,
-    symbol_linker: ?env.SymbolLinker,
     tokens: TokenList,
     spans: reader.SpanTable,
     state: State,
@@ -1787,27 +1750,11 @@ pub const ReadCursor = struct {
         allocator: std.mem.Allocator,
         cursor: *ParserCursor,
 
-        fn init(
-            allocator: std.mem.Allocator,
-            releases: *heap.ReleaseDomain,
-            tokens: *const TokenList,
-            spans: *reader.SpanTable,
-            diag: *reader.Diag,
-            provenance_namespace: heap.CodeProvenanceNamespace,
-            symbol_linker: ?env.SymbolLinker,
-        ) error{OutOfMemory}!ParserOwner {
-            const cursor = try allocator.create(ParserCursor);
-            errdefer allocator.destroy(cursor);
-            cursor.* = try ParserCursor.init(
-                allocator,
-                releases,
-                tokens,
-                spans,
-                diag,
-                provenance_namespace,
-                symbol_linker,
-            );
-            return .{ .allocator = allocator, .cursor = cursor };
+        fn init(reading: Reading, tokens: *const TokenList, spans: *reader.SpanTable) error{OutOfMemory}!ParserOwner {
+            const cursor = try reading.allocator.create(ParserCursor);
+            errdefer reading.allocator.destroy(cursor);
+            cursor.* = try ParserCursor.init(reading, tokens, spans);
+            return .{ .allocator = reading.allocator, .cursor = cursor };
         }
         fn deinit(self: *ParserOwner) void {
             self.cursor.deinit();
@@ -1881,13 +1828,15 @@ pub const ReadCursor = struct {
         const tokens = TokenList.init(allocator);
         diag.* = .{};
         return .{
-            .allocator = allocator,
-            .releases = releases,
+            .reading = .{
+                .allocator = allocator,
+                .releases = releases,
+                .diag = diag,
+                .provenance_namespace = provenance_namespace,
+                .symbol_linker = symbol_linker,
+            },
             .source_name = source_name,
             .source = source,
-            .diag = diag,
-            .provenance_namespace = provenance_namespace,
-            .symbol_linker = symbol_linker,
             .tokens = tokens,
             .spans = .init(allocator),
             .state = .{ .tokenize = .init(source, null) },
@@ -1962,7 +1911,7 @@ pub const ReadCursor = struct {
                 break :result false;
             },
             .retire_tokens => |*partial| result: {
-                self.tokens.retire(self.releases);
+                self.tokens.retire(self.reading.releases);
                 const moved = partial.*;
                 self.state = .{ .retire_spans = .{
                     .partial = moved,
@@ -1970,7 +1919,7 @@ pub const ReadCursor = struct {
                 } };
                 break :result false;
             },
-            .retire_spans => |*retirement| switch (retirement.cursor.advance(self.releases)) {
+            .retire_spans => |*retirement| switch (retirement.cursor.advance(self.reading.releases)) {
                 .pending => false,
                 .complete => result: {
                     const partial = retirement.partial;
@@ -1979,7 +1928,7 @@ pub const ReadCursor = struct {
                 },
             },
             .retire_owned => |*partial| result: {
-                partial.retire(self.allocator);
+                partial.retire(self.reading.allocator);
                 self.state = .retired;
                 break :result true;
             },
@@ -1992,7 +1941,7 @@ pub const ReadCursor = struct {
         return switch (self.state) {
             .tokenize => |*tokenizer| switch (try tokenizer: {
                 tokenizer.tokens = &self.tokens;
-                break :tokenizer tokenizer.advance(self.diag, work);
+                break :tokenizer tokenizer.advance(self.reading.diag, work);
             }) {
                 .pending => .pending,
                 .incomplete => |value_incomplete| result: {
@@ -2000,15 +1949,7 @@ pub const ReadCursor = struct {
                     break :result .{ .complete = .{ .incomplete = value_incomplete } };
                 },
                 .complete => result: {
-                    const parser = try ParserOwner.init(
-                        self.allocator,
-                        self.releases,
-                        &self.tokens,
-                        &self.spans,
-                        self.diag,
-                        self.provenance_namespace,
-                        self.symbol_linker,
-                    );
+                    const parser = try ParserOwner.init(self.reading, &self.tokens, &self.spans);
                     self.state = .{ .parse = parser };
                     break :result .pending;
                 },
@@ -2024,13 +1965,13 @@ pub const ReadCursor = struct {
                     // Every owned copy is allocated in this one transition, so
                     // a failure leaves the cursor parsed and nothing to free.
                     const output = &parser.cursor.output.?;
-                    var forms = try heap.OwnedValueBuffer.init(self.releases, output.count);
+                    var forms = try heap.OwnedValueBuffer.init(self.reading.releases, output.count);
                     errdefer forms.deinit();
-                    const top = try self.allocator.alloc(Span, output.count);
-                    errdefer self.allocator.free(top);
-                    const name = try self.allocator.alloc(u8, self.source_name.len);
-                    errdefer self.allocator.free(name);
-                    const source = try self.allocator.alloc(u8, self.source.len);
+                    const top = try self.reading.allocator.alloc(Span, output.count);
+                    errdefer self.reading.allocator.free(top);
+                    const name = try self.reading.allocator.alloc(u8, self.source_name.len);
+                    errdefer self.reading.allocator.free(name);
+                    const source = try self.reading.allocator.alloc(u8, self.source.len);
                     const moved = parser.*;
                     self.state = .{ .build = .{
                         .parser = moved,
@@ -2066,23 +2007,23 @@ pub const ReadCursor = struct {
                     .top = top,
                     .name = name,
                 } };
-                const source_slice = try reader.SourceSlice.initOwned(self.allocator, source_bytes);
+                const source_slice = try reader.SourceSlice.initOwned(self.reading.allocator, source_bytes);
                 const consumed = &self.state.source_consumed;
                 var output = consumed.parser.cursor.output.?;
                 consumed.parser.cursor.output = null;
-                output.retire(self.releases);
+                output.retire(self.reading.releases);
                 consumed.parser.retireCompleted();
-                self.tokens.retire(self.releases);
+                self.tokens.retire(self.reading.releases);
                 self.spans.top = consumed.top;
                 const parsed: reader.Parsed = .{
-                    .allocator = self.allocator,
+                    .allocator = self.reading.allocator,
                     .forms = consumed.forms.take(),
-                    .releases = self.releases,
+                    .releases = self.reading.releases,
                     .spans = self.spans,
                     .source_name = consumed.name,
                     .source = source_slice,
                 };
-                self.spans = .init(self.allocator);
+                self.spans = .init(self.reading.allocator);
                 self.state = .completed;
                 break :result .{ .complete = .{ .complete = parsed } };
             },

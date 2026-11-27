@@ -308,22 +308,6 @@ pub const TextOp = enum {
     }
 };
 
-pub const RandomOp = enum {
-    rand_int,
-    rand_ints,
-    rand_float,
-    entropy,
-
-    pub fn spelling(self: RandomOp) []const u8 {
-        return switch (self) {
-            .rand_int => "rand.int",
-            .rand_ints => "rand.ints",
-            .rand_float => "rand.float",
-            .entropy => "rand.entropy",
-        };
-    }
-};
-
 /// A typed kernel: `length` result positions computed range by range. A
 /// kernel defines only what one range computes; when it runs inline or as a
 /// driver, how it is charged, who holds its operands, and what happens to
@@ -340,8 +324,6 @@ pub const RandomOp = enum {
 /// - `chunk(params, operands, *Output, range, context)`: computes one range,
 ///   reporting its first fault.
 /// - `finish(*Output) Value`: publishes the result.
-/// - optional `adopted(*const Output) ?usize`: the operand whose buffer the
-///   result took over, whose reference therefore becomes the result's.
 /// - optional `result: ?ResultShape`: the kernel's result is one leaf, which
 ///   this executor prepares, taking over an operand's buffer whenever the
 ///   shape says the loop permits it and the call alone holds that buffer.
@@ -349,7 +331,7 @@ pub const RandomOp = enum {
 ///   `leafResult(*Output) *LeafResult` finds it when it is not the whole
 ///   output. An optional `resultLength(params, operands, length) usize`
 ///   gives its length when that is not `length`, and an optional
-///   `mayOverwrite(params, position) bool` narrows the declared operands for
+///   `mayOverwrite(params) bool` withholds the declared operands from
 ///   a kernel whose structure depends on its parameters, and an optional
 ///   `positions(params, aliased, length) usize` gives the work left when the
 ///   result took over an operand that already holds most of it. Every kernel whose result
@@ -404,7 +386,7 @@ pub fn Kernel(comptime Spec: type) type {
                     .first => if (position != 0) break :reuse,
                     .none => break :reuse,
                 }
-                if (comptime @hasDecl(Spec, "mayOverwrite")) if (!Spec.mayOverwrite(params, position)) break :reuse;
+                if (comptime @hasDecl(Spec, "mayOverwrite")) if (!Spec.mayOverwrite(params)) break :reuse;
                 const operand = operands[position];
                 if (operand != .list) break :reuse;
                 // The list may appear at several positions; the loop's
@@ -415,9 +397,6 @@ pub fn Kernel(comptime Spec: type) type {
                     if (other == .list and other.list == operand.list) {
                         references += 1;
                         if (comptime !contains(declared.overwritable, other_position)) covered = false;
-                        if (comptime @hasDecl(Spec, "mayOverwrite")) {
-                            if (!Spec.mayOverwrite(params, other_position)) covered = false;
-                        }
                     }
                 }
                 if (!covered) break :reuse;
@@ -470,8 +449,7 @@ pub fn Kernel(comptime Spec: type) type {
         }
 
         fn adoptedOperand(output: *const Spec.Output) ?usize {
-            if (comptime shape != null) return resultOf(output).adopted;
-            return if (@hasDecl(Spec, "adopted")) Spec.adopted(output) else null;
+            return if (comptime shape != null) resultOf(output).adopted else null;
         }
 
         const early = @hasDecl(Spec, "done");
