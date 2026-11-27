@@ -846,8 +846,8 @@ it becomes readable only in a publication, which advances the counter first.
 
 ### An execution site is the current root
 
-An activation runs in one root, and its `ExecutionSite` identifies it by that
-root's scope id, the same id the words written there carry. The scope is
+An activation runs in one root, and its `ExecutionSite` is that root's scope
+id, the same id the words written there carry. The scope is
 where the activation's own definitions land. Core, the session, and each
 module name have one id for the life of the `Env`; an id is a label, not
 counted and never retired, and the `Env` answers which root it denotes. When
@@ -871,11 +871,12 @@ caller's site unchanged, and so does a quotation applied as a value, by
 spawner's root; a protected test invocation runs as its module. A fiber
 records which of these its root activation is as one tagged value.
 
-Whether definitions may land is a flag on the site, set only where a root is
-entered: a root fiber and module construction set it, and a task clears it,
-because a task runs in its spawner's root without owning it. Everything else,
-every combinator application and `@attempt` included, inherits it unchanged,
-so whether a word may define never depends on which combinator reached it.
+Whether definitions may land follows from the fiber and the root alone. A
+task may not define in the session, because it runs in its spawner's root
+without owning it; a module's scope admits definitions only while its
+construction stages them, whichever fiber runs it. No combinator application
+or `@attempt` changes either, so whether a word may define never depends on
+which combinator reached it, and a site is nothing but the root's scope id.
 
 A site carries no authority. What a primitive may register, and the source
 the words it builds at run time are written in, is the source recorded in

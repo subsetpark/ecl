@@ -208,7 +208,7 @@ pub const Cache = struct {
     pub inline fn find(self: *const Cache, code: *const Header, site: machine.ExecutionSite, publication: u64) ?*Flattened {
         if (self.publication != publication or self.entries.len == 0) return null;
         const flattened = (entryFor(self.entries, code) orelse return null).* orelse return null;
-        if (flattened.scope != site.scope) return null;
+        if (flattened.scope != site) return null;
         return flattened;
     }
 
@@ -821,7 +821,7 @@ const Rewrite = struct {
         last: bool,
         source: machine.SummaryTarget.Source,
     ) error{OutOfMemory}!?bool {
-        if (source.home) |home| if (home.scope != site.scope) return null;
+        if (source.home) |home| if (home.scope != site) return null;
         if (source.attribution != .own) return null;
         // A qualified word may have to be loaded where it is called.
         if (std.mem.indexOfScalar(u8, intern.get(word.name), '.') != null) return null;
@@ -978,7 +978,7 @@ const Rewrite = struct {
             .chain = chain,
             .bodies = bodies,
             .publication = publication,
-            .scope = site.scope,
+            .scope = site,
         };
         return record;
     }

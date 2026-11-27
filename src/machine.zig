@@ -481,7 +481,7 @@ const Activation = struct {
 };
 comptime {
     if (@sizeOf(Activation) != 24) @compileError("an activation must remain three words");
-    if (@sizeOf(Eval) > 104) @compileError("an evaluation must remain at most 104 bytes: every call copies one");
+    if (@sizeOf(Eval) > 80) @compileError("an evaluation must remain at most 80 bytes: every call copies one");
     // `entered` copies a `Program` tag into a `Hold`.
     const ProgramTag = @typeInfo(Program).@"union".tag_type.?;
     for ([_][]const u8{ "owned", "borrowed", "definition" }) |name| {
@@ -642,7 +642,7 @@ const Eval = struct {
 
     /// The root this body runs in: where its own definitions land.
     fn scope(self: Eval) env.ScopeId {
-        return self.site.scope;
+        return self.site;
     }
 };
 /// A module construction boundary. The body builds the image `@defm` declared
@@ -826,34 +826,20 @@ fn encodeApplicationProvenanceTarget(
     return @ptrFromInt(raw);
 }
 
-pub const ExecutionSite = struct {
-    /// The current root: where this body's own definitions land, and, when it
-    /// is a module's scope, the module whose code is running. A module word
-    /// runs in its module's scope; every other word, and every quotation
-    /// applied as a value, runs in its caller's. Where a word resolves, and
-    /// what it may register, is carried by the word itself.
-    scope: env.ScopeId,
-    /// Whether definitions may land in `scope`. Set where a root is entered:
-    /// true for a root fiber and a module construction body, false for a
-    /// task, which runs in its spawner's root without owning it. Everything
-    /// else, every combinator application and `@attempt` included, inherits
-    /// it unchanged.
-    defining: bool,
+/// The current root of an activation: where its own definitions land, and,
+/// when it is a module's scope, the module whose code is running. A module
+/// word runs in its module's scope; every other word, and every quotation
+/// applied as a value, runs in its caller's. Where a word resolves, what it
+/// may register, and whether its call is checked are carried by the word.
+pub const ExecutionSite = env.ScopeId;
 
-    /// The base case: a fiber's root activation, built from nothing.
-    fn root(fiber: *Fiber) ExecutionSite {
-        const defining = fiber.role != .task;
-        return switch (fiber.root_entry) {
-            .module => |home| module(home, defining),
-            .scope => |scope| .{ .scope = scope, .defining = defining },
-        };
-    }
-
-    /// Code running as one module.
-    fn module(home: modules.ModuleRoot, defining: bool) ExecutionSite {
-        return .{ .scope = home.scope, .defining = defining };
-    }
-};
+/// The site of a fiber's root activation, built from nothing.
+fn rootSite(fiber: *const Fiber) ExecutionSite {
+    return switch (fiber.root_entry) {
+        .module => |home| home.scope,
+        .scope => |scope| scope,
+    };
+}
 
 pub const ApplicationProvenance = union(enum) {
     boundary,
@@ -1086,7 +1072,7 @@ comptime {
     // on correlated Fiber fields. Every eval and application frame records
     // its activation's execution site and call site; the activation packs
     // into three words to stay within this.
-    if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
+    if (@sizeOf(Frame) > 120) @compileError("machine frames must remain at most 120 bytes");
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
 pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan, lex_cmp, stencil };
@@ -2158,7 +2144,10 @@ pub const Fiber = struct {
     }
     pub fn definitionScope(self: *Fiber) MachineError!env.ScopeId {
         const scope = self.currentScope();
-        if (!self.current.?.site.defining) return self.fail(
+        // A task runs in its spawner's root without owning it. A module
+        // scope admits definitions only while its construction stages them,
+        // which the definition word checks.
+        if (self.role == .task and scope == self.environment.sessionScopeId()) return self.fail(
             .domain,
             "definitions are not legal inside a task; a task runs in its spawner's root without owning it",
         );
@@ -3276,7 +3265,7 @@ pub const Fiber = struct {
         word: intern.TraceWord,
         body_header: *Header,
     ) MachineError!void {
-        const site = ExecutionSite.module(candidate.root(), true);
+        const site: ExecutionSite = candidate.root().scope;
         const dropped = self.suspendCurrent() catch {
             self.releases.releaseHeader(body_header);
             return error.OutOfMemory;
@@ -3896,7 +3885,7 @@ pub fn initialize(fiber: *Fiber, code: *Header) void {
         .code = code,
         .program = program,
         .position = .{ .source = 0 },
-        .site = .root(fiber),
+        .site = rootSite(fiber),
         .activation = .none,
     };
 }
@@ -4550,12 +4539,8 @@ fn enterBody(
     effect: ?env.Effect,
 ) MachineError!void {
     // A module word runs as its module; any other word runs at its caller's
-    // site. Either way it defines where its caller could, and no further.
-    const caller = self.current.?.site;
-    const site: ExecutionSite = if (resolved_home) |home|
-        .module(home, caller.defining)
-    else
-        caller;
+    // site.
+    const site: ExecutionSite = if (resolved_home) |home| home.scope else self.current.?.site;
     // Beside `effect` rather than an optional of its own, which is copied
     // whole on every call that has none.
     // SAFETY: read only when `effect` is present, which sets it first.
