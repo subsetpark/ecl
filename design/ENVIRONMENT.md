@@ -210,8 +210,7 @@ A loaded native module remains loaded for the session. Repeated resolution
 uses its existing registration.
 
 Hosts may supply `RuntimeInputs.native_instances` entries containing a module
-name, a deferred or eager descriptor registration, immutable configuration bytes,
-a native-memory ceiling, and optional
+name, immutable configuration bytes, a native-memory ceiling, and optional
 resource limits. The Session copies the bytes. Duplicate names, invalid limits,
 and zero memory ceilings are rejected.
 Unconfigured modules receive empty configuration and a 64 MiB native-memory
@@ -418,12 +417,9 @@ Opening a shared library executes machine code before ECL validates its
 descriptor. Every directory used for native loading is a trusted-code
 boundary.
 
-Host native registration selects deferred loading or eager startup explicitly.
-Eager linked descriptors are validated and initialized before Session construction
-returns. The same initialized instance is used when its module is first called;
-its configuration and state survive until joined Session teardown. Invalid eager
-descriptors or initialization failure reject Session construction. Deferred
-registrations retain lazy validation and initialization.
+A configured module is still found and loaded like any other native module,
+when it is first called; the configuration applies to the instance that load
+initializes.
 
 ## Process execution
 

@@ -136,16 +136,25 @@ pub fn build(b: *std.Build) void {
     tutorial.root_module.link_libc = true;
     native_fixture_step.dependOn(native_build.installExtension(b, tutorial, "native-fixture"));
     _ = fixture_files.addCopyFile(tutorial.getEmittedBin(), "tutorial.eclmod");
-    const instance_fixture = native_build.addExtension(b, .{
-        .name = "instanceprobe",
-        .root_source_file = b.path("test/native/instance_dynamic.zig"),
-        .target = target,
-        .optimize = optimize,
-        .ecl_native = native_sdk,
-    });
-    instance_fixture.root_module.link_libc = true;
-    native_fixture_step.dependOn(native_build.installExtension(b, instance_fixture, "native-fixture"));
-    _ = fixture_files.addCopyFile(instance_fixture.getEmittedBin(), "instanceprobe.eclmod");
+    // The instance probe and two separately loaded modules from the same
+    // source: one with only a cooperative resource, and one whose resources
+    // are issued by an instance foreign to the probe's.
+    for ([_]struct { library: []const u8, module: []const u8, root: []const u8 }{
+        .{ .library = "instanceprobe", .module = "instanceprobe", .root = "test/native/instance_dynamic.zig" },
+        .{ .library = "cooperativeprobe", .module = "cooperative.probe", .root = "test/native/cooperative_dynamic.zig" },
+        .{ .library = "loanforeign", .module = "loanforeign", .root = "test/native/loanforeign_dynamic.zig" },
+    }) |probe| {
+        const instance_fixture = native_build.addExtension(b, .{
+            .name = probe.library,
+            .root_source_file = b.path(probe.root),
+            .target = target,
+            .optimize = optimize,
+            .ecl_native = native_sdk,
+        });
+        instance_fixture.root_module.link_libc = true;
+        native_fixture_step.dependOn(native_build.installExtension(b, instance_fixture, "native-fixture"));
+        _ = fixture_files.addCopyFile(instance_fixture.getEmittedBin(), b.fmt("{s}.eclmod", .{probe.module}));
+    }
     const native_fixture_options = namedOptions(b, "native fixture options");
     native_fixture_options.addOptionPathDirectory(
         "directory",

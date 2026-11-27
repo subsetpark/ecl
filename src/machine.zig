@@ -14,7 +14,6 @@ const native_module = @import("native_module.zig");
 const reader = @import("reader.zig");
 const poll_api = @import("poll.zig");
 const turn_core = @import("turn_core.zig");
-const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
 const standard_streams = @import("standard_streams.zig");
@@ -1100,12 +1099,6 @@ pub const InheritedContext = struct {
         };
     }
 
-    fn libraries(self: *const InheritedContext) EmbeddedLibraries {
-        return switch (self.phase) {
-            .bootstrap => .bundled,
-            .runtime => |context| .{ .registered = context.native_loader },
-        };
-    }
     pub fn runtime(self: *const InheritedContext) *const RuntimeContext {
         return switch (self.phase) {
             .runtime => |*context| context,
@@ -1473,11 +1466,6 @@ pub const Loading = opaque {
         site: ?ErrorSite,
     ) error{OutOfMemory}!void {
         return self.fiber().dispatchAfterLoad(word, site);
-    }
-
-    /// The embedded or registered standard library named `name`, if any.
-    pub fn embeddedLibrary(self: *Loading, name: intern.ModuleName) ?stdlib.Entry {
-        return self.fiber().inherited.libraries().find(name);
     }
 };
 
@@ -2428,7 +2416,7 @@ pub const Fiber = struct {
     /// are `'domain`.
     pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
         if (provenance == .standard_library) return;
-        if (self.inherited.libraries().find(name) == null) return;
+        if (module_lookup.embeddedLibrary(name) == null) return;
         return self.failFmt(
             .domain,
             "module name `{s}` is reserved for the standard library",
@@ -2441,7 +2429,7 @@ pub const Fiber = struct {
     pub fn moduleLookup(self: *Fiber, operand: value.Symbol, name: intern.ModuleName) error{OutOfMemory}!module_lookup.HeldModuleLookup {
         const searcher = try self.sourceOf(operand);
         const view = self.inherited.registry.view();
-        return .{ .view = view, .cursor = .init(&view, self.inherited.module_snapshot, self.inherited.libraries(), searcher, name) };
+        return .{ .view = view, .cursor = .init(&view, self.inherited.module_snapshot, searcher, name) };
     }
 
     /// The source `operand` was written in: what its cell records.
@@ -3299,7 +3287,6 @@ pub const Fiber = struct {
             .environment = self.environment,
             .view = self.inherited.registry.view(),
             .project = self.inherited.module_snapshot,
-            .libraries = self.inherited.libraries(),
         };
     }
 
@@ -4523,7 +4510,6 @@ pub const LookupChain = enum {
 
 pub const PlanEntry = resolution_plan.PlanEntry;
 pub const ResolutionPlan = resolution_plan.ResolutionPlan;
-pub const EmbeddedLibraries = module_lookup.EmbeddedLibraries;
 pub const ModuleLookupCursor = module_lookup.ModuleLookupCursor;
 pub const HeldModuleLookup = module_lookup.HeldModuleLookup;
 

@@ -2277,13 +2277,12 @@ registered-capability pins. State retirement uses the common bounded retirement
 domain, including for instances that never published a binding; it admits no new
 native allocations. The host joins that work before unloading the image.
 
-Host registration policy is copied and sorted during Session construction.
-Name resolution and instance publication use the same immutable index, with
-bounded binary lookup. A registered static descriptor enters the ordinary loader
-and owns the same instance lifecycle as a dynamic image.
+Host configuration is copied and sorted during Session construction. Instance
+initialization finds a module's configuration by name in that immutable index,
+with bounded binary lookup; it selects no image, which the ordinary loader
+finds.
 
-Host configuration is copied during Session construction and bound to a loaded
-instance by the host registration policy. An extension sees only its immutable
+Host configuration is bound to a loaded instance by the module's name. An extension sees only its immutable
 configuration bytes and its own native storage authority; no extension-facing
 lookup accepts a module name. Resource-open arguments cannot replace this
 configuration. Native storage accounting is serialized by its issuing instance.
@@ -2725,13 +2724,6 @@ diagnostic envelope through final release. After commit, selection validates an
 opaque token against that exchange and changes only the selected alternative;
 it neither allocates nor mutates published values. Joined terminal observation
 uses that selected report and retains its diagnostics even after resource close.
-Host registration selects deferred discovery or an eager linked descriptor.
-Eager startup uses the ordinary bounded descriptor validator and instance
-lifecycle before Session publication. Its initialized instance pin belongs to the
-registration; later module publication borrows that cached instance rather than
-reinitializing it. The registration releases its pin during joined owner
-settlement, after admission closes. Startup failure retires every completed and
-partial instance through the same reclamation protocol as lazy loading.
 Structured native message grants belong to the registered instance. Factory and
 operation capabilities retain the issuer's immutable validation limits, and native
 builders derive the same grant from their resource owner. Message footprint and

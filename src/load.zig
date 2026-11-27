@@ -15,6 +15,7 @@ const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const map_state = @import("module_snapshot.zig");
 const machine = @import("machine.zig");
+const module_lookup = @import("module_lookup.zig");
 const Value = value.Value;
 const Header = value.ListHandle;
 const Loading = machine.Loading;
@@ -461,7 +462,7 @@ const AutoLoadDriver = struct {
                     .granted => |lease| {
                         cursor.deinit();
                         if (fiber.inherited.module_snapshot != null and
-                            via.embeddedLibrary(self.request.module.name) == null)
+                            module_lookup.embeddedLibrary(self.request.module.name) == null)
                         {
                             self.state.borrowMut().* = .{ .map_lookup = .{
                                 .loading = .init(lease),
@@ -495,7 +496,7 @@ const AutoLoadDriver = struct {
                     // The embedded manifest is consulted before the
                     // search path: a stdlib name resolves without filesystem lookup
                     // and no ECL_PATH, and no path module can shadow one.
-                    if (via.embeddedLibrary(self.request.module.name)) |entry| {
+                    if (module_lookup.embeddedLibrary(self.request.module.name)) |entry| {
                         try self.beginEmbedded(via, &loading, entry);
                         continue;
                     }

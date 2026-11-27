@@ -184,6 +184,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/tutorial.zig",
     "test/native/instance.zig",
     "test/native/instance_dynamic.zig",
+    "test/native/cooperative_dynamic.zig",
+    "test/native/loanforeign_dynamic.zig",
     "test/native/malformed.zig",
     "test/native/negative/rejected_open_resource_authority.zig",
     "test/native/negative/rejected_open_child_authority.zig",

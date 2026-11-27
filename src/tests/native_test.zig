@@ -2646,47 +2646,31 @@ test "native: operation overload descriptors reject incomplete and conflicting c
     return error.TestUnexpectedResult;
 }
 
-test "native: host static and dynamic registration share instance and resource behavior" {
+test "native: a host-configured module shares instance and resource behavior" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{
-                .name = "instanceprobe",
-                .bytes = "A",
-                .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null },
-                .port_limits = .{ .max_live_ports = 2, .ring_capacity = 8 },
-            }},
-        }), .cooperative, .language_tests);
-        defer runtime.deinit();
-        try expectOk(&runtime, "instanceprobe.next 65 = {kind user msg \"host configuration\"} assert " ++
-            "instanceprobe.resource 999 port.open dup instanceprobe.shared-value [] port.call 66 = {kind user msg \"registered selector\"} assert port.close " ++
-            "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.call 42 = {kind user msg \"registered finalizer\"} assert port.close " ++
-            "instanceprobe.activity [] port.open (|p| p instanceprobe.activity-in port.endpoint dup [65] stream.write port.finish " ++
-            "p instanceprobe.activity-out port.endpoint dup 8 stream.read [65] match? {kind user msg \"registered stream\"} assert 8 stream.read empty? {kind user msg \"registered EOF\"} assert p port.close) apply");
-    }
-}
-
-test "native: host static registration rejects stale ABI and failed initialization" {
-    var inputs = try runtime_fixture.Fixture.init();
-    defer inputs.deinit();
-    var raw = @import("native-instance").Extension.descriptor().*;
-    for ([_]bool{ true, false }) |stale| {
-        raw.abi_version = abi.abi_version + @as(u32, @intFromBool(stale));
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .native_instances = &.{.{ .name = "instanceprobe", .bytes = if (stale) "A" else "fail", .registration = .{ .deferred = &raw } }},
-        }), .cooperative, .language_tests);
-        defer runtime.deinit();
-        try expectOk(&runtime, "(instanceprobe.next) @attempt `err at `kind at `io match? {kind user msg \"static load rejected\"} assert");
-    }
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{
+            .name = "instanceprobe",
+            .bytes = "A",
+            .port_limits = .{ .max_live_ports = 2, .ring_capacity = 8 },
+        }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "instanceprobe.next 65 = {kind user msg \"host configuration\"} assert " ++
+        "instanceprobe.resource 999 port.open dup instanceprobe.shared-value [] port.call 66 = {kind user msg \"registered selector\"} assert port.close " ++
+        "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.call 42 = {kind user msg \"registered finalizer\"} assert port.close " ++
+        "instanceprobe.activity [] port.open (|p| p instanceprobe.activity-in port.endpoint dup [65] stream.write port.finish " ++
+        "p instanceprobe.activity-out port.endpoint dup 8 stream.read [65] match? {kind user msg \"registered stream\"} assert 8 stream.read empty? {kind user msg \"registered EOF\"} assert p port.close) apply");
 }
 
 test "native: large host configuration initializes in bounded slices" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .bytes = &@as([65537]u8, @splat('x')), .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = &@as([65537]u8, @splat('x')) }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
     try expectOk(&runtime, "instanceprobe.next 7864440 = {kind user msg \"complete host configuration\"} assert");
@@ -2696,10 +2680,11 @@ test "native: cooperative instance resources have independent unlimited admissio
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
         .native_port_limits = .{ .max_live_ports = 1 },
         .native_instances = &.{
-            .{ .name = "cooperative.probe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").CooperativeOnly.descriptor() }, .port_limits = .{ .max_live_ports = null } },
-            .{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } },
+            .{ .name = "cooperative.probe", .bytes = "A", .port_limits = .{ .max_live_ports = null } },
+            .{ .name = "instanceprobe" },
         },
     }), .cooperative, .language_tests);
     defer runtime.deinit();
@@ -2711,7 +2696,8 @@ test "native: unlimited resource policy rejects controller descriptors" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() }, .port_limits = .{ .max_live_ports = null } }},
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .max_live_ports = null } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
     try expectOk(&runtime, "(instanceprobe.next) @attempt `err at `kind at `io match? {kind user msg \"controller policy rejected\"} assert");
@@ -2721,7 +2707,8 @@ test "native: host service budgets exceed shared extension ceilings independentl
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() }, .memory_limit = std.math.maxInt(usize), .port_limits = .{ .max_live_ports = 4097, .ring_capacity = 16 * 1024 * 1024 + 1 } }},
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .memory_limit = std.math.maxInt(usize), .port_limits = .{ .max_live_ports = 4097, .ring_capacity = 16 * 1024 * 1024 + 1 } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
     try expectOk(&runtime, "instanceprobe.next 65 = {kind user msg \"independent service grant\"} assert");
@@ -2730,31 +2717,29 @@ test "native: host service budgets exceed shared extension ceilings independentl
 test "native: structured diagnostics survive initialization and joined exchange closure" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
-        }), .cooperative, .language_tests);
-        defer runtime.deinit();
-        try expectOk(&runtime,
-            \\(instanceprobe.diagnostic-controller [1 {root sandbox path "nested/file" operation open reason denied}] port.open) @attempt `err at `data at
-            \\dup `root at `sandbox match? {kind user msg "controller initialization root"} assert `path at "nested/file" match? {kind user msg "controller initialization path"} assert
-            \\(instanceprobe.diagnostic-cooperative [1 {root sandbox path "nested/file" operation open reason denied}] port.open) @attempt `err at `data at
-            \\dup `operation at `open match? {kind user msg "cooperative initialization operation"} assert `reason at `denied match? {kind user msg "cooperative initialization reason"} assert
-            \\instanceprobe.diagnostic-controller [] port.open (|p|
-            \\p instanceprobe.controller-diagnose {path "retained"} port.begin (|x|
-            \\x (port.await) cons @attempt `err at `data at `path at "retained" match? {kind user msg "controller diagnostics"} assert
-            \\x port.close x (port.result) cons @attempt `err at `data at `path at "retained" match? {kind user msg "closed diagnostics"} assert) apply p port.close) apply
-            \\instanceprobe.diagnostic-cooperative [] port.open (|p|
-            \\p instanceprobe.cooperative-diagnose {path "resumable"} port.begin (|x|
-            \\x (port.await) cons @attempt `err at `data at `path at "resumable" match? {kind user msg "cooperative diagnostics"} assert
-            \\x port.close x (port.result) cons @attempt `err at `data at `path at "resumable" match? {kind user msg "closed cooperative diagnostics"} assert) apply p port.close) apply
-            \\instanceprobe.diagnostic-cooperative [] port.open (|p|
-            \\p instanceprobe.diagnostic-finalize {reason commit-failed} port.begin (|x|
-            \\x (port.await) cons @attempt `err at `data at `reason at `commit-failed match? {kind user msg "postcommit diagnostics"} assert
-            \\x port.close) apply p port.close) apply
-        );
-    }
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe" }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime,
+        \\(instanceprobe.diagnostic-controller [1 {root sandbox path "nested/file" operation open reason denied}] port.open) @attempt `err at `data at
+        \\dup `root at `sandbox match? {kind user msg "controller initialization root"} assert `path at "nested/file" match? {kind user msg "controller initialization path"} assert
+        \\(instanceprobe.diagnostic-cooperative [1 {root sandbox path "nested/file" operation open reason denied}] port.open) @attempt `err at `data at
+        \\dup `operation at `open match? {kind user msg "cooperative initialization operation"} assert `reason at `denied match? {kind user msg "cooperative initialization reason"} assert
+        \\instanceprobe.diagnostic-controller [] port.open (|p|
+        \\p instanceprobe.controller-diagnose {path "retained"} port.begin (|x|
+        \\x (port.await) cons @attempt `err at `data at `path at "retained" match? {kind user msg "controller diagnostics"} assert
+        \\x port.close x (port.result) cons @attempt `err at `data at `path at "retained" match? {kind user msg "closed diagnostics"} assert) apply p port.close) apply
+        \\instanceprobe.diagnostic-cooperative [] port.open (|p|
+        \\p instanceprobe.cooperative-diagnose {path "resumable"} port.begin (|x|
+        \\x (port.await) cons @attempt `err at `data at `path at "resumable" match? {kind user msg "cooperative diagnostics"} assert
+        \\x port.close x (port.result) cons @attempt `err at `data at `path at "resumable" match? {kind user msg "closed cooperative diagnostics"} assert) apply p port.close) apply
+        \\instanceprobe.diagnostic-cooperative [] port.open (|p|
+        \\p instanceprobe.diagnostic-finalize {reason commit-failed} port.begin (|x|
+        \\x (port.await) cons @attempt `err at `data at `reason at `commit-failed match? {kind user msg "postcommit diagnostics"} assert
+        \\x port.close) apply p port.close) apply
+    );
 }
 
 test "native: semantic string observations agree through callbacks and both resource modes" {
@@ -2790,24 +2775,22 @@ test "native: activity stream failure preserves buffered output and operation ad
 test "native: capacity rejection preserves validation diagnostics and bounded cleanup" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        inline for (.{ "resource", "cooperative" }) |resource_name| {
-            var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-                .ecl_path = if (linked) null else native_fixture.directory,
-                .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .max_live_ports = 1 } }},
-            }), .cooperative, .language_tests);
-            defer runtime.deinit();
-            try expectOk(&runtime, "instanceprobe." ++ resource_name ++ " [] port.open (|p| " ++
-                "(instanceprobe." ++ resource_name ++ " 42 port.open) @attempt `err at `kind at `type match? {kind user msg \"validation before capacity\"} assert " ++
-                "(instanceprobe." ++ resource_name ++ " {reason limit path \"input\"} port.open) @attempt `err at (|failure| " ++
-                "failure `kind at `domain match? {kind user msg \"capacity kind\"} assert failure `data at `path at \"input\" match? {kind user msg \"capacity context\"} assert) apply " ++
-                "instanceprobe.capacity-retirements 2 = {kind user msg \"joined rejection cleanup\"} assert p port.close) apply");
-            try expectOk(&runtime, "instanceprobe." ++ resource_name ++ " [] port.open (|p| " ++
-                "(instanceprobe." ++ resource_name ++ " -1 port.open pop) @spawn " ++
-                "(instanceprobe.capacity-started 0 =) (0 clock.sleep) while " ++
-                "dup task.cancel task.await `err has? {kind user msg \"cancelled rejected opening\"} assert p port.close) apply");
-            try expectOk(&runtime, "instanceprobe.capacity-retirements 3 = {kind user msg \"retired cancelled opening\"} assert");
-        }
+    inline for (.{ "resource", "cooperative" }) |resource_name| {
+        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .max_live_ports = 1 } }},
+        }), .cooperative, .language_tests);
+        defer runtime.deinit();
+        try expectOk(&runtime, "instanceprobe." ++ resource_name ++ " [] port.open (|p| " ++
+            "(instanceprobe." ++ resource_name ++ " 42 port.open) @attempt `err at `kind at `type match? {kind user msg \"validation before capacity\"} assert " ++
+            "(instanceprobe." ++ resource_name ++ " {reason limit path \"input\"} port.open) @attempt `err at (|failure| " ++
+            "failure `kind at `domain match? {kind user msg \"capacity kind\"} assert failure `data at `path at \"input\" match? {kind user msg \"capacity context\"} assert) apply " ++
+            "instanceprobe.capacity-retirements 2 = {kind user msg \"joined rejection cleanup\"} assert p port.close) apply");
+        try expectOk(&runtime, "instanceprobe." ++ resource_name ++ " [] port.open (|p| " ++
+            "(instanceprobe." ++ resource_name ++ " -1 port.open pop) @spawn " ++
+            "(instanceprobe.capacity-started 0 =) (0 clock.sleep) while " ++
+            "dup task.cancel task.await `err has? {kind user msg \"cancelled rejected opening\"} assert p port.close) apply");
+        try expectOk(&runtime, "instanceprobe.capacity-retirements 3 = {kind user msg \"retired cancelled opening\"} assert");
     }
 }
 
@@ -2845,142 +2828,79 @@ test "native: capacity failure descriptors reject incomplete lifecycle metadata"
 test "native: activity supervision stops output and drains input without data authority" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .ring_capacity = 2 } }},
-        }), .cooperative, .language_tests);
-        defer runtime.deinit();
-        try expectOk(&runtime, "instanceprobe.activity 8 port.open (|p| " ++
-            "p instanceprobe.activity-in port.endpoint [1 2] stream.write " ++
-            "p instanceprobe.activity-ready port.endpoint 1 stream.read [7] match? {kind user msg \"joined supervision\"} assert " ++
-            "p instanceprobe.activity-out port.endpoint dup 4 stream.read [1 2] match? {kind user msg \"accepted prefix\"} assert " ++
-            "4 stream.read [] match? {kind user msg \"stopped output EOF\"} assert " ++
-            "p instanceprobe.activity-health [] port.call 102 = {kind user msg \"input drained to EOF\"} assert " ++
-            "p port.close) apply");
-    }
-}
-
-test "native: eager registration captures startup inputs before first module use" {
-    var directory = std.testing.tmpDir(.{});
-    defer directory.cleanup();
-    try directory.dir.writeFile(std.testing.io, .{ .sub_path = "input", .data = "A" });
-    const path = try directory.dir.realPathFileAlloc(std.testing.io, "input", std.testing.allocator);
-    defer std.testing.allocator.free(path);
-    var inputs = try runtime_fixture.Fixture.init();
-    defer inputs.deinit();
-    var eager = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "eagerprobe", .bytes = path, .registration = .{ .eager = @import("native-instance").EagerExtension.descriptor() } }},
-    }), .cooperative, .evaluate);
-    defer eager.deinit();
-    var deferred = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "eagerprobe", .bytes = path, .registration = .{ .deferred = @import("native-instance").EagerExtension.descriptor() } }},
-    }), .cooperative, .evaluate);
-    defer deferred.deinit();
-    try directory.dir.writeFile(std.testing.io, .{ .sub_path = "input", .data = "B" });
-    try expectOk(&eager, "eagerprobe.value 65 = {kind user msg \"eager startup capture\"} assert eagerprobe.value 65 = {kind user msg \"cached startup instance\"} assert");
-    try expectOk(&deferred, "eagerprobe.value 66 = {kind user msg \"deferred startup capture\"} assert");
-}
-
-test "native: eager registration rejects stale descriptors and initialization failure during Session construction" {
-    var inputs = try runtime_fixture.Fixture.init();
-    defer inputs.deinit();
-    for ([_]bool{ true, false }) |stale| {
-        var descriptor = @import("native-instance").Extension.descriptor().*;
-        if (stale) descriptor.abi_version -= 1;
-        try std.testing.expectError(error.InvalidHostConfig, session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "fail", .registration = .{ .eager = &descriptor } }},
-        }), .cooperative, .evaluate));
-    }
-}
-
-fn eagerAllocationProbe(memory: std.mem.Allocator, fail_second: bool) !void {
-    var host = heap.HostOwner.init(memory);
-    defer host.cleanup().drain();
-    const result = native_module.Owner.initConfigured(host.cleanup(), .{}, &.{
-        .{ .name = "instanceprobe", .bytes = "capacity3", .registration = .{ .eager = @import("native-instance").Extension.descriptor() }, .port_limits = .{ .ring_capacity = 8 } },
-        .{ .name = "cooperative.probe", .bytes = if (fail_second) "fail" else "A", .registration = .{ .eager = @import("native-instance").CooperativeOnly.descriptor() }, .port_limits = .{ .max_live_ports = null } },
-    });
-    if (fail_second) {
-        const unexpected = result catch |err| switch (err) {
-            error.InvalidConfiguration => return,
-            else => return err,
-        };
-        unexpected.closeCalls().settle().deinit();
-        return error.TestUnexpectedResult;
-    }
-    const owner = try result;
-    owner.closeCalls().settle().deinit();
-}
-test "native: eager initialization allocation failures join all completed and partial instances" {
-    for ([_]bool{ false, true }) |fail_second| {
-        try eagerAllocationProbe(std.testing.allocator, fail_second);
-        try std.testing.checkAllAllocationFailures(std.testing.allocator, eagerAllocationProbe, .{fail_second});
-    }
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .ring_capacity = 2 } }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "instanceprobe.activity 8 port.open (|p| " ++
+        "p instanceprobe.activity-in port.endpoint [1 2] stream.write " ++
+        "p instanceprobe.activity-ready port.endpoint 1 stream.read [7] match? {kind user msg \"joined supervision\"} assert " ++
+        "p instanceprobe.activity-out port.endpoint dup 4 stream.read [1 2] match? {kind user msg \"accepted prefix\"} assert " ++
+        "4 stream.read [] match? {kind user msg \"stopped output EOF\"} assert " ++
+        "p instanceprobe.activity-health [] port.call 102 = {kind user msg \"input drained to EOF\"} assert " ++
+        "p port.close) apply");
 }
 
 test "native: instance message grants preserve default limits and bound construction independently" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var ordinary = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
-        }), .cooperative, .evaluate);
-        defer ordinary.deinit();
-        var granted = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .message_limits = .{ .nodes = 16384, .bytes = 131072 }, .builder_slots = 4 } }},
-        }), .cooperative, .evaluate);
-        defer granted.deinit();
-        try expectOk(&ordinary, "(instanceprobe.resource \"x\" 8192 take port.open) @attempt `err at `kind at `overflow match? {kind user msg \"default factory budget\"} assert " ++
-            "instanceprobe.resource [] port.open (|p| p (instanceprobe.shared-value \"x\" 8192 take port.call) cons @attempt `err at `kind at `overflow match? {kind user msg \"default operation budget\"} assert p port.close) apply");
-        try expectOk(&granted, "\"x\" 8192 take `payload set " ++
-            "instanceprobe.diagnostic-controller payload port.open (|p| " ++
-            "p instanceprobe.controller-string-fact payload port.call 1 = {kind user msg \"factory and controller request grant\"} assert " ++
-            "p (instanceprobe.controller-diagnose {} `path payload dict.put port.call) cons @attempt `err at `data at `path at len 8192 = {kind user msg \"controller diagnostic grant\"} assert p port.close) apply " ++
-            "instanceprobe.cooperative payload port.open (|p| p instanceprobe.message payload port.call 1 at len 8192 = {kind user msg \"cooperative result grant\"} assert p port.close) apply " ++
-            "instanceprobe.diagnostic-cooperative [] port.open (|p| p (instanceprobe.cooperative-diagnose {} `path payload dict.put port.call) cons @attempt `err at `data at `path at len 8192 = {kind user msg \"cooperative diagnostic grant\"} assert p port.close) apply " ++
-            "instanceprobe.cooperative [] port.open (|p| p (instanceprobe.values 5 port.call) cons @attempt `err at `kind at `overflow match? {kind user msg \"separate construction bound\"} assert p port.close) apply");
-    }
+    var ordinary = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe" }},
+    }), .cooperative, .evaluate);
+    defer ordinary.deinit();
+    var granted = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .message_limits = .{ .nodes = 16384, .bytes = 131072 }, .builder_slots = 4 } }},
+    }), .cooperative, .evaluate);
+    defer granted.deinit();
+    try expectOk(&ordinary, "(instanceprobe.resource \"x\" 8192 take port.open) @attempt `err at `kind at `overflow match? {kind user msg \"default factory budget\"} assert " ++
+        "instanceprobe.resource [] port.open (|p| p (instanceprobe.shared-value \"x\" 8192 take port.call) cons @attempt `err at `kind at `overflow match? {kind user msg \"default operation budget\"} assert p port.close) apply");
+    try expectOk(&granted, "\"x\" 8192 take `payload set " ++
+        "instanceprobe.diagnostic-controller payload port.open (|p| " ++
+        "p instanceprobe.controller-string-fact payload port.call 1 = {kind user msg \"factory and controller request grant\"} assert " ++
+        "p (instanceprobe.controller-diagnose {} `path payload dict.put port.call) cons @attempt `err at `data at `path at len 8192 = {kind user msg \"controller diagnostic grant\"} assert p port.close) apply " ++
+        "instanceprobe.cooperative payload port.open (|p| p instanceprobe.message payload port.call 1 at len 8192 = {kind user msg \"cooperative result grant\"} assert p port.close) apply " ++
+        "instanceprobe.diagnostic-cooperative [] port.open (|p| p (instanceprobe.cooperative-diagnose {} `path payload dict.put port.call) cons @attempt `err at `data at `path at len 8192 = {kind user msg \"cooperative diagnostic grant\"} assert p port.close) apply " ++
+        "instanceprobe.cooperative [] port.open (|p| p (instanceprobe.values 5 port.call) cons @attempt `err at `kind at `overflow match? {kind user msg \"separate construction bound\"} assert p port.close) apply");
 }
 
 test "native: bounded byte and symbol construction works through every SDK builder" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .clock = .{ .monotonic = .manual },
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .max_live_ports = 1, .message_limits = .{ .nodes = 65550, .bytes = 525000 }, .builder_slots = 4 } }},
-        }), .cooperative, .evaluate);
-        defer runtime.deinit();
-        try expectOk(&runtime,
-            \\(dup len 2 = {kind user msg "two values"} assert dup first dup len 65536 = {kind user msg "full byte chunk"} assert first 165 = {kind user msg "byte value"} assert 1 at str len 300 = {kind user msg "chunked UTF8 symbol"} assert) `check-packed set
-            \\instanceprobe.packed-controller [] port.open (|p|
-            \\  p instanceprobe.controller-packed-values 1 port.call check-packed apply
-            \\  p (instanceprobe.controller-packed-diagnostic 1 port.call) cons @attempt `err at `data at `payload at check-packed apply
-            \\  p port.close) apply
-            \\instanceprobe.packed-cooperative [] port.open (|p|
-            \\  p instanceprobe.cooperative-packed-values 1 port.call check-packed apply
-            \\  p (instanceprobe.cooperative-packed-diagnostic 1 port.call) cons @attempt `err at `data at `payload at check-packed apply
-            \\  (instanceprobe.packed-cooperative [] port.open) @attempt `err at `data at `payload at first [165 165] match? {kind user msg "capacity diagnostic builder"} assert
-            \\  p instanceprobe.packed-clock [] port.call 0 = {kind user msg "manual clock origin"} assert
-            \\  p port.close) apply
-            \\instanceprobe.packed-cooperative [] port.open (|p| p instanceprobe.packed-finalize 1 port.call check-packed apply p port.close) apply
-            \\instanceprobe.packed-cooperative [] port.open (|p| p (instanceprobe.packed-finalize-error 1 port.call) cons @attempt `err at `data at `payload at check-packed apply p port.close) apply
-        );
-        try runtime.advanceManualClock(123);
-        try expectOk(&runtime, "instanceprobe.packed-cooperative [] port.open dup instanceprobe.packed-clock [] port.call 123 = {kind user msg \"issuer clock\"} assert port.close");
-    }
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .clock = .{ .monotonic = .manual },
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .max_live_ports = 1, .message_limits = .{ .nodes = 65550, .bytes = 525000 }, .builder_slots = 4 } }},
+    }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime,
+        \\(dup len 2 = {kind user msg "two values"} assert dup first dup len 65536 = {kind user msg "full byte chunk"} assert first 165 = {kind user msg "byte value"} assert 1 at str len 300 = {kind user msg "chunked UTF8 symbol"} assert) `check-packed set
+        \\instanceprobe.packed-controller [] port.open (|p|
+        \\  p instanceprobe.controller-packed-values 1 port.call check-packed apply
+        \\  p (instanceprobe.controller-packed-diagnostic 1 port.call) cons @attempt `err at `data at `payload at check-packed apply
+        \\  p port.close) apply
+        \\instanceprobe.packed-cooperative [] port.open (|p|
+        \\  p instanceprobe.cooperative-packed-values 1 port.call check-packed apply
+        \\  p (instanceprobe.cooperative-packed-diagnostic 1 port.call) cons @attempt `err at `data at `payload at check-packed apply
+        \\  (instanceprobe.packed-cooperative [] port.open) @attempt `err at `data at `payload at first [165 165] match? {kind user msg "capacity diagnostic builder"} assert
+        \\  p instanceprobe.packed-clock [] port.call 0 = {kind user msg "manual clock origin"} assert
+        \\  p port.close) apply
+        \\instanceprobe.packed-cooperative [] port.open (|p| p instanceprobe.packed-finalize 1 port.call check-packed apply p port.close) apply
+        \\instanceprobe.packed-cooperative [] port.open (|p| p (instanceprobe.packed-finalize-error 1 port.call) cons @attempt `err at `data at `payload at check-packed apply p port.close) apply
+    );
+    try runtime.advanceManualClock(123);
+    try expectOk(&runtime, "instanceprobe.packed-cooperative [] port.open dup instanceprobe.packed-clock [] port.call 123 = {kind user msg \"issuer clock\"} assert port.close");
 }
 
 test "native: bounded constructors reject excessive and incomplete chunks and retire parked symbols" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
         .clock = .{ .monotonic = .manual },
-        .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+        .native_instances = &.{.{ .name = "instanceprobe" }},
     }), .cooperative, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime,
@@ -2994,93 +2914,90 @@ test "native: bounded constructors reject excessive and incomplete chunks and re
 test "native: inherited child lifetimes survive intermediate closure and join their ancestor" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
-        }), .{ .worker_pool = 4 }, .evaluate);
-        defer runtime.deinit();
-        try expectOk(&runtime,
-            \\instanceprobe.cooperative [] port.open `ancestor set
-            \\ancestor instanceprobe.cooperative-dependent 0 port.call `middle set
-            \\middle instanceprobe.cooperative-inherited 0 port.call `child set
-            \\child instanceprobe.cooperative-inherited 0 port.call `grandchild set
-            \\middle port.close
-            \\child instanceprobe.borrowed [] port.call 67 = {kind user msg "copied immediate initialization state"} assert
-            \\grandchild instanceprobe.borrowed [] port.call 68 = {kind user msg "transitive inherited initialization"} assert
-            \\child port.close
-            \\grandchild instanceprobe.borrowed [] port.call 68 = {kind user msg "intermediate closure preserves descendants"} assert
-            \\grandchild wrap (instanceprobe.park [] port.call pop) @give `descendant-task set
-            \\(instanceprobe.started 1 = not) (0 clock.sleep) while
-            \\ancestor port.close
-            \\descendant-task task.await `err has? {kind user msg "transferred inherited dependency"} assert
-            \\grandchild (instanceprobe.borrowed [] port.call) cons @attempt `err has? {kind user msg "ancestor joins inherited descendants"} assert grandchild port.close
-            \\instanceprobe.cooperative [] port.open `independent set
-            \\independent instanceprobe.cooperative-inherited 0 port.call `detached set
-            \\independent port.close
-            \\detached instanceprobe.borrowed [] port.call pop detached port.close
-            \\instanceprobe.cooperative [] port.open `last-parent set
-            \\last-parent instanceprobe.cooperative-dependent 0 port.call `last-middle set
-            \\last-middle (instanceprobe.cooperative-inherited 1 port.call) cons @attempt `err at `kind at `io match? {kind user msg "failed inherited initialization"} assert
-            \\last-middle (instanceprobe.cooperative-inherited 2 port.call pop) cons @spawn `initializing-child set
-            \\(instanceprobe.started 2 = not) (0 clock.sleep) while
-            \\last-parent port.close initializing-child task.await `err has? {kind user msg "ancestor closure joins unpublished inherited child"} assert last-middle port.close
-        );
-    }
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A" }},
+    }), .{ .worker_pool = 4 }, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime,
+        \\instanceprobe.cooperative [] port.open `ancestor set
+        \\ancestor instanceprobe.cooperative-dependent 0 port.call `middle set
+        \\middle instanceprobe.cooperative-inherited 0 port.call `child set
+        \\child instanceprobe.cooperative-inherited 0 port.call `grandchild set
+        \\middle port.close
+        \\child instanceprobe.borrowed [] port.call 67 = {kind user msg "copied immediate initialization state"} assert
+        \\grandchild instanceprobe.borrowed [] port.call 68 = {kind user msg "transitive inherited initialization"} assert
+        \\child port.close
+        \\grandchild instanceprobe.borrowed [] port.call 68 = {kind user msg "intermediate closure preserves descendants"} assert
+        \\grandchild wrap (instanceprobe.park [] port.call pop) @give `descendant-task set
+        \\(instanceprobe.started 1 = not) (0 clock.sleep) while
+        \\ancestor port.close
+        \\descendant-task task.await `err has? {kind user msg "transferred inherited dependency"} assert
+        \\grandchild (instanceprobe.borrowed [] port.call) cons @attempt `err has? {kind user msg "ancestor joins inherited descendants"} assert grandchild port.close
+        \\instanceprobe.cooperative [] port.open `independent set
+        \\independent instanceprobe.cooperative-inherited 0 port.call `detached set
+        \\independent port.close
+        \\detached instanceprobe.borrowed [] port.call pop detached port.close
+        \\instanceprobe.cooperative [] port.open `last-parent set
+        \\last-parent instanceprobe.cooperative-dependent 0 port.call `last-middle set
+        \\last-middle (instanceprobe.cooperative-inherited 1 port.call) cons @attempt `err at `kind at `io match? {kind user msg "failed inherited initialization"} assert
+        \\last-middle (instanceprobe.cooperative-inherited 2 port.call pop) cons @spawn `initializing-child set
+        \\(instanceprobe.started 2 = not) (0 clock.sleep) while
+        \\last-parent port.close initializing-child task.await `err has? {kind user msg "ancestor closure joins unpublished inherited child"} assert last-middle port.close
+    );
 }
 
 test "native: initialization input leases join closing issuers and preserve temporary borrows" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{
-                .{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 64, .message_limits = .{ .capabilities = 31 } }, .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } },
-                .{ .name = "loanforeign", .bytes = "B", .registration = .{ .deferred = @import("native-instance").ForeignLoanExtension.descriptor() } },
-            },
-        }), .{ .worker_pool = 4 }, .evaluate);
-        defer runtime.deinit();
-        for ([_][]const u8{ "controller", "cooperative" }) |mode| {
-            const source = try std.fmt.allocPrint(std.testing.allocator, "instanceprobe.resource [] port.open `target set " ++
-                "instanceprobe.{s}-loan target 0 pair port.open `loan set " ++
-                "target (port.close) cons @spawn `closer set " ++
-                "((target instanceprobe.value [] port.call pop) @attempt `err has? not) (0 clock.sleep) while " ++
-                "loan instanceprobe.{s}-loan-read [] port.call 65 = {{kind user msg \"admitted native state survives closure\"}} assert " ++
-                "loan instanceprobe.{s}-loan-probe [] port.call 1 = {{kind user msg \"operation cannot acquire lifetime loans\"}} assert " ++
-                "(instanceprobe.cooperative-loan target 0 pair port.open) @attempt `err at `kind at `io match? {{kind user msg \"closed issuer rejects new lease\"}} assert " ++
-                "loan port.close closer task.await `ok has? {{kind user msg \"issuer joins loan retirement\"}} assert target port.close " ++
-                "instanceprobe.resource [] port.open `temporary-target set " ++
-                "instanceprobe.{s}-loan temporary-target 1 pair port.open `temporary set " ++
-                "temporary-target port.close temporary instanceprobe.{s}-loan-read [] port.call 65 = {{kind user msg \"temporary loan consumed at readiness\"}} assert temporary port.close", .{ mode, mode, mode, mode, mode });
-            defer std.testing.allocator.free(source);
-            try expectOk(&runtime, source);
-        }
-        try expectOk(&runtime,
-            \\17 (instanceprobe.resource [] port.open) times 17 pack `pool set
-            \\instanceprobe.cooperative-loan pool first 4 pair port.open port.close
-            \\(instanceprobe.cooperative-loan pool first 5 pool 3 pack port.open) @attempt `err at `kind at `overflow match? {kind user msg "distinct native lease capacity"} assert
-            \\pool (port.close 0) each pop
-            \\instanceprobe.resource [] port.open `owned-input set
-            \\(loanforeign.loan owned-input 0 pair port.open) @attempt `err at `kind at `type match? {kind user msg "instance-bound resource lease"} assert
-            \\(instanceprobe.cooperative-loan owned-input 2 pair port.open) @attempt `err at `kind at `io match? {kind user msg "failed initializer releases resource lease"} assert owned-input port.close
-            \\instanceprobe.packed-controller [] port.open `wrong-kind set
-            \\(instanceprobe.cooperative-loan wrong-kind 0 pair port.open) @attempt `err at `kind at `type match? {kind user msg "nominal resource kind"} assert wrong-kind port.close
-            \\instanceprobe.resource [] port.open `parked-target set
-            \\(instanceprobe.cooperative-loan parked-target 3 pair port.open port.close) @spawn `opening set
-            \\(instanceprobe.started 5 = not) (0 clock.sleep) while
-            \\parked-target (port.close) cons @spawn `parked-closer set
-            \\opening task.cancel opening task.await `err has? {kind user msg "cancel unpublished lease owner"} assert
-            \\parked-closer task.await `ok has? {kind user msg "cancelled initializer joins issuer"} assert
-        );
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{
+            .{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 64, .message_limits = .{ .capabilities = 31 } } },
+            .{ .name = "loanforeign", .bytes = "B" },
+        },
+    }), .{ .worker_pool = 4 }, .evaluate);
+    defer runtime.deinit();
+    for ([_][]const u8{ "controller", "cooperative" }) |mode| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "instanceprobe.resource [] port.open `target set " ++
+            "instanceprobe.{s}-loan target 0 pair port.open `loan set " ++
+            "target (port.close) cons @spawn `closer set " ++
+            "((target instanceprobe.value [] port.call pop) @attempt `err has? not) (0 clock.sleep) while " ++
+            "loan instanceprobe.{s}-loan-read [] port.call 65 = {{kind user msg \"admitted native state survives closure\"}} assert " ++
+            "loan instanceprobe.{s}-loan-probe [] port.call 1 = {{kind user msg \"operation cannot acquire lifetime loans\"}} assert " ++
+            "(instanceprobe.cooperative-loan target 0 pair port.open) @attempt `err at `kind at `io match? {{kind user msg \"closed issuer rejects new lease\"}} assert " ++
+            "loan port.close closer task.await `ok has? {{kind user msg \"issuer joins loan retirement\"}} assert target port.close " ++
+            "instanceprobe.resource [] port.open `temporary-target set " ++
+            "instanceprobe.{s}-loan temporary-target 1 pair port.open `temporary set " ++
+            "temporary-target port.close temporary instanceprobe.{s}-loan-read [] port.call 65 = {{kind user msg \"temporary loan consumed at readiness\"}} assert temporary port.close", .{ mode, mode, mode, mode, mode });
+        defer std.testing.allocator.free(source);
+        try expectOk(&runtime, source);
     }
+    try expectOk(&runtime,
+        \\17 (instanceprobe.resource [] port.open) times 17 pack `pool set
+        \\instanceprobe.cooperative-loan pool first 4 pair port.open port.close
+        \\(instanceprobe.cooperative-loan pool first 5 pool 3 pack port.open) @attempt `err at `kind at `overflow match? {kind user msg "distinct native lease capacity"} assert
+        \\pool (port.close 0) each pop
+        \\instanceprobe.resource [] port.open `owned-input set
+        \\(loanforeign.loan owned-input 0 pair port.open) @attempt `err at `kind at `type match? {kind user msg "instance-bound resource lease"} assert
+        \\(instanceprobe.cooperative-loan owned-input 2 pair port.open) @attempt `err at `kind at `io match? {kind user msg "failed initializer releases resource lease"} assert owned-input port.close
+        \\instanceprobe.packed-controller [] port.open `wrong-kind set
+        \\(instanceprobe.cooperative-loan wrong-kind 0 pair port.open) @attempt `err at `kind at `type match? {kind user msg "nominal resource kind"} assert wrong-kind port.close
+        \\instanceprobe.resource [] port.open `parked-target set
+        \\(instanceprobe.cooperative-loan parked-target 3 pair port.open port.close) @spawn `opening set
+        \\(instanceprobe.started 5 = not) (0 clock.sleep) while
+        \\parked-target (port.close) cons @spawn `parked-closer set
+        \\opening task.cancel opening task.await `err has? {kind user msg "cancel unpublished lease owner"} assert
+        \\parked-closer task.await `ok has? {kind user msg "cancelled initializer joins issuer"} assert
+    );
 }
 
 test "native: admitted input leases settle before finalizer execution" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A" }},
     }), .{ .worker_pool = 4 }, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime,
@@ -3097,11 +3014,11 @@ test "native: admitted input leases settle before finalizer execution" {
 test "native: instance work quanta preserve bounds across callback and construction lifetimes" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| for ([_]native_port.WorkQuantum{ .q64, .q256 }) |quantum| {
+    for ([_]native_port.WorkQuantum{ .q64, .q256 }) |quantum| {
         const amount = quantum.count();
         var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null }, .port_limits = .{ .callback_quantum = quantum, .construction_quantum = quantum, .message_limits = .{ .nodes = 65550, .bytes = 525000 }, .builder_slots = 4 } }},
+            .ecl_path = native_fixture.directory,
+            .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .callback_quantum = quantum, .construction_quantum = quantum, .message_limits = .{ .nodes = 65550, .bytes = 525000 }, .builder_slots = 4 } }},
         }), .cooperative, .evaluate);
         defer runtime.deinit();
         const source = try std.fmt.allocPrint(std.testing.allocator, "instanceprobe.packed-cooperative [] port.open `resource set " ++
@@ -3114,67 +3031,63 @@ test "native: instance work quanta preserve bounds across callback and construct
         try expectOk(&runtime, source);
         // Construction must progress even after the callback spends its grant.
         try expectOk(&runtime, "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.call 42 = {kind user msg \"one-credit finalizer progress\"} assert port.close");
-    };
+    }
 }
 
 test "native: prepared finalizer failures retain immutable diagnostics and reject foreign choices" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } }},
-        }), .cooperative, .language_tests);
-        defer runtime.deinit();
-        try expectOk(&runtime,
-            \\instanceprobe.prepared-finalizer [] port.open `resource set
-            \\resource instanceprobe.prepared-seal 0 port.call 42 = {kind user msg "prepared success"} assert resource port.close
-            \\instanceprobe.prepared-finalizer [] port.open `resource set
-            \\(resource instanceprobe.prepared-seal 1 port.call) @attempt `err at `failure set resource port.close
-            \\failure `kind at `domain match? {kind user msg "prepared failure kind"} assert
-            \\failure `msg at "prepared native failure" match? {kind user msg "prepared failure message"} assert
-            \\failure `data at `choice at 12 = {kind user msg "prepared diagnostic survives close"} assert
-            \\instanceprobe.prepared-finalizer [] port.open `first set first instanceprobe.prepared-seal 2 port.begin `exchange set
-            \\exchange port.await
-            \\instanceprobe.prepared-finalizer [] port.open `second set
-            \\(second instanceprobe.prepared-seal 3 port.call) @attempt `err at `data at `choice at 12 = {kind user msg "foreign token rejected"} assert
-            \\instanceprobe.prepared-rejections 1 = {kind user msg "issuer validation executed"} assert
-            \\second port.close exchange port.close first port.close
-            \\instanceprobe.prepared-finalizer [] port.open `resource set
-            \\resource instanceprobe.prepared-seal 4 port.begin `exchange set
-            \\(instanceprobe.started 14 = not) (0 clock.sleep) while exchange port.cancel resource port.close
-            \\(exchange port.result) @attempt `err has? {kind user msg "uncommitted failure reservation cancelled"} assert exchange port.close
-            \\instanceprobe.prepared-finalizer [] port.open `resource set
-            \\resource instanceprobe.prepared-seal 5 port.begin `exchange set
-            \\(instanceprobe.started 15 = not) (0 clock.sleep) while exchange port.cancel resource port.close
-            \\(exchange port.result) @attempt `err at `data at `choice at 12 = {kind user msg "committed failure survives cancellation"} assert exchange port.close
-            \\instanceprobe.prepared-finalizer [] port.open `resource set
-            \\resource instanceprobe.prepared-seal 7 port.begin `exchange set
-            \\(instanceprobe.started 16 = not) (0 clock.sleep) while exchange port.cancel resource port.close
-            \\(exchange port.result) @attempt `err has? {kind user msg "partial diagnostic construction cancelled"} assert exchange port.close
-            \\instanceprobe.prepared-finalizer [] port.open `resource set
-            \\(resource instanceprobe.prepared-seal 6 port.call) @attempt `err at `kind at `overflow match? {kind user msg "failure choice capacity"} assert resource port.close
-        );
-    }
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "instanceprobe" }},
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime,
+        \\instanceprobe.prepared-finalizer [] port.open `resource set
+        \\resource instanceprobe.prepared-seal 0 port.call 42 = {kind user msg "prepared success"} assert resource port.close
+        \\instanceprobe.prepared-finalizer [] port.open `resource set
+        \\(resource instanceprobe.prepared-seal 1 port.call) @attempt `err at `failure set resource port.close
+        \\failure `kind at `domain match? {kind user msg "prepared failure kind"} assert
+        \\failure `msg at "prepared native failure" match? {kind user msg "prepared failure message"} assert
+        \\failure `data at `choice at 12 = {kind user msg "prepared diagnostic survives close"} assert
+        \\instanceprobe.prepared-finalizer [] port.open `first set first instanceprobe.prepared-seal 2 port.begin `exchange set
+        \\exchange port.await
+        \\instanceprobe.prepared-finalizer [] port.open `second set
+        \\(second instanceprobe.prepared-seal 3 port.call) @attempt `err at `data at `choice at 12 = {kind user msg "foreign token rejected"} assert
+        \\instanceprobe.prepared-rejections 1 = {kind user msg "issuer validation executed"} assert
+        \\second port.close exchange port.close first port.close
+        \\instanceprobe.prepared-finalizer [] port.open `resource set
+        \\resource instanceprobe.prepared-seal 4 port.begin `exchange set
+        \\(instanceprobe.started 14 = not) (0 clock.sleep) while exchange port.cancel resource port.close
+        \\(exchange port.result) @attempt `err has? {kind user msg "uncommitted failure reservation cancelled"} assert exchange port.close
+        \\instanceprobe.prepared-finalizer [] port.open `resource set
+        \\resource instanceprobe.prepared-seal 5 port.begin `exchange set
+        \\(instanceprobe.started 15 = not) (0 clock.sleep) while exchange port.cancel resource port.close
+        \\(exchange port.result) @attempt `err at `data at `choice at 12 = {kind user msg "committed failure survives cancellation"} assert exchange port.close
+        \\instanceprobe.prepared-finalizer [] port.open `resource set
+        \\resource instanceprobe.prepared-seal 7 port.begin `exchange set
+        \\(instanceprobe.started 16 = not) (0 clock.sleep) while exchange port.cancel resource port.close
+        \\(exchange port.result) @attempt `err has? {kind user msg "partial diagnostic construction cancelled"} assert exchange port.close
+        \\instanceprobe.prepared-finalizer [] port.open `resource set
+        \\(resource instanceprobe.prepared-seal 6 port.call) @attempt `err at `kind at `overflow match? {kind user msg "failure choice capacity"} assert resource port.close
+    );
 }
 
 test "native: resource kind observation preserves closed kinds and rejects foreign instances" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    for ([_]bool{ true, false }) |linked| {
-        var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-            .ecl_path = if (linked) null else native_fixture.directory,
-            .native_instances = &.{
-                .{ .name = "instanceprobe", .registration = .{ .deferred = if (linked) @import("native-instance").Extension.descriptor() else null } },
-                .{ .name = "loanforeign", .registration = .{ .deferred = @import("native-instance").ForeignLoanExtension.descriptor() } },
-            },
-        }), .cooperative, .language_tests);
-        defer runtime.deinit();
-        try expectOk(&runtime, "42 instanceprobe.resource-kind 0 = {kind user msg \"scalar kind\"} assert " ++
-            "loanforeign.resource [] port.open (|p| p instanceprobe.resource-kind 0 = {kind user msg \"foreign instance\"} assert p port.close) apply " ++
-            "instanceprobe.resource [] port.open (|p| p instanceprobe.resource-kind 1 = {kind user msg \"controller kind\"} assert p port.close p instanceprobe.resource-kind 1 = {kind user msg \"closed kind\"} assert) apply " ++
-            "instanceprobe.cooperative [] port.open (|p| p instanceprobe.resource-kind 2 = {kind user msg \"cooperative kind\"} assert p port.close) apply");
-    }
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{
+            .{ .name = "instanceprobe" },
+            .{ .name = "loanforeign" },
+        },
+    }), .cooperative, .language_tests);
+    defer runtime.deinit();
+    try expectOk(&runtime, "42 instanceprobe.resource-kind 0 = {kind user msg \"scalar kind\"} assert " ++
+        "loanforeign.resource [] port.open (|p| p instanceprobe.resource-kind 0 = {kind user msg \"foreign instance\"} assert p port.close) apply " ++
+        "instanceprobe.resource [] port.open (|p| p instanceprobe.resource-kind 1 = {kind user msg \"controller kind\"} assert p port.close p instanceprobe.resource-kind 1 = {kind user msg \"closed kind\"} assert) apply " ++
+        "instanceprobe.cooperative [] port.open (|p| p instanceprobe.resource-kind 2 = {kind user msg \"cooperative kind\"} assert p port.close) apply");
 }
 
 test "native: both child execution modes preserve retained initialization diagnostics" {

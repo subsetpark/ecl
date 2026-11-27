@@ -22,7 +22,6 @@ pub const Context = struct {
     /// Owned by the context's holder, which releases it with `deinit`.
     view: modules.View,
     project: ?*const map_state.Snapshot,
-    libraries: machine.EmbeddedLibraries,
 
     pub fn deinit(self: *Context) void {
         self.view.deinit();
@@ -212,7 +211,7 @@ pub const Resolver = struct {
 
     fn beginAcquire(self: *Resolver, context: *const Context) Progress {
         self.work.deinit();
-        self.work = .{ .acquisition = .init(&context.view, context.project, context.libraries, self.provenance(), self.target.?.module) };
+        self.work = .{ .acquisition = .init(&context.view, context.project, self.provenance(), self.target.?.module) };
         self.phase = .acquire;
         return .pending;
     }

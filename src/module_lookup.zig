@@ -3,30 +3,20 @@
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const modules = @import("modules.zig");
-const native_module = @import("native_module.zig");
 const poll_api = @import("poll.zig");
 const stdlib = @import("stdlib.zig");
 const map_state = @import("module_snapshot.zig");
 
-/// The libraries a named module lookup consults before the registry.
-pub const EmbeddedLibraries = union(enum) {
-    bundled,
-    registered: *native_module.Loader,
-    pub fn find(self: EmbeddedLibraries, name: intern.ModuleName) ?stdlib.Entry {
-        if (stdlib.find(intern.get(intern.moduleId(name)))) |entry| return entry;
-        switch (self) {
-            .bundled => {},
-            .registered => |loader| if (loader.registeredDescriptor(name)) |descriptor| return .{ .native = descriptor },
-        }
-        return null;
-    }
-};
+/// The embedded standard-library module `name`, which a named module lookup
+/// consults before the registry.
+pub fn embeddedLibrary(name: intern.ModuleName) ?stdlib.Entry {
+    return stdlib.find(intern.get(intern.moduleId(name)));
+}
 
 /// A named module lookup, as the source `context`, in one view. It borrows
 /// the view, which its holder keeps for the lookup's life and passes to each
 /// step; the registration it finds is borrowed from that view.
 pub const ModuleLookupCursor = struct {
-    libraries: EmbeddedLibraries,
     project: ?*const map_state.Snapshot,
     context: modules.RegistrationProvenance,
     name: intern.ModuleName,
@@ -37,10 +27,10 @@ pub const ModuleLookupCursor = struct {
     },
     pub const owned_disposal: heap.OwnedDisposal = .deinit;
 
-    pub fn init(view: *const modules.View, project: ?*const map_state.Snapshot, libraries: EmbeddedLibraries, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
-        var result: ModuleLookupCursor = .{ .libraries = libraries, .project = project, .context = context, .name = name, .state = .complete };
+    pub fn init(view: *const modules.View, project: ?*const map_state.Snapshot, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
+        var result: ModuleLookupCursor = .{ .project = project, .context = context, .name = name, .state = .complete };
         if (project) |snapshot| {
-            if (libraries.find(name) == null and
+            if (embeddedLibrary(name) == null and
                 !(if (context.sourceScope()) |source| source.exports(name) else false))
             {
                 result.state = .{ .catalog = snapshot.lookupCursor(context.scopeId(), intern.get(intern.moduleId(name))) };
