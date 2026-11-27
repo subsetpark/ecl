@@ -706,17 +706,18 @@ name and the provenance of the registration that made it. An activation of
 the definition is built from those two alone, so a definition holds nothing
 of the image that owns it.
 
-Ownership follows the root. Core's definitions live as long as the `Env`. A
-module image owns its definitions, and the Session keeps every published image
-until teardown, so a definition of a replaced image stays valid while code
-still runs it. A
-top-level session definition is counted, because replacement removes it from
-the directory while running activations and fibers' resolutions may still hold
-it. An activation running a body holds its definition, and a tail call secures
-the callee before it retires the caller. Counted definitions are the only kind
-reclaimed during a Session; the retention of published images is a deliberate
-exception, accepted because an image's definitions are not counted and running
-code holds them without a reference, and memory grows with reload history.
+Ownership follows the root. Core's definitions live as long as the `Env`.
+Every other definition is counted. The session's directory owns one reference
+to each top-level definition, and a module image owns one to each of its own;
+an image is owned in turn by the directories that map it, by leases and pins
+on it, and by its construction. Replacing a definition or a registration
+therefore reclaims the old one once the last directory that reaches it is
+reclaimed and nothing else holds it. Two rules keep running code safe. Within
+a turn, the turn is a reader of the registry's directories, so whatever it
+read from one stays valid until it ends. Across turns a holder owns a
+reference: an activation running a body holds its definition, a tail call
+secures the callee before it retires the caller, and a fiber's resolutions, a
+flattened list, and reflection each hold the definition they refer to.
 
 ### One resolver, at dispatch
 
@@ -767,8 +768,8 @@ over. Concurrent writers therefore cannot lose each other's updates. The
 directory's maps are persistent tries keyed by name identity: a successor
 copies only the nodes on the edited name's path and shares the rest with its
 snapshot, so an edit costs the trie's bounded depth, not the session's size. A
-superseded snapshot stays chained behind its successor until its last reader
-leaves; it then releases its roots, and each node no other snapshot shares
+superseded snapshot stays chained behind its successor until no reader that
+could have loaded it remains; it then releases its roots, and each node no other snapshot shares
 retires as its own owner, one per step. A discarded candidate takes the same
 path.
 
@@ -855,10 +856,11 @@ reference until it retires. Reload therefore never inherits documentation, and
 `module-doc` reads whichever generation the name selects when it runs, exactly as
 a qualified call does.
 
-Registration publishes the sealed image and adds it to the registry's history,
-which holds one reference to every image the registry ever published. Code of
-a replaced generation keeps running, and each word it reaches resolves in the
-generation registered then, as a qualified name does. A construction body's
+Registration publishes the sealed image, and the directory that maps it owns
+it; a replaced image is reclaimed with the last directory that maps it. Code
+of a replaced generation keeps running, held by its activations, and each word
+it reaches resolves in the generation registered then, as a qualified name
+does. A construction body's
 own words follow the same rule, so they see the generation being replaced, or
 core alone when the name is new. Publication stays separate from reclamation,
 as in read-copy-update.
@@ -1938,11 +1940,28 @@ outside those locks.
 Readers pair every immutable pointer with evidence that its allocation remains
 alive:
 
-- a directory or generation lease, or a validation's captured view;
+- a directory or generation lease, or a lookup's captured view;
 - a module generation pin, taken on an image before its directory is read;
+- a running turn, for what the turn read from a directory;
 - an evaluation's hold on its definition, or a unit's resolutions, each of
   which holds the definition it refers to; or
 - a source slice that retains its backing allocation.
+
+A running turn is itself a reader of the registry's directories. A fiber
+announces one reader when its turn begins and withdraws it on every exit, and
+holds none while parked or queued. Nothing superseded during a turn is
+reclaimed before the turn ends, so what the turn read from a directory needs
+no further evidence within it.
+
+Directory readers are counted by epoch, so reclamation never needs an instant
+with no reader. The publisher has two epochs, one current, and a reader counts
+itself under the epoch it finds current. A writer, and any reader that empties
+its epoch, may flip the epoch under the writer lock when the other epoch has
+no reader. A directory superseded while an epoch was current is reclaimed only
+after a flip away from that epoch and a flip back, and one of those two flips
+waits for every reader that could have loaded it. Reclamation thus lags a
+supersession by at most two flips, each bounded by the turns running when it
+happens; a held view is a reader of its epoch for as long as it is held.
 
 Observation capabilities return metadata or pinned cursors. They do not expose
 raw homes, mutable scopes, owner factories, or an upgrade path to execution.

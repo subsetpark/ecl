@@ -276,7 +276,7 @@ test "module loader: observation and dispatch require the requested registration
     try std.testing.expectEqualStrings("[42]\n", output.written());
 }
 
-test "module registration: reload history grows no faster than registrations" {
+test "module registration: reloads keep live memory bounded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -286,8 +286,8 @@ test "module registration: reload history grows no faster than registrations" {
         defer runtime.deinit();
 
         // Two registrations and a reload of one while a delayed call runs the
-        // superseded generation. The Session keeps every published image, so
-        // memory grows with registrations; nothing else may accumulate. The
+        // superseded generation. A replaced image is reclaimed once nothing
+        // runs it, so nothing accumulates with the reloads made. The
         // repetition lives inside one fiber, so the measurement sees image and
         // registration retention rather than the per-fiber source provenance
         // every session accumulates.
@@ -298,8 +298,7 @@ test "module registration: reload history grows no faster than registrations" {
             "task.await pop (reuse-right.bump) @spawn task.await pop";
         // Both batches are one fiber each and differ only in the cycle count,
         // so their fixed per-fiber costs cancel and the only variable is how
-        // many define/reload cycles ran. Ten times the cycles may cost ten
-        // times the retained images, and no more.
+        // many define/reload cycles ran.
         const small = "[1] 20 take (pop " ++ cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ cycle ++ ") for";
         try expectOk(&runtime, small);
@@ -310,7 +309,10 @@ test "module registration: reload history grows no faster than registrations" {
         const after_large = counting.total_requested_bytes;
         const small_growth = after_small -| before_small;
         const large_growth = after_large -| after_small;
-        try std.testing.expect(large_growth <= small_growth * 10 * 2 + 4096);
+        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
+            std.debug.print("reload soak: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
+            return err;
+        };
         try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());

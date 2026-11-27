@@ -322,7 +322,7 @@ test "module: qualified calls follow reloads" {
     try std.testing.expectEqualStrings("1 2", display.bytes());
 }
 
-test "module: provisional tasks keep rollback generations alive until quiescence" {
+test "module: a task spawned by a failed construction outlives the discarded image" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();

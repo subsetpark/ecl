@@ -307,8 +307,9 @@ pub const TestDeclarationCursor = struct {
 /// it was built for, and the provenance it registers under. The name is
 /// fixed before the body runs. While the constructing body runs, definitions
 /// and imports are staged; sealing turns the staged names into an immutable
-/// directory. A published image belongs to its registry's history until
-/// Session teardown, so the code running as it never outlives it.
+/// directory. An image owns one reference to each of its definitions. The
+/// directories that map it, leases and pins on it, and its construction own
+/// the image; a replaced image retires with the last directory that maps it.
 const ModuleImage = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
@@ -317,8 +318,6 @@ const ModuleImage = struct {
     /// Set once the registry has published the image. Before then only its
     /// constructor may resolve against its directory.
     published: std.atomic.Value(bool) = .init(false),
-    /// The next older image in its registry's history.
-    history_next: ?*ModuleImage = null,
     /// Names introduced by the construction body, not yet visible to anyone.
     staging: poll.ChunkStack(StagedName),
     staged_count: usize = 0,
@@ -427,11 +426,10 @@ const ModuleImage = struct {
         return true;
     }
 
+    /// Drops the image's reference to one name's entry. Constant work: a
+    /// definition nothing else holds retires as its own owner.
     fn retireEntry(entry: env.Entry, releases: *heap.ReleaseDomain) void {
-        switch (entry) {
-            .definition => |definition| definition.retireStatic(releases),
-            .alias => {},
-        }
+        entry.release(releases);
     }
 };
 
@@ -635,13 +633,20 @@ const DirectoryLease = struct {
 
     fn deinit(self: *DirectoryLease) void {
         const registry = @constCast(self.registry);
-        if (self.lease.deinit()) {
-            registry.lockBlocking();
-            const retired = registry.detachRetiredDirectories();
-            registry.unlock();
-            if (retired) |first| registry.releaseDomain().retire(first, &first.retirement);
-        }
+        if (self.lease.deinit()) registry.retireSuperseded();
         self.* = undefined;
+    }
+};
+
+/// One running turn as a reader of the registry's directories. It holds no
+/// snapshot: while it lives, no directory superseded since it began, and so
+/// no image or definition one owns, is reclaimed.
+pub const TurnLease = struct {
+    registry: *Registry,
+    reader: DirectoryPublisher.Reader,
+
+    pub fn deinit(self: TurnLease) void {
+        if (self.registry.privateState().directories.leave(self.reader)) self.registry.retireSuperseded();
     }
 };
 
@@ -910,7 +915,7 @@ pub const OwnedImage = enum(usize) {
             .provenance = image.provenance.sourceId(),
         } };
         const created: env.Entry = .{ .definition = switch (publication) {
-            .word => |word| try env.Definition.createSource(image.allocator, .static, env.quotationHeader(word.body), .{
+            .word => |word| try env.Definition.createSource(image.allocator, .counted, env.quotationHeader(word.body), .{
                 .visibility = word.visibility,
                 .origin = origin,
                 .effect = word.effect,
@@ -919,14 +924,14 @@ pub const OwnedImage = enum(usize) {
                 .root = home,
                 .attribution = word.attribution,
             }),
-            .native => |native| try env.Definition.create(image.allocator, .static, .{ .native = native.callable }, .{
+            .native => |native| try env.Definition.create(image.allocator, .counted, .{ .native = native.callable }, .{
                 .visibility = native.visibility,
                 .origin = origin,
                 .effect = native.effect,
                 .doc = native.doc,
                 .root = home,
             }),
-            .builtin => |primitive| try env.Definition.create(image.allocator, .static, .{ .builtin = primitive.primitive }, .{
+            .builtin => |primitive| try env.Definition.create(image.allocator, .counted, .{ .builtin = primitive.primitive }, .{
                 .visibility = primitive.visibility,
                 .origin = origin,
                 .effect = primitive.effect,
@@ -1230,10 +1235,6 @@ const RegistryState = struct {
     host: *const heap.HostCleanup,
     writer: std.Io.Mutex = .init,
     directories: DirectoryPublisher,
-    /// Every image this registry has published, newest first. Each holds one
-    /// reference until teardown, so code bound to a replaced image and words
-    /// written in it keep their meaning for the Session's life.
-    history: ?*ModuleImage = null,
     loading: std.atomic.Value(?*LoadingNode) = .init(null),
     /// The Session's publication counter. Every edit to the registry
     /// advances it; it holds no snapshot and only keys reuse.
@@ -1282,12 +1283,8 @@ pub const Registry = enum(usize) {
         const backing = self.privateState();
         const owner_allocator = backing.host.allocator();
         std.debug.assert(backing.directories.quiescent());
+        Directory.destroyChain(backing.directories.takeDraining(), self.allocator(), self.releaseDomain());
         Directory.destroyChain(backing.directories.currentOwned(), self.allocator(), self.releaseDomain());
-        var history = backing.history;
-        while (history) |image| {
-            history = image.history_next;
-            image.release();
-        }
         var loading = backing.loading.load(.acquire);
         while (loading) |node| {
             loading = node.next;
@@ -1558,12 +1555,44 @@ pub const Registry = enum(usize) {
         }
     };
 
-    fn detachRetiredDirectories(self: *Registry) ?*Directory {
-        if (!self.privateState().directories.quiescent()) return null;
-        const current = self.privateState().directories.currentOwned() orelse return null;
-        const retired = current.previous;
-        current.previous = null;
-        return retired;
+    /// The reader a turn is, for the turn's length.
+    pub fn enterTurn(self: *Registry) TurnLease {
+        return .{ .registry = self, .reader = self.privateState().directories.enter() };
+    }
+
+    /// What a reader that emptied its epoch owes: rotate under the writer
+    /// lock and retire what the rotation released after it.
+    fn retireSuperseded(self: *Registry) void {
+        self.lockBlocking();
+        const released = self.rotateDirectories();
+        self.unlock();
+        released.retire(self.releaseDomain());
+    }
+
+    /// The directory chains at most two rotations release.
+    const Superseded = struct {
+        chains: [2]?*Directory = .{ null, null },
+
+        fn retire(self: Superseded, releases: *heap.ReleaseDomain) void {
+            for (self.chains) |chain| if (chain) |first| releases.retire(first, &first.retirement);
+        }
+    };
+
+    /// Under the writer lock, constant work: rotates the publisher's epochs
+    /// while one has no reader and something superseded waits. The
+    /// directories behind the current one are those superseded since the
+    /// last flip. Two rotations release everything when no reader remains.
+    fn rotateDirectories(self: *Registry) Superseded {
+        const directories = &self.privateState().directories;
+        var released: Superseded = .{};
+        for (&released.chains) |*chain| {
+            const current = directories.currentOwned() orelse break;
+            if (current.previous == null and !directories.draining()) break;
+            if (!directories.mayRotate()) break;
+            chain.* = directories.rotate(current.previous);
+            current.previous = null;
+        }
+        return released;
     }
 
     /// A fresh image for the module whose name's scope is `scope`. The
@@ -1862,7 +1891,11 @@ pub const Registry = enum(usize) {
                         build.candidate.previous = @constCast(build.directory.directory);
                         self.registry.privateState().directories.publish(build.candidate);
                         _ = self.registry.privateState().publications.fetchAdd(1, .acq_rel);
+                        // A writer rotates too, so reclamation advances
+                        // while readers overlap without end.
+                        const released = self.registry.rotateDirectories();
                         self.registry.unlock();
+                        released.retire(self.registry.releaseDomain());
                         var published = build.*;
                         self.state = .complete;
                         published.directory.deinit();
@@ -1924,20 +1957,11 @@ pub const Registry = enum(usize) {
                 return candidate;
             }
 
-            /// The edit's effect on the images themselves, applied under the
-            /// writer lock just before the candidate becomes current: a
-            /// published image joins the registry's history, which keeps it
-            /// until teardown.
+            /// The edit's effect on the image itself, applied under the
+            /// writer lock just before the candidate becomes current.
             fn apply(self: *Self) void {
                 switch (kind) {
-                    .register => {
-                        const image = self.request.borrow();
-                        image.retain();
-                        const state = self.registry.privateState();
-                        image.history_next = state.history;
-                        state.history = image;
-                        image.published.store(true, .release);
-                    },
+                    .register => self.request.borrow().published.store(true, .release),
                     .define => {},
                 }
             }

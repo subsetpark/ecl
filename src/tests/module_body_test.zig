@@ -98,9 +98,8 @@ test "module bodies: a runtime-built body is module text too" {
     try expectStack(&runtime, "[(k *)] (`scale def (5) `k def ( -- n ) (4 scale) `go def) cat `flat @defm flat.go", "20");
 
     // Define, execute, and replace runtime-built bodies in one Fiber so the
-    // measurement excludes per-source archive retention. A Session keeps
-    // every published image, so memory grows with the registrations made; it
-    // must grow no faster than they do.
+    // measurement excludes per-source archive retention. A replaced image
+    // is reclaimed, so memory must not grow with the registrations made.
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     {
         var runtime_inputs8 = try runtime_fixture.Fixture.init();
@@ -120,7 +119,10 @@ test "module bodies: a runtime-built body is module text too" {
         const after_large = counting.total_requested_bytes;
         const small_growth = after_small -| before_small;
         const large_growth = after_large -| after_small;
-        try std.testing.expect(large_growth <= small_growth * 10 * 2 + 4096);
+        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
+            std.debug.print("runtime-built reload soak: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
+            return err;
+        };
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }

@@ -365,18 +365,21 @@ const redefinition_churn = "(dup 0 = (pop) ((1) `churned def 1 - churn) if) `chu
 /// state. Each size therefore runs twice and keeps its smaller growth: a
 /// doubling lands in at most one of the pair, while retention per
 /// redefinition would show in both.
-fn expectChurnBounded(runtime: *session.Session, counting: anytype, large: usize) !void {
+fn expectChurnBounded(runtime: *session.Session, counting: anytype, large: usize, settle: ?[]const u8) !void {
     var buffer: [32]u8 = undefined;
     const large_churn = try std.fmt.bufPrint(&buffer, "{d} churn", .{large});
     try expectOk(runtime, redefinition_churn);
     try expectOk(runtime, "64 churn");
+    if (settle) |unit| try expectOk(runtime, unit);
     var small_growth: usize = std.math.maxInt(usize);
     var large_growth: usize = std.math.maxInt(usize);
     for (0..2) |_| {
         const before_small = counting.total_requested_bytes;
         try expectOk(runtime, "64 churn");
+        if (settle) |unit| try expectOk(runtime, unit);
         const after_small = counting.total_requested_bytes;
         try expectOk(runtime, large_churn);
+        if (settle) |unit| try expectOk(runtime, unit);
         const after_large = counting.total_requested_bytes;
         small_growth = @min(small_growth, after_small -| before_small);
         large_growth = @min(large_growth, after_large -| after_small);
@@ -397,7 +400,7 @@ test "session: public definition mutation settles retirement every turn" {
         defer runtime.deinit();
         // A replaced top-level definition nothing still holds is reclaimed,
         // so redefining one name settles to bounded live memory.
-        try expectChurnBounded(&runtime, &counting, 1024);
+        try expectChurnBounded(&runtime, &counting, 1024, null);
         try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
@@ -452,7 +455,14 @@ test "session: mutation settlement is independent of a busy sole worker" {
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
         defer runtime.deinit();
         try expectOk(&runtime, "((1) () while) @spawn");
-        try expectChurnBounded(&runtime, &counting, 4096);
+        // The spinner never stops. Its running turn is a reader, so what a
+        // churn supersedes during that turn waits for the turn to end. Each
+        // measurement therefore follows a unit that awaits two tasks: the
+        // sole worker reaches them only by ending the spinner's turn, and
+        // pays the retirement that turn's end released on its way. The unit
+        // publishes nothing.
+        const worker_turns = "(1) @spawn task.await pop (1) @spawn task.await pop";
+        try expectChurnBounded(&runtime, &counting, 4096, worker_turns);
         try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
         try expectOk(&runtime, "dup task.cancel task.await pop");
     }

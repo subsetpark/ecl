@@ -371,11 +371,10 @@ pub const ModulePublication = union(enum) {
     },
 };
 
-/// Who keeps a definition alive. Core definitions live as long as the `Env`;
-/// a module image's definitions live as long as the image, which the Session
-/// keeps until teardown once it is published. A top-level session definition
-/// is the one counted kind: replacement can make it unreachable from the
-/// directory while running frames and fibers' resolutions still hold it.
+/// Who keeps a definition alive. Core definitions live as long as the `Env`.
+/// Every other definition is counted: the session's directory or a module
+/// image owns one reference, and replacement can make it unreachable from
+/// any directory while activations and fibers' resolutions still hold it.
 pub const Lifetime = enum { static, counted };
 
 /// The root a definition belongs to. A module's definition carries what an

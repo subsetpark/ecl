@@ -326,11 +326,45 @@ test "word cells: a quotation that escaped a module resolves in the module's cur
 }
 
 test "word cells: reloading a module under running tasks keeps live memory bounded" {
-    // PENDING: Patch 10
-    // Tasks run a module's words while the module is reloaded many times.
-    // Expect requested memory, once the tasks' turns end and retirement
-    // settles, bounded independently of the number of reloads.
-    return error.SkipZigTest;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
+    {
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(counting.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 2 }, .evaluate);
+        defer runtime.deinit();
+        // Two tasks loop on a module's words for as long as the root reloads
+        // the module, so every reload replaces code that is running. Each
+        // batch is one root fiber and two tasks, which end before it does:
+        // the batches differ only in how many reloads they make.
+        const reload = "((1) `step def ((step) () while) `forever def) `looped @defm";
+        const tasks = "(looped.forever) @spawn (looped.forever) @spawn ";
+        const stop = " dup task.cancel task.await pop dup task.cancel task.await pop";
+        const small = tasks ++ "[1] 16 take (pop " ++ reload ++ ") for" ++ stop;
+        const large = tasks ++ "[1] 256 take (pop " ++ reload ++ ") for" ++ stop;
+        try expectOk(&runtime, reload);
+        // The larger batch has more replaced code alive at once, and storage
+        // sized by that peak stays: warm with it.
+        try expectStack(&runtime, large, "");
+        // Storage that grows by doubling may land in either batch; a pair of
+        // rounds keeps the smaller growth of each, and retention per reload
+        // would show in both.
+        var small_growth: usize = std.math.maxInt(usize);
+        var large_growth: usize = std.math.maxInt(usize);
+        for (0..2) |_| {
+            const before_small = counting.total_requested_bytes;
+            try expectStack(&runtime, small, "");
+            const after_small = counting.total_requested_bytes;
+            try expectStack(&runtime, large, "");
+            const after_large = counting.total_requested_bytes;
+            small_growth = @min(small_growth, after_small -| before_small);
+            large_growth = @min(large_growth, after_large -| after_small);
+        }
+        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
+            std.debug.print("module reload under tasks: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
+            return err;
+        };
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 test "word cells: a reload reaches a dotted name that has already run" {

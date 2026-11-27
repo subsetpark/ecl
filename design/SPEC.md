@@ -1508,8 +1508,6 @@ registration current while the body runs, which is the predecessor during a
 re-registration and core alone the first time a name is registered. What the
 body has staged is not yet registered, so the body cannot call it.
 
-The language offers no guarantees about stale images being reaped.
-
 ### Imports and qualified names
 
 `import` consumes a module-name symbol and a list of attribute symbols, then

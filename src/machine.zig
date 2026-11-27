@@ -3413,9 +3413,9 @@ pub const Fiber = struct {
 
     /// What a plain word resolves to now, for idiom recognition: the fiber's
     /// remembered resolution when it has one, otherwise a fresh lookup that
-    /// is not remembered. Only a static definition outlives the lookup, and
-    /// recognition only ever declines, so anything else is simply not a
-    /// match.
+    /// is not remembered. Recognition reads the definition within the turn
+    /// that looked it up, which is what keeps it: the turn is a reader of
+    /// the directory that owns it.
     pub fn peekWord(self: *Fiber, word: value.Symbol) ?PeekedWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
         if (self.reusedResolution(word)) |definition| return peeked(definition, word);
@@ -3509,9 +3509,7 @@ pub const Fiber = struct {
     }
 
     /// Resolves `word` against the current view in one call, remembering the
-    /// result when `remember` is set. The definition is inspected before the
-    /// lookup's lease is released, since a concurrent replacement may retire
-    /// a counted definition afterwards.
+    /// result when `remember` is set.
     fn resolveFresh(
         self: *Fiber,
         word: value.Symbol,
@@ -3530,7 +3528,6 @@ pub const Fiber = struct {
     }
 
     fn peeked(definition: *env.Definition, word: value.Symbol) ?PeekedWord {
-        if (definition.lifetime != .static) return null;
         const home = modules.definitionModule(definition);
         return .{
             .definition = definition,
@@ -4134,6 +4131,10 @@ pub fn runSlice(fiber: *Fiber) MachineError!RunStatus {
     // the previous one already polled cancellation, and a driver's step polls
     // before it draws.
     fiber.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
+    // The turn is a reader of the registry's directories: a definition this
+    // turn reads from one stays valid until the turn ends, replaced or not.
+    const turn = fiber.inherited.registry.enterTurn();
+    defer turn.deinit();
     const status = loop(fiber) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,

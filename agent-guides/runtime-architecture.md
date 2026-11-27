@@ -153,10 +153,7 @@ publication, reclamation, or architectural enforcement. The short rules in
   rather than total publication/reload history. Document any retention or
   backpressure bound while readers remain, recycle fixed retirement records
   where appropriate, and prove the residual bound with delayed readers and
-  repeated public updates. Published module images are the one documented
-  exception: a Session keeps every image it published until teardown (see
-  `design/INTERPRETER.md`), so reload history grows memory by one image per
-  registration and nothing else may.
+  repeated public updates.
 
 ## Architectural enforcement
 

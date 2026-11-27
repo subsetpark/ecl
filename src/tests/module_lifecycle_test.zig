@@ -334,7 +334,7 @@ test "modules: removed identity builtin has no reservation and names validate by
 const churn_cycle = "((\"a module string\" [1 2 3] {k v}) `peek def) `churn @defm " ++
     "`churn.peek execute pop pop pop";
 
-test "concurrency: repeated construct reload cycles grow no faster than registrations" {
+test "concurrency: repeated construct reload cycles keep live memory bounded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -344,12 +344,15 @@ test "concurrency: repeated construct reload cycles grow no faster than registra
         defer runtime.deinit();
         // Both batches run as one fiber each and differ by a single source
         // character, so their fixed per-fiber costs are the same and the only
-        // variable is how many construct/reload cycles ran. A Session keeps
-        // every published image, so ten times the cycles may cost ten times
-        // the retained images, and no more.
+        // variable is how many construct/reload cycles ran. A replaced image
+        // is reclaimed with its definitions, so ten times the cycles must
+        // retain nothing more.
         const small = "[1] 20 take (pop " ++ churn_cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ churn_cycle ++ ") for";
-        try expectStack(&runtime, small, "");
+        // Images replaced within one turn are reclaimed when it ends, so the
+        // larger batch has more code alive at once. Warm with it: the index
+        // of source positions keeps its pages at their high-water mark.
+        try expectStack(&runtime, large, "");
         const before_small = counting.total_requested_bytes;
         try expectStack(&runtime, small, "");
         const after_small = counting.total_requested_bytes;
@@ -364,7 +367,7 @@ test "concurrency: repeated construct reload cycles grow no faster than registra
         // actually exceeded so a recurrence arrives with its numbers.
         const small_growth = after_small -| before_small;
         const large_growth = after_large -| after_small;
-        std.testing.expect(large_growth <= small_growth * 10 * 2 + 4096) catch |err| {
+        std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
             std.debug.print(
                 "settled memory: before={d} after_small={d} after_large={d} " ++
                     "small_growth={d} large_growth={d}\n",
