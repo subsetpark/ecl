@@ -26,10 +26,12 @@ BindingName.
 > either the top-level evaluator or identifies the exact active call
 > performing a registry mutation.
 >
-> A qualified call selects a registry name's current image and a public
-> binding in it in one atomic action, when the call begins, so code written
-> before a replacement reaches the replacement at its next call. Explicit
-> lookup performs the same fresh selection each time it runs.
+> A call selects a registry name's current image and a binding in it in one
+> atomic action, when the call begins, so code written before a replacement
+> reaches the replacement at its next call. A qualified call selects a public
+> binding of the module it spells; a scoped call selects any binding of the
+> module its word was written in. Explicit lookup performs the same fresh
+> selection each time it runs.
 Calls ~> Begin qualified call @ module-name: RegistryName, binding-name: BindingName.
 ---
 module? module-name.
@@ -67,9 +69,9 @@ where
 > values.
 >
 > Retirement is monotonic: replacement retires the former current
-> image and no retired image becomes current again. A retired image stays
-> published, so unqualified words whose occurrences retain it as their scope
-> keep their meaning; qualified words select the current registration.
+> image and no retired image becomes current again. No call begins in a
+> retired image: a word occurrence retains the name of the module it was
+> written in, never an image.
 Call.
 Image.
 Definition.
@@ -82,7 +84,7 @@ InvocationContext.
 {Calls} call-definition call: Call => Definition.
 
 occurrence-name occurrence: WordOccurrence => BindingName.
-occurrence-image occurrence: WordOccurrence => Image.
+occurrence-module occurrence: WordOccurrence => RegistryName.
 
 call-invocation? invoker: InvocationContext => Bool.
 invocation-call invoker: InvocationContext => Call.
@@ -194,24 +196,22 @@ Registry, Construction ~> Register @ invoker: InvocationContext,
 where
 
 > `Begin scoped call` resolves the name stored in a word occurrence against the
-> image stored in that occurrence. A quotation or word occurrence owns this
-> scope but does not cache a definition. The image must have been published;
-> a retired image still answers. Private definitions are available to
-> same-image scoped resolution without becoming publicly invocable.
+> current image of the module stored in that occurrence. A quotation or word
+> occurrence owns this scope but does not cache a definition or an image.
+> Private definitions are available to scoped resolution, wherever the
+> occurrence is applied, without becoming publicly invocable.
 Calls ~> Begin scoped call @ caller: Call,
                              occurrence: WordOccurrence,
                              binding-name: BindingName,
                              call-active? caller,
                              occurrence-name occurrence = binding-name.
 ---
+module? (occurrence-module occurrence).
 some image: Image,
-     image = occurrence-image occurrence,
-     constructed? image,
-     image-published? image,
+     image = image-of (occurrence-module occurrence),
      binding-present? image binding-name,
      definition: Definition,
      definition = definition-at image binding-name,
-     (public? definition or call-image caller = definition-image definition),
      callee: Call,
      ~call-created? callee |
   call-created?' callee and

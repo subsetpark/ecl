@@ -303,152 +303,12 @@ pub const TestDeclarationCursor = struct {
     }
 };
 
-/// Acquires one reference on a refcounted module owner, but only if a
-/// reference already exists.
-///
-/// A scope cell points to its owner without holding it, so a borrow that has just
-/// read the cell may be racing that owner's last `release`. An unconditional
-/// `fetchAdd` there asserts in a safe build and resurrects a destroyed object
-/// in ReleaseFast. Failure leaves the count untouched, which is the load-
-/// bearing half: a `fetchAdd` followed by a correction would publish a
-/// transient nonzero value that a concurrent `release` could read as a live
-/// owner.
-fn tryAcquire(refs: *std.atomic.Value(u32)) bool {
-    var observed = refs.load(.acquire);
-    while (observed != 0) {
-        std.debug.assert(observed != std.math.maxInt(u32));
-        observed = refs.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire) orelse
-            return true;
-    }
-    return false;
-}
-
-test "modules: a conditional acquire refuses a dead owner and never disturbs its count" {
-    var live: std.atomic.Value(u32) = .init(1);
-    try std.testing.expect(tryAcquire(&live));
-    try std.testing.expectEqual(@as(u32, 2), live.load(.acquire));
-    try std.testing.expect(tryAcquire(&live));
-    try std.testing.expectEqual(@as(u32, 3), live.load(.acquire));
-
-    // Zero is the point of no return: `release` has already cleared the label
-    // cell and handed the owner to its release domain, so an acquire that
-    // succeeded here would resurrect it.
-    var dead: std.atomic.Value(u32) = .init(0);
-    try std.testing.expect(!tryAcquire(&dead));
-    try std.testing.expectEqual(@as(u32, 0), dead.load(.acquire));
-    try std.testing.expect(!tryAcquire(&dead));
-    try std.testing.expectEqual(@as(u32, 0), dead.load(.acquire));
-}
-
-/// One image's authoritative reference count, allocated with the image and
-/// outliving it whenever a scope cell still points to it.
-///
-/// Allocated at the image's birth so a refcount never has to
-/// migrate mid-life without briefly existing twice, and two counts have a
-/// window in which they disagree. One count, one retain/release path.
-///
-/// `image` dangles once the image has been destroyed. That is sound rather than
-/// merely tolerated: it is read only after a successful `tryAcquire`, which
-/// cannot succeed at zero, and zero is reached before the image is destroyed.
-///
-/// Only the anchor is parked at retirement, never the image. Parking the image
-/// struct in place was implemented and measured against the retention soaks:
-/// 394 bytes per stamped reload, large_growth=629952 against a bound of 226876
-/// — 25x over. An anchor is cell-order instead, which those soaks tolerate.
-const RefAnchor = struct {
-    refs: std.atomic.Value(u32) = .init(1),
-    park: Park,
-
-    /// The image pointer and the parked-list link share one word, because a
-    /// dead anchor's image pointer is never read again.
-    ///
-    /// The proof is structural: `image` is read only after a successful CAS
-    /// off a nonzero count; `refs == 0` is permanent once reached; and `next` is
-    /// stored on the release path strictly after zero. So a `tryRetain` racing
-    /// the overlay fails its CAS and touches nothing else.
-    ///
-    /// The overlay is what brings the anchor to 16 bytes. It was measured
-    /// against the retention soaks, which allow roughly 32 bytes per stamped
-    /// reload: parking the whole `ModuleImage` in place cost 394 bytes and
-    /// failed by 14212, and a 32-byte anchor would have cleared the bound by
-    /// only 636 bytes against ~111KB of small-phase noise, which is how an
-    /// invariant becomes a flaky test and then a weakened one.
-    /// `extern` so it carries no safety tag. A plain untagged union is 16
-    /// bytes in Debug and ReleaseSafe because Zig adds one, which alone would
-    /// blow the 16-byte anchor budget, as direct measurement confirms. Both members are
-    /// plain pointers, so extern layout is exact and the link is the node: a
-    /// `TombstoneNode` is nothing but its `next`, so a pointer to this union
-    /// *is* a pointer to the node.
-    const Park = extern union {
-        image: *ModuleImage,
-        next: ?*heap.ReleaseDomain.TombstoneNode,
-    };
-
-    fn tryRetain(self: *RefAnchor) bool {
-        return tryAcquire(&self.refs);
-    }
-};
-
-comptime {
-    if (@sizeOf(RefAnchor) > 16)
-        @compileError("RefAnchor exceeds the parked-anchor budget the retention soaks impose");
-}
-
-/// The opaque handle a scope cell stores to point to this image's anchor.
-///
-/// The cell must point to the *anchor* and not the home: a home is embedded in the
-/// image, and the anchor is precisely the thing that outlives it. So
-/// `ModuleHome.tryPin` cannot serve a cell-originated borrow, and
-/// `tryPinAnchor` below is its counterpart for one.
-pub fn anchorHandle(home: *const ModuleHome, _: *const ExecutionAccess) *env.ImageAnchor {
-    return anchorHandleInternal(home);
-}
-
-fn anchorHandleInternal(home: *const ModuleHome) *env.ImageAnchor {
-    return @ptrCast(home.image().anchor);
-}
-
-fn tryPinAnchorInternal(owner: *env.ImageAnchor) ?GenerationPin {
-    const anchor: *RefAnchor = @ptrCast(@alignCast(owner));
-    if (!anchor.tryRetain()) return null;
-    // Only now is the image pointer readable: before the CAS succeeded this
-    // word may have been the parked-list link instead.
-    return .initRetained(anchor.park.image);
-}
-
-/// Acquires one reference through a scope cell's owner handle, or null when the
-/// image has reached its last release.
-///
-/// Split from `tryPinAnchorInternal` for the same reason `pin` is split from
-/// `pinInternal`: the audit rejects one function that both holds a capability
-/// token and casts a pointer.
-pub fn tryPinAnchor(owner: *env.ImageAnchor, _: *const ExecutionAccess) ?GenerationPin {
-    return tryPinAnchorInternal(owner);
-}
-
-/// The single destructor `ReleaseDomain.reclaimTombstones` is given.
-///
-/// A parked anchor is the only thing this module ever parks. A second parked
-/// type must take its own list head rather than turn the node into a
-/// discriminated one -- the node is a bare link precisely because the soak
-/// budget has no room for discrimination.
-pub fn destroyParkedAnchor(
-    allocator: std.mem.Allocator,
-    node: *heap.ReleaseDomain.TombstoneNode,
-) void {
-    // The link is the union's first and only field, so the union starts where
-    // the node does. Plain casts, no capability token.
-    const park: *RefAnchor.Park = @ptrCast(node);
-    const anchor: *RefAnchor = @fieldParentPtr("park", park);
-    allocator.destroy(anchor);
-}
-
-/// One module: the directory its definitions live in, the module-root scope
-/// its text was written in, and the registry identity it was built for. The
-/// name is fixed before the body runs. While the constructing body runs, definitions
+/// One module: the directory its definitions live in, the scope of the name
+/// it was built for, and the provenance it registers under. The name is
+/// fixed before the body runs. While the constructing body runs, definitions
 /// and imports are staged; sealing turns the staged names into an immutable
 /// directory. A published image belongs to its registry's history until
-/// Session teardown, so words written in it never outlive it.
+/// Session teardown, so the code running as it never outlives it.
 const ModuleImage = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
@@ -465,24 +325,19 @@ const ModuleImage = struct {
     /// The directory, built from the staged names as the image is sealed;
     /// null until then.
     names: ?env.NameMap = null,
-    scope: env.Scope,
+    /// The scope of the module's name, which the `Env` owns: what code
+    /// running as this module, of this generation or another, runs in.
+    scope: *env.Scope,
     tests: TestCatalog,
     /// The module's documentation as written, one reference owned by the
     /// image. A generation carries its own: reload replaces the text with the
     /// code, and nothing carries it from one generation to the next.
     doc: ?*env.DocumentationString = null,
-    /// The authoritative count lives in this separately owned cell, so it can outlive this
-    /// struct for the images a scope cell points to.
-    anchor: *RefAnchor,
-    /// Whether ECL source was ever stamped against this image, recorded where
-    /// `release` takes the label cell. Only a stamped image is pointed to by a cell
-    /// that holds no reference, so only a stamped image's anchor is parked.
-    minted_cell: bool = false,
+    refs: std.atomic.Value(u32) = .init(1),
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: union(enum) {
         live,
         tests: TestCatalog.TeardownCursor,
-        scope: env.Scope.EmbeddedTeardownCursor,
         staging,
         names: env.NameMap.RawEntryCursor,
     } = .live,
@@ -490,51 +345,32 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        name: intern.ModuleName,
+        scope: *env.Scope,
         provenance: RegistrationProvenance,
     ) error{OutOfMemory}!*ModuleImage {
-        // No scope cell is minted here. An image needs one only if ECL source
-        // is stamped against it, which `moduleOwned` arranges lazily.
         const result = try allocator.create(ModuleImage);
-        const anchor = allocator.create(RefAnchor) catch |err| {
-            allocator.destroy(result);
-            return err;
-        };
-        anchor.* = .{ .park = .{ .image = result } };
         result.* = .{
             .allocator = allocator,
             .releases = releases,
-            .name = name,
+            .name = scope.moduleName().?,
             .provenance = provenance,
             .staging = .init(allocator),
-            .scope = env.Scope.moduleRoot(allocator),
+            .scope = scope,
             .tests = .init(allocator),
-            .anchor = anchor,
         };
         return result;
     }
 
     fn retain(self: *ModuleImage) void {
-        const old = self.anchor.refs.fetchAdd(1, .monotonic);
+        const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
 
-    /// Reachable only from a caller that already holds this image alive.
-    fn tryRetain(self: *ModuleImage) bool {
-        return self.anchor.tryRetain();
-    }
-
     fn release(self: *ModuleImage) void {
-        const old = self.anchor.refs.fetchSub(1, .release);
+        const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old != 0);
         if (old != 1) return;
-        _ = self.anchor.refs.load(.acquire);
-        // Before any teardown step, so a quotation labelled with this image
-        // reads a definite `retired` and never a scope under teardown.
-        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| {
-            cell.retire();
-            self.minted_cell = true;
-        }
+        _ = self.refs.load(.acquire);
         self.retirement_state = .{ .tests = .init(&self.tests) };
         self.releases.retire(self, &self.retirement);
     }
@@ -563,11 +399,6 @@ const ModuleImage = struct {
             .live => unreachable,
             .tests => |*tests| {
                 if (!tests.advance(releases)) return false;
-                self.retirement_state = .{ .scope = .init(&self.scope) };
-                return false;
-            },
-            .scope => |*scope| {
-                if (!scope.advance()) return false;
                 self.retirement_state = .staging;
                 return false;
             },
@@ -592,18 +423,7 @@ const ModuleImage = struct {
             },
         }
         if (self.doc) |doc| releases.releaseHeader(env.documentationHeader(doc));
-        const anchor = self.anchor;
-        const stamped = self.minted_cell;
         allocator.destroy(self);
-        if (!stamped) {
-            allocator.destroy(anchor);
-            return true;
-        }
-        // A cell outlives this image and points to its anchor without holding a
-        // reference: `refs` stays readable at zero, so a borrow that reaches
-        // this anchor fails its acquire rather than faulting.
-        anchor.park = .{ .next = null };
-        releases.parkTombstone(@ptrCast(&anchor.park));
         return true;
     }
 
@@ -686,8 +506,8 @@ pub const RegistrationProvenance = union(enum) {
 pub const ModuleLookupProgress = poll.Progress(?env.Entry);
 /// One name in a published image's directory, under a pin that keeps the image
 /// alive across a resumable lookup. Visibility is the caller's to check: an
-/// export lookup refuses private entries, and a word written in the image may
-/// use them.
+/// export lookup refuses private entries, and a word written in the module
+/// may use them.
 pub const ModuleNameLookupCursor = struct {
     lookup: ?env.NameMap.RawLookupCursor,
     pin: GenerationPin,
@@ -734,9 +554,10 @@ pub const ModulePublicNameCursor = struct {
     }
 };
 fn publicNameCursorFor(image: *ModuleImage) ModulePublicNameCursor {
+    image.retain();
     return .{
         .entries = if (image.names) |*names| names.rawEntries() else null,
-        .pin = ModuleHome.init(image).pinInternal(),
+        .pin = .initRetained(image),
     };
 }
 
@@ -928,56 +749,26 @@ pub const TestExecutionAccess = opaque {
     }
 };
 
-/// The identity executing frames run under: the image whose code is running,
-/// which fixes same-home dispatch and diagnostic spelling.
-/// Observation leases never expose this pointer; only code holding the
-/// Session's execution authority can obtain its scope or another pin.
-pub const ModuleHome = opaque {
-    fn init(target: *ModuleImage) *ModuleHome {
-        return @ptrCast(target);
-    }
-    fn image(self: *const ModuleHome) *ModuleImage {
-        return @ptrCast(@alignCast(@constCast(self)));
-    }
-    pub fn scope(self: *const ModuleHome, _: *const ExecutionAccess) *env.Scope {
-        return &self.image().scope;
-    }
-    /// The module name this code was built for, fixed before its body ran.
-    pub fn name(self: *const ModuleHome) intern.ModuleName {
-        return self.image().name;
-    }
-    pub fn registrationProvenance(self: *const ModuleHome) RegistrationProvenance {
-        return self.image().provenance;
-    }
-    fn pinInternal(self: *const ModuleHome) GenerationPin {
-        self.image().retain();
-        return .initRetained(self.image());
-    }
-    pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
-        return self.pinInternal();
-    }
-    /// One name in the image's published directory, or null while the image
-    /// is unpublished: a word written in an image under construction sees
-    /// none of its staged names. The caller holds the image alive.
-    pub fn lookupCursor(self: *const ModuleHome, binding: intern.BindingName) ?env.NameMap.RawLookupCursor {
-        const names = self.image().directory() orelse return null;
-        return names.rawLookup(binding);
-    }
-    /// The image's published names, or null while it is unpublished.
-    pub fn publishedEntries(self: *const ModuleHome) ?env.NameMap.RawEntryCursor {
-        const names = self.image().directory() orelse return null;
-        return names.rawEntries();
-    }
-    /// Whether the registry has published this image.
-    pub fn isPublished(self: *const ModuleHome) bool {
-        return self.image().published.load(.acquire);
+/// A module as running code refers to it: the scope of the module's name,
+/// which fixes same-module dispatch and diagnostic spelling, and the
+/// provenance one registration of the module was made under. It holds
+/// nothing of an image.
+pub const ModuleRoot = struct {
+    scope: *env.Scope,
+    provenance: RegistrationProvenance,
+
+    pub fn name(self: ModuleRoot) intern.ModuleName {
+        return self.scope.moduleName().?;
     }
 };
 
-/// The home a definition belongs to, or null for a core or session definition.
-pub fn definitionHome(definition: *const env.Definition) ?*ModuleHome {
-    const handle = definition.home orelse return null;
-    return @ptrCast(handle);
+/// The module a definition belongs to, or null for a core or session
+/// definition.
+pub inline fn definitionModule(definition: *const env.Definition) ?ModuleRoot {
+    return switch (definition.root) {
+        .core, .session => null,
+        .module => |module| .{ .scope = module.scope, .provenance = .fromSourceId(module.provenance) },
+    };
 }
 
 /// An owned execution reference to one image. The raw image is never exposed,
@@ -994,234 +785,12 @@ pub const GenerationPin = enum(usize) {
         std.debug.assert(self != .consumed);
         return @ptrFromInt(@backingInt(self));
     }
-    fn homeInternal(self: GenerationPin) *ModuleHome {
-        return .init(self.image());
-    }
-    /// Split from `homeInternal` because the audit rejects one function that
-    /// both holds a capability token and casts a pointer.
-    pub fn home(self: GenerationPin, _: *const ExecutionAccess) *ModuleHome {
-        return self.homeInternal();
-    }
     pub fn deinit(self: *GenerationPin) void {
         if (self.* == .consumed) return;
         self.image().release();
         self.* = .consumed;
     }
-    /// Whether two pins hold the same owner. Exposes nothing: a pin is already
-    /// an opaque integer, and this only compares two of them. It exists so a
-    /// pin adopted from a borrow can be deduplicated against pins already held
-    /// without anyone learning what it points at.
-    pub fn sameOwner(self: GenerationPin, other: GenerationPin) bool {
-        return @backingInt(self) == @backingInt(other);
-    }
-
-    pub fn matches(
-        self: GenerationPin,
-        expected_home: *const ModuleHome,
-        _: *const ExecutionAccess,
-    ) bool {
-        return self.homeInternal() == expected_home;
-    }
 };
-
-/// The home of the image a module-root scope belongs to, or null for any other
-/// scope.
-///
-/// The cast is sound because `env.Scope.moduleRoot` has exactly one caller —
-/// `ModuleImage.create` — so every module-root scope is an image's own embedded
-/// `scope` field. Re-verified when this was written; a second caller would
-/// falsify it, which is why the check belongs in review and not only here.
-///
-/// Takes no `ExecutionAccess`: the token gates `ModuleHome`'s methods while the
-/// pointer alone grants nothing, and the audit rejects one function that both holds a token and
-/// casts a pointer.
-pub fn homeForModuleRootScope(scope: *env.Scope) ?*ModuleHome {
-    if (!scope.isModuleRoot()) return null;
-    const image: *ModuleImage = @fieldParentPtr("scope", scope);
-    return ModuleHome.init(image);
-}
-
-test "modules: an image's home is reachable from its own root scope" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-
-    var container = try env.Env.init(&host);
-    defer container.deinit();
-
-    const image = try ModuleImage.create(std.testing.allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
-    defer image.release();
-
-    const recovered = homeForModuleRootScope(&image.scope) orelse
-        return error.ExpectedImageHome;
-    try std.testing.expectEqual(ModuleHome.init(image), recovered);
-    try std.testing.expectEqual(image.name, recovered.name());
-
-    var session_scope = container.sessionRoot(std.testing.allocator);
-    defer env.testing.deinitScope(&session_scope, releases);
-    try std.testing.expectEqual(
-        @as(?*ModuleHome, null),
-        homeForModuleRootScope(&session_scope),
-    );
-}
-
-test "modules: a stamped retired image leaves one anchor and an unstamped one leaves nothing" {
-    // Registry-level rather than Session-level, and every sample is taken after
-    // an explicit drain to quiescence. A Session-level version of this measured
-    // 52KB per cycle against an expected 40 bytes: it was sampling deferred
-    // retirement backlog rather than settled memory. Absolute settled-memory bounds
-    // are only assertable where the drains are controllable.
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
-    const allocator = counting.allocator();
-    {
-        var host = heap.HostOwner.init(allocator);
-        const releases = host.domain();
-        var container = try env.Env.init(&host);
-
-        const rounds = 64;
-
-        // An image nothing ever stamped is destroyed in full, anchor included.
-        host.cleanup().drain();
-        const unstamped_base = counting.total_requested_bytes;
-        for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
-            image.release();
-            host.cleanup().drain();
-        }
-        try std.testing.expectEqual(
-            @as(usize, 0),
-            counting.total_requested_bytes -| unstamped_base,
-        );
-
-        // A stamped image mints its cell exactly as `moduleOwned` does, and
-        // leaves precisely that cell plus its parked anchor behind.
-        const stamped_base = counting.total_requested_bytes;
-        for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
-            _ = try container.scopeIdForOwned(&image.scope, @ptrCast(image.anchor));
-            image.release();
-            host.cleanup().drain();
-        }
-        const stamped_growth = counting.total_requested_bytes -| stamped_base;
-        const per_cycle = @sizeOf(RefAnchor) + @sizeOf(env.ScopeCell);
-        // Directory pages are installed in blocks, so they are slack above the
-        // per-cycle floor rather than part of it. The floor is the assertion
-        // that matters: reintroducing in-place header parking would put
-        // @sizeOf(ModuleImage) per cycle here instead of an anchor.
-        try std.testing.expect(stamped_growth >= rounds * per_cycle);
-        try std.testing.expect(stamped_growth <= rounds * per_cycle + 8192);
-
-        container.deinit();
-        host.cleanup().reclaimTombstones(destroyParkedAnchor);
-        host.cleanup().drain();
-    }
-    try std.testing.expectEqual(.ok, counting.deinit());
-}
-
-test "modules: a borrow holds an image's contents across a full drain" {
-    // The necessity half of the borrow's gate, and deliberately deterministic.
-    //
-    // The stochastic version -- racing a resolver against an image's last
-    // release from ECL -- cannot discriminate, because four separate mechanisms
-    // already narrow the window to instruction scale that no ECL-level yield can
-    // land inside: a superseded directory keeps its entries until its last reader
-    // leaves, the resolution walk's counted lookup cursor
-    // together with the environment teardown wait covers the lookup, and
-    // `scheduleWord`'s pin covers the frame. So the borrow's necessity is stated
-    // here as an API fact instead, where the drop can be constructed exactly and
-    // the verdict is the same on every run.
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
-    const allocator = counting.allocator();
-    {
-        var host = heap.HostOwner.init(allocator);
-        const releases = host.domain();
-        var container = try env.Env.init(&host);
-
-        const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
-        const owner: *env.ImageAnchor = @ptrCast(image.anchor);
-        _ = try container.scopeIdForOwned(&image.scope, owner);
-        const cell = try container.scopeCell(&image.scope, owner);
-
-        // Exercise the real primitive directly.
-        var borrowed = tryPinAnchorInternal(owner) orelse
-            return error.ExpectedLiveBorrow;
-
-        const before_drop = counting.total_requested_bytes;
-        // The last reference anything outside the borrow holds.
-        image.release();
-        host.cleanup().drain();
-
-        // Nothing was reclaimed: the borrow is what holds the contents. Remove
-        // the acquire from `executeWord`, or take it after the walk instead of
-        // before, and this is the assertion that fails -- on every run.
-        //
-        // Verified by building the misplaced-pin variant: with the acquire
-        // removed the tier does not pass, though it *hangs* rather than failing
-        // here, because the later `deinit` releases a count already at zero.
-        // A regression must surface as a timeout before any assertion fires.
-        try std.testing.expectEqual(before_drop, counting.total_requested_bytes);
-        // And the scope is still reachable through its proof arm, which is what
-        // resolution does with it.
-        try std.testing.expectEqual(
-            @as(?*env.Scope, &image.scope),
-            cell.scopeUnder(.fresh_pin),
-        );
-        try std.testing.expectEqual(
-            ModuleHome.init(image),
-            homeForModuleRootScope(&image.scope),
-        );
-
-        borrowed.deinit();
-        host.cleanup().drain();
-
-        // Now the contents are gone, and a borrow attempted after the fact fails
-        // its acquire rather than resurrecting anything.
-        try std.testing.expect(counting.total_requested_bytes < before_drop);
-        try std.testing.expectEqual(
-            @as(?GenerationPin, null),
-            tryPinAnchorInternal(owner),
-        );
-
-        container.deinit();
-        host.cleanup().reclaimTombstones(destroyParkedAnchor);
-        host.cleanup().drain();
-    }
-    try std.testing.expectEqual(.ok, counting.deinit());
-}
-
-test "modules: the same drop with no borrow reclaims the contents" {
-    // The strawman the stochastic tests could not express: identical to the test
-    // above except that no borrow is taken. If the contents survived here too,
-    // the borrow above would be proving nothing about the borrow.
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
-    const allocator = counting.allocator();
-    {
-        var host = heap.HostOwner.init(allocator);
-        const releases = host.domain();
-        var container = try env.Env.init(&host);
-
-        const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
-        const owner: *env.ImageAnchor = @ptrCast(image.anchor);
-        _ = try container.scopeIdForOwned(&image.scope, owner);
-
-        const before_drop = counting.total_requested_bytes;
-        image.release();
-        host.cleanup().drain();
-
-        try std.testing.expect(counting.total_requested_bytes < before_drop);
-        // The anchor outlived the image, so the failed acquire is a verdict
-        // rather than a fault: this read is exactly what a stale word does.
-        try std.testing.expectEqual(
-            @as(?GenerationPin, null),
-            tryPinAnchorInternal(owner),
-        );
-
-        container.deinit();
-        host.cleanup().reclaimTombstones(destroyParkedAnchor);
-        host.cleanup().drain();
-    }
-    try std.testing.expectEqual(.ok, counting.deinit());
-}
 
 /// Opaque observation capability owning one reference to a published image.
 pub const GenerationLease = enum(usize) {
@@ -1248,13 +817,20 @@ pub const GenerationLease = enum(usize) {
     /// One name in this published generation's directory.
     pub fn lookupCursor(self: GenerationLease, binding: intern.BindingName) ModuleNameLookupCursor {
         const retained = self.image();
+        retained.retain();
         return .{
             .lookup = if (retained.directory()) |names| names.rawLookup(binding) else null,
-            .pin = ModuleHome.init(retained).pinInternal(),
+            .pin = .initRetained(retained),
         };
     }
     pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
         return publicNameCursorFor(self.image());
+    }
+    /// Every name of the generation's directory, private ones included,
+    /// borrowed for the lease.
+    pub fn entries(self: GenerationLease) ?env.NameMap.RawEntryCursor {
+        const names = self.image().directory() orelse return null;
+        return names.rawEntries();
     }
     fn testNameCursor(self: GenerationLease) TestCatalog.NameCursor {
         return .{ .next = self.image().tests.entries_head };
@@ -1269,8 +845,7 @@ pub const GenerationLease = enum(usize) {
         };
     }
     /// Session-gated transfer from observation to execution. The raw image
-    /// stays hidden on both sides, which is why an activation's home can only
-    /// come from the registry lease it was resolved through.
+    /// stays hidden on both sides.
     pub fn enterExecution(
         self: *GenerationLease,
         _: *const ExecutionAccess,
@@ -1300,11 +875,11 @@ pub const OwnedImage = enum(usize) {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@backingInt(self.*));
     }
-    pub fn executionHome(
-        self: *const OwnedImage,
-        _: *const ExecutionAccess,
-    ) *ModuleHome {
-        return .init(self.borrow());
+    /// What the construction body, and code of the module once registered,
+    /// runs as.
+    pub fn root(self: *const OwnedImage) ModuleRoot {
+        const image = self.borrow();
+        return .{ .scope = image.scope, .provenance = image.provenance };
     }
     pub fn moduleName(self: *const OwnedImage) intern.ModuleName {
         return self.borrow().name;
@@ -1330,7 +905,10 @@ pub const OwnedImage = enum(usize) {
     ) error{OutOfMemory}!void {
         const image = self.borrow();
         const origin: env.BindingOrigin = .{ .module_local = .{ .trace_word = name } };
-        const handle: *anyopaque = @ptrCast(image);
+        const home: env.DefinitionRoot = .{ .module = .{
+            .scope = image.scope,
+            .provenance = image.provenance.sourceId(),
+        } };
         const created: env.Entry = .{ .definition = switch (publication) {
             .word => |word| try env.Definition.createSource(image.allocator, .static, env.quotationHeader(word.body), .{
                 .visibility = word.visibility,
@@ -1338,25 +916,22 @@ pub const OwnedImage = enum(usize) {
                 .effect = word.effect,
                 .doc = word.doc,
                 .source = word.source,
-                .root = .image,
+                .root = home,
                 .attribution = word.attribution,
-                .home = handle,
             }),
             .native => |native| try env.Definition.create(image.allocator, .static, .{ .native = native.callable }, .{
                 .visibility = native.visibility,
                 .origin = origin,
                 .effect = native.effect,
                 .doc = native.doc,
-                .root = .image,
-                .home = handle,
+                .root = home,
             }),
             .builtin => |primitive| try env.Definition.create(image.allocator, .static, .{ .builtin = primitive.primitive }, .{
                 .visibility = primitive.visibility,
                 .origin = origin,
                 .effect = primitive.effect,
                 .doc = primitive.doc,
-                .root = .image,
-                .home = handle,
+                .root = home,
             }),
         } };
         image.stage(name, created) catch |err| {
@@ -1881,11 +1456,10 @@ pub const Registry = enum(usize) {
         pub fn quotation(self: *const TestExecutionTarget) *value.ListHandle {
             return env.quotationHeader(self.body);
         }
-        pub fn home(
-            self: *const TestExecutionTarget,
-            access: *const ExecutionAccess,
-        ) *ModuleHome {
-            return self.generation.home(access);
+        /// The module the test runs as.
+        pub fn root(self: *const TestExecutionTarget) ModuleRoot {
+            const image = self.generation.image();
+            return .{ .scope = image.scope, .provenance = image.provenance };
         }
         pub fn deinit(self: *TestExecutionTarget) void {
             self.generation.deinit();
@@ -1992,15 +1566,26 @@ pub const Registry = enum(usize) {
         return retired;
     }
 
-    /// A fresh image for `name`. The caller has validated the name; the
-    /// registry checks it again at publication, which is the boundary that
-    /// owns registry names.
+    /// A fresh image for the module whose name's scope is `scope`. The
+    /// caller has validated the name; the registry checks it again at
+    /// publication, which is the boundary that owns registry names.
     pub fn createImage(
         self: *Registry,
-        name: intern.ModuleName,
+        scope: *env.Scope,
         provenance: RegistrationProvenance,
     ) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), name, provenance));
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), scope, provenance));
+    }
+
+    /// The generation registered under `name` now, or null when none is.
+    /// Constant work: one lookup in the current directory.
+    pub fn currentGeneration(self: *const Registry, name: intern.ModuleName) ?GenerationLease {
+        var directory = self.acquireDirectory();
+        defer directory.deinit();
+        const current = directory.directory orelse return null;
+        const image = current.modules.find(name) orelse return null;
+        image.retain();
+        return .initRetained(image);
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);
@@ -2016,11 +1601,11 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            name: intern.ModuleName,
+            scope: *env.Scope,
             provenance: RegistrationProvenance,
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
-            const candidate = try registry.createImage(name, provenance);
+            const candidate = try registry.createImage(scope, provenance);
             // The descriptor's module documentation was validated with it.
             candidate.document(instance.validated().documentation());
             return .{
@@ -2089,7 +1674,7 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            name: intern.ModuleName,
+            scope: *env.Scope,
             provenance: RegistrationProvenance,
             module: env.BuiltinModule,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
@@ -2097,7 +1682,7 @@ pub const Registry = enum(usize) {
                 .allocator = registry.allocator(),
                 .releases = registry.releaseDomain(),
                 .words = module.words,
-                .candidate = try registry.createImage(name, provenance),
+                .candidate = try registry.createImage(scope, provenance),
             };
             errdefer result.deinit();
             const document = try result.buildDocumentation(module.doc);

@@ -485,7 +485,6 @@ fn resolveForReflection(
                 return .{ .retry = try fiber.retryQualifiedOperandAfterLoad(requested, miss) };
             },
             .unresolved => |chain| fiber.undefinedNameIn(requested.name, chain),
-            .retired => fiber.failUnbound(requested, .retired),
             .alias_cycle => fiber.failUnbound(requested, .alias_cycle),
         },
     };
@@ -493,8 +492,8 @@ fn resolveForReflection(
 
 /// Documentation and the declared effect are the only reflection that yields
 /// values. There is no counterpart for a binding's stored body: nothing lifts a
-/// published body out of the home it resolves against, which is what keeps a
-/// quotation's scope label impossible to re-site.
+/// published body out of the root it resolves against, which is what keeps a
+/// quotation's words impossible to re-site.
 fn installLookup(fiber: *Fiber, requested: value.Symbol) MachineError!void {
     try fiber.startDriver(LookupDriver{
         .requested = requested,

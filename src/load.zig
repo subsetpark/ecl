@@ -884,7 +884,12 @@ const AutoLoadDriver = struct {
         // The candidate is created before ownership moves: struct-literal
         // fields evaluate in order, so a failure here would otherwise
         // strand the lease and path this driver had already taken.
-        const publication = try modules.Registry.BuiltinCandidateCursor.init(fiber.inherited.registry, self.request.module.name, .standard_library, module);
+        const publication = try modules.Registry.BuiltinCandidateCursor.init(
+            fiber.inherited.registry,
+            try fiber.environment.moduleScope(self.request.module.name),
+            .standard_library,
+            module,
+        );
         // No errdefer: from here nothing fails until `startDriver`, which
         // disposes the whole uninstalled driver's owned fields itself.
         const next = BuiltinLoadDriver{
@@ -1086,7 +1091,7 @@ const NativeLoadDriver = struct {
             .loaded => |*instance| {
                 const publication = try modules.Registry.NativeCandidateCursor.init(
                     fiber.inherited.registry,
-                    self.name,
+                    try fiber.environment.moduleScope(self.name),
                     self.provenance,
                     instance.borrow(),
                 );
@@ -1254,7 +1259,7 @@ const SourceDriver = struct {
             self.text.borrow().sourceName(),
             self.text.borrow().source(),
             &self.diag,
-            try fiber.rootLinker(fiber.lexicalScope(), self.sourceProvenance(fiber)),
+            fiber.rootLinker(fiber.lexicalScope(), self.sourceProvenance(fiber)),
         );
         self.state = .{ .ingesting = ingestion };
     }

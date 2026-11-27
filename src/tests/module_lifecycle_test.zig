@@ -381,10 +381,10 @@ test "concurrency: applying an escaped quotation races reload" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // A quotation that escaped `racer` refers to the image it was written in, and
-    // spawned tasks bind and apply it while a concurrent `@defm` replaces that
-    // image. The Session keeps the replaced image, so each task resolves the
-    // escaped words against it while the registry publishes the new one.
+    // A quotation that escaped `racer` refers to the module by name, and
+    // spawned tasks apply it while a concurrent `@defm` replaces the
+    // registration: each task resolves the escaped word in whichever
+    // registration is current when it reaches it.
     //
     // Its name places it in the `concurrency:` tier so it runs under ThreadSanitizer and
     // at eight workers. The assertions are deliberately weak: failures stay
@@ -399,7 +399,7 @@ test "concurrency: applying an escaped quotation races reload" {
 // The `concurrency:` prefix is load-bearing: the TSan and 8-worker tiers
 // select on it.
 
-test "concurrency: escaped quotations keep running old code across a concurrent reload" {
+test "concurrency: escaped quotations follow a concurrent reload" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -407,11 +407,11 @@ test "concurrency: escaped quotations keep running old code across a concurrent 
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
-        // The quotation escapes its module, so its words are linked to the
-        // image it was written in. Tasks bind and apply it while a reload
-        // replaces that image; the Session keeps the replaced image, so every
-        // task runs the old code, and the allocator checks that nothing the
-        // reload published or retired leaks.
+        // The quotation escapes its module, and its words refer to the
+        // module by name. Tasks apply it while a reload replaces the
+        // registration, so each runs the old word or the new one; the
+        // allocator checks that nothing the reload published or retired
+        // leaks.
         try expectOk(
             &runtime,
             "((1) `k def ((k)) `q def) `goner @defm goner.q `gone set",
@@ -422,11 +422,13 @@ test "concurrency: escaped quotations keep running old code across a concurrent 
                 "((2) `k def ((k)) `q def) `goner @defm (task.await) each pop",
             "",
         );
+        // Once the reload has completed, the quotation runs the new word.
+        try expectStack(&runtime, "gone apply", "2");
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
-test "concurrency: a reload that drops a word leaves escaped quotations running old code" {
+test "concurrency: a reload that drops a word leaves escaped quotations undefined" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -434,9 +436,9 @@ test "concurrency: a reload that drops a word leaves escaped quotations running 
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
-        // The reload drops `q`, while tasks are still applying a quotation
-        // written in the old image. The Session keeps that image, so its words
-        // still resolve there.
+        // The reload drops `k`, while tasks are still applying a quotation
+        // that calls it: each task reaches the word before the reload or
+        // fails on it after.
         try expectOk(
             &runtime,
             "((1) `k def ((k)) `q def) `reloaded @defm reloaded.q `held set",
@@ -444,12 +446,13 @@ test "concurrency: a reload that drops a word leaves escaped quotations running 
         try expectStack(
             &runtime,
             "[1] 64 take (pop ((held apply) @attempt) @spawn) each " ++
-                "((2) `k def) `reloaded @defm (task.await) each pop",
+                "((2) `j def) `reloaded @defm (task.await) each pop",
             "",
         );
-        // The replacement is what callers now reach; the escaped quotation went
-        // on meaning what it meant, for as long as anything held it.
-        try expectStack(&runtime, "reloaded.k", "2");
+        // The replacement is what callers now reach, and the escaped
+        // quotation's word has no definition in it.
+        try expectStack(&runtime, "reloaded.j", "2");
+        try expectErrorContains(&runtime, "held apply", &.{ "kind undefined-word", "word k", "scope module" });
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }

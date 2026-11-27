@@ -647,7 +647,7 @@ current definitions.
 
 ### The word occurrence carries its cell
 
-Definitions live in roots: the session, each module image, and core. A word's
+Definitions live in roots: the session, each module, and core. A word's
 link is the id of a cell in a table the Session's `Env` owns. A cell records
 where the word was written: the `ScopeId` of the root, the source whose text
 it came from, and its spelling. One root, source, and spelling always yield
@@ -655,7 +655,7 @@ the same cell, so a link stands for a place rather than for one occurrence.
 `Env` is the only minter of cells, and every producer of words obtains links
 through a linker built for one root and one source. The reader links each
 occurrence as it reads it, with the source being read; a module construction
-body is relinked to its image and that image's source; a word built at run
+body is relinked to its module's name and its image's source; a word built at run
 time is linked as the activation that built it would have written it; and one
 the implementation builds for itself links to nothing and means core. Copying,
 moving, or splicing a word copies its link, so a single quotation may contain
@@ -681,16 +681,17 @@ keyed lookup that only producers of links pay. A source is an opaque value to
 decoder.
 
 Scope ids are issued monotonically and never reused, because a cell holds a
-bare id and no reference. Core and the session each have one id for the life of
-the `Env`; an image's id identifies its scope cell, which goes empty when an
-unpublished image is discarded, so resolving a word written there is a definite
-failure rather than a fallback.
+bare id and no reference. Core, the session, and each module name have one id
+for the life of the `Env`. A module's root is its name, never an image: every
+registration of the name shares the id and the cells written under it, and a
+word written in a module denotes whatever the name registers when the word is
+reached.
 
 ### Definitions are immutable
 
 A `Definition` is one closed choice — a source body, an in-tree builtin
 callback, or a validated native callable — together with its effect,
-documentation, visibility, source slice, and module-local name. Nothing about
+documentation, visibility, source slice, module-local name, and root. Nothing about
 it changes once it is created; replacing a name publishes a different
 definition. A definition is sealed by its constructor, so every holder of one
 holds code that execution, publication, and reflection can read, and a
@@ -700,29 +701,37 @@ call itself or a word defined later. The one check of a body is of a
 host-built module's literal table entry, which is refused when it executes a
 word.
 
+A module's definition carries its root by value: the scope of the module's
+name and the provenance of the registration that made it. An activation of
+the definition is built from those two alone, so a definition holds nothing
+of the image that owns it.
+
 Ownership follows the root. Core's definitions live as long as the `Env`. A
 module image owns its definitions, and the Session keeps every published image
-until teardown, so words written in a replaced image keep their meaning. A
+until teardown, so a definition of a replaced image stays valid while code
+still runs it. A
 top-level session definition is counted, because replacement removes it from
 the directory while running activations and fibers' resolutions may still hold
 it. An activation running a body holds its definition, and a tail call secures
 the callee before it retires the caller. Counted definitions are the only kind
 reclaimed during a Session; the retention of published images is a deliberate
-exception, accepted to avoid an ownership protocol for quotations that escape
-their image, and memory grows with reload history.
+exception, accepted because an image's definitions are not counted and running
+code holds them without a reference, and memory grows with reload history.
 
 ### One resolver, at dispatch
 
 The resolver resolves one word: by its link to a root, then the root's
 directory and core, or, for a dotted spelling, a module registration and its
-public entry; `core.` selects core alone. A name alias is followed through the
+public entry; `core.` selects core alone. A module root is looked up by name
+in the captured snapshot, with no visibility check, and the word in that
+image's directory, private names included; an unregistered name leaves core
+alone. A name alias is followed through the
 same resolver, as the module holding it would resolve it; Brent's algorithm
 detects a cycle without bounding the length of an acyclic chain.
 
 Whose view of the module map finds a module is a property of the word, never
-of the site resolving it: the source its cell records, the image's own source
-for a word written in an image, and the holding module's source along an alias
-chain. A word with no cell has no source. A primitive that takes a module name
+of the site resolving it: the source its cell records, and the holding
+module's source along an alias chain. A word with no cell has no source. A primitive that takes a module name
 keeps the operand's link and looks the module up as that symbol's source. A
 miss that a load might cure reports the view it searched under, and the load
 asks as that view, so a load can succeed only where the lookup that follows it
@@ -786,16 +795,26 @@ resolutions, because core's directory changes without a publication.
 ### An execution site is the current root
 
 An activation runs in one root, and its `ExecutionSite` identifies it by that
-root's scope. The scope is where the activation's own definitions land. When
-it is a module image's root scope, the image is the module whose code is
-running, and the site derives it from the scope instead of carrying it: an
-activation cannot run in one module's scope as another module, or as none.
+root's scope. The scope is where the activation's own definitions land. `Env`
+owns one scope per module name for the life of the Session, recording the
+name and the scope id words written in the module carry. When an activation's
+scope is a module's, that module is the one whose code is running, and the
+site derives it from the scope instead of carrying it: an activation cannot
+run in one module's scope as another module, or as none.
 
-A module word runs in its image's scope. Every other word runs at its caller's
+No site and no definition refers to an image; the one frame that holds one is
+a construction boundary, which owns the image it stages. The few readers that
+need an image find it. A definition word finds the image being staged through
+the open construction boundary whose image has the current scope, and
+reflection finds the module's current registration by name, under a lease.
+
+A module word runs in its module's scope, under the provenance its definition
+carries. Every other word runs at its caller's
 site unchanged, and a quotation applied as a value, by `apply`, a combinator,
 `@attempt`, or a resumed load, runs in its caller's root without the caller's
 embedded registration trust. A task runs in its spawner's root; a protected
-test invocation runs as its module's image. A fiber records which of these
+test invocation runs as its module, under the provenance of the registration
+its body was read from. A fiber records which of these
 its root activation is as one tagged value.
 
 Whether definitions may land is a flag on the site, set only where a root is
@@ -817,8 +836,8 @@ authority facts cross a boundary as one nominal value.
 A module image is created with its name, by `@defm` or by a loader that has
 validated the name. The name is part of the image's identity: registration consumes
 the sealed image and publishes it under that name, so no image is ever
-registered under a second one. Whatever reports running code's module, `*module*`, a diagnostic's
-qualified spelling, or the private home, reads it from the image. While its construction body runs, `def`, `defp`, `import`, and
+registered under a second one. An image refers to the scope of its name, and its construction body runs in
+that scope, as the module's code does once registered. While its construction body runs, `def`, `defp`, `import`, and
 `importp` stage names in the image; nothing staged is visible, so the body
 cannot run a definition it has made. When the body completes, the module is
 sealed: the staged names become the image's directory, and a name staged
@@ -837,11 +856,12 @@ reference until it retires. Reload therefore never inherits documentation, and
 a qualified call does.
 
 Registration publishes the sealed image and adds it to the registry's history,
-which holds one reference to every image the registry ever published. Old code
-keeps running: a word written in a replaced generation keeps resolving there,
-while a qualified name reaches the generation registered when it runs. This resembles Erlang's distinction
-between old and current module code and read-copy-update's separation of
-publication from reclamation.
+which holds one reference to every image the registry ever published. Code of
+a replaced generation keeps running, and each word it reaches resolves in the
+generation registered then, as a qualified name does. A construction body's
+own words follow the same rule, so they see the generation being replaced, or
+core alone when the name is new. Publication stays separate from reclamation,
+as in read-copy-update.
 
 The reserved qualifier `core` is decided before any registry work. When the
 resolver splits a dotted spelling and the module segment is exactly `core`, it

@@ -280,19 +280,49 @@ test "word cells: exports resolves its module as the source of its operand" {
 }
 
 test "word cells: a reload reaches a plain word of the module that has already run" {
-    // PENDING: Patch 7
-    // A module word calls a helper of its module by its plain name and has
-    // run once. Reload the module with a different helper. Expect code of the
-    // earlier registration that is still reachable to run the new helper.
-    return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // `run` calls its module's `step`, applies its caller's quotation, and
+    // calls `step` again.
+    try expectOk(&runtime, "((1) `step def (|q| step q apply step) `run def) `looper @defm");
+    try expectStack(&runtime, "() looper.run", "1 1");
+    // The quotation reloads the module while `run` is running: the second
+    // call reads the module as registered then. The reload drops `run`
+    // itself, which the activation running it outlives.
+    try expectStack(&runtime, "(((2) `step def) `looper @defm) looper.run", "1 2");
+    // A word of the module that loops calling a helper reaches each
+    // registration made between its calls.
+    try expectOk(&runtime, "((10 +) `bump def ((apply 1 bump) each) `sweep def) `looper @defm");
+    try expectStack(
+        &runtime,
+        "[() (((20 +) `bump def) `looper @defm) (((30 +) `bump def) `looper @defm)] looper.sweep",
+        "[11 21 31]",
+    );
 }
 
 test "word cells: a quotation that escaped a module resolves in the module's current registration" {
-    // PENDING: Patch 7
-    // A module word returns a quotation that calls a private word of the
-    // module. Reload the module, then apply the quotation. Expect the private
-    // word of the current registration.
-    return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // The session has no `secret`, and the module's is private: only the
+    // quotation's own root reaches it.
+    try expectOk(&runtime, "((1) `secret defp ((secret)) `handle def) `vault @defm vault.handle `held set");
+    try expectStack(&runtime, "held apply", "1");
+    try expectOk(&runtime, "((2) `secret defp) `vault @defm");
+    try expectStack(&runtime, "held apply", "2");
+    // A symbol the module's code builds at run time is written in the module
+    // too, so it follows the module the same way.
+    try expectOk(&runtime, "((3) `secret defp (\"secret\" intern) `spell def) `vault @defm vault.spell `built set");
+    try expectStack(&runtime, "built execute", "3");
+    try expectOk(&runtime, "((4) `secret defp) `vault @defm");
+    try expectStack(&runtime, "built execute held apply", "4 4");
 }
 
 test "word cells: reloading a module under running tasks keeps live memory bounded" {

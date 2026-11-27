@@ -21,7 +21,6 @@ pub const Context = struct {
     environment: *env.Env,
     /// Owned by the context's holder, which releases it with `deinit`.
     view: modules.View,
-    module_access: *const modules.ExecutionAccess,
     registry: *modules.Registry,
     project: ?*const map_state.Snapshot,
     libraries: machine.EmbeddedLibraries,
@@ -44,8 +43,6 @@ pub const Miss = union(enum) {
     /// the view the lookup searched under, so it fails where the lookup
     /// would miss again.
     unregistered_module: struct { name: intern.ModuleName, searcher: modules.RegistrationProvenance },
-    /// The word was written in an image that has since been torn down.
-    retired,
     /// Following name aliases did not reach a definition.
     alias_cycle,
 };
@@ -53,7 +50,6 @@ pub const Miss = union(enum) {
 /// A miss that no module load can turn into a definition.
 pub const Unbound = union(enum) {
     unresolved: LookupChain,
-    retired,
     alias_cycle,
 };
 
@@ -69,7 +65,7 @@ pub const Resolver = struct {
     pub const Progress = poll.Progress(Outcome);
 
     name: u32,
-    root: Root,
+    root: env.Root,
     /// The source the word was written in.
     written: modules.RegistrationProvenance,
     phase: Phase = .dot,
@@ -77,9 +73,9 @@ pub const Resolver = struct {
     dot_index: usize = 0,
     prefix: ?intern.ModuleName = null,
     export_name: ?intern.BindingName = null,
+    /// The registration whose directory is being read: the word's own
+    /// module, or the module a qualified name selected.
     generation: ?modules.GenerationLease = null,
-    /// The pin proving a written-in image live while its directory is read.
-    image_pin: ?modules.GenerationPin = null,
     /// The provenance of the image whose directory held the alias being
     /// followed: an alias resolves as its own module would resolve it.
     owner_provenance: ?modules.RegistrationProvenance = null,
@@ -97,13 +93,6 @@ pub const Resolver = struct {
         provenance: modules.RegistrationProvenance,
     };
 
-    const Root = union(enum) {
-        core,
-        session,
-        image: *env.ScopeCell,
-        retired,
-    };
-
     const Phase = enum {
         dot,
         prefix,
@@ -114,7 +103,8 @@ pub const Resolver = struct {
         export_lookup,
         core_atom,
         core_lookup,
-        image_lookup,
+        own_acquire,
+        own_lookup,
         complete,
     };
 
@@ -125,29 +115,25 @@ pub const Resolver = struct {
         module_validation: intern.ModuleNameCursor,
         binding_validation: intern.NamespaceCursor,
         acquisition: machine.ModuleLookupCursor,
+        own_acquisition: modules.Registry.AcquireCursor,
         export_lookup: modules.ModuleNameLookupCursor,
-        lookup: env.NameMap.RawLookupCursor,
         core_lookup: env.CoreMap.RawLookupCursor,
 
         fn deinit(self: *Work) void {
             switch (self.*) {
                 .acquisition => |*cursor| cursor.deinit(),
+                .own_acquisition => |*cursor| cursor.deinit(),
                 .export_lookup => |*cursor| cursor.deinit(),
-                .none, .dot, .atom, .module_validation, .binding_validation, .lookup, .core_lookup => {},
+                .none, .dot, .atom, .module_validation, .binding_validation, .core_lookup => {},
             }
             self.* = .none;
         }
     };
 
     pub fn init(context: *const Context, word: value.Symbol) Resolver {
-        const root: Root = switch (env.wordTarget(word.slot)) {
+        const root: env.Root = switch (env.wordTarget(word.slot)) {
             .unlinked, .local => .core,
-            .cell => |id| switch (context.environment.scopeOf(context.environment.place(id).root)) {
-                .unscoped, .core => .core,
-                .session => .session,
-                .cell => |cell| .{ .image = cell },
-                .retired => .retired,
-            },
+            .cell => |id| context.environment.scopeOf(context.environment.place(id).root),
         };
         return .{
             .name = word.name,
@@ -160,7 +146,6 @@ pub const Resolver = struct {
     pub fn deinit(self: *Resolver) void {
         self.work.deinit();
         if (self.generation) |*lease| lease.deinit();
-        if (self.image_pin) |*pin| pin.deinit();
         self.* = undefined;
     }
 
@@ -184,9 +169,9 @@ pub const Resolver = struct {
 
     fn plainChain(self: *const Resolver) LookupChain {
         return switch (self.root) {
-            .core, .retired => .core,
+            .core => .core,
             .session => .session,
-            .image => .module,
+            .module => .module,
         };
     }
 
@@ -194,21 +179,16 @@ pub const Resolver = struct {
     fn beginPlain(self: *Resolver, context: *const Context) Progress {
         const binding: intern.BindingName = @fromBackingInt(self.name);
         switch (self.root) {
-            .retired => return self.miss(.retired),
             .core => return self.beginCore(context, binding),
             .session => {
                 const entry = context.view.sessionFind(binding) orelse return self.beginCore(context, binding);
                 return self.follow(context, entry, false);
             },
-            .image => |cell| {
-                const owner = cell.ownerHandle() orelse return self.beginCore(context, binding);
-                self.image_pin = modules.tryPinAnchor(owner, context.module_access) orelse
-                    return self.miss(.retired);
-                const scope = cell.scopeUnder(.fresh_pin) orelse return self.miss(.retired);
-                const home = modules.homeForModuleRootScope(scope) orelse return self.beginCore(context, binding);
-                const lookup = home.lookupCursor(binding) orelse return self.beginCore(context, binding);
-                self.work = .{ .lookup = lookup };
-                self.phase = .image_lookup;
+            // The word's own module is found by name with no visibility
+            // check: it is the module the word was written in.
+            .module => |name| {
+                self.work = .{ .own_acquisition = context.view.acquireCursor(name) };
+                self.phase = .own_acquire;
                 return .pending;
             },
         }
@@ -262,13 +242,6 @@ pub const Resolver = struct {
     }
 
     fn beginAcquire(self: *Resolver, context: *const Context) Progress {
-        // A qualified name written in an image searches that image's file
-        // registries, so the image is held while its provenance is read.
-        if (self.root == .image and self.image_pin == null) {
-            const owner = self.root.image.ownerHandle();
-            if (owner) |handle| self.image_pin = modules.tryPinAnchor(handle, context.module_access) orelse
-                return self.miss(.retired);
-        }
         if (self.generation) |*lease| lease.deinit();
         self.generation = null;
         self.work.deinit();
@@ -285,19 +258,10 @@ pub const Resolver = struct {
     }
 
     /// The provenance a qualified name resolves under: the holder's along an
-    /// alias chain, the image's own for a word written in one, and otherwise
-    /// the source the word was written in. Where the word runs plays no part.
+    /// alias chain, and otherwise the source the word was written in. Where
+    /// the word runs plays no part.
     fn provenance(self: *const Resolver) modules.RegistrationProvenance {
-        if (self.owner_provenance) |owner| return owner;
-        switch (self.root) {
-            .image => |cell| if (cell.scope.load(.acquire)) |scope| {
-                if (self.image_pin != null) {
-                    if (modules.homeForModuleRootScope(scope)) |home| return home.registrationProvenance();
-                }
-            },
-            else => {},
-        }
-        return self.written;
+        return self.owner_provenance orelse self.written;
     }
 
     pub fn advance(self: *Resolver, context: *const Context) Progress {
@@ -406,14 +370,27 @@ pub const Resolver = struct {
                     return self.found(definition);
                 },
             },
-            .image_lookup => switch (self.work.lookup.advance()) {
+            .own_acquire => switch (self.work.own_acquisition.advance()) {
+                .pending => .pending,
+                .complete => |maybe_generation| {
+                    self.work.deinit();
+                    const binding: intern.BindingName = @fromBackingInt(self.name);
+                    const generation = maybe_generation orelse return self.beginCore(context, binding);
+                    self.generation = generation;
+                    self.work = .{ .export_lookup = generation.lookupCursor(binding) };
+                    self.phase = .own_lookup;
+                    return .pending;
+                },
+            },
+            .own_lookup => switch (self.work.export_lookup.advance()) {
                 .pending => .pending,
                 .complete => |maybe_entry| {
-                    if (maybe_entry) |entry| {
-                        self.owner_provenance = self.provenance();
-                        return self.follow(context, entry, false);
-                    }
-                    return self.beginCore(context, @fromBackingInt(self.name));
+                    const entry = maybe_entry orelse {
+                        self.work.deinit();
+                        return self.beginCore(context, @fromBackingInt(self.name));
+                    };
+                    self.owner_provenance = self.generation.?.provenance();
+                    return self.follow(context, entry, false);
                 },
             },
             .complete => unreachable,

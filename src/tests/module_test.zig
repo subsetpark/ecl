@@ -464,6 +464,7 @@ const registry_commits_per_worker = 50;
 
 const RegistryThreadContext = struct {
     registry: *modules.Registry,
+    environment: *env.Env,
     failed: *std.atomic.Value(bool),
     shared: intern.ModuleName,
     /// One fresh module name per commit, so a lost update loses a name.
@@ -471,7 +472,8 @@ const RegistryThreadContext = struct {
 };
 
 fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool {
-    var candidate = context.registry.createImage(name, .ordinary) catch return false;
+    const scope = context.environment.moduleScope(name) catch return false;
+    var candidate = context.registry.createImage(scope, .ordinary) catch return false;
     defer candidate.deinit();
     var sealed = candidate.sealLiteralGroup() catch return false;
     defer sealed.deinit();
@@ -498,8 +500,8 @@ test "registry: concurrent commits are linearized without lost names" {
     defer host.cleanup().drain();
     var environment = try env.Env.init(&host);
     defer {
-        // Images clear their Env-owned scope-label cell as they
-        // retire, so that work must drain before the Env frees them.
+        // Images retire as deferred work, which must drain before the Env
+        // frees the scopes they refer to.
         host.cleanup().drain();
         environment.deinit();
     }
@@ -515,6 +517,7 @@ test "registry: concurrent commits are linearized without lost names" {
     var failed = std.atomic.Value(bool).init(false);
     const context = RegistryThreadContext{
         .registry = &registry,
+        .environment = &environment,
         .failed = &failed,
         .shared = try intern.internModuleName("shared-module"),
         .distinct = &distinct,
@@ -577,8 +580,8 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     defer host.cleanup().drain();
     var environment = try env.Env.init(&host);
     defer {
-        // Images clear their Env-owned scope-label cell as they
-        // retire, so that work must drain before the Env frees them.
+        // Images retire as deferred work, which must drain before the Env
+        // frees the scopes they refer to.
         host.cleanup().drain();
         environment.deinit();
     }
@@ -596,7 +599,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     const first_name = try intern.internModuleName("allocation-module");
     const second_name = try intern.internModuleName("allocation-second-module");
     const word_name = try intern.internNamespace("answer");
-    var first = try registry.createImage(first_name, .ordinary);
+    var first = try registry.createImage(try environment.moduleScope(first_name), .ordinary);
     defer first.deinit();
     const constant = try TestBinding.init(allocator);
     defer releases.releaseValue(constant.body);
@@ -611,7 +614,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     try modules.testing.register(&registry, &first_sealed);
     var lease = modules.testing.acquire(&registry, first_name).?;
     defer lease.deinit();
-    var second = try registry.createImage(first_name, .ordinary);
+    var second = try registry.createImage(try environment.moduleScope(first_name), .ordinary);
     defer second.deinit();
     try second.stageDefinition(word_name, .{ .word = .{
         .body = env.quotation(constant.body.list).?,
@@ -622,7 +625,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var second_sealed = try second.sealLiteralGroup();
     defer second_sealed.deinit();
     try modules.testing.register(&registry, &second_sealed);
-    var third = try registry.createImage(second_name, .ordinary);
+    var third = try registry.createImage(try environment.moduleScope(second_name), .ordinary);
     defer third.deinit();
     try third.stageDefinition(word_name, constant.module(effect, .public));
     var third_sealed = try third.sealLiteralGroup();

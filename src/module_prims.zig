@@ -124,14 +124,14 @@ const DefmDriver = struct {
     }
 };
 
-/// Returns the name of the active execution home's image. A construction
+/// Returns the name of the module whose code is running. A construction
 /// body reports the name it is being built under.
 fn moduleNameWord(fiber: *Fiber) MachineError!void {
-    const home = fiber.currentHome() orelse return fiber.fail(
+    const name = fiber.currentModule() orelse return fiber.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    try fiber.pushOwned(.{ .symbol = .{ .name = intern.moduleId(home.name()) } });
+    try fiber.pushOwned(.{ .symbol = .{ .name = intern.moduleId(name) } });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names

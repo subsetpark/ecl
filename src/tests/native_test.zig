@@ -1363,8 +1363,8 @@ test "native: the static transport publishes a linked descriptor through the sam
     defer {
         const closing = owner.closeCalls();
         registry.deinit();
-        // Images clear their Env-owned scope-label cell as they retire, so this
-        // drain must finish before the Env releases the cells.
+        // Images retire as deferred work, so this drain must finish before
+        // the Env frees the scopes they refer to.
         host.cleanup().drain();
         environment.deinit();
         const settled = closing.settle();
@@ -1389,7 +1389,7 @@ test "native: the static transport publishes a linked descriptor through the sam
         },
     };
     defer loaded.releasePin();
-    var publication = try modules.Registry.NativeCandidateCursor.init(&registry, requested, .ordinary, loaded);
+    var publication = try modules.Registry.NativeCandidateCursor.init(&registry, try environment.moduleScope(requested), .ordinary, loaded);
     defer publication.deinit();
     var candidate = while (true) switch (try publication.advance()) {
         .pending => {},

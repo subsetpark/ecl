@@ -557,9 +557,9 @@ pub const Session = enum(usize) {
         if (core.test_authority) |*authority| authority.deinit();
         core.registry.deinit();
         core.archive_owner.deinit();
-        // Registry teardown retires images, and an image clears its Env-owned
-        // scope-label cell as it goes. Drain that work before the Env releases
-        // the cells, so no deferred image release ever touches freed memory.
+        // Registry teardown retires images as deferred work. Drain it before
+        // the Env goes, so no deferred image release outlives what the Env
+        // owns.
         host.drain();
         core.environment.deinit();
         // Environment and registry retirement own native image pins. Drain
@@ -575,11 +575,6 @@ pub const Session = enum(usize) {
         // retirement, including reservations inherited by escaped descendants.
         core.filesystem_owner.deinit();
         core.allocator().destroy(core.filesystem_owner);
-        // Last, and only here. A scope cell points to a parked anchor without
-        // holding a reference to it, so the anchor stays valid until execution has
-        // provably stopped -- which `scheduler.deinit` at the top of this
-        // function guarantees, ahead of every teardown below it.
-        host.reclaimTombstones(modules.destroyParkedAnchor);
         allocator.destroy(core.host_owner);
         allocator.destroy(core);
         self.* = .consumed;
@@ -1346,7 +1341,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     // Publish through the production candidate/registration boundary. Only
     // setup uses the owning registry; assertions observe public Session output.
     const registry = &runtime.coreState().registry;
-    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, try intern.internModuleName("probe"), .ordinary, .{ .doc = "Scheduler probe words.", .words = &.{
+    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, try runtime.coreState().environment.moduleScope(try intern.internModuleName("probe")), .ordinary, .{ .doc = "Scheduler probe words.", .words = &.{
         .{ .name = "immediate", .primitive = Probe.immediate, .effect = "-- n", .doc = "Return one number." },
         .{ .name = "host-yield", .primitive = Probe.hostYield, .effect = "-- n", .doc = "Yield without parking before returning a number." },
         .{ .name = "empty", .primitive = Probe.empty, .effect = "-- n", .doc = "Violate the output contract immediately." },

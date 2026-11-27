@@ -1,7 +1,7 @@
 //! Public behavior of module construction bodies.
 //!
-//! `@defm` re-homes every word of the body it is handed, however the body was
-//! built, through every nested list and dict.
+//! `@defm` relinks every word of the body it is handed to its module,
+//! however the body was built, through every nested list and dict.
 //!
 //! Every test here goes through the ordinary `Session` interface. Nothing
 //! inspects interpreter representation.
@@ -57,7 +57,7 @@ fn expectErrorContains(
     while (runtime.stackItems().len != 0) try expectOk(runtime, "pop");
 }
 
-test "module bodies: a construction body refers to its image" {
+test "module bodies: a construction body refers to its module" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -125,7 +125,7 @@ test "module bodies: a runtime-built body is module text too" {
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
-test "module bodies: one reader body serves two images independently" {
+test "module bodies: one reader body serves two modules independently" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -137,22 +137,22 @@ test "module bodies: one reader body serves two images independently" {
     );
     try expectOk(&runtime, "shared `left @defm");
     try expectOk(&runtime, "shared `right @defm");
-    // Each image stamped its own copy, so each reads its own state.
+    // Each module relinked its own copy, so each reads its own state.
     try expectStack(&runtime, "left.read", "left");
     try expectStack(&runtime, "right.read", "right");
     // The original body is unchanged and still constructs.
     try expectStack(&runtime, "shared `third @defm third.read", "third");
 }
 
-test "module bodies: a nested construction inside a stamped body still refers to its own image" {
+test "module bodies: a nested construction inside a relinked body still refers to its own module" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    // The inner `@defm` is handed the outer stamp's copy of its body. A
-    // re-scoped copy of reader text is still reader text, so the inner
-    // construction re-scopes it against the inner image rather than leaving it
+    // The inner `@defm` is handed the outer module's copy of its body. A
+    // relinked copy of reader text is still reader text, so the inner
+    // construction relinks it to the inner module rather than leaving it
     // pointing at the enclosing one.
     try expectStack(
         &runtime,
@@ -161,7 +161,7 @@ test "module bodies: a nested construction inside a stamped body still refers to
         "2",
     );
     // A body with many occurrences is copied whole, every one of them referring to
-    // the image. (That the copy is *sliced* is a cursor-level property, proved
+    // the module. (That the copy is *sliced* is a cursor-level property, proved
     // in `spans.zig` by advancing one element at a time.)
     try expectStack(
         &runtime,

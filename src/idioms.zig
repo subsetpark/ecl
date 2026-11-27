@@ -280,7 +280,7 @@ fn followingWord(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.T
 
 /// Resolves `word` where the phrase runs and returns its trace word only when
 /// it is the trusted binding expected. A word that resolves to nothing a plain
-/// word may run, or whose root has retired, is simply not that binding;
+/// word may run is simply not that binding;
 /// generic execution reports any error.
 fn liveWord(peeked: ?machine.PeekedWord, primitive: ?env.PrimitiveImpl) ?intern.TraceWord {
     const resolved = peeked orelse return null;
@@ -1281,7 +1281,7 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
 /// resolves through its own slot wherever it runs, and recognition reads that
 /// same slot, so a word written in another root, as a caller's quotation run
 /// inside a prelude definition is, matches exactly when dispatch would run the
-/// expected binding; a root that shadows the name, or has retired, declines.
+/// expected binding; a root that shadows the name declines.
 fn plainWord(slot_id: u32) bool {
     return env.wordTarget(slot_id) != .local;
 }

@@ -29,24 +29,20 @@ pub fn begin(
     defer body.deinit(fiber.releases, fiber.allocator);
     const registry = fiber.inherited.registry;
     const word = fiber.active_word;
-    var candidate = try registry.createImage(name, fiber.current.?.site.registration_provenance);
+    const scope = try fiber.environment.moduleScope(name);
+    var candidate = try registry.createImage(scope, fiber.current.?.site.registration_provenance);
     errdefer candidate.deinit();
     if (doc) |document| candidate.document(document);
-    // Every word in the body refers to the image. A specialized leaf holds no
-    // symbol and no container, so it opens the boundary unchanged in this
-    // step; any other body is re-scoped, which is user-sized and therefore
-    // ordinary resumable scheduler work: the driver holds the candidate
-    // image and the source body until the copy is finished and the
-    // boundary can open.
+    // Every word in the body refers to the module by name. A specialized
+    // leaf holds no symbol and no container, so it opens the boundary
+    // unchanged in this step; any other body is re-scoped, which is
+    // user-sized and therefore ordinary resumable scheduler work: the driver
+    // holds the candidate image and the source body until the copy is
+    // finished and the boundary can open.
     if (body.borrow().kind() != .generic_spine)
         return via.openImageBoundary(&candidate, word, body.take());
-    const home = candidate.executionHome(fiber.module_access);
-    const image_cell = try fiber.environment.scopeCell(
-        home.scope(fiber.module_access),
-        modules.anchorHandle(home, fiber.module_access),
-    );
     var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-        try fiber.archive.rescopeCursor(body.take(), fiber.environment.linker(image_cell.id, home.registrationProvenance().sourceId())),
+        try fiber.archive.rescopeCursor(body.take(), fiber.rootLinker(scope, candidate.provenance())),
     );
     defer cursor.deinit(fiber.releases, fiber.allocator);
     try via.startDriver(ConstructionDriver{

@@ -332,7 +332,7 @@ test "module: provisional tasks keep rollback generations alive until quiescence
     try expectOk(&runtime, "((((1) () while) @spawn pop missing) `bad @defm) @attempt pop");
 }
 
-test "module: hot reload commit failure and whole-body pinning" {
+test "module: hot reload commit failure and a word that reloads its own module" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -342,12 +342,11 @@ test "module: hot reload commit failure and whole-body pinning" {
     try expectOk(&runtime, "(1 `x setp " ++
         "( -- n ) ((2 `x setp ( -- n ) (x) `get def) `m @defm x) `probe def " ++
         "( -- n ) (x) `get def) `m @defm m.probe m.get");
-    // `probe` reloads its own module and then reads `x`. A module-written word
-    // anchors to the generation its activation entered, so the read lands in
-    // the image `probe` itself was written in; code on the stack is never
-    // re-pointed under itself. The fresh `m.get` afterwards follows the name to
-    // the generation that replaced it.
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    // `probe` reloads its own module and then reads `x`. A word written in a
+    // module resolves in the module as registered when it is reached, so the
+    // read lands in the registration `probe` just made, as the fresh `m.get`
+    // afterwards does.
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "(3 `x setp missing) `m @defm", &.{"kind undefined-word"});
     try expectOk(&runtime, "m.get");
@@ -849,20 +848,24 @@ test "module: a session quotation still resolves in the session" {
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
 }
 
-test "module: a body that reloads its own name keeps its entry generation" {
+test "module: a construction body's own words resolve in the current registration" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // `probe` re-registers its own name and then reads its private `x`. Code on
-    // the activation stack is never re-pointed under itself, so the read lands
-    // in the generation `probe` was entered with; a fresh entry afterwards
-    // follows the name to the generation that replaced it.
-    try expectOk(&runtime, "(1 `x setp " ++
-        "( -- n ) ((2 `x setp ( -- n ) (x) `get def) `m @defm x) `probe def " ++
-        "( -- n ) (x) `get def) `m @defm m.probe m.get");
+    // What a body stages is invisible until the module is registered, so on
+    // a first registration the body's own words see core alone.
+    try expectErrorContains(&runtime, "((1) `k def k `seen set) `staged @defm", &.{
+        "kind undefined-word",
+        "word k",
+        "scope module",
+    });
+    try expectOk(&runtime, "((1) `k def) `staged @defm");
+    // During a reload they see the registration being replaced: `k` here is
+    // the previous definition, not the one the body has just staged.
+    try expectOk(&runtime, "((2) `k def k `seen set) `staged @defm staged.seen staged.k");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
 }

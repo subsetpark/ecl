@@ -4,7 +4,7 @@
 //! resulting image as the registration's new generation. Every test here pins
 //! one publicly observable clause of that contract through the ordinary
 //! `Session` interface — no accessor exposes `ModuleImage`,
-//! `ModuleHome`, `Environment`, or any registry internal.
+//! `Environment`, or any registry internal.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const test_heap = @import("test_heap.zig");
@@ -360,42 +360,37 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "[7 0] 6 rand.int nip type", "int");
 }
 
-test "module values: a pushed quotation resolves in the image it was written in" {
+test "module values: a pushed quotation resolves in the module it was written in" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // `(k)` is written inside the module, so it resolves in that image's chain
+    // `(k)` is written inside the module, so it resolves in the module
     // rather than wherever the caller applies it. The session has no `k` at
-    // all, which is what makes the label load-bearing here.
+    // all, which is what makes the word's root load-bearing here.
     try expectOk(&runtime, "((1) `k def ((k)) `q def) `holding @defm holding.q `held set");
     try expectStack(&runtime, "held apply", "1");
 }
 
-test "module values: an escaped quotation refers to the image it was written in" {
+test "module values: an escaped quotation follows its module's registrations" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // A word written in a module body refers to that image. A quotation that
-    // escaped it goes on meaning what it meant, for as long as anything still
-    // holds the image -- redefinition reaches only future calls; existing code
-    // retains its meaning.
+    // A word written in a module body refers to the module by name, so a
+    // quotation that escaped it reads whatever is registered under that name
+    // when it is applied.
     try expectOk(&runtime, "((1) `k def ((k)) `q def) `held-name @defm held-name.q `held set");
     try expectStack(&runtime, "held apply", "1");
 
-    // Replacing the name publishes a new image. Fresh calls through the name
-    // get the new code, which is the whole of what the REPL needs.
+    // Replacing the name reaches fresh calls through the name and the
+    // quotation held from the replaced registration alike.
     try expectOk(&runtime, "((2) `k def ((k)) `q def) `held-name @defm");
     try expectStack(&runtime, "held-name.q apply", "2");
-
-    // The quotation held from the replaced generation is not re-pointed to the
-    // new image: the Session keeps the old image, so it goes on meaning what
-    // it meant.
-    try expectStack(&runtime, "held apply", "1");
+    try expectStack(&runtime, "held apply", "2");
 }
 
-test "module values: an escaped locals body keeps its replaced image" {
+test "module values: an escaped locals body resolves its words in the current registration" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -404,9 +399,11 @@ test "module values: an escaped locals body keeps its replaced image" {
     try expectOk(&runtime, "((1 +) `inc def ((|x| x inc)) `q def ((|x| x)) `r def) `lowered-owner @defm " ++
         "lowered-owner.q `held set lowered-owner.r `plain set");
     try expectStack(&runtime, "7 held apply", "8");
+    try expectOk(&runtime, "((2 +) `inc def) `lowered-owner @defm");
+    try expectStack(&runtime, "7 held apply", "9");
+    // A registration without the word leaves the body's own word undefined.
     try expectOk(&runtime, "((0) `q def) `lowered-owner @defm");
-    // The body's own word refers to the replaced image, which the Session keeps.
-    try expectStack(&runtime, "7 held apply", "8");
-    // Locals alone refer to nothing in the image.
+    try expectErrorContains(&runtime, "7 held apply", &.{ "kind undefined-word", "word inc", "scope module" });
+    // Locals alone refer to nothing in the module.
     try expectStack(&runtime, "7 plain apply", "7");
 }

@@ -179,12 +179,11 @@ const RootEntry = union(enum) {
     /// The fiber's own root scope.
     own,
     /// A root the fiber does not own: a task in its spawner's, or a Session's
-    /// root fiber in the Session's. The scope's owner outlives the fiber, or
-    /// the fiber pins it.
+    /// root fiber in the Session's. The scope's owner outlives the fiber.
     scope: *env.Scope,
-    /// One registered module generation's own code, under that image's
-    /// provenance. The fiber pins the generation before entering it.
-    image: *modules.ModuleHome,
+    /// One registered module's own code, under the provenance of the
+    /// registration it was read from.
+    module: modules.ModuleRoot,
 };
 /// Who runs a fiber, and so what it may do. A root fiber runs a submission
 /// or a host-driven load and may define. A task fiber runs in its spawner's
@@ -654,7 +653,7 @@ const ModuleBoundary = struct {
     image: modules.OwnedImage,
     /// The construction body `@defm` runs, after re-scoping. A declaration
     /// is module-level only while this is the current activation; quotations
-    /// called by the body may inherit its home but not its declaration site.
+    /// called by the body may inherit its scope but not its declaration site.
     root_code: *Header,
 
     fn deinit(self: ModuleBoundary) void {
@@ -831,10 +830,10 @@ fn encodeApplicationProvenanceTarget(
 
 pub const ExecutionSite = struct {
     /// The current root: where this body's own definitions land, and, when it
-    /// is a module image's root scope, the module whose code is running. A
-    /// module word runs in its image's scope; every other word, and every
-    /// quotation applied as a value, runs in its caller's. Where a word
-    /// resolves is carried by the word itself.
+    /// is a module's scope, the module whose code is running. A module word
+    /// runs in its module's scope; every other word, and every quotation
+    /// applied as a value, runs in its caller's. Where a word resolves is
+    /// carried by the word itself.
     scope: *env.Scope,
     /// Authority carried only while evaluating an embedded source module.
     /// A named module constructed by that source moves it into the immutable
@@ -851,7 +850,7 @@ pub const ExecutionSite = struct {
     fn root(fiber: *Fiber) ExecutionSite {
         const defining = fiber.role != .task;
         return switch (fiber.root_entry) {
-            .image => |home| image(home, fiber.module_access, defining),
+            .module => |home| module(home, defining),
             .own, .scope => .{
                 .scope = fiber.lexicalScope(),
                 .defining = defining,
@@ -863,17 +862,13 @@ pub const ExecutionSite = struct {
         };
     }
 
-    /// Code running as one module image: the image's own definitions, then
-    /// core, under the image's provenance.
-    fn image(
-        home: *modules.ModuleHome,
-        access: *const modules.ExecutionAccess,
-        defining: bool,
-    ) ExecutionSite {
+    /// Code running as one module, under the provenance of the registration
+    /// it belongs to.
+    fn module(home: modules.ModuleRoot, defining: bool) ExecutionSite {
         return .{
-            .scope = home.scope(access),
+            .scope = home.scope,
             .defining = defining,
-            .registration_provenance = home.registrationProvenance(),
+            .registration_provenance = home.provenance,
         };
     }
 
@@ -1569,12 +1564,8 @@ pub const Fiber = struct {
 
     const LifetimeGuard = struct {
         const State = union(enum) {
-            active: std.ArrayList(modules.GenerationPin),
-            scope: struct {
-                cursor: ?env.Scope.EmbeddedTeardownCursor = null,
-                generation_pins: std.ArrayList(modules.GenerationPin),
-            },
-            pins: std.ArrayList(modules.GenerationPin),
+            active,
+            scope: env.Scope.EmbeddedTeardownCursor,
             complete,
         };
         // Activations point at this address, so it must never move while the
@@ -1585,7 +1576,7 @@ pub const Fiber = struct {
         fn init(allocator: std.mem.Allocator, environment: *env.Env) LifetimeGuard {
             return .{
                 .root_scope = environment.sessionRoot(allocator),
-                .state = .{ .active = .empty },
+                .state = .active,
             };
         }
 
@@ -1595,70 +1586,19 @@ pub const Fiber = struct {
             self.root_scope = root;
         }
 
-        fn pin(
-            self: *LifetimeGuard,
-            allocator: std.mem.Allocator,
-            generation: *modules.ModuleHome,
-            access: *const modules.ExecutionAccess,
-        ) error{OutOfMemory}!void {
-            const pins = &self.state.active;
-            for (pins.items) |pinned| if (pinned.matches(generation, access)) return;
-            var owned_pin = generation.pin(access);
-            errdefer owned_pin.deinit();
-            try pins.append(allocator, owned_pin);
-        }
-
-        /// Takes ownership of a pin acquired elsewhere -- the borrow at
-        /// dispatch. Deduplicates the same way `pin` does, releasing the
-        /// incoming reference when one is already held, so adopting is
-        /// idempotent per owner.
-        fn adopt(
-            self: *LifetimeGuard,
-            allocator: std.mem.Allocator,
-            owned: *modules.GenerationPin,
-        ) error{OutOfMemory}!void {
-            const pins = &self.state.active;
-            for (pins.items) |pinned| if (pinned.sameOwner(owned.*)) {
-                owned.deinit();
-                return;
-            };
-            errdefer owned.deinit();
-            try pins.append(allocator, owned.*);
-            owned.* = .consumed;
-        }
-
         fn rootScope(self: *LifetimeGuard) *env.Scope {
             std.debug.assert(self.state == .active);
             return &self.root_scope;
         }
 
-        fn advanceTeardown(
-            self: *LifetimeGuard,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-        ) bool {
+        fn advanceTeardown(self: *LifetimeGuard) bool {
             return switch (self.state) {
-                .active => |pins| result: {
-                    self.state = .{ .scope = .{
-                        .generation_pins = pins,
-                    } };
+                .active => result: {
+                    self.state = .{ .scope = .init(&self.root_scope) };
                     break :result false;
                 },
-                .scope => |*scope| result: {
-                    _ = releases;
-                    if (scope.cursor == null)
-                        scope.cursor = .init(&self.root_scope);
-                    if (!scope.cursor.?.advance()) break :result false;
-                    const pins = scope.generation_pins;
-                    self.state = .{ .pins = pins };
-                    break :result false;
-                },
-                .pins => |*pins| if (pins.pop()) |pin_value| result: {
-                    var owned_pin = pin_value;
-                    owned_pin.deinit();
-                    break :result false;
-                } else result: {
-                    pins.deinit(allocator);
+                .scope => |*cursor| result: {
+                    if (!cursor.advance()) break :result false;
                     self.state = .complete;
                     break :result true;
                 },
@@ -1666,12 +1606,8 @@ pub const Fiber = struct {
             };
         }
 
-        fn deinit(
-            self: *LifetimeGuard,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-        ) void {
-            while (!self.advanceTeardown(releases, allocator)) {}
+        fn deinit(self: *LifetimeGuard) void {
+            while (!self.advanceTeardown()) {}
             self.* = undefined;
         }
     };
@@ -1805,7 +1741,7 @@ pub const Fiber = struct {
         return switch (self.root_entry) {
             .own => self.rootScope(),
             .scope => |scope| scope,
-            .image => |home| home.scope(self.module_access),
+            .module => |root| root.scope,
         };
     }
 
@@ -1986,9 +1922,9 @@ pub const Fiber = struct {
             self.native == .work_park_resume;
     }
     /// Scheduler-owned teardown of all user-sized fiber cargo. Each fiber
-    /// of budget retires at most one continuation, operand, native owner, or
-    /// generation pin. Array storage is released by `deinit` after this cursor
-    /// reports complete.
+    /// of budget retires at most one continuation, operand, or native owner.
+    /// Array storage is released by `deinit` after this cursor reports
+    /// complete.
     pub fn advanceSchedulerTeardown(self: *Fiber, budget: usize) CleanupProgress {
         std.debug.assert(budget != 0);
         var consumed: usize = 0;
@@ -2038,7 +1974,7 @@ pub const Fiber = struct {
                 },
                 .evaluating, .unwinding, .incomplete, .exit => {},
             }
-            if (!self.lifetime.advanceTeardown(self.releases, self.allocator)) {
+            if (!self.lifetime.advanceTeardown()) {
                 consumed += 1;
                 continue;
             }
@@ -2063,18 +1999,17 @@ pub const Fiber = struct {
     /// the body are still construction, so a body cannot launder a task launch
     /// through code it defines first.
     /// The names `words` lists from where this activation runs: a session
-    /// root's top-level directory, or a published image's.
+    /// root's top-level directory, or the directory of the running module's
+    /// current registration.
     pub fn visibleNameRoot(self: *Fiber) reflection.VisibleNameRoot {
-        const scope = self.currentScope();
-        if (scope.isModuleRoot()) if (modules.homeForModuleRootScope(scope)) |home| {
-            if (home.isPublished()) return .{ .image = .{
-                .entries = home.publishedEntries(),
-                .pin = home.pin(self.module_access),
-            } };
-            return .core;
+        return switch (self.currentScope().storage) {
+            .module_root => |module| {
+                const lease = self.inherited.registry.currentGeneration(module.name) orelse return .core;
+                return .{ .image = .{ .entries = lease.entries(), .lease = lease } };
+            },
+            .core_build => .core,
+            .session => .{ .session = self.inherited.registry.view() },
         };
-        if (scope.storage == .core_build) return .core;
-        return .{ .session = self.inherited.registry.view() };
     }
 
     /// The image under construction whose root is `scope`, found through the
@@ -2085,8 +2020,7 @@ pub const Fiber = struct {
             const boundary = &self.frames.items[@backingInt(frame_index)].boundary;
             switch (boundary.mode) {
                 .module => |*module| {
-                    if (module.image.executionHome(self.module_access).scope(self.module_access) == scope)
-                        return &module.image;
+                    if (module.image.root().scope == scope) return &module.image;
                 },
                 .attempt, .load => {},
             }
@@ -2102,9 +2036,6 @@ pub const Fiber = struct {
             index = boundary.previous_boundary;
         }
         return false;
-    }
-    pub fn pinGeneration(self: *Fiber, generation: *modules.ModuleHome) error{OutOfMemory}!void {
-        try self.lifetime.pin(self.allocator, generation, self.module_access);
     }
 
     /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
@@ -2191,7 +2122,7 @@ pub const Fiber = struct {
         // After every evaluation, frame, driver and failure that could hold a
         // flattened list's code.
         self.flattened.deinit(self.allocator, self.releases);
-        self.lifetime.deinit(self.releases, self.allocator);
+        self.lifetime.deinit();
         self.* = undefined;
     }
 
@@ -2271,28 +2202,24 @@ pub const Fiber = struct {
     pub fn currentScope(self: *const Fiber) *env.Scope {
         return self.current.?.scope();
     }
-    /// Links words written into `scope`, a root, by code of `provenance`. An
-    /// image's cell carries its owner anchor, so a word that escapes the
-    /// image proves the image live before reading its directory.
+    /// Links words written into `scope`, a root, by code of `provenance`. A
+    /// word written in a module's root refers to the module by name.
     pub fn rootLinker(
         self: *Fiber,
         scope: *env.Scope,
         provenance: modules.RegistrationProvenance,
-    ) error{OutOfMemory}!env.SymbolLinker {
+    ) env.SymbolLinker {
         const root = switch (scope.storage) {
             .session => self.environment.sessionScopeId(),
             .core_build => self.environment.coreScopeId(),
-            .module_root => (try self.environment.scopeCell(
-                scope,
-                modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access),
-            )).id,
+            .module_root => |module| module.id,
         };
         return self.environment.linker(root, provenance.sourceId());
     }
     /// The word `name` as the running activation would have written it: in
     /// that activation's root, by its source.
     pub fn linkedWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = try self.rootLinker(self.currentScope(), self.current.?.site.registration_provenance);
+        const linker = self.rootLinker(self.currentScope(), self.current.?.site.registration_provenance);
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The word `name` linked to core as standard-library source, as a word
@@ -2326,15 +2253,15 @@ pub const Fiber = struct {
             return null;
         return located.source_name;
     }
-    /// The module whose code is running, if the current root is an image.
-    pub fn currentHome(self: *const Fiber) ?*modules.ModuleHome {
-        return modules.homeForModuleRootScope(self.currentScope());
+    /// The module whose code is running, if the current root is a module's.
+    pub fn currentModule(self: *const Fiber) ?intern.ModuleName {
+        return self.currentScope().moduleName();
     }
     /// Begin publishing one first-class test into the candidate owned by the
     /// immediately enclosing module-construction boundary. Requiring that
     /// boundary to be the top frame distinguishes the construction body's
     /// direct root from quotations or child fibers that merely inherit its
-    /// scope and private home.
+    /// scope.
     pub fn testDeclarationCursor(
         self: *Fiber,
         name: intern.BindingName,
@@ -2352,8 +2279,7 @@ pub const Fiber = struct {
         const candidate = &frame.boundary.mode.module.image;
         if (self.current.?.code != frame.boundary.mode.module.root_code)
             return self.fail(.domain, "test is legal only at a direct module construction root");
-        const home = candidate.executionHome(self.module_access);
-        if (self.currentScope() != home.scope(self.module_access))
+        if (self.currentScope() != candidate.root().scope)
             return self.fail(.domain, "test is legal only at a direct module construction root");
         if (self.inherited.test_execution == null)
             return .discard();
@@ -2582,7 +2508,6 @@ pub const Fiber = struct {
                 return .detached;
             },
             .unresolved => |chain| return self.undefinedNameIn(requested.name, chain),
-            .retired => return self.failUnbound(requested, .retired),
             .alias_cycle => return self.failUnbound(requested, .alias_cycle),
         }
     }
@@ -3447,8 +3372,7 @@ pub const Fiber = struct {
         word: intern.TraceWord,
         body_header: *Header,
     ) MachineError!void {
-        const home = candidate.executionHome(self.module_access);
-        const site = ExecutionSite.image(home, self.module_access, true);
+        const site = ExecutionSite.module(candidate.root(), true);
         const dropped = self.suspendCurrent() catch {
             self.releases.releaseHeader(body_header);
             return error.OutOfMemory;
@@ -3481,7 +3405,6 @@ pub const Fiber = struct {
         return .{
             .environment = self.environment,
             .view = view,
-            .module_access = self.module_access,
             .registry = self.inherited.registry,
             .project = self.inherited.module_snapshot,
             .libraries = self.inherited.libraries(),
@@ -3523,7 +3446,6 @@ pub const Fiber = struct {
             var context: binder.Context = .{
                 .environment = self.environment,
                 .view = self.inherited.registry.view(),
-                .module_access = self.module_access,
                 .registry = self.inherited.registry,
                 .project = self.inherited.module_snapshot,
                 .libraries = self.inherited.libraries(),
@@ -3544,9 +3466,9 @@ pub const Fiber = struct {
         // A call that crosses into a module checks the word's declared
         // effect, and that check's failure reports the depth it found: only
         // the call itself can say that.
-        const home = modules.definitionHome(definition);
+        const home = modules.definitionModule(definition);
         if (home) |target| {
-            const crosses = target.scope(self.module_access) != site.scope;
+            const crosses = target.scope != site.scope;
             if (crosses and definitionOrigin(definition, home) != .standard_library) return .none;
         }
         return switch (definition.code()) {
@@ -3555,7 +3477,7 @@ pub const Fiber = struct {
             .source => |executable| .{ .source = .{
                 .definition = definition,
                 .code = executable.code(),
-                .site = if (home) |target| .image(target, self.module_access, site.defining) else site,
+                .site = if (home) |target| .module(target, site.defining) else site,
                 .summary = self.resolutions.summary(word, self.inherited.registry.currentPublication(), key),
                 .trace_word = definitionTraceWord(definition, home, word.name),
                 .attribution = definition.attribution,
@@ -3609,7 +3531,7 @@ pub const Fiber = struct {
 
     fn peeked(definition: *env.Definition, word: value.Symbol) ?PeekedWord {
         if (definition.lifetime != .static) return null;
-        const home = modules.definitionHome(definition);
+        const home = modules.definitionModule(definition);
         return .{
             .definition = definition,
             .trace_word = definitionTraceWord(definition, home, word.name),
@@ -3796,7 +3718,6 @@ pub const Fiber = struct {
         self.active_word = .plain(word.name);
         return switch (miss) {
             .unresolved => |chain| self.undefinedWordIn(word.name, chain),
-            .retired => self.failRetiredWord(word.name),
             .alias_cycle => self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)}),
         };
     }
@@ -3822,14 +3743,8 @@ pub const Fiber = struct {
                 .{ .qualified = word.name, .context = module.searcher, .continuation = continuation },
             ),
             .unresolved => |chain| return self.failUnbound(word, .{ .unresolved = chain }),
-            .retired => return self.failUnbound(word, .retired),
             .alias_cycle => return self.failUnbound(word, .alias_cycle),
         }
-    }
-
-    fn failRetiredWord(self: *Fiber, name: u32) MachineError {
-        self.active_word = .plain(name);
-        return self.fail(.domain, "the scope this word was written in has retired");
     }
 
     pub fn raiseOwned(self: *Fiber, raised: Value) MachineError {
@@ -4658,17 +4573,14 @@ pub const ExplicitLookup = struct {
 pub const Reflected = struct {
     definition: *env.Definition,
     trace_word: intern.TraceWord,
-    home: ?*modules.ModuleHome,
     releases: *heap.ReleaseDomain,
 
     /// Holds a definition the lookup's view kept alive.
     pub fn hold(fiber: *Fiber, definition: *env.Definition, name: u32) Reflected {
         if (definition.lifetime == .counted) definition.retain();
-        const home = modules.definitionHome(definition);
         return .{
             .definition = definition,
-            .trace_word = definitionTraceWord(definition, home, name),
-            .home = home,
+            .trace_word = definitionTraceWord(definition, modules.definitionModule(definition), name),
             .releases = fiber.releases,
         };
     }
@@ -4689,7 +4601,7 @@ pub const SummaryTarget = union(enum) {
     source: struct {
         definition: *const env.Definition,
         code: *Header,
-        /// Where the body runs: the caller's site, or the word's own image.
+        /// Where the body runs: the caller's site, or the word's own module.
         site: ExecutionSite,
         summary: WordResolutions.BodySummary,
         /// What an activation of the word is traced under, and whose
@@ -4707,18 +4619,22 @@ pub const PeekedWord = struct {
 
 const ResolutionOrigin = enum { direct, module, standard_library, core };
 
-fn definitionOrigin(definition: *const env.Definition, home: ?*const modules.ModuleHome) ResolutionOrigin {
-    if (home) |owner| return moduleResolutionOrigin(owner);
+fn definitionOrigin(definition: *const env.Definition, home: ?modules.ModuleRoot) ResolutionOrigin {
+    if (home) |owner| return switch (owner.provenance) {
+        .standard_library => .standard_library,
+        .ordinary, .root_scope, .source => .module,
+    };
     return switch (definition.root) {
         .core => .core,
-        .session, .image => .direct,
+        .session, .module => .direct,
     };
 }
 
-/// How a trace identifies a called definition: a module-local one by its home's spelling,
-/// anything else by the name the call used.
-fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.ModuleHome, name: u32) intern.TraceWord {
-    if (home) |owner| if (definition.traceWord()) |local| return homeTraceWord(owner, local);
+/// How a trace identifies a called definition: a module-local one by its
+/// module's name, during construction as well as after, and anything else by
+/// the name the call used.
+fn definitionTraceWord(definition: *const env.Definition, home: ?modules.ModuleRoot, name: u32) intern.TraceWord {
+    if (home) |owner| if (definition.traceWord()) |local| return .moduleLocal(owner.name(), local);
     return .plain(name);
 }
 
@@ -4727,18 +4643,18 @@ fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.
 /// word's: its effects are reflective metadata, and its arity failures are
 /// those of the code it runs.
 fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) MachineError!void {
-    // A homeless builtin has no effect boundary: the common case, run
+    // A builtin of no module has no effect boundary: the common case, run
     // directly.
-    if (definition.home == null) switch (definition.code()) {
+    const home = modules.definitionModule(definition);
+    if (home == null) switch (definition.code()) {
         .builtin => |primitive| return invokeBuiltin(self, .plain(name), primitive),
         else => {},
     };
-    const home = modules.definitionHome(definition);
     const trace_word = definitionTraceWord(definition, home, name);
     self.active_word = trace_word;
     const origin = definitionOrigin(definition, home);
     const cross_home = if (home) |target|
-        target.scope(self.module_access) != self.current.?.scope()
+        target.scope != self.current.?.scope()
     else
         false;
     const checked = cross_home and origin != .standard_library;
@@ -4760,20 +4676,6 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
             try native_call.begin(self, callable);
         },
     }
-}
-
-fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
-    return switch (home.registrationProvenance()) {
-        .ordinary => .module,
-        .standard_library => .standard_library,
-        .root_scope, .source => .module,
-    };
-}
-
-/// How a module-local definition is spelled when reached through `home`: by
-/// the name the image was built for, during construction as well as after.
-fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) intern.TraceWord {
-    return .moduleLocal(home.name(), local);
 }
 
 pub const LookupChain = enum {
@@ -4806,14 +4708,14 @@ fn scheduleWord(
     self: *Fiber,
     executable: *const env.Executable,
     word: EnteredWord,
-    resolved_home: ?*modules.ModuleHome,
+    resolved_home: ?modules.ModuleRoot,
     effect: ?env.Effect,
 ) MachineError!void {
-    // A module word runs as its image; any other word runs at its caller's
+    // A module word runs as its module; any other word runs at its caller's
     // site. Either way it defines where its caller could, and no further.
     const caller = self.current.?.site;
     const site: ExecutionSite = if (resolved_home) |home|
-        .image(home, self.module_access, caller.defining)
+        .module(home, caller.defining)
     else
         caller;
     const check = if (effect != null) try prepareEffectCheck(self, effect, word.word) else null;
