@@ -811,7 +811,7 @@ const ProgramCompiler = struct {
         _: *Fiber,
         _: *usize,
         _: machine.SummaryTarget.Source,
-        _: *env.Scope,
+        _: env.ScopeId,
     ) lower.Stop!lower.Counts {
         return error.Unread;
     }

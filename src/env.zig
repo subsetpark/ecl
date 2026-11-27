@@ -358,11 +358,12 @@ pub const ModulePublication = union(enum) {
 /// one registration of the module was made under. It holds nothing of an
 /// image.
 pub const ModuleRoot = struct {
-    scope: *Scope,
+    scope: ScopeId,
+    module: intern.ModuleName,
     provenance: SourceId,
 
     pub fn name(self: ModuleRoot) intern.ModuleName {
-        return self.scope.moduleName().?;
+        return self.module;
     }
 };
 
@@ -669,51 +670,15 @@ pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
 /// aliases, so it holds definitions alone.
 pub const CoreMap = poll.FixedMap(intern.BindingName, *Definition);
 
-/// Which root a scope is. A session or core-building scope denotes the one
-/// directory of its kind; a module root is the one scope of a module name,
-/// which the `Env` owns and every registration of the name shares.
-pub const ScopeStorage = union(enum) {
-    session,
-    core_build: CorePublisher,
-    module_root: ModuleIdentity,
-};
-
-/// What a module root's scope records: the module's name and the id words
-/// written in the module carry as their root.
+/// A module name's scope: the name, and the id words written in the module
+/// carry as their root. The `Env` issues one per name for its whole life.
 pub const ModuleIdentity = struct {
     name: intern.ModuleName,
     id: ScopeId,
 };
 
-pub const Scope = struct {
-    storage: ScopeStorage,
-    /// Identifies this scope for as long as the process runs, which its
-    /// address does not: a scope freed unpublished leaves its address to the
-    /// next one. A cache that outlives a scope keys on this, never on the
-    /// pointer.
-    serial: u64,
-
-    var next_serial: std.atomic.Value(u64) = .init(1);
-
-    pub fn isModuleRoot(self: *const Scope) bool {
-        return self.storage == .module_root;
-    }
-
-    /// The module whose root this scope is, or null for any other root.
-    pub fn moduleName(self: *const Scope) ?intern.ModuleName {
-        return switch (self.storage) {
-            .module_root => |module| module.name,
-            .session, .core_build => null,
-        };
-    }
-
-    fn direct(storage: ScopeStorage) Scope {
-        return .{ .storage = storage, .serial = next_serial.fetchAdd(1, .monotonic) };
-    }
-};
-
 /// Authority to publish into core while it is being built. Minted only by
-/// `BuildingEnv.rootScope`, and refused once core is frozen.
+/// `BuildingEnv.corePublisher`, and refused once core is frozen.
 pub const CorePublisher = enum(usize) {
     invalid = 0,
     _,
@@ -1056,11 +1021,10 @@ const ScopeCell = struct {
     root: Root,
 };
 
-/// One module name's root: its id and its scope, which live from the name's
-/// first use to the `Env`'s teardown at one address.
+/// One module name's scope cell, which lives from the name's first use to the
+/// `Env`'s teardown at one address.
 const ModuleCell = struct {
     cell: ScopeCell,
-    scope: Scope,
     /// The cells heading the subtrees below this one in the trie that finds
     /// a module's cell by name, read and written under
     /// `EnvState.modules_mutex`: successive two-bit digits of the name's
@@ -1350,7 +1314,7 @@ pub const Env = enum(usize) {
     /// The scope of module `name`, made on first use and kept until
     /// teardown: every registration of the name, and all code running as
     /// the module, shares it.
-    pub fn moduleScope(self: *Env, name: intern.ModuleName) error{OutOfMemory}!*Scope {
+    pub fn moduleScope(self: *Env, name: intern.ModuleName) error{OutOfMemory}!ModuleIdentity {
         const backing = self.privateState();
         const allocator = backing.host.allocator();
         std.Io.Threaded.mutexLockUncancelable(&backing.modules_mutex);
@@ -1358,24 +1322,22 @@ pub const Env = enum(usize) {
         var link: *?*ModuleCell = &backing.modules_head;
         var digits = std.hash.Wyhash.hash(0, std.mem.asBytes(&name));
         while (link.*) |module| : (digits <<= 2) {
-            if (module.cell.root.module == name) return &module.scope;
+            if (module.cell.root.module == name) return .{ .name = name, .id = module.cell.id };
             link = &module.children[@intCast(digits >> 62)];
         }
         const module = try allocator.create(ModuleCell);
         errdefer allocator.destroy(module);
         module.* = .{
             .cell = .{ .id = .none, .root = .{ .module = name } },
-            .scope = Scope.direct(.{ .module_root = .{ .name = name, .id = .none } }),
             .previous = backing.modules_last,
         };
         // The cell is complete before its id exists: `register` is the one
         // point at which an id escapes into the lock-free directory. The
         // scope is found only through the trie, after it records the id.
         module.cell.id = try backing.scopes.register(allocator, &module.cell);
-        module.scope.storage.module_root.id = module.cell.id;
         backing.modules_last = module;
         link.* = module;
-        return &module.scope;
+        return .{ .name = name, .id = module.cell.id };
     }
 
     /// The domain definitions retire into.
@@ -1455,18 +1417,6 @@ pub const Env = enum(usize) {
     pub fn initBuilding(host_owner: *heap.HostOwner) error{OutOfMemory}!struct { Env, BuildingEnv } {
         const environment = try init(host_owner);
         return .{ environment, BuildingEnv.init(environment) };
-    }
-
-    /// A session root. Its holder owns the storage and frees it once no
-    /// fiber runs in it.
-    pub fn sessionRoot(_: *Env) Scope {
-        return Scope.direct(.session);
-    }
-
-    pub fn createSessionRoot(self: *Env, allocator: std.mem.Allocator) error{OutOfMemory}!*Scope {
-        const root = try allocator.create(Scope);
-        root.* = self.sessionRoot();
-        return root;
     }
 };
 
@@ -1568,11 +1518,11 @@ pub const BuildingEnv = enum(usize) {
         return self.target();
     }
 
-    /// The root the bootstrap Fiber evaluates the prelude in. Its storage is the
-    /// core publisher, which refuses once core is frozen.
-    pub fn rootScope(self: *BuildingEnv) Scope {
+    /// What the bootstrap Fiber publishes the prelude's definitions with
+    /// while it evaluates them in core. It refuses once core is frozen.
+    pub fn corePublisher(self: *BuildingEnv) CorePublisher {
         var environment = self.target();
-        return Scope.direct(.{ .core_build = .init(environment.privateState()) });
+        return .init(environment.privateState());
     }
 
     /// Freezes core.
@@ -1623,10 +1573,10 @@ test "env: a module name keeps one scope id, issued monotonically" {
         var spelling: [24]u8 = undefined;
         const name = try intern.internModuleName(try std.fmt.bufPrint(&spelling, "scope-probe-{d}", .{index}));
         const scope = try container.moduleScope(name);
-        // A name keeps the scope, and the id, it was first issued.
+        // A name keeps the id it was first issued.
         try std.testing.expectEqual(scope, try container.moduleScope(name));
-        try std.testing.expectEqual(name, scope.moduleName().?);
-        const id = scope.storage.module_root.id;
+        try std.testing.expectEqual(name, scope.name);
+        const id = scope.id;
         try std.testing.expectEqual(Root{ .module = name }, container.scopeOf(id));
         const raw = @backingInt(id);
         try std.testing.expect(raw != 0);

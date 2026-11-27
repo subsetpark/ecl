@@ -82,11 +82,10 @@ pub fn installSource(
         // runs; the bootstrap fiber evaluates the prelude generically.
         .{ .registry = registry, .idiom_mode = .generic_only, .phase = .bootstrap },
         cancelled,
-        .bootstrap,
-        .own,
+        .{ .bootstrap = building.corePublisher() },
+        .{ .scope = environment.coreScopeId() },
     );
     defer fiber.deinit();
-    fiber.replaceRootScope(building.rootScope());
     machine.run(&fiber, root_header) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Ecl => {

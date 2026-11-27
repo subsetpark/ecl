@@ -332,7 +332,7 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        scope: *env.Scope,
+        module: env.ModuleIdentity,
         provenance: RegistrationProvenance,
     ) error{OutOfMemory}!*ModuleImage {
         const result = try allocator.create(ModuleImage);
@@ -340,7 +340,7 @@ const ModuleImage = struct {
             .allocator = allocator,
             .releases = releases,
             .staging = .init(allocator),
-            .home = .{ .scope = scope, .provenance = provenance },
+            .home = .{ .scope = module.id, .module = module.name, .provenance = provenance },
             .tests = .init(allocator),
         };
         return result;
@@ -1450,10 +1450,10 @@ pub const Registry = enum(usize) {
     /// publication, which is the boundary that owns registry names.
     pub fn createImage(
         self: *Registry,
-        scope: *env.Scope,
+        module: env.ModuleIdentity,
         provenance: RegistrationProvenance,
     ) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), scope, provenance));
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), module, provenance));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);
@@ -1469,11 +1469,11 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            scope: *env.Scope,
+            module: env.ModuleIdentity,
             provenance: RegistrationProvenance,
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
-            const candidate = try registry.createImage(scope, provenance);
+            const candidate = try registry.createImage(module, provenance);
             // The descriptor's module documentation was validated with it.
             candidate.document(instance.validated().documentation());
             return .{
@@ -1541,7 +1541,7 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            scope: *env.Scope,
+            scope: env.ModuleIdentity,
             provenance: RegistrationProvenance,
             module: env.BuiltinModule,
         ) error{OutOfMemory}!BuiltinCandidateCursor {

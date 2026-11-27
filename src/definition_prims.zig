@@ -62,7 +62,7 @@ fn define(fiber: *Fiber, mode: Mode) MachineError!void {
     try fiber.require(2);
     const private = mode == .defp;
     const scope = try fiber.definitionScope();
-    if (private and scope.storage != .module_root)
+    if (private and fiber.environment.scopeOf(scope) != .module)
         return fiber.fail(.domain, "defp/setp are legal only in a module root");
     const name = try fiber.popSymbol();
     var item = try fiber.popValue();
@@ -93,7 +93,7 @@ fn define(fiber: *Fiber, mode: Mode) MachineError!void {
 
 const DefineDriver = struct {
     mode: Mode,
-    scope: *env.Scope,
+    scope: env.ScopeId,
     name: u32,
     item: heap.Owned(Value),
     separator: u32,
@@ -376,9 +376,10 @@ const DefineDriver = struct {
                 var owned_source: ?reader_types.SourceSlice = if (publication.source) |*owned| owned.take() else null;
                 defer if (owned_source) |*owned| owned.deinit();
                 const source = owned_source;
-                switch (self.scope.storage) {
+                const root_kind = fiber.environment.scopeOf(self.scope);
+                switch (root_kind) {
                     // A module stages its definitions until it is sealed.
-                    .module_root => {
+                    .module => {
                         const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
                             .domain,
                             "module definitions are legal only while the module is under construction",
@@ -393,9 +394,9 @@ const DefineDriver = struct {
                         } });
                         return .completed;
                     },
-                    .session, .core_build => {},
+                    .session, .core => {},
                 }
-                const root: env.DefinitionRoot = if (self.scope.storage == .session) .session else .core;
+                const root: env.DefinitionRoot = if (root_kind == .session) .session else .core;
                 const definition = try env.Definition.createSource(
                     fiber.allocator,
                     env.quotationHeader(body),
@@ -408,7 +409,7 @@ const DefineDriver = struct {
                     },
                 );
                 const name = publication.binding_name;
-                switch (self.scope.storage) {
+                switch (root_kind) {
                     .session => {
                         // The registry cursor takes the definition's first
                         // reference.
@@ -416,7 +417,11 @@ const DefineDriver = struct {
                             fiber.inherited.registry.defineCursor(name, .{ .definition = definition }),
                         ) };
                     },
-                    .core_build => |publisher| {
+                    .core => {
+                        const publisher = fiber.corePublisher() orelse {
+                            definition.retireStatic(fiber.releases);
+                            return fiber.fail(.domain, "core is sealed");
+                        };
                         publisher.publish(name, definition) catch |err| {
                             definition.retireStatic(fiber.releases);
                             return switch (err) {
@@ -427,7 +432,7 @@ const DefineDriver = struct {
                         };
                         return .completed;
                     },
-                    .module_root => unreachable,
+                    .module => unreachable,
                 }
             },
             .publishing_session => |*cursor| switch (try cursor.borrowMut().advance()) {

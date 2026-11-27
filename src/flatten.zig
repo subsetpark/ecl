@@ -93,9 +93,9 @@ pub const Flattened = struct {
     bodies: []*Header,
     /// The publication it was built in.
     publication: u64,
-    /// The site the original ran at when it was flattened: its root, by
-    /// serial as a summary holds it, and the provenance it registers under.
-    scope: u64,
+    /// The site the original ran at when it was flattened: its root, and
+    /// the provenance it registers under.
+    scope: env.ScopeId,
     provenance: modules.RegistrationProvenance,
     /// The lowest height of the fiber's evaluations at which one began
     /// running this list: the evaluation and everything it leads to, the
@@ -211,7 +211,7 @@ pub const Cache = struct {
     pub inline fn find(self: *const Cache, code: *const Header, site: machine.ExecutionSite, publication: u64) ?*Flattened {
         if (self.publication != publication or self.entries.len == 0) return null;
         const flattened = (entryFor(self.entries, code) orelse return null).* orelse return null;
-        if (flattened.scope != site.scope.serial or flattened.provenance != site.registration_provenance) return null;
+        if (flattened.scope != site.scope or flattened.provenance != site.registration_provenance) return null;
         return flattened;
     }
 
@@ -391,7 +391,7 @@ noinline fn make(fiber: *Fiber, site: machine.ExecutionSite, code: *Header, publ
 /// What a quotation a phrase applies consumes and leaves: its remembered
 /// summary, or a read under a rewrite's own bounds when there is none, which
 /// a quotation longer than a summary is kept for needs.
-fn counted(fiber: *Fiber, scope: *env.Scope, quotation: *Header) error{OutOfMemory}!?stack_summary.Summary {
+fn counted(fiber: *Fiber, scope: env.ScopeId, quotation: *Header) error{OutOfMemory}!?stack_summary.Summary {
     if (try stack_summary.of(fiber, scope, quotation)) |summary| return summary;
     return stack_summary.read(fiber, scope, quotation);
 }
@@ -986,7 +986,7 @@ const Rewrite = struct {
             .chain = chain,
             .bodies = bodies,
             .publication = publication,
-            .scope = site.scope.serial,
+            .scope = site.scope,
             .provenance = site.registration_provenance,
         };
         return record;

@@ -176,11 +176,9 @@ const FailureSite = union(enum) {
 };
 /// Where a fiber's root activation runs.
 const RootEntry = union(enum) {
-    /// The fiber's own root scope.
-    own,
-    /// A root the fiber does not own: a task in its spawner's, or a Session's
-    /// root fiber in the Session's. The scope's owner outlives the fiber.
-    scope: *env.Scope,
+    /// A root by its scope: the session's for a root fiber, core's for the
+    /// bootstrap fiber, and a task's spawner's.
+    scope: env.ScopeId,
     /// One registered module's own code, under the provenance of the
     /// registration it was read from.
     module: modules.ModuleRoot,
@@ -188,9 +186,10 @@ const RootEntry = union(enum) {
 /// Who runs a fiber, and so what it may do. A root fiber runs a submission
 /// or a host-driven load and may define. A task fiber runs in its spawner's
 /// scope without being a root of its own, so it may not define. The bootstrap
-/// fiber builds the prelude before any scheduler exists.
+/// fiber builds the prelude before any scheduler exists, and alone holds the
+/// authority to publish into core while it does.
 pub const Role = union(enum) {
-    bootstrap,
+    bootstrap: env.CorePublisher,
     root: Membership,
     task: Membership,
 
@@ -642,7 +641,7 @@ const Eval = struct {
     }
 
     /// The root this body runs in: where its own definitions land.
-    fn scope(self: Eval) *env.Scope {
+    fn scope(self: Eval) env.ScopeId {
         return self.site.scope;
     }
 };
@@ -833,7 +832,7 @@ pub const ExecutionSite = struct {
     /// runs in its module's scope; every other word, and every quotation
     /// applied as a value, runs in its caller's. Where a word resolves is
     /// carried by the word itself.
-    scope: *env.Scope,
+    scope: env.ScopeId,
     /// Authority carried only while evaluating an embedded source module.
     /// A named module constructed by that source moves it into the immutable
     /// registration; ordinary source always carries ordinary provenance.
@@ -850,7 +849,7 @@ pub const ExecutionSite = struct {
         const defining = fiber.role != .task;
         return switch (fiber.root_entry) {
             .module => |home| module(home, defining),
-            .own, .scope => .{
+            .scope => .{
                 .scope = fiber.lexicalScope(),
                 .defining = defining,
                 .registration_provenance = if (fiber.inherited.module_snapshot) |module_snapshot|
@@ -1554,9 +1553,6 @@ pub const Fiber = struct {
     /// The way to the content of `environment`'s word cells.
     cells: env.WordCells,
     inherited: InheritedContext,
-    /// Activations point at this address, so it must never move while the
-    /// fiber is alive.
-    root_scope: env.Scope,
     archive: *spans.SpanArchive,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
@@ -1628,7 +1624,6 @@ pub const Fiber = struct {
             .stack = stack,
             .environment = environment,
             .cells = environment.wordCells(),
-            .root_scope = environment.sessionRoot(),
             .archive = archive,
             .inherited = inherited,
             .cancelled = cancelled,
@@ -1662,17 +1657,12 @@ pub const Fiber = struct {
         return self.stack.pop();
     }
 
-    pub fn replaceRootScope(self: *Fiber, root: env.Scope) void {
-        self.root_scope = root;
-    }
-
     /// The chain a homeless binding — a primitive or an embedded prelude
     /// definition — resolves against. It is the session root over core, so
     /// session-level redefinition still reaches prelude bodies while a module
     /// body executing further down the stack does not.
-    pub fn lexicalScope(self: *Fiber) *env.Scope {
+    pub fn lexicalScope(self: *Fiber) env.ScopeId {
         return switch (self.root_entry) {
-            .own => &self.root_scope,
             .scope => |scope| scope,
             .module => |root| root.scope,
         };
@@ -1931,23 +1921,23 @@ pub const Fiber = struct {
     /// root's top-level directory, or the directory of the running module's
     /// current registration.
     pub fn visibleNameRoot(self: *Fiber) reflection.VisibleNameRoot {
-        return switch (self.currentScope().storage) {
-            .module_root => |module| {
+        return switch (self.environment.scopeOf(self.currentScope())) {
+            .module => |name| {
                 var view = self.inherited.registry.view();
-                const generation = view.moduleFind(module.name) orelse {
+                const generation = view.moduleFind(name) orelse {
                     view.deinit();
                     return .core;
                 };
                 return .{ .image = .{ .entries = generation.entries(), .view = view } };
             },
-            .core_build => .core,
+            .core => .core,
             .session => .{ .session = self.inherited.registry.view() },
         };
     }
 
     /// The image under construction whose root is `scope`, found through the
     /// open module boundaries: the one place its staged names are written.
-    pub fn stagingImage(self: *Fiber, scope: *env.Scope) ?*modules.OwnedImage {
+    pub fn stagingImage(self: *Fiber, scope: env.ScopeId) ?*modules.OwnedImage {
         var index = self.boundary_index;
         while (index) |frame_index| {
             const boundary = &self.frames.items[@backingInt(frame_index)].boundary;
@@ -2129,22 +2119,17 @@ pub const Fiber = struct {
             settleAdvisoryDiagnostic(console.writeDiagnostics(line, false));
         }
     }
-    pub fn currentScope(self: *const Fiber) *env.Scope {
+    pub fn currentScope(self: *const Fiber) env.ScopeId {
         return self.current.?.scope();
     }
     /// Links words written into `scope`, a root, by code of `provenance`. A
     /// word written in a module's root refers to the module by name.
     pub fn rootLinker(
         self: *Fiber,
-        scope: *env.Scope,
+        scope: env.ScopeId,
         provenance: modules.RegistrationProvenance,
     ) env.SymbolLinker {
-        const root = switch (scope.storage) {
-            .session => self.environment.sessionScopeId(),
-            .core_build => self.environment.coreScopeId(),
-            .module_root => |module| module.id,
-        };
-        return self.environment.linker(root, provenance);
+        return self.environment.linker(scope, provenance);
     }
     /// The word `name` as the running activation would have written it: in
     /// that activation's root, by its source.
@@ -2161,7 +2146,15 @@ pub const Fiber = struct {
     }
     /// The root a definition, removal, or import writes. Refused inside a
     /// task, which runs in its spawner's root without owning it.
-    pub fn definitionScope(self: *Fiber) MachineError!*env.Scope {
+    /// What publishes a definition made in core: the bootstrap fiber's
+    /// authority, and nothing for any other fiber.
+    pub fn corePublisher(self: *const Fiber) ?env.CorePublisher {
+        return switch (self.role) {
+            .bootstrap => |publisher| publisher,
+            .root, .task => null,
+        };
+    }
+    pub fn definitionScope(self: *Fiber) MachineError!env.ScopeId {
         const scope = self.currentScope();
         if (!self.current.?.site.defining) return self.fail(
             .domain,
@@ -2182,7 +2175,10 @@ pub const Fiber = struct {
     }
     /// The module whose code is running, if the current root is a module's.
     pub fn currentModule(self: *const Fiber) ?intern.ModuleName {
-        return self.currentScope().moduleName();
+        return switch (self.environment.scopeOf(self.currentScope())) {
+            .module => |name| name,
+            .core, .session => null,
+        };
     }
     /// Begin publishing one first-class test into the candidate owned by the
     /// immediately enclosing module-construction boundary. Requiring that
@@ -3362,7 +3358,7 @@ pub const Fiber = struct {
     /// What a stack summary reads of one word of code running in `scope`. A
     /// summary reads its words before the quotation runs, which may be while
     /// no evaluation is current.
-    pub fn summaryTarget(self: *Fiber, word: value.Symbol, scope: *env.Scope) error{OutOfMemory}!SummaryTarget {
+    pub fn summaryTarget(self: *Fiber, word: value.Symbol, scope: env.ScopeId) error{OutOfMemory}!SummaryTarget {
         if (binder.executableWord(.{ .symbol = word }) == null) return .none;
         const definition = try self.denoted(word) orelse return .none;
         // Asked after the cell is read: a summary made of words read on both
@@ -4436,7 +4432,7 @@ pub const SummaryTarget = union(enum) {
         attribution: env.Attribution,
 
         /// The root the body runs in, called from code running in `caller`.
-        pub fn scope(self: Source, caller: *env.Scope) *env.Scope {
+        pub fn scope(self: Source, caller: env.ScopeId) env.ScopeId {
             return if (self.home) |home| home.scope else caller;
         }
     };
@@ -4454,7 +4450,7 @@ inline fn ofStandardLibrary(definition: *const env.Definition) bool {
 /// `home` crosses into that module under a check of the word's declared
 /// effect. A standard-library word's effects are reflective metadata, and its
 /// arity failures are those of the code it runs.
-inline fn crossesChecked(home: ?modules.ModuleRoot, scope: *env.Scope) bool {
+inline fn crossesChecked(home: ?modules.ModuleRoot, scope: env.ScopeId) bool {
     const owner = home orelse return false;
     return owner.scope != scope and owner.provenance != .standard_library;
 }

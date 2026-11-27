@@ -42,7 +42,7 @@ pub fn begin(
     if (body.borrow().kind() != .generic_spine)
         return via.openImageBoundary(&candidate, word, body.take());
     var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-        try fiber.archive.rescopeCursor(body.take(), fiber.rootLinker(scope, candidate.provenance())),
+        try fiber.archive.rescopeCursor(body.take(), fiber.rootLinker(scope.id, candidate.provenance())),
     );
     defer cursor.deinit(fiber.releases, fiber.allocator);
     try via.startDriver(ConstructionDriver{

@@ -171,7 +171,7 @@ fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
 fn importWord(fiber: *Fiber, visibility: env.Visibility) MachineError!void {
     try fiber.require(2);
     const scope = try fiber.definitionScope();
-    if (visibility == .private and (!scope.isModuleRoot() or fiber.stagingImage(scope) == null))
+    if (visibility == .private and (fiber.environment.scopeOf(scope) != .module or fiber.stagingImage(scope) == null))
         return fiber.fail(.domain, "importp is legal only in a module root under construction");
     var requested = try fiber.popList();
     errdefer requested.deinit();
@@ -195,7 +195,7 @@ const ImportDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: heap.Owned(Value),
     prepared: heap.Owned([]intern.BindingName),
-    scope: *env.Scope,
+    scope: env.ScopeId,
     visibility: env.Visibility,
     module_validation: intern.ModuleNameCursor,
     module_name: ?intern.ModuleName = null,
@@ -264,10 +264,10 @@ const ImportDriver = struct {
                 .binding = binding,
                 .visibility = self.visibility,
             };
-            switch (self.scope.storage) {
+            switch (fiber.environment.scopeOf(self.scope)) {
                 // A module stages its imports with its definitions; a name
                 // introduced twice fails construction.
-                .module_root => {
+                .module => {
                     const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
                         .domain,
                         "module imports are legal only while the module is under construction",
@@ -276,7 +276,7 @@ const ImportDriver = struct {
                     self.publish_index += 1;
                     continue;
                 },
-                .core_build => return fiber.fail(.domain, "core does not import"),
+                .core => return fiber.fail(.domain, "core does not import"),
                 .session => {},
             }
             if (self.publisher == null)

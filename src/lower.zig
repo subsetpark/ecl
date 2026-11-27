@@ -136,7 +136,7 @@ pub fn Walker(comptime Mode: type) type {
         /// Reads `code`, run in the root `scope`, where the stack stands. Its
         /// locals are its own: it
         /// reads none of its caller's and leaves none bound.
-        pub fn run(self: *Self, code: *Header, scope: *env.Scope, depth: usize) (Stop || error{OutOfMemory})!void {
+        pub fn run(self: *Self, code: *Header, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
             const length: usize = @intCast(code.length());
             if (depth > policy.max_depth) return error.Exhausted;
             self.visited.* += length;
@@ -190,7 +190,7 @@ pub fn Walker(comptime Mode: type) type {
             } else return error.Unread;
         }
 
-        fn call(self: *Self, word: value.Symbol, at: At, scope: *env.Scope, depth: usize) (Stop || error{OutOfMemory})!void {
+        fn call(self: *Self, word: value.Symbol, at: At, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
             switch (try self.fiber.summaryTarget(word, scope)) {
                 .none => return error.Unread,
                 .source => |source| {
@@ -240,7 +240,7 @@ pub fn Walker(comptime Mode: type) type {
         /// A combinator applied to quotation literals, read as what it would
         /// run. A quotation consumes what it needed from beneath where it
         /// started and leaves what stands above that.
-        fn combinator(self: *Self, primitive: env.PrimitiveImpl, scope: *env.Scope, depth: usize) (Stop || error{OutOfMemory})!void {
+        fn combinator(self: *Self, primitive: env.PrimitiveImpl, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
             // SAFETY: the first `count` are written before they are read.
             var quotations: [combinators.max_counted]*Header = undefined;
             switch (combinators.flow(primitive)) {
@@ -333,7 +333,7 @@ pub fn Walker(comptime Mode: type) type {
 
         /// Every quotation runs from the same inputs; their results follow
         /// one another in the quotations' order.
-        fn cleave(self: *Self, quotations: []const *Header, scope: *env.Scope, depth: usize) (Stop || error{OutOfMemory})!void {
+        fn cleave(self: *Self, quotations: []const *Header, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
             const before = self.slots;
             const start = self.height;
             const beneath = self.low;
@@ -360,7 +360,7 @@ pub fn Walker(comptime Mode: type) type {
 
         /// Each quotation runs on its own inputs, the last on the top of the
         /// stack; their results follow one another in the quotations' order.
-        fn spread(self: *Self, quotations: []const *Header, scope: *env.Scope, depth: usize) (Stop || error{OutOfMemory})!void {
+        fn spread(self: *Self, quotations: []const *Header, scope: env.ScopeId, depth: usize) (Stop || error{OutOfMemory})!void {
             const beneath = self.low;
             // SAFETY: only the entries from `first` on are read.
             var results: Items = undefined;

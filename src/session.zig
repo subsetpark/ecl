@@ -266,7 +266,6 @@ const SessionCore = struct {
     console: console_api.Console,
     scheduler: scheduler_api.Scheduler,
     root_tasks: scheduler_api.TaskScope,
-    root_scope: ?*env.Scope = null,
     requested_exit: ?u8 = null,
     last_polls: u64 = 0,
     last_root_execution_metrics: if (machine.root_execution_metrics_enabled) machine.RootExecutionMetrics else void = if (machine.root_execution_metrics_enabled) .{} else {},
@@ -552,7 +551,6 @@ pub const Session = enum(usize) {
         const host = core.host_owner.cleanup();
         const closing_native_owner = core.native_owner.closeCalls();
         core.scheduler.deinit(&core.root_tasks);
-        if (core.root_scope) |root_scope| allocator.destroy(root_scope);
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
         const services = core.inherited.runtime();
@@ -622,8 +620,6 @@ pub const Session = enum(usize) {
         committed: bool = false,
 
         fn begin(core: *SessionCore) error{OutOfMemory}!RootTransaction {
-            if (core.root_scope == null)
-                core.root_scope = try core.environment.createSessionRoot(core.allocator());
             var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
             for (core.stack.items) |item| checkpoint.appendBorrowed(item);
             const fiber = initRootFiber(core);
@@ -653,7 +649,7 @@ pub const Session = enum(usize) {
             core.inherited,
             &root_never_cancelled,
             .{ .root = .{ .scheduler = core.scheduler.worker(), .scope = &core.root_tasks } },
-            .{ .scope = core.root_scope.? },
+            .{ .scope = core.environment.sessionScopeId() },
         );
         return fiber;
     }

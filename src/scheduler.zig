@@ -1518,7 +1518,7 @@ const ScopeCancellationCursor = struct {
 
 pub const SpawnSite = union(enum) {
     /// The child applies its quotation in the spawner's current root.
-    inherited: *env.Scope,
+    inherited: env.ScopeId,
     /// The child runs one registered module's own code.
     module: modules.ModuleRoot,
 };

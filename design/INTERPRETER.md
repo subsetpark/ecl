@@ -848,15 +848,15 @@ it becomes readable only in a publication, which advances the counter first.
 ### An execution site is the current root
 
 An activation runs in one root, and its `ExecutionSite` identifies it by that
-root's scope. The scope is where the activation's own definitions land. `Env`
-owns one scope per module name for the life of the Session, recording the
-name and the scope id words written in the module carry. A scope is identity
-and nothing else: it is not counted, and nothing retires it. A session root's
-scope belongs to the Session or the fiber that made it, which outlives every
-activation running there. When an activation's
-scope is a module's, that module is the one whose code is running, and the
-site derives it from the scope instead of carrying it: an activation cannot
-run in one module's scope as another module, or as none.
+root's scope id, the same id the words written there carry. The scope is
+where the activation's own definitions land. Core, the session, and each
+module name have one id for the life of the `Env`; an id is a label, not
+counted and never retired, and the `Env` answers which root it denotes. When
+an activation's scope is a module's, that module is the one whose code is
+running, and the site derives it from the scope instead of carrying it: an
+activation cannot run in one module's scope as another module, or as none.
+Core's scope is the bootstrap fiber's, which alone holds the authority to
+publish into core while it is built.
 
 No site and no definition refers to an image; the one frame that holds one is
 a construction boundary, which owns the image its body stages until the body
