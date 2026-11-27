@@ -3464,6 +3464,10 @@ pub const Fiber = struct {
     pub fn summaryTarget(self: *Fiber, word: value.Symbol, site: ExecutionSite) error{OutOfMemory}!SummaryTarget {
         if (binder.executableWord(.{ .symbol = word }) == null) return .none;
         const definition = try self.denoted(word) orelse return .none;
+        // Asked after the cell is read: a summary made of words read on both
+        // sides of a store would be kept under a counter value that outlasts
+        // the store. A walk that began earlier fails its own closing check.
+        if (self.inherited.registry.publishing()) return .none;
         // A call that crosses into a module checks the word's declared
         // effect, and that check's failure reports the depth it found: only
         // the call itself can say that.

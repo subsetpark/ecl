@@ -1274,6 +1274,17 @@ pub const Registry = enum(usize) {
         return self.privateState().publications.load(.acquire);
     }
 
+    /// Whether a publication has made some of its stores and not yet all of
+    /// them. The counter is odd between publications and even inside one.
+    /// What a reader takes from a cell while this holds may sit beside a
+    /// cell the same publication has yet to store, so the two say nothing
+    /// together, and nothing read then may be remembered under the
+    /// counter's value: that value does not change again until the
+    /// publication's last store.
+    pub fn publishing(self: *const Registry) bool {
+        return self.privateState().publications.load(.acquire) & 1 == 0;
+    }
+
     /// Mint the capability seal owned by a test-mode Session. Its backing
     /// carries the registry rather than accepting one alongside the access
     /// token, so cross-Session authority substitution is unrepresentable.

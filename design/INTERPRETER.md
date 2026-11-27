@@ -815,7 +815,11 @@ Every publication advances the Session's publication counter, which its
 registry owns, before its first store a reader can see and again after its
 last. What a reader keeps under a value read between publications is therefore
 outdated before the next publication shows, and a definition a publication
-makes readable is read under a later value than any read before it existed. The counter is never reused and holds no snapshot; it only keys what fibers remember. It is
+makes readable is read under a later value than any read before it existed.
+The counter's parity says whether a publication is between those two
+advances, and a stack summary takes nothing from a cell while one is: words
+read on both sides of a store say nothing together, and the value they would
+be kept under outlasts the store. The counter is never reused and holds no snapshot; it only keys what fibers remember. It is
 per Session so that one Session's publications never change what another's
 fibers reuse, and so what a fiber allocates is a function of its own run.
 
