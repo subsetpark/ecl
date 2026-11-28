@@ -439,6 +439,7 @@ pub const ModuleInstance = opaque {
         }
         if (!self.hasCapability(.reschedule)) {
             result.continuation_state = null;
+            result.continuation_scratch = null;
             result.consume = null;
             result.request_yield = null;
             result.list_at = null;
@@ -448,6 +449,19 @@ pub const ModuleInstance = opaque {
             result.read_units = null;
         }
         return result;
+    }
+
+    /// Native-memory storage charged to this instance's limit. A caller must
+    /// hold an instance pin across the allocation's whole lifetime and release
+    /// it before that pin.
+    pub fn allocateNative(self: *ModuleInstance, length: usize) ?[]align(64) u8 {
+        std.debug.assert(length != 0);
+        const bytes = InstanceState.allocateNative(self.mutableState(), length) orelse return null;
+        return bytes[0..length];
+    }
+
+    pub fn releaseNative(self: *ModuleInstance, bytes: []align(64) u8) void {
+        InstanceState.releaseNative(self.mutableState(), bytes.ptr, bytes.len);
     }
 
     pub fn name(self: *const ModuleInstance) intern.ModuleName {

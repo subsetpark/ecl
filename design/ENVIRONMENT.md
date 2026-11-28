@@ -83,7 +83,7 @@ module. Its descriptor declares the same module name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 
-The current pre-release native ABI is version 24, with entry symbol
+The current pre-release native ABI is version 26, with entry symbol
 `ecl_module_abi_v24`. Resource authors choose `ecl.Port(.{ .controller = Spec })`
 or `ecl.Port(.{ .cooperative = Spec })`. Cooperative callbacks receive bounded
 work accounting, read-only Session-relative `monotonicMilliseconds`, and
@@ -210,7 +210,12 @@ module is visible.
 Resource operations belong to host-owned exchanges. Ordinary native callbacks
 can forward their opaque identities; controller execution and cleanup continue
 independently of callback return. Suspension of an ordinary word uses its
-separate `Reschedule` capability.
+separate `Reschedule` capability. Besides its fixed state, a suspended call owns
+scratch bytes: `scratch()` observes them and `resizeScratch(length)` resizes them,
+keeping their prefix. Scratch is charged to the instance's native-memory ceiling;
+a refused resize returns null and changes nothing. The bytes survive yields and
+are released when the call completes, fails, or is cancelled. A returned slice is
+valid only until the next resize or the end of the turn.
 `port.open` and `port.begin` accept structured configuration and parameters;
 controllers read them through bounded `Controller.input` paths. Each request
 allows at most 64 KiB of scalar/text data, 4,096 aggregate nodes, and 16 port
