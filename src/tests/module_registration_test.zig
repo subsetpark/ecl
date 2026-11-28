@@ -259,12 +259,8 @@ test "module loader: observation and dispatch require the requested registration
     // `import` reaches the same registration through the same path.
     try expectStack(&runtime, "`stats (answer) import answer", "42");
 
-    // A file that registers nothing fails with the total loader error.
-    try expectErrorContains(&runtime, "orphan.answer", &.{
-        "kind io",
-        "registered nothing under that name",
-        "path \"test/acceptance/modules/orphan.ecl\"",
-    });
+    // A file that declares no module supplies none.
+    try expectErrorContains(&runtime, "orphan.answer", &.{ "kind undefined-word", "word orphan.answer" });
 
     // Observation is registration-driven because it is *symbol*-driven:
     // `see` and `doc` both consume a name, and a name is exactly what

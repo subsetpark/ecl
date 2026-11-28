@@ -17,7 +17,7 @@ const turn_core = @import("turn_core.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
 const standard_streams = @import("standard_streams.zig");
-const map_state = @import("module_snapshot.zig");
+const module_search = @import("module_search.zig");
 const external = @import("external.zig");
 const scheduler_api = @import("scheduler.zig");
 const idioms = @import("idioms.zig");
@@ -541,9 +541,7 @@ const Eval = struct {
         redispatch: u32,
     },
 
-    /// The root this body runs in, the provenance it registers under, and
-    /// whether it may define. One value, so a construction site cannot set
-    /// one part and leave another describing different code.
+    /// The root this body runs in.
     site: ExecutionSite,
     /// The word this evaluation is traced under, and that word's call site.
     /// The evaluation owns it: retiring the evaluation releases it, and an
@@ -662,8 +660,9 @@ const BoundaryMode = union(enum) {
     attempt,
     module: ModuleBoundary,
     /// `@load`: the loaded file's stack-isolated unit. Its failure is not
-    /// caught here; it propagates to the enclosing unit.
-    load,
+    /// caught here; it propagates to the enclosing unit. It holds what the
+    /// unit it interrupted may register, restored as it leaves.
+    load: modules.RegistrationProvenance,
 };
 const Boundary = struct {
     mode: BoundaryMode,
@@ -1087,8 +1086,8 @@ pub const InheritedContext = struct {
     test_execution: ?*const modules.TestExecutionAccess = null,
     native_diagnostics: bool = false,
     tls_trust: ?TlsTrust = null,
-    ecl_path: ?[]const u8 = null,
-    module_snapshot: ?*const map_state.Snapshot = null,
+    /// The Session's module search path and the files found on it.
+    module_search: ?*module_search.Search = null,
     idiom_mode: IdiomMode = .automatic,
     phase: union(enum) { bootstrap, runtime: RuntimeContext },
 
@@ -1441,8 +1440,8 @@ pub const Loading = opaque {
         self.fiber().finishIncomplete(incomplete);
     }
 
-    /// Opens one `@load` boundary over a read source. Consumes `body` on
-    /// success and failure.
+    /// Opens one `@load` boundary over a read source, which registers as
+    /// ordinary code. Consumes `body` on success and failure.
     pub fn openLoad(self: *Loading, body: *Header, word: intern.TraceWord) error{OutOfMemory}!void {
         return self.fiber().openLoad(body, word);
     }
@@ -1526,10 +1525,10 @@ pub const Fiber = struct {
     current: ?Eval = null,
     active_index: u32 = 0,
     active_word: intern.TraceWord = no_word,
-    /// The word being dispatched when it is not the occurrence at
-    /// `active_index`: one `execute` runs, or one a resumed lookup invokes.
-    /// Null otherwise.
-    dispatched: ?value.Symbol = null,
+    /// What the unit running now may register: the file a load is reading,
+    /// the standard library while an embedded module loads, and ordinary
+    /// otherwise. Set as a load enters its unit and restored as it leaves.
+    registrant: modules.RegistrationProvenance = .ordinary,
     /// Scratch for spelling one qualified trace word in a diagnostic message.
     /// A module-local word's qualified spelling is never interned, so there is
     /// no string to point at. Written before it is read on
@@ -1996,6 +1995,15 @@ pub const Fiber = struct {
     fn deinitPoppedFrame(self: *Fiber, popped: Frame) void {
         var frame = popped;
         if (frame == .effect_check) frame.effect_check.restoreActive(self);
+        // A load that fails leaves its unit, and what that unit may register
+        // goes with it.
+        switch (frame) {
+            .qualified_after_load => |after| self.registrant = after.outer,
+            .boundary => |boundary| if (boundary.mode == .load) {
+                self.registrant = boundary.mode.load;
+            },
+            .eval, .effect_check, .application => {},
+        }
         // An unwind pops a measured frame before it restores the boundary's
         // floor; nothing requires operands in between, but the pointer must
         // not outlive the state the frame's context owns.
@@ -2069,55 +2077,21 @@ pub const Fiber = struct {
     pub fn currentScope(self: *const Fiber) env.ScopeId {
         return self.current.?.scope();
     }
-    /// Links words written into `scope`, a root, by code of `provenance`. A
-    /// word written in a module's root refers to the module by name.
-    pub fn rootLinker(
-        self: *Fiber,
-        scope: env.ScopeId,
-        provenance: modules.RegistrationProvenance,
-    ) env.SymbolLinker {
-        return self.environment.linker(scope, provenance);
+    /// Links words written into `scope`, a root. A word written in a
+    /// module's root refers to the module by name.
+    pub fn rootLinker(self: *Fiber, scope: env.ScopeId) env.SymbolLinker {
+        return self.environment.linker(scope);
     }
-    /// The word `name` as the running activation would have written it in
-    /// `source`: in that activation's root.
-    pub fn linkedWord(self: *Fiber, name: u32, source: modules.RegistrationProvenance) error{OutOfMemory}!value.Symbol {
-        const linker = self.rootLinker(self.currentScope(), source);
+    /// The word `name` as the running activation would have written it: in
+    /// that activation's root.
+    pub fn linkedWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
+        const linker = self.rootLinker(self.currentScope());
         return .{ .name = name, .slot = try linker.link(name) };
     }
-    /// The source of the word being dispatched, which is the authority a
-    /// primitive registers, loads, and links words under: the occurrence the
-    /// running code reached, or the word `execute` or a resumed lookup
-    /// dispatched in its place. A primitive whose work outlives its call
-    /// asks when it is called.
-    pub fn dispatchedSource(self: *Fiber) error{OutOfMemory}!modules.RegistrationProvenance {
-        const word = self.dispatched orelse occurrence: {
-            const current = self.current orelse return self.rootSource();
-            const at = self.written(current.code, self.active_index);
-            const form = formAt(at.code, at.index);
-            if (form != .symbol) return .ordinary;
-            break :occurrence form.symbol;
-        };
-        return self.sourceOf(word);
-    }
-    /// The source a root's own text is written in when it names no file:
-    /// the project's local scope under a module map, and ordinary code
-    /// otherwise.
-    pub fn rootSource(self: *const Fiber) modules.RegistrationProvenance {
-        return if (self.inherited.module_snapshot) |snapshot| .rootScope(snapshot.localScope()) else .ordinary;
-    }
-    /// Runs `word` as the word being dispatched, for a dispatch that does
-    /// not run the occurrence at the current position.
-    pub fn executeAs(self: *Fiber, word: value.Symbol) MachineError!void {
-        const outer = self.dispatched;
-        self.dispatched = word;
-        defer self.dispatched = outer;
-        return self.executeWord(word);
-    }
-    /// The word `name` linked to core as standard-library source, as a word
-    /// the implementation builds for itself is: it means core's binding
-    /// wherever it runs.
+    /// The word `name` linked to core, as a word the implementation builds
+    /// for itself is: it means core's binding wherever it runs.
     pub fn coreWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = self.environment.linker(self.environment.coreScopeId(), .standard_library);
+        const linker = self.environment.linker(self.environment.coreScopeId());
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The root a definition, removal, or import writes. Refused inside a
@@ -2374,7 +2348,6 @@ pub const Fiber = struct {
         self.active_word = .plain(intern.moduleId(name));
         try self.autoLoadModule(name, .{
             .qualified = intern.moduleId(name),
-            .context = self.rootSource(),
             .continuation = .load_only,
         });
     }
@@ -2391,7 +2364,6 @@ pub const Fiber = struct {
         try self.replayOperand(requested);
         try self.autoLoadModule(module.name, .{
             .qualified = requested.name,
-            .context = module.searcher,
             .continuation = .replay,
         });
         return .detached;
@@ -2406,7 +2378,7 @@ pub const Fiber = struct {
     ) MachineError!void {
         return load.autoLoadModule(.of(self), name, request);
     }
-    pub fn loadSourceOnly(self: *Fiber, source: *const map_state.SourceScope) MachineError!void {
+    pub fn loadSourceOnly(self: *Fiber, source: *const module_search.Source) MachineError!void {
         return load.loadSource(.of(self), source);
     }
 
@@ -2414,8 +2386,8 @@ pub const Fiber = struct {
     /// registers them, so a stdlib name means the same module in every scope,
     /// whether or not it has loaded. User registration and removal under one
     /// are `'domain`.
-    pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
-        if (provenance == .standard_library) return;
+    pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName) MachineError!void {
+        if (self.registrant == .standard_library) return;
         if (module_lookup.embeddedLibrary(name) == null) return;
         return self.failFmt(
             .domain,
@@ -2424,28 +2396,21 @@ pub const Fiber = struct {
         );
     }
 
-    /// A named module lookup as the source that wrote `operand`, the symbol
-    /// that refers to the module, sees it.
-    pub fn moduleLookup(self: *Fiber, operand: value.Symbol, name: intern.ModuleName) error{OutOfMemory}!module_lookup.HeldModuleLookup {
-        const searcher = try self.sourceOf(operand);
+    /// A named module lookup in a view the lookup holds.
+    pub fn moduleLookup(self: *Fiber, name: intern.ModuleName) module_lookup.HeldModuleLookup {
         const view = self.inherited.registry.view();
-        return .{ .view = view, .cursor = .init(&view, self.inherited.module_snapshot, searcher, name) };
+        return .{ .view = view, .cursor = view.moduleCursor(name) };
     }
 
-    /// The source `operand` was written in: what its cell records.
-    pub fn sourceOf(self: *Fiber, operand: value.Symbol) error{OutOfMemory}!modules.RegistrationProvenance {
-        return binder.sourceOf(self.environment, try self.cellOf(operand));
-    }
-
-    /// A mapped source file registers only the modules its artifact exports;
-    /// code with no source identity registers any name.
-    pub fn refuseUnexportedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
-        const source = provenance.sourceScope() orelse return;
+    /// A found file's load registers only the modules the file declares;
+    /// any other unit registers any name.
+    pub fn refuseUnexportedModule(self: *Fiber, name: intern.ModuleName) MachineError!void {
+        const source = self.registrant.foundSource() orelse return;
         if (source.exports(name)) return;
         return self.failFmt(
             .domain,
-            "module `{s}` is not exported by its source file `{s}`",
-            .{ intern.get(intern.moduleId(name)), source.location().relative_path },
+            "module `{s}` is not declared by its source file `{s}`",
+            .{ intern.get(intern.moduleId(name)), source.path() },
         );
     }
     /// Consumes `source` on success and failure.
@@ -3286,20 +3251,19 @@ pub const Fiber = struct {
         return .{
             .environment = self.environment,
             .view = self.inherited.registry.view(),
-            .project = self.inherited.module_snapshot,
         };
     }
 
     /// The cell of `word`: the one its link identifies, or, for a word the
     /// implementation built for itself, the cell of its spelling written in
-    /// core by no source, which is the place such a word resolves in. So
+    /// core, which is the place such a word resolves in. So
     /// every word that runs has a cell, and one rule answers for it.
     pub fn cellOf(self: *Fiber, word: value.Symbol) error{OutOfMemory}!env.CellId {
         return switch (env.wordTarget(word.slot)) {
             .cell => |id| id,
             // A lowered locals operation handed over as a value is a name
             // like any other.
-            .unlinked, .local => @fromBackingInt(try self.environment.linker(self.environment.coreScopeId(), .ordinary).link(word.name)),
+            .unlinked, .local => @fromBackingInt(try self.environment.linker(self.environment.coreScopeId()).link(word.name)),
         };
     }
 
@@ -3585,7 +3549,8 @@ pub const Fiber = struct {
             return error.OutOfMemory;
         }
         const site = invoker.site;
-        try self.openBoundary(.load, @intCast(self.stack.items.len), word, body);
+        try self.openBoundary(.{ .load = self.registrant }, @intCast(self.stack.items.len), word, body);
+        self.registrant = .ordinary;
         self.current = .{
             .code = body,
             .program = .owned,
@@ -3636,7 +3601,9 @@ pub const Fiber = struct {
         self.noteFrameDepth();
     }
     fn enterRegistration(self: *Fiber, body: *Header, after: load.AfterLoad) error{OutOfMemory}!void {
-        var continuation = OwnedFrame.init(.{ .qualified_after_load = after });
+        var saved = after;
+        saved.outer = self.registrant;
+        var continuation = OwnedFrame.init(.{ .qualified_after_load = saved });
         defer continuation.deinit(self.releases, self.allocator);
         const site = self.current.?.site;
         const dropped = (if (after.request.preservesCaller())
@@ -3651,6 +3618,7 @@ pub const Fiber = struct {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         };
+        self.registrant = after.registrant;
         self.current = .{
             .code = body,
             .program = .owned,
@@ -4294,9 +4262,6 @@ const LookupDispatchDriver = struct {
                         if (site) |at| if (fiber.current) |current| if (current.code == at.code) {
                             fiber.active_index = at.index;
                         };
-                        const outer = fiber.dispatched;
-                        fiber.dispatched = word;
-                        defer fiber.dispatched = outer;
                         try invokeDefinition(fiber, definition, word);
                         return .detached;
                     },
@@ -4309,7 +4274,6 @@ const LookupDispatchDriver = struct {
                             // it again once the module is registered.
                             .unregistered_module => |module| try fiber.autoLoadModule(module.name, .{
                                 .qualified = word.name,
-                                .context = module.searcher,
                                 .continuation = .{ .dispatch = .{ .word = word, .site = site } },
                             }),
                             .unresolved => |chain| return fiber.undefinedWordIn(word.name, chain),
@@ -4510,7 +4474,6 @@ pub const LookupChain = enum {
 
 pub const PlanEntry = resolution_plan.PlanEntry;
 pub const ResolutionPlan = resolution_plan.ResolutionPlan;
-pub const ModuleLookupCursor = module_lookup.ModuleLookupCursor;
 pub const HeldModuleLookup = module_lookup.HeldModuleLookup;
 
 /// Suspends the caller and makes `executable` the running evaluation, under
@@ -4730,6 +4693,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
         },
         .qualified_after_load => {
             const continuation = self.popFrame(.qualified_after_load);
+            self.registrant = continuation.outer;
             // Source loading temporarily replaces the caller's evaluation.
             // Replay requests resume at their restored primitive operands;
             // dispatch requests resume the exact stored word without replay.
@@ -4759,7 +4723,10 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                     return true;
                 },
                 .module => unreachable,
-                .load => try finishLoad(self, boundary.stack_base),
+                .load => |outer| {
+                    self.registrant = outer;
+                    try finishLoad(self, boundary.stack_base);
+                },
             }
         },
     };

@@ -18,24 +18,15 @@ const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
 
-const standalone_map =
-    \\{format 1 local "local" scopes {
-    \\ "local" {root "." visible ["direct"] sources ["local/*.ecl"] artifacts []}
-    \\ "direct" {root "." visible ["indirect"] sources [] artifacts [
-    \\   {path "direct.ecl" kind ecl exports ["direct" "sibling"]}]}
-    \\ "indirect" {root "." visible [] sources [] artifacts [
-    \\   {path "indirect.ecl" kind ecl exports ["indirect"]}]}}}
-;
-
-test "loader: standalone maps capture local discovery and enforce direct lexical visibility" {
+test "search: project files supply modules under any filename, several to a file" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     const dir = inputs.temporary.dir;
     try dir.createDir(std.testing.io, "local", .default_dir);
-    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = standalone_map });
+    try dir.createDirPath(std.testing.io, ".ecl/packages/dep");
     try dir.writeFile(std.testing.io, .{ .sub_path = "local/one.ecl", .data = "((10) `answer def) `localmod @defm" });
-    try dir.writeFile(std.testing.io, .{ .sub_path = "direct.ecl", .data = "((indirect.answer) `answer def) `direct @defm ((7) `answer def) `sibling @defm" });
-    try dir.writeFile(std.testing.io, .{ .sub_path = "indirect.ecl", .data = "((42) `answer def) `indirect @defm" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "pair.ecl", .data = "((indirect.answer) `answer def) `direct @defm ((7) `answer def) `sibling @defm" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = ".ecl/packages/dep/whatever.ecl", .data = "((42) `answer def) `indirect @defm" });
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
@@ -44,27 +35,22 @@ test "loader: standalone maps capture local discovery and enforce direct lexical
     try std.testing.expectEqual(@as(i64, 10), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[2].int);
-    try expectErrorContains(&runtime, "indirect.answer", &.{"not visible"});
-    // An already committed source is not executed again, even after removal.
-    try dir.deleteFile(std.testing.io, "direct.ecl");
+    // A loaded file is not executed again, even after removal.
+    try dir.deleteFile(std.testing.io, "pair.ecl");
     try expectOk(&runtime, "direct.answer sibling.answer");
+    // The search path is scanned once per Session.
     try dir.writeFile(std.testing.io, .{ .sub_path = "local/two.ecl", .data = "((20) `answer def) `newlocal @defm" });
-    try expectErrorContains(&runtime, "newlocal.answer", &.{"not exported"});
+    try expectErrorContains(&runtime, "newlocal.answer", &.{"undefined-word"});
     var next = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer next.deinit();
     try expectOk(&next, "newlocal.answer");
     try std.testing.expectEqual(@as(i64, 20), next.stackItems()[0].int);
 }
 
-test "loader: a mapped module reads its own exports and doc through *module*" {
+test "search: a found module reads its own exports and doc through *module*" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     const dir = inputs.temporary.dir;
-    try dir.createDir(std.testing.io, "local", .default_dir);
-    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = standalone_map });
-    // `direct` is visible to the session; `indirect` only to `direct`. Each
-    // asks about itself, so the module operand is found from the asking
-    // module's own place in the map, not from the session's.
     try dir.writeFile(std.testing.io, .{
         .sub_path = "direct.ecl",
         .data = "(: \"Direct doc.\") ((*module* exports) `names def (*module* module-doc) `about def " ++
@@ -86,120 +72,107 @@ test "loader: a mapped module reads its own exports and doc through *module*" {
     try expectStack(&runtime, "direct.inner-about", "\"Indirect doc.\"");
 }
 
-test "loader: map references relocate and malformed nearest maps fail closed" {
+test "search: the project root is the nearest directory holding ecl.pkg" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     const dir = inputs.temporary.dir;
-    try dir.createDir(std.testing.io, "local", .default_dir);
-    try dir.createDir(std.testing.io, "maps", .default_dir);
-    const complete = "{format 1 local \"root\" scopes {\"root\" {root \"..\" visible [] sources [\"local/*.ecl\"] artifacts []}}}";
-    try dir.writeFile(std.testing.io, .{ .sub_path = "maps/complete", .data = complete });
-    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = "{format 1 map \"maps/complete\"}" });
-    try dir.writeFile(std.testing.io, .{ .sub_path = "local/entry.ecl", .data = "((3) `answer def) `mapped @defm" });
+    try dir.createDirPath(std.testing.io, "app/sub");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "app/ecl.pkg", .data = "" });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "app/lib.ecl", .data = "((3) `answer def) `rooted @defm" });
+    const start = try std.fs.path.join(std.testing.allocator, &.{ inputs.cwd, "app", "sub" });
+    defer std.testing.allocator.free(start);
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .initial_cwd = start }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "rooted.answer", "3");
+}
+
+test "search: a module two files declare fails when it is requested, naming both" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    try writeInput(&inputs, "a.ecl", "((1) `answer def) `twice @defm ((5) `answer def) `alone @defm");
+    try writeInput(&inputs, "b.ecl", "((2) `answer def) `twice @defm");
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "mapped.answer");
-    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
-    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = "broken" });
-    try std.testing.expectError(error.InvalidHostConfig, session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate));
-    var explicit = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .module_map = "maps/complete" }), .cooperative, .evaluate);
-    defer explicit.deinit();
-    try expectOk(&explicit, "mapped.answer");
-    try dir.writeFile(std.testing.io, .{ .sub_path = "maps/chained", .data = "{format 1 map \"complete\"}" });
-    try dir.writeFile(std.testing.io, .{ .sub_path = "maps/complete", .data = "{format 1 map \"chained\"}" });
-    var diagnostic: session.InitDiagnostic = .{};
-    try std.testing.expectError(error.InvalidHostConfig, session.Session.initDiagnosed(backing.allocator(), &.{}, inputs.inputs(.{ .module_map = "maps/complete" }), .cooperative, .evaluate, &diagnostic));
-    // The innermost rejection is reported: the chained target, not its referrer.
-    try std.testing.expect(std.mem.startsWith(u8, diagnostic.message(), "invalid module map: referenced module map `"));
-    try std.testing.expect(std.mem.endsWith(u8, diagnostic.message(), "maps/chained` is itself a reference; it must be a complete map"));
+    try expectErrorContains(&runtime, "twice.answer", &.{ "kind domain", "module `twice` is declared by both `", "a.ecl` and `", "b.ecl`" });
+    try expectStack(&runtime, "alone.answer", "5");
 }
 
-test "loader: map validation and snapshot construction clean up every allocation failure" {
+test "search: scanning and lookup clean up every allocation failure" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     try inputs.temporary.dir.createDir(std.testing.io, "local", .default_dir);
-    try inputs.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "local/one.ecl", .data = "() `localmod @defm" });
-    const path = try std.fs.path.join(std.testing.allocator, &.{ inputs.cwd, "ecl.modules" });
-    defer std.testing.allocator.free(path);
+    try inputs.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "local/one.ecl", .data = "() `localmod @defm () `other @defm" });
     const Probe = struct {
-        fn run(allocator: std.mem.Allocator, filename: []const u8, cwd: []const u8) !void {
+        fn run(allocator: std.mem.Allocator, cwd: []const u8) !void {
+            const search_api = @import("../module_search.zig");
             var owner = @import("../heap.zig").HostOwner.init(allocator);
             defer owner.cleanup().drain();
-            var diagnostic: @import("../module_map.zig").Diagnostic = .{};
-            const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true, &diagnostic);
-            const snapshot = @import("../module_snapshot.zig").Snapshot.fromMap(owner.cleanup(), map, cwd) catch |err| {
-                map.deinit();
-                return err;
-            };
-            defer snapshot.deinit();
-            var lookup = snapshot.lookupCursor(snapshot.localScope(), "direct");
-            defer lookup.deinit();
-            while (true) switch (lookup.advance()) {
+            const search = try search_api.Search.init(owner.cleanup(), std.testing.io, cwd, null, null);
+            defer search.deinit();
+            var scan = search.scan();
+            defer scan.deinit();
+            const built = while (true) switch (try scan.advance()) {
                 .pending => {},
-                .complete => |outcome| {
-                    try std.testing.expect(outcome == .matched);
-                    break;
-                },
+                .complete => |done| break done,
             };
+            const catalog = search.publish(built);
+            try std.testing.expect(catalog.find(try intern.internModuleName("other")) == .file);
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{ path, inputs.cwd });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{inputs.cwd});
 }
 
-test "loader: maps load native artifacts through concurrent public requests" {
+test "search: a file both the project root and an ECL_PATH entry reach is one file" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    try inputs.temporary.dir.createDir(std.testing.io, "lib", .default_dir);
+    try writeInput(&inputs, "lib/anything.ecl", "((7) `v def) `lib @defm");
+    const entry = try std.fs.path.join(std.testing.allocator, &.{ inputs.cwd, "lib" });
+    defer std.testing.allocator.free(entry);
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .ecl_path = entry }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "lib.v", "7");
+}
+
+test "search: ECL_PATH supplies native libraries through concurrent public requests" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     const native_root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, @import("native_fixture_options").directory, std.testing.allocator);
     defer std.testing.allocator.free(native_root);
-    const source = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{format 1 local \"local\" scopes {{" ++
-            "\"local\" {{root \".\" visible [\"native\"] sources [] artifacts []}} " ++
-            "\"native\" {{root \"{s}\" visible [] sources [] artifacts [" ++
-            "{{path \"sample.eclmod\" kind native exports [\"sample\"]}}]}}}}}}",
-        .{native_root},
-    );
-    defer std.testing.allocator.free(source);
-    try inputs.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "ecl.modules", .data = source });
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .ecl_path = native_root }), .{ .worker_pool = 4 }, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "(40 sample.increment) @spawn (41 sample.increment) @spawn task.await `ok at pop task.await `ok at pop 9 sample.increment");
     try std.testing.expectEqual(@as(i64, 10), runtime.stackItems()[0].int);
 }
 
-test "loader: a mapped file registers only the modules it exports" {
+test "loader: a found file's load registers only the modules it declares" {
     var fixture = try runtime_fixture.Fixture.init();
     defer fixture.deinit();
-    const map = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-        "{path \"foo.ecl\" kind ecl exports [\"root.foo\"]} " ++
-        "{path \"bar.ecl\" kind ecl exports [\"root.bar\"]}]}}}";
-    try writeInput(&fixture, "ecl.modules", map);
-    try writeInput(&fixture, "foo.ecl", "((99) `answer def) `root.foo.hidden @defm\n" ++
+    try writeInput(&fixture, "foo.ecl", "((99) `answer def) \"root.foo.hidden\" intern @defm\n" ++
         "((1) `answer def) `root.foo @defm\n");
     try writeInput(&fixture, "bar.ecl", "((((7) `answer def) `baz @defm) `register def " ++
         "(2) `answer def) `root.bar @defm\n");
 
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
-        .io = std.testing.io,
-        .initial_cwd = fixture.cwd,
-    }), .default, .evaluate);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, fixture.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    // A nested registration during load fails the load before its export.
-    try expectErrorContains(&runtime, "root.foo.answer", &.{ "kind domain", "module `root.foo.hidden` is not exported by its source file `foo.ecl`" });
-    // A word written in a mapped file keeps that file's identity when it runs.
-    try expectErrorContains(&runtime, "root.bar.register", &.{ "kind domain", "module `baz` is not exported by its source file `bar.ecl`" });
-    try expectErrorContains(&runtime, "baz.answer", &.{"not exported by the active module map"});
-    try expectOk(&runtime, "root.bar.answer");
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+    // A computed registration during the load fails it before its export.
+    try expectErrorContains(&runtime, "root.foo.answer", &.{ "kind domain", "module `root.foo.hidden` is not declared by its source file `", "foo.ecl`" });
+    // Outside the load, a word the file defines registers as the code that
+    // runs it.
+    try expectOk(&runtime, "root.bar.register baz.answer root.bar.answer");
+    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
 }
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
@@ -705,7 +678,7 @@ test "loader: @load is one isolated unit and preserves file provenance" {
     try std.testing.expectEqualStrings("side42\n6\n", output.written());
 }
 
-test "loader: ECL_PATH loads the first candidate when an imported word is reached" {
+test "search: ECL_PATH entries supply modules, and a name two entries declare is reported" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     const search = try std.fmt.allocPrint(
@@ -714,35 +687,20 @@ test "loader: ECL_PATH loads the first candidate when an imported word is reache
         .{std.fs.path.delimiter},
     );
     defer std.testing.allocator.free(search);
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer output.deinit();
-    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer diagnostics.deinit();
-    var runtime_inputs37 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs37.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs37.inputs(.{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-        .ecl_path = search,
-    }), .default, .evaluate);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{ .ecl_path = search }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "(`attempted (answer) import answer) @attempt pop attempted.answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     // The import inside the @attempt bound `answer` in the session.
     try expectOk(&runtime, "answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[1].int);
-    try expectOk(&runtime, "`stats (answer) import answer");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
+    try expectErrorContains(&runtime, "`stats (answer) import answer", &.{ "kind domain", "path-first/stats.ecl` and `", "path-second/stats.ecl`" });
 
-    var runtime_inputs38 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs38.deinit();
-    var no_path = try session.Session.init(backing.allocator(), &.{}, runtime_inputs38.inputs(.{
-        .io = std.testing.io,
-        .output = &output.writer,
-        .diagnostics = &diagnostics.writer,
-        .ecl_path = "",
-    }), .default, .evaluate);
+    var no_path_inputs = try runtime_fixture.Fixture.init();
+    defer no_path_inputs.deinit();
+    var no_path = try session.Session.init(backing.allocator(), &.{}, no_path_inputs.inputs(.{ .ecl_path = "" }), .default, .evaluate);
     defer no_path.deinit();
     try expectErrorContains(&no_path, "`stats (answer) import answer", &.{ "kind undefined-word", "word answer" });
 }
@@ -913,53 +871,25 @@ fn writeInput(fixture: *runtime_fixture.Fixture, path: []const u8, source: []con
     try fixture.temporary.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = source });
 }
 
-test "loader: a failing mapped artifact publishes no usable module" {
+test "loader: a file whose load failed loads again for a module it has not registered" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [{path \"many.ecl\" kind ecl exports [\"broken.first\" \"broken.second\"]}]}}}");
-    try writeInput(&inputs, "many.ecl", "((1) `answer def) `broken.first @defm missing-during-artifact-load ((2) `answer def) `broken.second @defm");
+    try writeInput(&inputs, "many.ecl", "((1) `answer def) `broken.first @defm missing-during-file-load ((2) `answer def) `broken.second @defm");
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "broken.first.answer", &.{"missing-during-artifact-load"});
-    try expectErrorContains(&runtime, "broken.first.answer", &.{"missing-during-artifact-load"});
+    try expectErrorContains(&runtime, "broken.second.answer", &.{"missing-during-file-load"});
+    // What the failed load registered before failing stays registered.
+    try expectStack(&runtime, "broken.first.answer", "1");
     try writeInput(&inputs, "many.ecl", "((3) `answer def) `broken.first @defm ((4) `answer def) `broken.second @defm");
-    try expectOk(&runtime, "broken.first.answer broken.second.answer");
-    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
-    try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
-}
-
-test "authority: a symbol built in a task links by the source of the word that built it" {
-    var inputs = try runtime_fixture.Fixture.init();
-    defer inputs.deinit();
-    try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {" ++
-        "\"root\" {root \".\" visible [\"alpha\"] sources [] artifacts []} " ++
-        "\"alpha\" {root \".\" visible [\"secret\"] sources [] artifacts [{path \"app.ecl\" kind ecl exports [\"app\"]}]} " ++
-        "\"secret\" {root \".\" visible [] sources [] artifacts [{path \"secret.ecl\" kind ecl exports [\"secret\"]}]}}}");
-    // `intern` is written in `app.ecl`, whose scope may see `secret`; the
-    // task runs in the module's root, and the symbol it builds is linked by
-    // that occurrence's source rather than by the task's root.
-    try writeInput(&inputs, "app.ecl", "((\"secret.answer\" intern execute) `direct def " ++
-        "((\"secret.answer\" intern execute) @spawn task.await) `go def) `app @defm\n");
-    try writeInput(&inputs, "secret.ecl", "((42) `answer def) `secret @defm\n");
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
-    defer runtime.deinit();
-    try expectStack(&runtime, "app.direct app.go", "42 {ok [42]}");
-    // Written at the root, the same request is refused: the root does not
-    // see `secret`.
-    try expectErrorContains(&runtime, "\"secret.answer\" intern execute", &.{"not visible to `root`"});
+    try expectStack(&runtime, "broken.second.answer broken.first.answer", "4 3");
 }
 
 test "loader: module-body imports do not depend on which file declares the module or where" {
     for ([_][]const u8{ "pair.left.sum", "pair.right.sum" }) |entry| {
         var inputs = try runtime_fixture.Fixture.init();
         defer inputs.deinit();
-        try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-            "{path \"left.ecl\" kind ecl exports [\"pair.left\" \"pair.later\"]} " ++
-            "{path \"right.ecl\" kind ecl exports [\"pair.right\"]}]}}}");
         // `pair.left` imports from a module declared after it in its own file
         // and from a file whose own module imports back from this one.
         try writeInput(&inputs, "left.ecl", "(`pair.later (base) importp `pair.right (step) importp " ++
@@ -980,11 +910,6 @@ test "loader: module-body imports do not depend on which file declares the modul
 test "loader: a module-body import of a missing or private attribute fails where its word is reached" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
-    try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-        "{path \"outer.ecl\" kind ecl exports [\"outer\"]} " ++
-        "{path \"inner.ecl\" kind ecl exports [\"inner\"]} " ++
-        "{path \"private.ecl\" kind ecl exports [\"private\" \"sealed\"]} " ++
-        "{path \"early.ecl\" kind ecl exports [\"early\" \"late\"]}]}}}");
     try writeInput(&inputs, "outer.ecl", "(`inner (x) importp (x) `go def) `outer @defm\n");
     try writeInput(&inputs, "inner.ecl", "(`outer (missing) importp (2) `x def (missing) `reach def) `inner @defm\n");
     try writeInput(&inputs, "private.ecl", "(`sealed (secret) importp (0) `go def (secret) `reach def) `private @defm\n((1) `secret defp) `sealed @defm\n");
@@ -1005,54 +930,36 @@ test "loader: a module-body import of a missing or private attribute fails where
     try expectErrorContains(&runtime, "early.v", &.{ "kind undefined-word", "undefined word `y`" });
 }
 
-test "loader: ECL_PATH modules import from each other" {
+test "loader: found modules import from each other" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     try writeInput(&inputs, "ping.ecl", "(`pong (bounce) importp (1) `one def (bounce 10 +) `total def) `ping @defm");
     try writeInput(&inputs, "pong.ecl", "(`ping (one) importp (one 1 +) `bounce def) `pong @defm");
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .ecl_path = inputs.cwd }), .cooperative, .evaluate);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "ping.total");
     try std.testing.expectEqual(@as(i64, 12), runtime.stackItems()[0].int);
 }
 
-test "loader: without maps malformed package state does not affect ECL_PATH" {
+test "search: malformed package state does not affect module search" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     try writeInput(&inputs, "ecl.pkg", "broken manifest");
     try writeInput(&inputs, "ecl.lock", "broken lock");
     try writeInput(&inputs, "ordinary.ecl", "((42) `answer def) `ordinary @defm");
-    const environ = [_]@import("../machine.zig").Environ.Entry{.{ .name = "ECL_PATH", .value = inputs.cwd }};
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .environ = &environ, .ecl_path = inputs.cwd }), .cooperative, .evaluate);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "ordinary.answer");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
 }
 
-test "loader: an explicit artifact with no exports cannot register a module" {
-    var inputs = try runtime_fixture.Fixture.init();
-    defer inputs.deinit();
-    try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [{path \"private.ecl\" kind ecl exports []}]}}}");
-    try writeInput(&inputs, "private.ecl", "((42) `answer def) `hidden @defm hidden.answer 42 = {kind user} assert");
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
-    defer runtime.deinit();
-    const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}/private.ecl\" @load", .{inputs.cwd});
-    defer std.testing.allocator.free(source);
-    try expectErrorContains(&runtime, source, &.{ "kind domain", "module `hidden` is not exported by its source file `private.ecl`" });
-}
-
-test "loader: a mapped file cannot register a stdlib name" {
+test "loader: a found file cannot register a stdlib name" {
     var fixture = try runtime_fixture.Fixture.init();
     defer fixture.deinit();
-    const map = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-        "{path \"foo.ecl\" kind ecl exports [\"root.foo\"]}]}}}";
-    try writeInput(&fixture, "ecl.modules", map);
     try writeInput(&fixture, "foo.ecl", "((a b -- c) (pop pop 0) `has? def) `dict @defm\n" ++
         "(({a 1} `a 7 dict.get) `lookup def) `root.foo @defm\n");
 

@@ -20,7 +20,7 @@ const reflection = @import("reflection.zig");
 const scheduler_api = @import("scheduler.zig");
 const console_api = @import("console.zig");
 const standard_streams = @import("standard_streams.zig");
-const map_state = @import("module_snapshot.zig");
+const module_search = @import("module_search.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
 const bundled_proc = @import("bundled-proc");
@@ -123,13 +123,15 @@ pub const RuntimeInputs = struct {
     diagnostics: *std.Io.Writer,
     tls_trust: ?TlsTrustOverride = null,
     ecl_path: ?[]const u8 = null,
-    /// An explicit map overrides nearest-map discovery, relative to initial_cwd.
-    module_map: ?[]const u8 = null,
+    /// The project root modules are searched from. Null finds it from
+    /// `initial_cwd`: the nearest ancestor holding `ecl.pkg`, or that
+    /// directory itself.
+    module_root: ?[]const u8 = null,
     /// Borrowed name/value pairs; the Session owns its own copy.
     environ: []const machine.Environ.Entry,
     /// Whether the process has already claimed stdin as the program source.
     standard_input: machine.StandardInput.Availability = .data,
-    /// Absolute startup directory for process execution and module-map discovery.
+    /// Absolute startup directory for process execution and module search.
     initial_cwd: []const u8,
     process_limits: bundled_proc.Limits = .{},
     filesystem: filesystem_port.Config = .{},
@@ -259,7 +261,7 @@ const SessionCore = struct {
     /// What every root unit's fiber inherits, built once. The Session owns the
     /// copied strings and the argument list it borrows.
     inherited: machine.InheritedContext,
-    module_snapshot: ?*map_state.Snapshot,
+    module_search: *module_search.Search,
     local_preload: LocalPreloadState = .idle,
     environ: EnvironSnapshot,
     standard_streams: standard_streams.Devices,
@@ -288,22 +290,13 @@ const OpaqueSessionCore = opaque {};
 const root_never_cancelled: std.atomic.Value(bool) = .init(false);
 const LocalPreloadState = union(enum) {
     idle,
-    cursor: map_state.LocalSourceCursor,
+    cursor: module_search.ProjectSourceCursor,
     complete,
-
-    fn deinit(self: *LocalPreloadState) void {
-        switch (self.*) {
-            .cursor => |*cursor| cursor.deinit(),
-            .idle, .complete => {},
-        }
-        self.* = .complete;
-    }
 };
 
 pub const LocalPreloadProgress = union(enum) {
     pending,
     complete,
-    no_map,
     invalid: []const u8,
     err: Value,
 };
@@ -418,8 +411,8 @@ pub const Session = enum(usize) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
-        const owned_ecl_path = if (host.ecl_path) |path| try allocator.dupe(u8, path) else null;
-        errdefer if (owned_ecl_path) |path| allocator.free(path);
+        const owned_search = try module_search.Search.init(host_owner.cleanup(), host.io, host.initial_cwd, host.module_root, host.ecl_path);
+        errdefer owned_search.deinit();
         const owned_tls_trust: ?machine.TlsTrust = if (host.tls_trust) |trust| .{
             .ca_file = try allocator.dupe(u8, trust.ca_file),
             .now = trust.now,
@@ -430,25 +423,6 @@ pub const Session = enum(usize) {
             error.InvalidConfig => return diagnostic.fail("HTTP limits or TLS trust configuration are invalid", .{}),
         };
         errdefer http_owner.deinit();
-        const owned_module_snapshot = discovery: {
-            const maps = @import("module_map.zig");
-            var rejection: maps.Diagnostic = .{};
-            const map_path = maps.discover(allocator, host.io, host.initial_cwd, host.module_map, &rejection) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Invalid => return diagnostic.fail("invalid module map: {s}", .{rejection.message()}),
-            };
-            if (map_path) |path| {
-                defer allocator.free(path);
-                const map = maps.load(host_owner.cleanup(), host.io, path, &rejection) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Invalid => return diagnostic.fail("invalid module map: {s}", .{rejection.message()}),
-                };
-                errdefer map.deinit();
-                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), map, host.initial_cwd);
-            }
-            break :discovery null;
-        };
-        errdefer if (owned_module_snapshot) |module_snapshot| module_snapshot.deinit();
         var test_authority = if (mode == .language_tests)
             @as(?modules.TestAuthority, try registry.createTestAuthority())
         else
@@ -505,7 +479,7 @@ pub const Session = enum(usize) {
             // this core, so they are initialized on the lines after the core
             // is; nothing reads either field before that.
             .inherited = undefined,
-            .module_snapshot = owned_module_snapshot,
+            .module_search = owned_search,
             .environ = snapshot,
             // SAFETY: see `inherited` above.
             .standard_streams = undefined,
@@ -522,8 +496,7 @@ pub const Session = enum(usize) {
             .test_observation = if (test_authority) |authority| authority.observation() else null,
             .test_execution = if (test_authority) |authority| authority.execution() else null,
             .tls_trust = owned_tls_trust,
-            .ecl_path = owned_ecl_path,
-            .module_snapshot = owned_module_snapshot,
+            .module_search = owned_search,
             .phase = .{ .runtime = .{
                 .native_loader = native_owner.loader(),
                 .console = &core.console,
@@ -557,10 +530,7 @@ pub const Session = enum(usize) {
         core.releaseDomain().releaseValue(services.arguments);
         core.standard_streams.deinit(core.releaseDomain());
         core.http_owner.deinit();
-        if (core.inherited.ecl_path) |path| core.allocator().free(path);
         if (core.inherited.tls_trust) |trust| core.allocator().free(trust.ca_file);
-        core.local_preload.deinit();
-        if (core.module_snapshot) |module_snapshot| module_snapshot.deinit();
         if (core.test_authority) |*authority| authority.deinit();
         core.registry.deinit();
         core.archive_owner.deinit();
@@ -574,6 +544,7 @@ pub const Session = enum(usize) {
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
         core.allocator().free(services.startup_cwd);
+        core.module_search.deinit();
         core.environ.deinit();
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
@@ -677,7 +648,7 @@ pub const Session = enum(usize) {
         return self.loadTarget(.{ .module = name });
     }
 
-    const LoadTarget = union(enum) { module: intern.ModuleName, source: *const map_state.SourceScope };
+    const LoadTarget = union(enum) { module: intern.ModuleName, source: *const module_search.Source };
 
     fn loadTarget(self: *Session, target: LoadTarget) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
@@ -707,17 +678,27 @@ pub const Session = enum(usize) {
         return .ok;
     }
 
-    /// Advance local-scope preload by at most one artifact observation and one
-    /// ordinary source load. Cursor authority remains inside SessionCore, so a
-    /// host cannot retain a Snapshot borrow past Session teardown.
+    /// Advance loading the project root's source files by at most one file
+    /// observation and one ordinary source load, scanning the search path
+    /// first if no lookup has. Cursor authority remains inside SessionCore,
+    /// so a host cannot retain a catalog borrow past Session teardown.
     pub fn advanceLocalPreload(self: *Session) error{OutOfMemory}!LocalPreloadProgress {
         const core = self.coreState();
         if (core.local_preload == .idle) {
-            const module_snapshot = core.module_snapshot orelse {
-                core.local_preload = .complete;
-                return .no_map;
+            const catalog = core.module_search.current() orelse scanned: {
+                var scan = core.module_search.scan();
+                defer scan.deinit();
+                const built = while (true) switch (try scan.advance()) {
+                    .pending => {},
+                    .complete => |done| break done,
+                };
+                break :scanned core.module_search.publish(built);
             };
-            core.local_preload = .{ .cursor = module_snapshot.localSourceCursor() };
+            if (catalog.failure) |reason| {
+                core.local_preload = .complete;
+                return .{ .invalid = reason };
+            }
+            core.local_preload = .{ .cursor = catalog.projectSources() };
         }
         return switch (core.local_preload) {
             .idle => unreachable,
@@ -725,14 +706,13 @@ pub const Session = enum(usize) {
             .cursor => |*cursor| switch (cursor.advance()) {
                 .pending => .pending,
                 .complete => result: {
-                    cursor.deinit();
                     core.local_preload = .complete;
                     break :result .complete;
                 },
                 .item => |source| switch (try self.loadTarget(.{ .source = source })) {
                     .ok => .pending,
                     .err => |failure| .{ .err = failure },
-                    .incomplete => .{ .invalid = "local-scope source loader returned incomplete source" },
+                    .incomplete => .{ .invalid = "project source loader returned incomplete source" },
                 },
             },
         };

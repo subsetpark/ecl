@@ -1,6 +1,6 @@
 //! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
-const map_state = @import("module_snapshot.zig");
+const module_search = @import("module_search.zig");
 const builtin = @import("builtin");
 const env = @import("env.zig");
 const value = @import("value.zig");
@@ -418,15 +418,13 @@ const StagedName = struct {
     entry: env.Entry,
 };
 
-/// Nominal publication provenance, one word. Embedded definitions retain their
-/// trusted origin. Cataloged code carries its defining-file capability, which
-/// also identifies its resolution scope, direct visibility, and the modules it
-/// may register. Interactive root code has local-scope visibility.
+/// What a unit may register, one word: anything, for an embedded library
+/// load; only its declarations, for a found file's load; and any name not
+/// reserved for the standard library, for other code. A fiber holds the
+/// value of the unit it is running, and an image records the one it was
+/// registered under.
 ///
-/// The variant is the two low bits, which a source scope's address leaves
-/// clear: a root scope's id sits above them, and a source scope's address
-/// around them. A word's cell and a module's definitions record this value as
-/// it is.
+/// A found file is its address, which is never zero or one.
 pub const RegistrationProvenance = enum(u64) {
     ordinary = 0,
     standard_library = 1,
@@ -435,42 +433,26 @@ pub const RegistrationProvenance = enum(u64) {
     pub const Kind = union(enum) {
         ordinary,
         standard_library,
-        root_scope: map_state.ScopeId,
-        source: *const map_state.SourceScope,
+        source: *const module_search.Source,
     };
 
-    pub fn rootScope(id: map_state.ScopeId) RegistrationProvenance {
-        return @fromBackingInt(2 | (@as(u64, @backingInt(id)) << 2));
-    }
-
-    pub fn source(scope: *const map_state.SourceScope) RegistrationProvenance {
-        const address: u64 = @intFromPtr(scope);
-        std.debug.assert(address & 3 == 0);
-        return @fromBackingInt(address | 3);
+    pub fn source(found: *const module_search.Source) RegistrationProvenance {
+        return @fromBackingInt(@intFromPtr(found));
     }
 
     pub fn kind(self: RegistrationProvenance) Kind {
-        const raw = @backingInt(self);
-        return switch (@as(u2, @truncate(raw))) {
-            0 => .ordinary,
-            1 => .standard_library,
-            2 => .{ .root_scope = @fromBackingInt(@intCast(raw >> 2)) },
-            3 => .{ .source = @ptrFromInt(@as(usize, @intCast(raw & ~@as(u64, 3)))) },
+        return switch (self) {
+            .ordinary => .ordinary,
+            .standard_library => .standard_library,
+            _ => .{ .source = @ptrFromInt(@as(usize, @intCast(@backingInt(self)))) },
         };
     }
 
-    pub fn scopeId(self: RegistrationProvenance) ?map_state.ScopeId {
+    /// The found file this provenance is, if it is one.
+    pub fn foundSource(self: RegistrationProvenance) ?*const module_search.Source {
         return switch (self.kind()) {
-            .root_scope => |id| id,
-            .source => |scope| scope.scopeId(),
+            .source => |found| found,
             .ordinary, .standard_library => null,
-        };
-    }
-
-    pub fn sourceScope(self: RegistrationProvenance) ?*const map_state.SourceScope {
-        return switch (self.kind()) {
-            .source => |scope| scope,
-            .ordinary, .standard_library, .root_scope => null,
         };
     }
 };
@@ -1029,7 +1011,7 @@ const free_loading_owner: usize = 0;
 
 const LoadingKey = union(enum) {
     module: intern.ModuleName,
-    artifact: map_state.ArtifactId,
+    artifact: module_search.FileId,
 
     fn eql(left: LoadingKey, right: LoadingKey) bool {
         return switch (left) {
@@ -1055,18 +1037,17 @@ const LoadingNode = struct {
     next: ?*LoadingNode,
 };
 
-/// The authority to make one artifact's registrations visible. Only
+/// The authority to record a found file as loaded. Only
 /// `LoadingLease.artifactCommit` mints one, and only from a live lease keyed
-/// to that artifact, so a holder of the project lock cannot publish an
-/// artifact whose declarations nobody verified. An `ArtifactId` identifies an
-/// artifact; this represents the right to publish it.
+/// to that file, so no file is recorded loaded whose declarations nobody
+/// verified.
 pub const ArtifactCommit = enum(u32) {
     _,
 
-    fn init(published: map_state.ArtifactId) ArtifactCommit {
+    fn init(published: module_search.FileId) ArtifactCommit {
         return @fromBackingInt(@intCast(@backingInt(published)));
     }
-    pub fn artifact(self: ArtifactCommit) map_state.ArtifactId {
+    pub fn artifact(self: ArtifactCommit) module_search.FileId {
         return @fromBackingInt(@intCast(@backingInt(self)));
     }
 };
@@ -1078,14 +1059,14 @@ pub const LoadingLease = enum(usize) {
     fn init(loading: *LoadingNode) LoadingLease {
         return @fromBackingInt(@intCast(@intFromPtr(loading)));
     }
-    /// Trade a live artifact lease for the authority to publish that
-    /// artifact. The lease is not released here: publication must become
-    /// visible before the lease frees, or a contender would find the artifact
-    /// uncommitted and reload it. `deinit` follows on the same step.
+    /// Trade a live file lease for the authority to record the file loaded.
+    /// The lease is not released here: the record must be visible before the
+    /// lease frees, or a contender would find the file unloaded and load it
+    /// again. `deinit` follows on the same step.
     pub fn artifactCommit(self: *LoadingLease) ArtifactCommit {
         return switch (self.node().key) {
             .artifact => |artifact| .init(artifact),
-            .module => @panic("a module loading lease cannot publish an artifact"),
+            .module => @panic("a module loading lease cannot record a file loaded"),
         };
     }
     fn node(self: LoadingLease) *LoadingNode {
@@ -2008,7 +1989,7 @@ pub const Registry = enum(usize) {
 
     pub fn beginArtifactLoadingCursor(
         self: *Registry,
-        artifact: map_state.ArtifactId,
+        artifact: module_search.FileId,
         owner: LoadingOwner,
     ) BeginLoadingCursor {
         const head = self.privateState().loading.load(.acquire);

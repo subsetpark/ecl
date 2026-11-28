@@ -38,12 +38,16 @@
   locked [packages "sample" source kind] at-path `archive equal) `check-commit defp
 
  ### defp runnable
- (answer -- : "Load through the project's active runtime map in a new interpreter.")
+ (answer -- : "Load the installed dependency in a new interpreter.")
  (str "alpha.answer " swap cat " = {kind user msg \"wrong active dependency\"} assert" cat
   ["-e"] swap wrap cat invoke `term at {kind exited code 0} equal) `runnable defp
 
- ### test initial
- (-- : "Resolve mixed sources explicitly and start the installed app from broken project state.")
+ ### defp installed
+ (-- text : "Read the installed dependency's source, which a failed command leaves unchanged.")
+ (`cwd ".ecl/packages/alpha/src/alpha.ecl" fs.read-text) `installed defp
+
+ ### defp initial
+ (-- : "Resolve mixed sources explicitly; project modules never replace the application's.")
  (["init" "consumer"] command
   `cwd "ecl.lock" fs.read-text
   ["add"] args 1 at wrap cat ["--tag" "release"] cat command
@@ -52,66 +56,63 @@
   seed-archive ["update" "--offline"] command
   args 2 at check-commit 42 runnable
   `cwd "src/conflict.ecl" "((999) `answer def) `pkg.command @defm" fs.publish-text
-  `cwd "ecl.modules" "broken map" fs.publish-text
   ["sync" "--offline"] command
   ["verify"] command
   args 2 at check-commit 42 runnable
-  `cwd "ecl.lock" fs.read-text `cwd "ecl.modules" fs.read-text
+  `cwd "ecl.lock" fs.read-text installed
   `cwd "ecl.lock" "corrupt lock" fs.publish-text
   ["pkg" "sync" "--offline"] invoke `term at `code at 1 equal
-  `cwd "ecl.modules" fs.read-text equal
+  installed equal
   ["update" "--offline"] command
   `cwd "ecl.lock" fs.read-text equal ["verify"] command)
- `initial test
+ `initial defp
 
- ### test reproduce-old
+ ### defp reproduce-old
  (-- : "Reproduce only the portable manifest and lock after a tag moves and caches are absent.")
  (`cwd ".ecl" fs.exists? 0 equal
-  `cwd "ecl.modules" fs.exists? 0 equal
   `cwd "ecl.lock" fs.read-text
   seed-archive ["sync"] command
   `cwd "ecl.lock" fs.read-text equal
   args 2 at check-commit 42 runnable ["verify"] command)
- `reproduce-old test
+ `reproduce-old defp
 
- ### test moved
+ ### defp moved
  (-- : "Honor the old lock until an explicit update, and preserve state on unavailable commits.")
  (`cwd "ecl.lock" fs.read-text
   ["sync" "--offline"] command
   `cwd "ecl.lock" fs.read-text equal
   args 2 at check-commit 42 runnable
   ["add"] args 1 at wrap cat ["--tag" "release"] cat command
-  `cwd "ecl.lock" fs.read-text `cwd "ecl.modules" fs.read-text
+  `cwd "ecl.lock" fs.read-text installed
   ["pkg" "sync" "--offline"] invoke `term at `code at 1 equal
-  `cwd "ecl.modules" fs.read-text equal `cwd "ecl.lock" fs.read-text equal
+  installed equal `cwd "ecl.lock" fs.read-text equal
   ["update" "--offline"] command
   args 3 at check-commit 99 runnable
-  `cwd "ecl.pkg" fs.read-text `cwd "ecl.lock" fs.read-text `cwd "ecl.modules" fs.read-text
+  `cwd "ecl.pkg" fs.read-text `cwd "ecl.lock" fs.read-text installed
   ["pkg" "add"] args 1 at wrap cat ["--commit" "ffffffffffffffffffffffffffffffffffffffff"] cat
   invoke `term at `code at 1 equal
-  `cwd "ecl.modules" fs.read-text equal `cwd "ecl.lock" fs.read-text equal
+  installed equal `cwd "ecl.lock" fs.read-text equal
   `cwd "ecl.pkg" fs.read-text equal ["verify"] command)
- `moved test
+ `moved defp
 
- ### test reproduce-new
- (-- : "Reproduce the updated portable graph and vendor without cache dependence.")
+ ### defp reproduce-new
+ (-- : "Reproduce the updated portable graph.")
  (`cwd ".ecl" fs.exists? 0 equal
   `cwd "ecl.lock" fs.read-text
   ["sync" "--offline"] command
   `cwd "ecl.lock" fs.read-text equal
   args 3 at check-commit 99 runnable ["verify"] command)
- `reproduce-new test
+ `reproduce-new defp
 
- ### test vendor
- (-- : "Vendor the active sealed graph after removal of the shared download cache.")
- (["vendor" "--offline"] command
-  `cwd "ecl.modules" fs.read-text pkg.layout.from-reference "vendor/" str.starts? 1 equal
+ ### defp relocated
+ (-- : "Reinstall a relocated project from its kept archives without the shared download cache.")
+ (["sync" "--offline"] command
   99 runnable ["verify"] command)
- `vendor test
+ `relocated defp
 
  ### def run
- (-- : "Select one fixture phase and run its assertions using ECL's built-in test interface.")
- (tests (`module at `pkg.test.git-commands match?) filter (`name at chars args first match?) filter
-  dup len 1 = {kind user msg "Git command phase was not registered"} assert
-  first @test result.or-raise pop) `run def
+ (-- : "Run the fixture phase the first argument selects.")
+ ({"initial" (initial) "reproduce-old" (reproduce-old) "moved" (moved)
+   "reproduce-new" (reproduce-new) "relocated" (relocated)}
+  args first at apply) `run def
 ) `pkg.test.git-commands @defm

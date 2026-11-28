@@ -62,7 +62,7 @@ const source_groups = [_]SourceGroup{
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
     embeddedGroup(true, &.{
-        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "inert_data.zig", "module_map.zig", "module_snapshot.zig",
+        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "module_search.zig",
     }),
     // The embedded prelude loader and the embedded stdlib manifest are one
     // bootstrap surface: both hand constant source to the ordinary reader.
@@ -238,7 +238,6 @@ pub fn main(init: std.process.Init) !void {
     failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
-    failed = auditPreludeAuthority() or failed;
     failed = auditHttpServerWriteSink() or failed;
     failed = auditFormalValueKinds() or failed;
     failed = auditWorkBudgetIssuers() or failed;
@@ -566,41 +565,6 @@ fn auditPreludeLayout() bool {
     return false;
 }
 
-/// The prelude's words carry standard-library source, and a word's source is
-/// the authority a primitive registers and loads under. A prelude wrapper
-/// around a registering word would lend that authority to whatever its caller
-/// hands it, so the prelude never spells one.
-const prelude_forbidden_words = [_][]const u8{ "@defm", "@load" };
-
-fn auditPreludeAuthority() bool {
-    const source = @embedFile("../prelude.ecl");
-    var failed = false;
-    var index: usize = 0;
-    while (index < source.len) {
-        switch (source[index]) {
-            '"' => if (!skipPreludeString(source, &index)) {
-                std.log.err("prelude authority: unterminated string", .{});
-                return true;
-            },
-            '#' => index = std.mem.indexOfScalarPos(u8, source, index, '\n') orelse source.len,
-            '(', ')', ',', '[', ']', '{', '}', '`' => index += 1,
-            else => if (std.ascii.isWhitespace(source[index])) {
-                index += 1;
-            } else {
-                const end = preludeTokenEnd(source, index);
-                const token = source[index..end];
-                const word = if (std.mem.startsWith(u8, token, "core.")) token["core.".len..] else token;
-                for (prelude_forbidden_words) |forbidden| if (std.mem.eql(u8, word, forbidden)) {
-                    std.log.err("prelude authority: the prelude spells `{s}`, which would register under standard-library authority", .{token});
-                    failed = true;
-                };
-                index = end;
-            },
-        }
-    }
-    return failed;
-}
-
 fn validHeaderName(name: []const u8) bool {
     if (name.len == 0) return false;
     for (name) |byte| if (std.ascii.isWhitespace(byte) or byte == ',') return false;
@@ -888,10 +852,11 @@ const work_budget_issuers = [_][]const u8{ "poll.zig", "machine.zig", "scheduler
 /// hold the blocking constructors and setup paths that use it today, each
 /// reviewed for a bounded input; a new use elsewhere needs the same review.
 const unbounded_allowance_users = [_][]const u8{
-    "dict.zig",          "doc.zig",        "formatter.zig", "inert_data.zig",
-    "kernel_random.zig", "list.zig",       "machine.zig",   "modules.zig",
-    "native_module.zig", "poll.zig",       "prelude.zig",   "print.zig",
-    "session.zig",       "task_prims.zig",
+    "dict.zig",          "doc.zig",           "formatter.zig",
+    "kernel_random.zig", "list.zig",          "machine.zig",
+    "modules.zig",       "native_module.zig", "poll.zig",
+    "prelude.zig",       "print.zig",         "session.zig",
+    "task_prims.zig",
 };
 
 /// The kernel quantum is the length of a fiber's turn. Code that meters its

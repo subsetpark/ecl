@@ -354,13 +354,12 @@ pub const ModulePublication = union(enum) {
 };
 
 /// A module as running code refers to it: the scope of the module's name,
-/// which fixes same-module dispatch and diagnostic spelling, and the source
-/// one registration of the module was made under. It holds nothing of an
-/// image.
+/// which fixes same-module dispatch and diagnostic spelling, and what one
+/// registration of the module was made under. It holds nothing of an image.
 pub const ModuleRoot = struct {
     scope: ScopeId,
     module: intern.ModuleName,
-    provenance: SourceId,
+    provenance: @import("modules.zig").RegistrationProvenance,
 
     pub fn name(self: ModuleRoot) intern.ModuleName {
         return self.module;
@@ -732,7 +731,7 @@ pub const CellPublisher = enum(usize) {
     }
 
     /// Stores `definition`, or nothing, in every cell of the session's
-    /// top-level name `name`. Bounded by the sources that wrote the name.
+    /// top-level name `name`.
     pub fn define(self: CellPublisher, name: intern.BindingName, definition: ?*Definition) void {
         const state = self.target();
         state.word_cells.storeNamed(state.session_cell.id, name, definition);
@@ -768,20 +767,15 @@ pub const Root = union(enum) {
     module: intern.ModuleName,
 };
 
-/// The source a word was written in, or a module was registered under. `env`
-/// stores and compares it and never interprets it.
-pub const SourceId = @import("modules.zig").RegistrationProvenance;
-
 /// Identifies one cell of the Session's `Env`: the link of a word occurrence.
 /// Issued from 1, never reused, and always below `value.quote_flag`.
 pub const CellId = enum(u32) { _ };
 
-/// Where a linked word was written: the root it resolves in, the source
-/// whose view of the module map it resolves under, and its spelling.
+/// Where a linked word was written: the root it resolves in, and its
+/// spelling.
 pub const Place = struct {
     root: ScopeId,
     name: u32,
-    source: SourceId,
 };
 
 /// What a word's cell answers: the definition its place resolves to now, or
@@ -846,8 +840,7 @@ pub const WordCells = struct {
 /// registry also takes inside its writer lock, never the reverse. A hash trie
 /// threaded through the cells finds the first cell of a root and name: each
 /// such cell heads up to four subtrees, chosen by successive two-bit digits
-/// of the hash, so nothing is ever rehashed or relocated. The cells of one
-/// root and name, one per source that wrote the name there, chain from it.
+/// of the hash, so nothing is ever rehashed or relocated.
 const CellTable = struct {
     const first_shelf_bits = 6;
     const first_id_bias = 1 << first_shelf_bits;
@@ -860,8 +853,6 @@ const CellTable = struct {
         /// What the place's spelling is as a word, copied from the interned
         /// name when the cell is minted.
         spelling: intern.Spelling,
-        /// The next cell of the same root and name; zero at the last.
-        next_source: u32 = 0,
     };
 
     mutex: std.Io.Mutex = .init,
@@ -909,8 +900,8 @@ const CellTable = struct {
         return std.hash.Wyhash.hash(0, std.mem.asBytes(&[2]u32{ @backingInt(root), name }));
     }
 
-    /// The link to the first cell of `root` and `name`: zero where there is
-    /// none yet. Under `mutex`.
+    /// The link to the cell of `root` and `name`: zero where there is none
+    /// yet. Under `mutex`.
     fn named(self: *CellTable, root: ScopeId, name: u32) *u32 {
         var link: *u32 = &self.head;
         var digits = hash(root, name);
@@ -925,12 +916,8 @@ const CellTable = struct {
     fn findOrMint(self: *CellTable, allocator: std.mem.Allocator, place: Place) error{OutOfMemory}!CellId {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        var link = self.named(place.root, place.name);
-        while (link.* != 0) {
-            const cell = self.at(link.*);
-            if (cell.place.source == place.source) return @fromBackingInt(link.*);
-            link = &cell.next_source;
-        }
+        const link = self.named(place.root, place.name);
+        if (link.* != 0) return @fromBackingInt(link.*);
         const raw = self.next;
         if (raw >= value.quote_flag) return error.OutOfMemory;
         const where = coordinates(raw);
@@ -954,13 +941,13 @@ const CellTable = struct {
         return @fromBackingInt(raw);
     }
 
-    /// Stores `definition`, or nothing, as the answer of every cell of
-    /// `root` and the plain name `name`: one per source that wrote it.
+    /// Stores `definition`, or nothing, as the answer of the cell of `root`
+    /// and the plain name `name`, if there is one.
     fn storeNamed(self: *CellTable, root: ScopeId, name: intern.BindingName, definition: ?*Definition) void {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        var raw = self.named(root, intern.bindingId(name)).*;
-        while (raw != 0) : (raw = self.at(raw).next_source) self.content(raw).store(definition);
+        const raw = self.named(root, intern.bindingId(name)).*;
+        if (raw != 0) self.content(raw).store(definition);
     }
 
     /// Empties up to `count` cells from `from` whose answer a registration
@@ -995,20 +982,19 @@ const CellTable = struct {
     }
 };
 
-/// How a producer of symbol occurrences links each one to the place it is
-/// written in: a root and a source. A reader that links nothing carries
-/// none, and every symbol it produces resolves in core.
+/// How a producer of symbol occurrences links each one to the root it is
+/// written in. A reader that links nothing carries none, and every symbol
+/// it produces resolves in core.
 pub const SymbolLinker = struct {
     state: *EnvState,
     root: ScopeId,
-    source: SourceId,
 
     /// The link of the word `name` written here: the id of its cell, minted
     /// on first use.
     pub fn link(self: SymbolLinker, name: u32) error{OutOfMemory}!u32 {
         const id = try self.state.word_cells.findOrMint(
             self.state.host.allocator(),
-            .{ .root = self.root, .name = name, .source = self.source },
+            .{ .root = self.root, .name = name },
         );
         return @backingInt(id);
     }
@@ -1345,10 +1331,9 @@ pub const Env = enum(usize) {
         return heap.hostDomain(self.privateState().host);
     }
 
-    /// Links words written into the root `root` identifies by the source
-    /// `source`.
-    pub fn linker(self: *const Env, root: ScopeId, source: SourceId) SymbolLinker {
-        return .{ .state = self.privateState(), .root = root, .source = source };
+    /// Links words written into the root `root` identifies.
+    pub fn linker(self: *const Env, root: ScopeId) SymbolLinker {
+        return .{ .state = self.privateState(), .root = root };
     }
 
     /// Where the word whose link is `id` was written. An index: no hash and
@@ -1586,15 +1571,13 @@ test "env: a module name keeps one scope id, issued monotonically" {
     }
 }
 
-test "env: a root, source and name link to one cell below the flag bits" {
+test "env: a root and name link to one cell below the flag bits" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
     var container = try Env.init(&host);
     defer container.deinit();
 
-    const here: SourceId = @fromBackingInt(1);
-    const elsewhere: SourceId = @fromBackingInt(2);
-    const session = container.linker(container.sessionScopeId(), here);
+    const session = container.linker(container.sessionScopeId());
     // Enough names to spill past the first shelves of the table.
     var names: [1000]u32 = undefined;
     for (&names, 0..) |*name, index| {
@@ -1614,14 +1597,10 @@ test "env: a root, source and name link to one cell below the flag bits" {
         try std.testing.expect(link <= previous);
         const written = container.place(@fromBackingInt(link));
         try std.testing.expectEqual(container.sessionScopeId(), written.root);
-        try std.testing.expectEqual(here, written.source);
         try std.testing.expectEqual(name, written.name);
     }
-    // Another source, and another root, write the same name somewhere else.
-    const other_source = try container.linker(container.sessionScopeId(), elsewhere).link(names[0]);
-    const other_root = try container.linker(container.coreScopeId(), here).link(names[0]);
-    try std.testing.expect(other_source > previous);
-    try std.testing.expect(other_root > other_source);
-    try std.testing.expectEqual(elsewhere, container.place(@fromBackingInt(other_source)).source);
+    // Another root writes the same name somewhere else.
+    const other_root = try container.linker(container.coreScopeId()).link(names[0]);
+    try std.testing.expect(other_root > previous);
     try std.testing.expectEqual(container.coreScopeId(), container.place(@fromBackingInt(other_root)).root);
 }

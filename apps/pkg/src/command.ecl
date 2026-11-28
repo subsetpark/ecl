@@ -4,7 +4,7 @@
  ### defp require
  (condition -- : "Reject unsupported package command arguments.")
  (`domain error.new
-  "usage: ecl pkg init [name] | add <name> <version> <https-url> | add <https-git-url> --tag|--commit <revision> | sync|update|vendor [--offline] | verify | tree | why <module> | gc <retained-lock>..."
+  "usage: ecl pkg init [name] | add <name> <version> <https-url> | add <https-git-url> --tag|--commit <revision> | sync|update [--offline] | verify | tree | why <module> | gc <retained-lock>..."
   error.with-message assert) `require defp
 
  ### defp offline
@@ -17,36 +17,28 @@
  (`directory at port.close) `project-close defp
 
  ### defp read-lock
- (project -- lock : "Read portable project resolution independently of the active runtime map.")
+ (project -- lock : "Read the portable project resolution.")
  (`directory at "ecl.lock" fs.read-text pkg.resolution.read) `read-lock defp
 
  ### defp synchronize
- (arguments update vendor -- :
-  "Run explicitly selected resolution policy and publish an immutable generation.")
- (|arguments update vendor|
-  arguments offline pkg.project.find
-  update vendor pair (synchronize-project) cat apply) `synchronize defp
+ (arguments update -- : "Run explicitly selected resolution policy and install the result.")
+ (|arguments update|
+  arguments offline pkg.project.find update (synchronize-project) cons apply) `synchronize defp
 
  ### defp synchronize-project
- (offline project update vendor -- :
-  "Coordinate generation publication while preserving caller process context.")
- (|offline project update vendor|
-  vendor project (read-lock pop) cons when
-  project update offline vendor pkg.install.synchronize
+ (offline project update -- : "Install the selected packages while preserving caller context.")
+ (|offline project update|
+  project update offline pkg.install.synchronize
   project read-lock `packages at dict.size wrap "synced {} packages" str.format io.print
   project project-close) `synchronize-project defp
 
  ### defp sync
  (arguments -- : "Honor the portable root lock.")
- (0 0 synchronize) `sync defp
+ (0 synchronize) `sync defp
 
  ### defp update
  (arguments -- : "Explicitly resolve the manifest's dependency graph again.")
- (1 0 synchronize) `update defp
-
- ### defp vendor
- (arguments -- : "Publish an equivalent self-contained generation beneath vendor/.")
- (0 1 synchronize) `vendor defp
+ (1 synchronize) `update defp
 
  ### defp init
  (arguments -- : "Initialize an ordinary local-source project and portable empty lock.")
@@ -64,30 +56,20 @@
  `absent defp
 
  ### defp initialize
- (name project -- : "Validate the local map before publishing initial project state.")
+ (name project -- : "Publish initial project state without overwriting any.")
  (|name project|
-  ["ecl.pkg" "ecl.lock" "ecl.modules"] project `directory at (absent) cons for
+  ["ecl.pkg" "ecl.lock"] project `directory at (absent) cons for
   project `directory at "src" fs.mkdirs
   {format 2 version "0.1.0" sources ["src/**/*.ecl"] requires {}} `name name put
   project (initialize-manifest) cons apply) `initialize defp
 
  ### defp initialize-manifest
- (manifest project -- :
-  "Create manifest, lock, and usable local-source map without package bootstrap.")
+ (manifest project -- : "Create the manifest and its empty lock without package bootstrap.")
  (|manifest project|
-  manifest {} pkg.solver.resolve
-  manifest project pair (initialize-lock) cat apply) `initialize-manifest defp
-
- ### defp initialize-lock
- (lock manifest project -- :
-  "Publish the initial inert map only after validating it at the root document path.")
- (|lock manifest project|
-  manifest lock {} "." pkg.map.build
-  dup project `path at "ecl.modules" pair path.join pkg.map.validate
   project `directory at "ecl.pkg" manifest pkg.manifest.write fs.create-text
-  project `directory at "ecl.lock" lock pkg.resolution.write fs.create-text
-  str "\n" cat project `directory at "ecl.modules" rolldown fs.create-text
-  manifest `name at wrap "initialized ecl.pkg for {}" str.format io.print) `initialize-lock defp
+  project `directory at "ecl.lock" manifest {} pkg.solver.resolve pkg.resolution.write
+  fs.create-text
+  manifest `name at wrap "initialized ecl.pkg for {}" str.format io.print) `initialize-manifest defp
 
  ### defp tree
  (arguments -- : "Show selected dependency edges from the portable root lock.")
@@ -100,12 +82,12 @@
  `why defp
 
  ### defp verify
- (arguments -- : "Verify the active generation without recovery or other writes.")
+ (arguments -- : "Verify the installed packages without any writes.")
  (empty? require pkg.project.find dup pkg.install.verify
-  "verified active generation" io.print project-close) `verify defp
+  "verified installed packages" io.print project-close) `verify defp
 
  ### defp gc
- (arguments -- : "Collect only unretained shared downloads, never project generations.")
+ (arguments -- : "Collect only unretained shared downloads, never installed packages.")
  (pkg.gc.run wrap "removed {} cached archives" str.format io.print) `gc defp
 
  ### defp archive-requirement
@@ -148,7 +130,7 @@
   "Explicitly edit the manifest; a changed dependency graph then requires pkg update.")
  (dup len 3 = require pkg.project.find
   (|arguments project|
-   project pkg.project.lock project pkg.install.recover
+   project pkg.project.lock
    arguments first pkg.name.url?
    arguments (git-requirement) cons arguments (archive-requirement) cons if
    project (record) cons apply port.close project project-close) apply) `add defp
@@ -171,8 +153,8 @@
   "Dispatch an installed package application command independently of project loading.")
  (dup empty? not require
   dup first
-  {"init" (init) "add" (add) "sync" (sync) "update" (update) "vendor" (vendor)
-   "verify" (verify) "tree" (tree) "why" (why) "gc" (gc)}
+  {"init" (init) "add" (add) "sync" (sync) "update" (update) "verify" (verify) "tree" (tree) "why"
+   (why) "gc" (gc)}
   (|arguments command commands|
    commands command has? require arguments 1 drop commands command at apply) apply) `main def
 ) `pkg.command @defm

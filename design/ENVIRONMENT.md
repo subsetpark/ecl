@@ -36,95 +36,43 @@ instance lifecycle for static and dynamic registration.
 The `fs` and `tar` modules use direct runtime primitives with the shared
 scope-owned port lifecycle, bounded work, and joined cleanup.
 
-Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
-cannot replace an embedded module during automatic loading, and the names are
-reserved against user changes (see `SPEC.md` for the mutation rules). No program can change what an embedded module, or a
-library word that calls one, means.
+Embedded names have precedence over filesystem modules. No file on the search
+path can replace an embedded module, and the names are reserved against user
+changes (see `SPEC.md` for the mutation rules). No program can change what an
+embedded module, or a library word that calls one, means.
 
-### Filesystem module search
+### Module search
 
-`ECL_PATH` is an ordered platform path list. For each root, automatic loading
-tries `<module-name>.ecl` and then `<module-name>.eclmod`. The first existing
-candidate is authoritative, including any error raised while loading it.
+A Session finds modules on its search path: the project root, then
+`<project root>/.ecl/packages`, then each entry of `ECL_PATH`, an ordered
+platform path list. The project root is the nearest ancestor of the startup
+directory holding `ecl.pkg`, or the startup directory itself. There is no other
+resolution metadata: nothing is written for the interpreter to read.
 
-Filesystem search applies only when the current Session has no module map.
-With a map, resolution uses only its visible artifacts and embedded modules.
+The first time a Session looks up a module that is neither registered nor
+embedded, it scans every entry recursively, skipping directories whose names
+begin with `.`, so the project root's scan never enters `.ecl`. Each `.ecl` file
+is parsed without being run, and its literal top-level module declarations are
+the modules it declares; filenames are arbitrary, and a file may declare
+several modules. The scan happens once per Session: files added later appear
+in new Sessions. A missing entry supplies nothing, and a file that does not
+parse declares nothing.
 
-An ECL source candidate may register several modules. Successful loading
-requires the requested registration to exist after the source unit completes.
-All registrations from a failing source unit remain unavailable.
+A module that one file declares loads by running that file once, and loading
+requires every module the file declares to be registered when it completes. A
+module that two or more files declare is `` `domain `` when it is requested,
+naming the first two; a declaration nobody requests is never checked. A module
+no file declares loads from the first entry holding `<name>.eclmod`, whose
+first existing candidate is authoritative, including any error raised while
+loading it. Loading a found file registers only the modules it declares; any
+other registration while it loads, such as a computed or nested one, is
+`` `domain ``. Registrations a failing file made before it failed remain, and
+a later request for a module it has not registered runs it again.
 
-### Module maps
-
-An `ecl.modules` document supplies inert module-resolution metadata. It contains
-no package versions, fetching instructions, or cache policy. The nearest such
-file is discovered by searching upward from the startup directory. `ecl --module-map FILE ...` selects a map explicitly;
-its path is relative to the caller's working directory. A malformed discovered
-or explicitly selected map fails Session construction, without falling back.
-
-```ecl
-{format 1 local "project" scopes {
- "project" {root "." visible ["library"]
-            `sources ["src/**/*.ecl"] `artifacts []}
- "library" {root "installed/library" visible [] sources []
-            `artifacts [{path "library.ecl" kind ecl
-                         `exports ["library"]}]}}}
-```
-
-Every scope has exactly `root`, `visible`, `sources`, and `artifacts` fields.
-Scope names are nonempty strings. Visibility includes the scope itself and
-only the explicitly listed direct edges; it is checked even for loaded
-modules. A qualified name is checked against the scope of the source it was
-written in, wherever the code containing it runs. Missing, duplicate, or self visibility edges are invalid. Exported
-module names and artifact paths must be unique across the map. Artifacts in
-different scopes may reuse relative filenames when their roots differ.
-Artifact paths are relative, without empty, dot, parent, glob, or drive
-components. Scope roots resolve relative to the document containing them.
-
-Source patterns use `/` separators, `*` and `?` within segments, and `**` as a
-whole segment. Selected regular `.ecl` files are parsed without execution at
-Session startup, and their literal top-level module declarations become
-exports. Explicit artifacts list their exports directly and are read only on
-first use. A mapped file may register only the modules it exports; any other
-registration, such as a computed or nested one, is `` `domain ``. Kinds are `ecl`
-and `native`; a native artifact exports exactly one module and executes
-trusted native code through the ordinary extension boundary. Test discovery
-enumerates ECL artifacts from the designated `local` scope.
-
-A reference document has exactly this shape:
-
-```ecl
-{format 1 map ".ecl/generations/current/ecl.modules"}
-```
-
-The referenced document must be a complete map, never another reference.
-Its paths resolve relative to that document. Each Session captures its map
-once; later file additions appear in new Sessions without synchronization.
-Source execution remains lazy, once per artifact, with atomic registration.
-Startup performs no fetching or repair. Maps are bounded to 16 MiB, 4,096
-scopes and artifacts, 65,536 exports, 16 MiB per discovered source, and 64 MiB
-of discovered source text. Names and paths are at most 4,096 UTF-8 bytes and
-contain no control characters.
-
-`ecl check-map FILE` validates a document using the same parser, limits,
-reference resolution, and inert source discovery as Session startup. It exits
-zero with no output on success, one with a diagnostic for an invalid map or
-usage, and two on allocation failure. An invalid map's diagnostic identifies the
-first rejected entry: the document, scope, path, or module at fault, and for a
-duplicate module both declaring files. The filename resolves against the
-caller's working directory; paths inside the document resolve against that
-document. Validation does not construct a Session, inspect the caller's map,
-execute source or native artifacts, or write files. An explicit
-`--module-map` does not affect this command. This operation validates resolution
-metadata; artifact content verification remains the publisher's responsibility.
-
-`ecl check-map --document FILE -` reads at most 16 MiB from standard input and
-uses `FILE` as the containing document's path. Neither that file nor its parent
-directory needs to exist. Relative roots and a single map reference use the
-same rules as a file-backed map. This supports validation before publishing a
-staged document; validation never creates or replaces the specified file. An input
-read or size failure exits one with a diagnostic. Plain `check-map -` is invalid
-because stdin alone does not identify a relative-path base.
+The scan is bounded: 16 MiB per file, 64 MiB of source in all, 4,096 files,
+65,536 declarations, and one million directory entries inspected. Passing a
+bound fails the lookup that started the scan, and every later lookup that
+needs it, with the reason.
 
 ### Native modules
 
@@ -663,16 +611,15 @@ configuration.
 The maintained application in `apps/pkg/` implements `ecl pkg` through the
 installed-application dispatch described below. It owns `ecl.pkg`, the portable
 version-controlled `ecl.lock`, source acquisition, dependency selection, cache
-policy, immutable generations, verification, and publication recovery.
-See its [application contract](../apps/pkg/README.md) and
+policy, installation, and verification. See its
+[application contract](../apps/pkg/README.md) and
 [manifest format](../apps/pkg/FORMATS.md).
 
-The interpreter reads only `ecl.modules`. A hand-written map supports imports
-and tests without a package application. A fresh checkout with a manifest and
-lock reproduces the exact locked graph through `ecl pkg sync`; updates require
-`ecl pkg update`. Each published generation retains its own resolution snapshot,
-so separate atomic updates of the root lock and active map never mix dependency
-state inside an existing runnable generation.
+The interpreter reads none of these files. `ecl pkg` unpacks each selected
+package beneath `.ecl/packages/<name>/`, where module search finds it, and
+keeps its exact archive in `.ecl/archives/`. A fresh checkout with a manifest
+and lock reproduces the exact locked graph through `ecl pkg sync`; updates
+require `ecl pkg update`.
 
 ## Installed applications
 
@@ -683,13 +630,12 @@ CLI commands take precedence. Otherwise `ecl <name> ...` consults only that
 installation directory, never the project or `PATH`.
 
 An application directory is one that contains `main.ecl`, the entry script,
-limited to 16 MiB. The entry script runs in an ordinary Session using the
-`ecl.modules` map beside it.
-The caller's working directory, trailing arguments, environment, and standard
-streams are preserved, including standard input as data. The caller's project
-map, including an explicitly selected map, does not replace the application
-map. A malformed project therefore cannot prevent application startup. The
-application and its artifacts must be installed directly; startup does not
+limited to 16 MiB. The entry script runs in an ordinary Session whose project
+root is the application directory; neither the caller's project nor `ECL_PATH`
+is searched. The caller's working directory, trailing arguments, environment,
+and standard streams are preserved, including standard input as data. A
+malformed project therefore cannot prevent application startup. The
+application and its modules must be installed directly; startup does not
 fetch, synchronize, or bootstrap them through a package manager.
 
 ## The `ecl` command
@@ -727,7 +673,7 @@ without separate grants.
 
 The command reads these environment variables at startup:
 
-- `ECL_PATH` supplies the unmanaged module search path;
+- `ECL_PATH` supplies module search path entries after the project's;
 - `ECL_WORKERS` supplies a positive base-10 worker count and defaults to the
   CPU count;
 - `ECL_NATIVE_DIAGNOSTICS` enables native-loading diagnostics when present;
@@ -758,11 +704,12 @@ editor remains usable.
 
 ### Test command
 
-`ecl test` requires a module map with a designated local scope. It loads every
-ECL artifact in that scope, including files with no exported modules, discovers their declared tests, and invokes the selected runner in a
-Test Session. Each source artifact is loaded once, including when an earlier
-source already loaded it through an exported module. Dependency sources are loaded only as needed.
-The default runner is `test.default.run`.
+`ecl test` loads every file under the project root that declares a module,
+skipping dot-directories, discovers their declared tests, and invokes the
+selected runner in a Test Session. Each file is loaded once, including when an
+earlier file already loaded it through a module it declares. A file that
+declares no module is a script and is never run. Dependencies load only as
+needed. The default runner is `test.default.run`.
 
 `--runner <qualified-word>` selects another public runner. Arguments after
 `--` are exposed to that runner through `args`. Test bodies remain private to

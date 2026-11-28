@@ -27,7 +27,7 @@
   nip find-at) `parent defp
 
  ### def find-at
- (path -- project : "Find the nearest project manifest without consulting locks or maps.")
+ (path -- project : "Find the nearest project manifest without consulting locks.")
  (absolute dup fs.open-dir
   dup "ecl.pkg" fs.exists?
   (found) (parent) if) `find-at def
@@ -62,12 +62,6 @@
  (absolute "/" fs.open-dir
   (|path root| root path 1 drop dup empty? (pop ".") when fs.mkdirs root port.close
    path fs.open-dir) apply) `open-created def
-
- ### def generation-id
- (-- identifier :
-  "Create a collision-resistant local generation name independent of portable locks.")
- (rand.entropy rand.entropy rand.entropy rand.entropy 4 pack str bytes hash.sha256)
- `generation-id def
 
  ### def temporary
  (-- path : "Select the caller's explicit temporary directory or the system convention.")

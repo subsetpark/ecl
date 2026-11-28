@@ -49,7 +49,7 @@ pub fn installSource(
         source_name,
         source,
         &diag,
-        environment.linker(environment.coreScopeId(), .standard_library),
+        environment.linker(environment.coreScopeId()),
     );
     defer {
         while (!ingestion.advanceRetirement())

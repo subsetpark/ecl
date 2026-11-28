@@ -1,6 +1,6 @@
-//! Name resolution. A word occurrence carries the root and the source it was
-//! written in, and resolves there, under that source's view of the module
-//! map, against one captured publication view when it is reached.
+//! Name resolution. A word occurrence carries the root it was written in,
+//! and resolves there against one captured publication view when it is
+//! reached.
 //! Nothing resolves a word before then: a definition is published without
 //! its body being read, so a word that resolves to nothing fails its call.
 const std = @import("std");
@@ -10,7 +10,6 @@ const intern = @import("intern.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const machine = @import("machine.zig");
-const map_state = @import("module_snapshot.zig");
 
 /// The chain a miss reports.
 pub const LookupChain = machine.LookupChain;
@@ -21,7 +20,6 @@ pub const Context = struct {
     environment: *env.Env,
     /// Owned by the context's holder, which releases it with `deinit`.
     view: modules.View,
-    project: ?*const map_state.Snapshot,
 
     pub fn deinit(self: *Context) void {
         self.view.deinit();
@@ -33,17 +31,14 @@ pub const Context = struct {
 pub const Miss = union(enum) {
     /// Nothing by that name is visible along the chain searched.
     unresolved: LookupChain,
-    /// A well-formed qualified name whose module is not registered, or not
-    /// one `searcher` may refer to. A load that follows asks as `searcher`,
-    /// the view the lookup searched under, so it fails where the lookup
-    /// would miss again.
+    /// A well-formed qualified name whose module is not registered.
     unregistered_module: UnregisteredModule,
     /// Following name aliases did not reach a definition.
     alias_cycle,
 };
 
-/// A qualified name's module, unregistered or invisible to `searcher`.
-pub const UnregisteredModule = struct { name: intern.ModuleName, searcher: modules.RegistrationProvenance };
+/// A qualified name's module that is not registered.
+pub const UnregisteredModule = struct { name: intern.ModuleName };
 
 /// What resolving one word produced. Borrowed: valid while the context's
 /// view is held.
@@ -60,28 +55,20 @@ pub const Resolver = struct {
 
     name: u32,
     root: env.Root,
-    /// The source the word was written in.
-    written: modules.RegistrationProvenance,
     spelling: intern.Spelling,
     phase: Phase = .begin,
     work: Work = .none,
     /// The module and binding a qualified lookup is of: the word's own
     /// spelling, then each alias followed.
     target: ?Target = null,
-    /// The provenance of the image whose directory held the alias being
-    /// followed: an alias resolves as its own module would resolve it.
-    owner_provenance: ?modules.RegistrationProvenance = null,
     /// Brent's cycle detection over alias hops: a hop that repeats the saved
     /// one proves a cycle, and the saved hop moves forward at each power of
     /// two. An acyclic chain of any length still resolves.
-    saved_hop: ?Hop = null,
+    saved_hop: ?Target = null,
     hops: u64 = 0,
     hop_power: u64 = 1,
 
     const Target = struct { module: intern.ModuleName, binding: intern.BindingName };
-
-    /// Everything the next hop's result depends on.
-    const Hop = struct { target: Target, provenance: modules.RegistrationProvenance };
 
     const Phase = enum {
         begin,
@@ -95,15 +82,14 @@ pub const Resolver = struct {
 
     const Work = union(enum) {
         none,
-        acquisition: machine.ModuleLookupCursor,
+        acquisition: modules.ModuleCursor,
         own_acquisition: modules.ModuleCursor,
         export_lookup: env.NameMap.RawLookupCursor,
         core_lookup: env.CoreMap.RawLookupCursor,
 
         fn deinit(self: *Work) void {
             switch (self.*) {
-                .acquisition => |*cursor| cursor.deinit(),
-                .none, .own_acquisition, .export_lookup, .core_lookup => {},
+                .none, .acquisition, .own_acquisition, .export_lookup, .core_lookup => {},
             }
             self.* = .none;
         }
@@ -116,7 +102,6 @@ pub const Resolver = struct {
         return .{
             .name = place.name,
             .root = environment.scopeOf(place.root),
-            .written = place.source,
             .spelling = environment.spelling(id),
         };
     }
@@ -157,8 +142,6 @@ pub const Resolver = struct {
                 const entry = context.view.sessionFind(binding) orelse return self.beginCore(context, binding);
                 return self.follow(context, entry, false);
             },
-            // The word's own module is found by name with no visibility
-            // check: it is the module the word was written in.
             .module => |name| {
                 self.work = .{ .own_acquisition = context.view.moduleCursor(name) };
                 self.phase = .own_acquire;
@@ -198,7 +181,7 @@ pub const Resolver = struct {
         }
         const target: Target = .{ .module = alias.module, .binding = alias.binding };
         self.target = target;
-        const hop: Hop = .{ .target = target, .provenance = self.provenance() };
+        const hop = target;
         if (self.saved_hop) |saved| if (std.meta.eql(saved, hop)) return self.miss(.alias_cycle);
         self.hops += 1;
         if (self.hops == self.hop_power) {
@@ -211,16 +194,9 @@ pub const Resolver = struct {
 
     fn beginAcquire(self: *Resolver, context: *const Context) Progress {
         self.work.deinit();
-        self.work = .{ .acquisition = .init(&context.view, context.project, self.provenance(), self.target.?.module) };
+        self.work = .{ .acquisition = context.view.moduleCursor(self.target.?.module) };
         self.phase = .acquire;
         return .pending;
-    }
-
-    /// The provenance a qualified name resolves under: the holder's along an
-    /// alias chain, and otherwise the source the word was written in. Where
-    /// the word runs plays no part.
-    fn provenance(self: *const Resolver) modules.RegistrationProvenance {
-        return self.owner_provenance orelse self.written;
     }
 
     pub fn advance(self: *Resolver, context: *const Context) Progress {
@@ -237,16 +213,13 @@ pub const Resolver = struct {
                 },
                 .malformed => self.miss(.{ .unresolved = .qualified }),
             },
-            .acquire => switch (self.work.acquisition.advance(&context.view)) {
+            .acquire => switch (self.work.acquisition.advance()) {
                 .pending => .pending,
                 .complete => |maybe_generation| {
                     self.work.deinit();
                     const generation = maybe_generation orelse return self.miss(.{ .unregistered_module = .{
                         .name = self.target.?.module,
-                        .searcher = self.provenance(),
                     } });
-                    // An entry found there resolves as that module would.
-                    self.owner_provenance = generation.provenance();
                     self.work = .{ .export_lookup = generation.lookupCursor(self.target.?.binding) };
                     self.phase = .export_lookup;
                     return .pending;
@@ -275,7 +248,6 @@ pub const Resolver = struct {
                     self.work.deinit();
                     const binding: intern.BindingName = @fromBackingInt(self.name);
                     const generation = maybe_generation orelse return self.beginCore(context, binding);
-                    self.owner_provenance = generation.provenance();
                     self.work = .{ .export_lookup = generation.lookupCursor(binding) };
                     self.phase = .own_lookup;
                     return .pending;
@@ -295,11 +267,6 @@ pub const Resolver = struct {
         };
     }
 };
-
-/// The source the word of cell `id` was written in.
-pub fn sourceOf(environment: *const env.Env, id: env.CellId) modules.RegistrationProvenance {
-    return environment.place(id).source;
-}
 
 /// The occurrence a form executes as a word, or null when the form is data:
 /// a value, a quoted symbol, or a lowered locals operation.

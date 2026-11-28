@@ -488,12 +488,8 @@ test "loader: failures and cycles are total" {
     try expectErrorContains(&runtime, "`cycle (x) import x", &.{ "kind domain", "never reach a definition" });
     // A file whose first form calls into the module it is loading asks for
     // that load again before it has registered anything.
-    try expectErrorContains(&runtime, "selfload.x", &.{ "kind domain", "recursive auto-load of module `selfload`" });
-    try expectErrorContains(&runtime, "`orphan (x) import x", &.{
-        "kind io",
-        "registered nothing under that name",
-        "path \"test/acceptance/modules/orphan.ecl\"",
-    });
+    try expectErrorContains(&runtime, "selfload.x", &.{ "kind domain", "recursive auto-load of `", "test/acceptance/modules/selfload.ecl`" });
+    try expectErrorContains(&runtime, "`orphan (x) import x", &.{ "kind undefined-word", "word x" });
     try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" @load", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
     try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" @load", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
 

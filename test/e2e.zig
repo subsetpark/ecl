@@ -578,7 +578,6 @@ fn writeTestProject(
     directory: std.Io.Dir,
     files: []const struct { path: []const u8, source: []const u8 },
 ) !void {
-    try directory.writeFile(io, .{ .sub_path = "ecl.modules", .data = "{format 1 local \"app\" scopes {\"app\" {root \".\" visible [] sources [\"*.ecl\" \"z-*.ecl\"] artifacts []}}}" });
     for (files) |file| try directory.writeFile(io, .{
         .sub_path = file.path,
         .data = file.source,
@@ -619,11 +618,11 @@ test "e2e: ecl test runs the default runner" {
     });
 }
 
-test "e2e: ecl test loads each source artifact once" {
+test "e2e: ecl test loads each project file once" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
-    // The first source loads the later source through an export. Preload must
-    // reuse that committed artifact rather than evaluate it again.
+    // The first file loads the later one through a module it declares.
+    // Loading the project must not evaluate that file again.
     try writeTestProject(scratch.dir, &.{
         .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {kind user} assert\n" ++
             "((app.public.answer 42 = {kind user} assert) `uses-public test) `consumer @defm\n" },
@@ -671,29 +670,16 @@ test "e2e: ecl test reports project and runner failures" {
     defer empty.cleanup();
     const exe = try absoluteExe();
     defer allocator.free(exe);
-    var absent = try cli.runOptions(.{
+    try empty.dir.writeFile(io, .{ .sub_path = "broken.ecl", .data = "missing-while-loading () `broken @defm\n" });
+    var broken = try cli.runOptions(.{
         .argv = &.{ exe, "test" },
         .cwd = .{ .dir = empty.dir },
     });
-    defer absent.deinit();
-    try absent.expect(.{
+    defer broken.deinit();
+    try broken.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{"map with a designated local scope"},
-    });
-
-    var invalid = std.testing.tmpDir(.{});
-    defer invalid.cleanup();
-    try invalid.dir.writeFile(io, .{ .sub_path = "ecl.modules", .data = "broken" });
-    var invalid_result = try cli.runOptions(.{
-        .argv = &.{ exe, "test" },
-        .cwd = .{ .dir = invalid.dir },
-    });
-    defer invalid_result.deinit();
-    try invalid_result.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{ "ecl: invalid module map: module map `", "ecl.modules` must contain exactly one dict" },
+        .stderr_contains = &.{ "kind undefined-word", "missing-while-loading" },
     });
 
     var project = std.testing.tmpDir(.{});
@@ -1238,32 +1224,36 @@ test "e2e: direct load and ECL_PATH acceptance" {
     defer direct.deinit();
     try direct.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    const modules = try std.Io.Dir.cwd().realPathFileAlloc(io, "test/acceptance/modules", allocator);
+    defer allocator.free(modules);
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
     var environment = std.process.Environ.Map.init(allocator);
     defer environment.deinit();
-    try environment.put("ECL_PATH", "test/acceptance/modules");
+    try environment.put("ECL_PATH", modules);
     var result = try cli.runOptions(.{
-        .argv = &.{ build_options.ecl_exe, "-e", "`stats (answer) import answer" },
+        .argv = &.{ exe, "-e", "`stats (answer) import answer" },
+        .cwd = .{ .dir = scratch.dir },
         .environ_map = &environment,
     });
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
-    const exe = try absoluteExe();
-    defer allocator.free(exe);
+    // The startup directory is the project root when no ancestor holds
+    // `ecl.pkg`, so its files are searched with no ECL_PATH.
     var module_directory = try std.Io.Dir.cwd().openDir(io, "test/acceptance/modules", .{});
     defer module_directory.close(io);
     var empty_environment = std.process.Environ.Map.init(allocator);
     defer empty_environment.deinit();
-    var no_implicit_cwd = try cli.runOptions(.{
+    var project_root = try cli.runOptions(.{
         .argv = &.{ exe, "-e", "`stats (answer) import answer" },
         .cwd = .{ .dir = module_directory },
         .environ_map = &empty_environment,
     });
-    defer no_implicit_cwd.deinit();
-    try no_implicit_cwd.expect(.{
-        .exit_code = 1,
-        .stderr_contains = &.{"kind undefined-word"},
-    });
+    defer project_root.deinit();
+    try project_root.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 }
 
 test "e2e: M5 ragged equality overflow float and char acceptance" {

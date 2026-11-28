@@ -11,7 +11,7 @@
  ### test exact-byte-cache
  (-- :
   "A cache miss or damaged entry is harmless; valid bytes publish atomically under their hash.")
- (`cwd "apps/pkg/test/fixtures/cache-unused" fs.stage-dir
+ (`cwd "test/fixtures/cache-unused" fs.stage-dir
   (|directory|
    directory digest pkg.cache.read-at [] equal
    directory digest [1 2] pkg.cache.write-at

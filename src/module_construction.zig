@@ -16,8 +16,8 @@ const WorkProgress = machine.WorkProgress;
 
 /// Opens a construction boundary for `@defm`. The name has already been
 /// validated; the body evaluates against a fresh image, and completion
-/// publishes that image under the name and `provenance`, the source the
-/// `@defm` occurrence was written in. The image retains `doc`; the caller
+/// publishes that image under the name and `provenance`, what the unit that
+/// ran `@defm` may register. The image retains `doc`; the caller
 /// keeps its own reference. Consumes `body_header` on success and failure.
 pub fn begin(
     via: *Construction,
@@ -44,7 +44,7 @@ pub fn begin(
     if (body.borrow().kind() != .generic_spine)
         return via.openImageBoundary(&candidate, word, body.take());
     var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-        try fiber.archive.rescopeCursor(body.take(), fiber.rootLinker(scope.id, candidate.provenance())),
+        try fiber.archive.rescopeCursor(body.take(), fiber.rootLinker(scope.id)),
     );
     defer cursor.deinit(fiber.releases, fiber.allocator);
     try via.startDriver(ConstructionDriver{

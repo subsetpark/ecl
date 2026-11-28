@@ -72,7 +72,6 @@ fn startDefm(fiber: *Fiber, name: u32, body_header: *Header) MachineError!void {
         .body = .init(body.take()),
         .validation = .init(name),
         .doc = owned_doc,
-        .provenance = try fiber.dispatchedSource(),
     });
 }
 
@@ -92,9 +91,6 @@ const DefmDriver = struct {
     validation: intern.ModuleNameCursor,
     /// The module's documentation, consumed from beneath the operands.
     doc: heap.Owned(Value) = .none,
-    /// The source the `@defm` occurrence was written in: what the module
-    /// registers under.
-    provenance: modules.RegistrationProvenance,
 
     pub fn advance(fiber: *Fiber, self: *DefmDriver) MachineError!machine.WorkProgress {
         const work = fiber.workBudget();
@@ -107,9 +103,8 @@ const DefmDriver = struct {
                 // name that can never publish must fail before the body runs.
                 if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                     return fiber.fail(.domain, "module name `core` is reserved for the core qualifier");
-                const provenance = self.provenance;
-                try fiber.refuseReservedModule(name, provenance);
-                try fiber.refuseUnexportedModule(name, provenance);
+                try fiber.refuseReservedModule(name);
+                try fiber.refuseUnexportedModule(name);
                 const body = self.body.take();
                 var doc = self.doc;
                 self.doc = .none;
@@ -119,7 +114,7 @@ const DefmDriver = struct {
                     name,
                     body,
                     if (doc.isPresent()) env.documentation(doc.borrow().list).? else null,
-                    provenance,
+                    fiber.registrant,
                 );
                 return .detached;
             },
@@ -130,14 +125,13 @@ const DefmDriver = struct {
 
 /// Returns the name of the module whose code is running. A construction
 /// body reports the name it is being built under.
-/// The symbol is linked as the running code would have written it, so a
-/// word that takes a module operand finds the module from that code's source.
+/// The symbol is linked as the running code would have written it.
 fn moduleNameWord(fiber: *Fiber) MachineError!void {
     const name = fiber.currentModule() orelse return fiber.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    try fiber.pushOwned(.{ .symbol = try fiber.linkedWord(intern.moduleId(name), try fiber.dispatchedSource()) });
+    try fiber.pushOwned(.{ .symbol = try fiber.linkedWord(intern.moduleId(name)) });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names
@@ -307,7 +301,6 @@ fn qualify(fiber: *Fiber) MachineError!void {
     try fiber.startDriver(QualifyDriver{
         .module_validation = .init(module_name),
         .binding_validation = .init(binding),
-        .source = try fiber.dispatchedSource(),
     });
 }
 
@@ -315,8 +308,6 @@ const QualifyDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     module_validation: intern.ModuleNameCursor,
     binding_validation: intern.NamespaceCursor,
-    /// The source of the `qualify` occurrence, which links the result.
-    source: modules.RegistrationProvenance,
     module_name: ?intern.ModuleName = null,
     binding_name: ?intern.BindingName = null,
     cursor: ?heap.Owned(intern.QualifiedCursor) = null,
@@ -350,7 +341,7 @@ const QualifyDriver = struct {
             ));
             switch (try self.cursor.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |word| return .{ .output = .{ .symbol = try fiber.linkedWord(word, self.source) } },
+                .complete => |word| return .{ .output = .{ .symbol = try fiber.linkedWord(word) } },
             }
         }
         return .stepped;
@@ -362,7 +353,7 @@ fn words(fiber: *Fiber) MachineError!void {
 
 fn exportsWord(fiber: *Fiber) MachineError!void {
     const requested = try fiber.popWord();
-    try fiber.startDriver(try ExportsDriver.init(fiber, requested));
+    try fiber.startDriver(ExportsDriver.init(fiber, requested));
 }
 
 /// Collect one module's public names, or core's, then sort them and build the
@@ -371,10 +362,8 @@ fn exportsWord(fiber: *Fiber) MachineError!void {
 const ExportsDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     allocator: std.mem.Allocator,
-    /// The operand as written: its link says whose view finds the module.
+    /// The operand as written, which a load replays.
     requested: value.Symbol,
-    /// The source of the `exports` occurrence, which links the names.
-    source: modules.RegistrationProvenance,
     found: heap.Owned(poll_api.ChunkList(u32)),
     state: heap.Owned(State),
 
@@ -418,13 +407,11 @@ const ExportsDriver = struct {
         }
     };
 
-    fn init(fiber: *Fiber, requested: value.Symbol) error{OutOfMemory}!ExportsDriver {
+    fn init(fiber: *Fiber, requested: value.Symbol) ExportsDriver {
         const core_requested = intern.isReservedRegistryBytes(intern.get(requested.name));
-        const source = try fiber.dispatchedSource();
         return .{
             .allocator = fiber.allocator,
             .requested = requested,
-            .source = source,
             .found = .init(poll_api.ChunkList(u32).init(fiber.allocator)),
             .state = .init(if (core_requested)
                 .{ .core_names = .init(reflection.VisibleNameCursor.init(.core, fiber.environment)) }
@@ -453,15 +440,14 @@ const ExportsDriver = struct {
                         return fiber.fail(.domain, "exports requires a valid module name");
                     self.replace(fiber, .{ .acquire = .{
                         .name = module_name,
-                        .lookup = .init(try fiber.moduleLookup(self.requested, module_name)),
+                        .lookup = .init(fiber.moduleLookup(module_name)),
                     } });
                 },
             },
             .acquire => |*acquire| switch (acquire.lookup.borrowMut().advance()) {
                 .pending => {},
                 .complete => |maybe_generation| if (maybe_generation) |generation| {
-                    var lookup = acquire.lookup.take();
-                    lookup.cursor.deinit();
+                    const lookup = acquire.lookup.take();
                     self.replace(fiber, .{ .module_names = .{
                         .view = .init(lookup.view),
                         .cursor = generation.publicNameCursor(),
@@ -472,7 +458,7 @@ const ExportsDriver = struct {
                     fiber.retireDriver(self);
                     return fiber.retryQualifiedOperandAfterLoad(
                         requested,
-                        .{ .name = module_name, .searcher = try fiber.sourceOf(requested) },
+                        .{ .name = module_name },
                     );
                 },
             },
@@ -505,7 +491,7 @@ const ExportsDriver = struct {
                 const names = fill.names.borrow().items();
                 const filled = fill.values.borrow().len();
                 if (filled != names.len) {
-                    fill.values.borrowMut().appendOwned(value.datum(.{ .symbol = try fiber.linkedWord(names[filled], self.source) }));
+                    fill.values.borrowMut().appendOwned(value.datum(.{ .symbol = try fiber.linkedWord(names[filled]) }));
                     continue;
                 }
                 const materializer = list.ValueMaterializer.initOwned(self.allocator, fill.values.take());
@@ -552,7 +538,7 @@ const ModuleDocDriver = struct {
                         fiber.retireDriver(self);
                         return fiber.retryQualifiedOperandAfterLoad(
                             requested,
-                            .{ .name = module_name, .searcher = try fiber.sourceOf(requested) },
+                            .{ .name = module_name },
                         );
                     };
                     const document = generation.documentation() orelse
@@ -568,7 +554,7 @@ const ModuleDocDriver = struct {
                     if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                         return fiber.fail(.domain, "`core` is a qualifier, not a documented module");
                     self.name = name;
-                    self.acquire = .init(try fiber.moduleLookup(self.requested, name));
+                    self.acquire = .init(fiber.moduleLookup(name));
                 },
             }
         }

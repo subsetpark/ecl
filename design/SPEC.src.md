@@ -546,20 +546,14 @@ different places (eg., in a module and the session, or in the session and in
 core...). This is the quality of "syntactic closure": quotation *bindings* are
 stable when used as callbacks, even absent of lexical scoping.
 
-The same holds for which modules a word may reach. A qualified word, or one
-that reaches a module through an import, is resolved as the source it was
-written in would resolve it, against the modules that source may refer to.
-Applying a quotation somewhere else changes nothing about which module its
-words reach. A symbol built at run time counts as written where the word that
-built it (`symbol`, `intern`, `qualify`, `exports`, `*module*`) was written,
-and a word that takes a module name resolves it as the source of that symbol.
+Every module name means the same registration wherever a word naming it is
+written or run.
 
-What a word may register follows its source the same way. `@defm` registers,
-and `parse` reads text, as the source the occurrence that invoked it was
-written in, whichever code applies it and whichever task runs it; a word
-invoked by `execute` acts as the source of the symbol executed. So a symbol
-`intern` builds in a task spawned from a mapped source file reaches the
-modules that file may refer to, not those of the task's root.
+What `@defm` may register follows the unit running it, not where the word was
+written: while a file found by module search loads, only the modules that file
+declares (see `ENVIRONMENT.md`); while an embedded module loads, any name;
+and otherwise any name the standard library does not reserve. A task, and a
+file read by `@load`, register as any other code does.
 
 ### Definition annotations
 

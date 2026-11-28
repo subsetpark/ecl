@@ -115,7 +115,7 @@ tier.
 - **Release candidate: `.github/workflows/release-candidate.yml`.** A manual
   exhaustive superset of the pull-request and post-merge matrices, plus the
   initialized-Session OOM sweeps and complete ReleaseFast suite, run once
-  against a candidate commit. Core, standard-library, module-map, and host OOM
+  against a candidate commit. Core, standard-library, module-search, and host OOM
   families use independent runners and wall-clock budgets. Package policy runs
   through the maintained application's ECL acceptance; allocation lifetimes
   are covered at the public module, archive, filesystem, and native boundaries. A compile-only producer publishes their one shared ReleaseSafe Zig

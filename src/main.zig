@@ -13,13 +13,11 @@ const help =
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
     \\    ecl fmt <FILE|->           Format source to standard output
     \\    ecl fmt -w <FILE>          Format and atomically rewrite a file
-    \\    ecl check-map <FILE>       Validate an inert module map
     \\    ecl <APPLICATION> [ARGS...] Run an installed application
-    \\    ecl test [OPTIONS] [-- ARGS...]  Run the local module scope tests
+    \\    ecl test [OPTIONS] [-- ARGS...]  Run the project's tests
     \\
     \\OPTIONS:
     \\    -e, --eval <SOURCE>        Evaluate source text
-    \\    --module-map <FILE>       Load an explicit module map (before command)
     \\    -h, --help                 Show this help
     \\    -V, --version              Show the version
     \\
@@ -44,7 +42,9 @@ const Startup = struct {
     process: std.process.Init,
     cwd: []const u8,
     environ: []const ecl.machine.Environ.Entry,
-    module_map: ?[]const u8 = null,
+    /// The project root an installed application runs in, in place of the
+    /// caller's project and `ECL_PATH`.
+    module_root: ?[]const u8 = null,
     /// Set by `configuredWorkers`, which every command that starts a Session
     /// passes through first.
     worker_count: usize = 1,
@@ -77,12 +77,7 @@ fn dispatch(startup: Startup) AppError!u8 {
     var init = startup;
     const arguments = init.process.minimal.args.toSlice(init.process.arena.allocator()) catch
         return error.OutOfMemory;
-    var cli = arguments[1..];
-    if (cli.len != 0 and std.mem.eql(u8, cli[0], "--module-map")) {
-        if (cli.len < 2) return emitSyntheticError(init, .io, "--module-map requires a file", null);
-        init.module_map = cli[1];
-        cli = cli[2..];
-    }
+    const cli = arguments[1..];
     if (cli.len == 0) {
         init = try configuredWorkers(init) orelse return 2;
         const tty = std.Io.File.stdin().isTty(init.process.io) catch return error.Io;
@@ -101,7 +96,6 @@ fn dispatch(startup: Startup) AppError!u8 {
         return 0;
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
-    if (std.mem.eql(u8, first, "check-map")) return checkMapCommand(init, cli[1..]);
     if (std.mem.eql(u8, first, "test")) return testCommand(init, cli[1..]);
     init = try configuredWorkers(init) orelse return 2;
     if (std.mem.eql(u8, first, "-e") or std.mem.eql(u8, first, "--eval")) {
@@ -144,39 +138,6 @@ fn dispatch(startup: Startup) AppError!u8 {
     return executeSource(init, "<command>", first, cli[1..], true, .data);
 }
 
-fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
-    const from_stdin = arguments.len == 3 and std.mem.eql(u8, arguments[0], "--document") and std.mem.eql(u8, arguments[2], "-");
-    if (!from_stdin and (arguments.len != 1 or std.mem.eql(u8, arguments[0], "-"))) {
-        try writeFile(init.process.io, .stderr, "ecl check-map: usage: ecl check-map <FILE> | --document <FILE> -\n");
-        return 1;
-    }
-    const path = try std.fs.path.resolve(init.process.gpa, &.{ init.cwd, arguments[if (from_stdin) 1 else 0] });
-    defer init.process.gpa.free(path);
-    var host = ecl.heap.HostOwner.init(init.process.gpa);
-    defer host.cleanup().drain();
-    var diagnostic: ecl.module_map.Diagnostic = .{};
-    const map = (if (from_stdin) input: {
-        var buffer: [8192]u8 = undefined;
-        var stream = std.Io.File.stdin().reader(init.process.io, &buffer);
-        const source = stream.interface.allocRemaining(init.process.gpa, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return emitIoError(init, "cannot read bounded module map input", err),
-        };
-        defer init.process.gpa.free(source);
-        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true, &diagnostic);
-    } else ecl.module_map.load(host.cleanup(), init.process.io, path, &diagnostic)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => {
-            var buffer: [512]u8 = undefined;
-            const message = std.fmt.bufPrint(&buffer, "invalid module map: {s}", .{diagnostic.message()}) catch
-                buffer[0..ecl.console.completeUtf8Len(&buffer)];
-            return emitSyntheticError(init, .io, message, null);
-        },
-    };
-    defer map.deinit();
-    return 0;
-}
-
 fn applicationName(name: []const u8) bool {
     if (name.len == 0 or name.len > 64 or !std.ascii.isAlphabetic(name[0])) return false;
     for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-') return false;
@@ -195,12 +156,10 @@ fn installedApplication(init: Startup, name: []const u8, arguments: []const []co
     const prefix = std.fs.path.dirname(bin) orelse return null;
     const app_dir = try std.fs.path.join(allocator, &.{ prefix, "share", "ecl", "apps", name });
     defer allocator.free(app_dir);
-    // An installed application is a directory holding `main.ecl`, which runs
-    // under the `ecl.modules` beside it.
+    // An installed application is a directory holding `main.ecl`, which
+    // finds its modules in that directory alone.
     const entry_path = try std.fs.path.join(allocator, &.{ app_dir, "main.ecl" });
     defer allocator.free(entry_path);
-    const map = try std.fs.path.join(allocator, &.{ app_dir, "ecl.modules" });
-    defer allocator.free(map);
     const source = std.Io.Dir.cwd().readFileAlloc(init.process.io, entry_path, allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
         error.OutOfMemory => return error.OutOfMemory,
@@ -208,7 +167,7 @@ fn installedApplication(init: Startup, name: []const u8, arguments: []const []co
     };
     defer allocator.free(source);
     var application = init;
-    application.module_map = map;
+    application.module_root = app_dir;
     return try executeSource(application, entry_path, source, arguments, false, .data);
 }
 
@@ -268,8 +227,8 @@ const CliRuntime = struct {
                 .io = startup.process.io,
                 .output = &self.output_writer.interface,
                 .diagnostics = &self.diagnostic_writer.interface,
-                .ecl_path = startup.process.environ_map.get("ECL_PATH"),
-                .module_map = startup.module_map,
+                .ecl_path = if (startup.module_root == null) startup.process.environ_map.get("ECL_PATH") else null,
+                .module_root = startup.module_root,
                 .environ = startup.environ,
                 .standard_input = standard_input,
                 .initial_cwd = startup.cwd,
@@ -333,12 +292,6 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     while (true) switch (try runtime.advanceLocalPreload()) {
         .pending => {},
         .complete => break,
-        .no_map => return emitSyntheticError(
-            init,
-            .io,
-            "ecl test requires an ecl.modules map with a designated local scope",
-            null,
-        ),
         .invalid => |message| return emitSyntheticError(init, .io, message, null),
         .err => |failure| {
             defer runtime.release(failure);

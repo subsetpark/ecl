@@ -1,9 +1,10 @@
 ### module pkg.verify
-# Read-only verification against each generation's own resolution snapshot.
+# Read-only verification of installed packages against the lock and the exact
+# archives kept beside them.
 (
  ### defp require
- (condition -- : "Reject a modified or incomplete immutable generation.")
- (`domain error.new "package generation verification failed" error.with-message assert) `require
+ (condition -- : "Reject a modified or incomplete installation.")
+ (`domain error.new "package installation verification failed" error.with-message assert) `require
  defp
 
  ### defp check-member
@@ -67,43 +68,19 @@
  `package def
 
  ### defp selected
- (state name -- state :
-  "Verify one selected seal, identity, contents, and exported artifact mapping.")
+ (state name -- state : "Verify one selected archive, identity, and installed contents.")
  (|state name|
   state `lock at `packages at name at `hash at
   state name pair (selected-hash) cat apply) `selected defp
 
  ### defp selected-hash
- (hash state name -- state :
-  "Use the immutable generation's archive copy, never its download cache.")
+ (hash state name -- state : "Use the kept archive copy, never the download cache.")
  (|hash state name|
-  state `directory at "archives/" hash pkg.cache.filename cat fs.read-bytes hash pkg.fetch.checked
-  state `directory at "packages/" name cat fs.child-dir
+  state `directory at ".ecl/archives/" hash pkg.cache.filename cat fs.read-bytes hash
+  pkg.fetch.checked
+  state `directory at ".ecl/packages/" name cat fs.child-dir
   (|bytes directory| bytes directory package directory port.close) apply
-  state name pair (record-bundle) cat apply) `selected-hash defp
-
- ### defp record-bundle
- (bundle state name -- state : "Require the locked manifest and retain only inspected metadata.")
- (|bundle state name|
-  state `lock at bundle `manifest at pkg.resolution.check-manifest
-  state `bundles state `bundles at name bundle put put) `record-bundle defp
-
- ### def generation
- (project location -- :
-  "Validate a complete generation without repair, network, or root-lock interpretation.")
- (|project location|
-  location pkg.layout.generation? require
-  project `directory at location fs.child-dir
-  project location pair (opened) cat apply) `generation def
-
- ### defp opened
- (directory project location -- :
-  "Validate snapshots and reconstruct the expected complete runtime map.")
- (|directory project location|
-  directory "ecl.pkg" fs.read-text pkg.manifest.read
-  directory "ecl.lock" fs.read-text pkg.resolution.read
-  directory project location 3 pack (snapshots) cat apply
-  directory port.close) `opened defp
+  `manifest at state `lock at swap pkg.resolution.check-manifest state) `selected-hash defp
 
  ### defp child
  (state entry -- state : "Require exactly the expected immediate child name and object kind.")
@@ -113,8 +90,7 @@
   state `expected state `expected at entry `name at del put) `child defp
 
  ### defp children
- (directory path expected -- :
-  "Reject missing, extra, linked, or special generation control entries.")
+ (directory path expected -- : "Reject missing, extra, linked, or special entries.")
  (|directory path expected|
   directory path fs.open-list
   (|cursor expected|
@@ -123,38 +99,15 @@
    `expected at dict.size 0 = require cursor port.close)
   expected swap cons apply) `children defp
 
- ### defp layout
- (directory lock -- : "Require the closed immutable generation layout and every selected seal.")
+ ### def installation
+ (directory lock -- :
+  "Require exactly the selected packages and archives, each installed as its archive holds it,
+   without repair or network.")
  (|directory lock|
-  directory "."
-  {"ecl.pkg" file "ecl.lock" file "ecl.modules" file "packages" directory "archives" directory}
+  directory ".ecl/packages" lock `packages at dict.keys (`directory pair) each dict.from-pairs
   children
-  directory "packages" lock `packages at dict.keys (`directory pair) each dict.from-pairs children
-  directory "archives" lock `packages at dict.vals
-  (`hash at pkg.cache.filename `file pair) each dict.from-pairs children) `layout defp
-
- ### defp snapshots
- (manifest lock directory project location -- :
-  "Verify dependencies and map against the generation's own inputs.")
- (|manifest lock directory project location|
-  lock manifest pkg.resolution.compatible pop
-  directory lock layout
+  directory ".ecl/archives" lock `packages at dict.vals
+  (`hash at pkg.cache.filename `file pair) each dict.from-pairs children
   lock `packages at dict.keys dup grade at
-  {bundles {}} `lock lock put `directory directory put (selected) fold `bundles at
-  manifest lock location 3 pack (expected-map) cat apply
-  dup directory "ecl.modules" fs.read-text pkg.data.read-one match? require
-  project `path at location "/ecl.modules" cat pair path.join pkg.map.validate) `snapshots defp
-
- ### defp expected-map
- (bundles manifest lock location -- map :
-  "Rebuild exactly the app-owned artifact and visibility metadata.")
- (|bundles manifest lock location|
-  manifest lock bundles location pkg.layout.local-root pkg.map.build) `expected-map defp
-
- ### def publication
- (directory location project-path -- :
-  "Validate a candidate and require the root manifest it was built from.")
- (|directory location project-path|
-  directory location "/ecl.pkg" cat fs.read-text directory "ecl.pkg" fs.read-text match? require
-  {} `directory directory put `path project-path put location generation) `publication def
+  {} `lock lock put `directory directory put (selected) fold pop) `installation def
 ) `pkg.verify @defm

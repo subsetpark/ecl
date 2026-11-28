@@ -1,7 +1,7 @@
 # Package manifest and source conventions
 
 These contracts belong to the maintained package application. The portable
-format-3 lock and publication protocol are specified in [README.md](README.md).
+format-3 lock and installation are specified in [README.md](README.md).
 
 ### Versions
 

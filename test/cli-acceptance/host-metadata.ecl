@@ -15,13 +15,11 @@
  (-- : "Report the captured working directory and the OS-reported executable path.")
  ("host-metadata" install
   `cwd "host-metadata/caller λ" fs.mkdirs
-  "{format 1 local \"local\" scopes {\"local\" {root \".\" visible [] sources [] artifacts []}}}"
-  "host-metadata/caller λ/map" write
   dup "host.cwd json.emit io.prin" metadata
   host.cwd "host-metadata/caller λ" pair path.join json.emit "host.cwd" expect
   dup "host.executable json.emit io.prin" metadata
   over json.emit "host.executable" expect
-  "{args [\"check-map\" \"map\"] timeout-ms 5000} `executable host.executable put proc.run `term at `code at"
-  metadata "0" "nested check-map through host.executable" expect) `'metadata ignores PWD and PATH'
+  "{args [\"-e\" \"1\"] timeout-ms 5000} `executable host.executable put proc.run `term at `code at"
+  metadata "0" "nested run through host.executable" expect) `'metadata ignores PWD and PATH'
  test
 ) `cli.test.host-metadata @defm

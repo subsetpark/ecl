@@ -9,8 +9,8 @@ const std = @import("std");
 const test_heap = @import("test_heap.zig");
 const session = @import("../session.zig");
 
-test "concurrency: map artifact auto-loads converge through one loading lease" {
-    var fixture = try ConcurrentMapFixture.init();
+test "concurrency: auto-loads of one found file converge through one loading lease" {
+    var fixture = try ConcurrentLoadFixture.init();
     defer fixture.deinit();
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
@@ -32,12 +32,12 @@ test "concurrency: map artifact auto-loads converge through one loading lease" {
     );
 }
 
-const ConcurrentMapFixture = struct {
+const ConcurrentLoadFixture = struct {
     directory: std.testing.TmpDir,
     root: [:0]u8,
     nested: []u8,
 
-    fn init() !ConcurrentMapFixture {
+    fn init() !ConcurrentLoadFixture {
         const allocator = std.testing.allocator;
         var directory = std.testing.tmpDir(.{});
         errdefer directory.cleanup();
@@ -45,10 +45,7 @@ const ConcurrentMapFixture = struct {
         errdefer allocator.free(root);
         try directory.dir.createDir(std.testing.io, "project", .default_dir);
         try directory.dir.createDir(std.testing.io, "project/nested", .default_dir);
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "project/ecl.modules",
-            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [{path \"race.ecl\" kind ecl exports [\"race\"]}]}}}",
-        });
+        try directory.dir.writeFile(std.testing.io, .{ .sub_path = "project/ecl.pkg", .data = "" });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/race.ecl",
             .data = "((pop 42) `answer def) `race @defm\n",
@@ -58,7 +55,7 @@ const ConcurrentMapFixture = struct {
         return .{ .directory = directory, .root = root, .nested = nested };
     }
 
-    fn deinit(self: *ConcurrentMapFixture) void {
+    fn deinit(self: *ConcurrentLoadFixture) void {
         const allocator = std.testing.allocator;
         allocator.free(self.nested);
         allocator.free(self.root);

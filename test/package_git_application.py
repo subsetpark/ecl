@@ -28,14 +28,8 @@ def main():
         shutil.copy2(supplied_binary, binary)
         installed = root / 'distribution/share/ecl/apps/pkg'
         shutil.copytree(sources / 'src', installed / 'src')
-        for source, target in [('main.ecl', 'main.ecl'), ('installed.modules', 'ecl.modules')]:
-            shutil.copy2(sources / source, installed / target)
+        shutil.copy2(sources / 'main.ecl', installed / 'main.ecl')
         shutil.copy2(extension, installed / 'git.eclmod')
-        app_map = root / 'acceptance.modules'
-        app_map.write_text(
-            "{format 1 local \"tests\" scopes {\"tests\" {root " + json.dumps(str(sources))
-            + " visible [] sources [\"src/**/*.ecl\" \"test/acceptance/git-commands.ecl\"] artifacts []}}}"
-        )
         repo = root / 'repo.git'
         repo.mkdir()
         run(['git', 'init', '--object-format=sha1', '-b', 'main'], repo)
@@ -69,12 +63,12 @@ def main():
         scratch = root / 'scratch'
         scratch.mkdir()
         env = {**os.environ, 'ECL_CACHE': str(cache), 'ECL_GIT_CA_FILE': str(certs / 'ca.pem'),
-               'TMPDIR': str(scratch), 'ECL_WORKERS': '4'}
+               'TMPDIR': str(scratch), 'ECL_WORKERS': '4', 'ECL_PATH': str(sources)}
         url = f'https://127.0.0.1:{server.server_port}/repo.git'
 
         def phase(name, project, new_commit=''):
             result = subprocess.run(
-                [str(binary), '--module-map', str(app_map), 'test', '--runner', 'pkg.test.git-commands.run',
+                [str(binary), 'test', '--runner', 'pkg.test.git-commands.run',
                  '--', name, url, old_commit, new_commit, str(fixture_directory)],
                 cwd=project, env=env, stdin=subprocess.DEVNULL, timeout=600,
             )
@@ -104,7 +98,7 @@ def main():
             shutil.rmtree(cache)
             relocated = root / 'relocated'
             fresh_new.rename(relocated)
-            phase('vendor', relocated, new_commit)
+            phase('relocated', relocated, new_commit)
         finally:
             server.shutdown()
             server.server_close()

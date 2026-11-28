@@ -20,12 +20,12 @@
   (pkg.fetch.requirement) cons @attempt `err at `kind at `domain equal
   snapshot 1 at (pkg.bundle.inspect) cons @attempt result.err? 1 equal) `check-snapshot defp
 
- ### test exact-fetch
+ ### defp exact-fetch
  (-- : "Use a tag only for explicit selection, then fetch and hash-check the pinned commit.")
  (args first `tag "release" pkg.fetch.git check-snapshot)
- `exact-fetch test
+ `exact-fetch defp
 
  ### def run
- (-- : "Run only the fetch acceptance test; package modules carry their own tests.")
- (`pkg.test.fetch pkg.test.support.run-module) `run def
+ (-- : "Run the fetch acceptance against the repository and commit given as arguments.")
+ (exact-fetch) `run def
 ) `pkg.test.fetch @defm

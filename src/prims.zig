@@ -10,7 +10,6 @@ const lexer = @import("lexer.zig");
 const printer = @import("print.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
-const modules = @import("modules.zig");
 const floor = @import("floor.zig");
 const module_prims = @import("module_prims.zig");
 const combinators = @import("combinators.zig");
@@ -343,7 +342,7 @@ fn execute(fiber: *Fiber) MachineError!void {
         .symbol => |word| value.Symbol{ .name = word.name, .slot = env.unquoted(word.slot) },
         else => return fiber.typeError("a symbol"),
     };
-    try fiber.executeAs(word);
+    try fiber.executeWord(word);
 }
 fn parse(fiber: *Fiber) MachineError!void {
     var source_value = try fiber.popString();
@@ -614,13 +613,11 @@ fn startSymbolConversion(fiber: *Fiber, mode: SymbolConversion) MachineError!voi
         .symbol => try fiber.pushOwned(item.take()),
         .list => {
             if (!item.borrow().isString()) return fiber.typeError("a string or symbol");
-            const source = try fiber.dispatchedSource();
             const encoder = kernel_storage.StringEncoder.init(fiber.allocator, item.borrow());
             try fiber.startDriver(SymbolConversionDriver{
                 .source_value = .init(item.take()),
                 .encoder = .init(encoder),
                 .mode = mode,
-                .source = source,
             });
         },
         else => return fiber.typeError("a string or symbol"),
@@ -629,16 +626,13 @@ fn startSymbolConversion(fiber: *Fiber, mode: SymbolConversion) MachineError!voi
 
 /// `symbol` and `intern` differ only in the final cursor: lookup answers
 /// absence with `domain, insertion grows the process-lifetime table. Either
-/// way the symbol links to the root of the activation that built it, by the
-/// source the `symbol` or `intern` occurrence was written in, as one written
-/// there would: a symbol built from a string is lexical, not dynamic.
+/// way the symbol links to the root of the activation that built it, as one
+/// written there would: a symbol built from a string is lexical, not dynamic.
 const SymbolConversionDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     source_value: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.StringEncoder),
     mode: SymbolConversion,
-    /// The source of the word that asked, which the symbol is linked by.
-    source: modules.RegistrationProvenance,
     spelling: ?heap.Owned([]u8) = null,
     validation: ?lexer.SymbolCursor = null,
     name: union(enum) {
@@ -683,12 +677,12 @@ const SymbolConversionDriver = struct {
                 .complete => |maybe_id| {
                     const id = maybe_id orelse
                         return fiber.fail(.domain, "symbol spelling is not interned; use intern to create it");
-                    return .{ .output = .{ .symbol = try fiber.linkedWord(id, self.source) } };
+                    return .{ .output = .{ .symbol = try fiber.linkedWord(id) } };
                 },
             },
             .insert => |*cursor| switch (try cursor.advance()) {
                 .pending => {},
-                .complete => |id| return .{ .output = .{ .symbol = try fiber.linkedWord(id, self.source) } },
+                .complete => |id| return .{ .output = .{ .symbol = try fiber.linkedWord(id) } },
             },
         };
         return .stepped;

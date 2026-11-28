@@ -1170,7 +1170,7 @@ test "native: a discovered artifact publishes its complete table atomically" {
     }
 }
 
-test "native: source candidates win inside a root and path-root order wins across roots" {
+test "native: a source declaration takes precedence over a native library" {
     const fixture_path = try std.fs.path.join(
         std.testing.allocator,
         &.{ native_fixture.directory, "sample.eclmod" },
@@ -1246,8 +1246,10 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer native_inputs9.deinit();
     var path_first = try initRuntime(&native_inputs9, &output.writer, &diagnostics.writer, search);
     defer path_first.deinit();
-    try expectOk(&path_first, "41 sample.increment");
-    try std.testing.expectEqual(@as(i64, 42), path_first.stackItems()[0].int);
+    // A source in any entry is found before a native library in an earlier
+    // one.
+    try expectOk(&path_first, "sample.increment");
+    try std.testing.expectEqual(@as(i64, 100), path_first.stackItems()[0].int);
 }
 
 test "native: a rejected artifact publishes nothing and never selects a later candidate" {
