@@ -212,8 +212,10 @@ can forward their opaque identities; controller execution and cleanup continue
 independently of callback return. Suspension of an ordinary word uses its
 separate `Reschedule` capability. Besides its fixed state, a suspended call owns
 scratch bytes: `scratch()` observes them and `resizeScratch(length)` resizes them,
-keeping their prefix. Scratch is charged to the instance's native-memory ceiling;
-a refused resize returns null and changes nothing. The bytes survive yields and
+keeping their prefix. Scratch is charged to the instance's native-memory ceiling,
+and a resize only for its growth, so shrinking is never refused by the ceiling; a
+refused resize returns null and changes nothing. A resize may copy the prefix in
+one step, so size scratch once when the length is known. The bytes survive yields and
 are released when the call completes, fails, or is cancelled. A returned slice is
 valid only until the next resize or the end of the turn.
 `port.open` and `port.begin` accept structured configuration and parameters;

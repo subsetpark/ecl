@@ -575,6 +575,19 @@ fn scratchGrant(call: *ecl.Call("length -- granted"), schedule: *TwoSliceSchedul
     return call.complete(.{ecl.Scalar.int(@intFromBool(granted))});
 }
 
+/// Fills scratch to `length`, then resizes it to `target`, reporting whether
+/// the second resize was granted and the first byte survived it.
+fn scratchResize(call: *ecl.Call("length target -- granted"), schedule: *TwoSliceSchedule) ecl.CallbackResult {
+    const length = call.input(0).int() orelse return call.fail(.type, "scratch-resize expects integers");
+    const target = call.input(1).int() orelse return call.fail(.type, "scratch-resize expects integers");
+    if (length <= 0 or target <= 0) return call.fail(.domain, "scratch-resize expects positive lengths");
+    const filled = schedule.resizeScratch(@intCast(length)) orelse return call.fail(.domain, "scratch refused");
+    filled[0] = 0xa5;
+    const resized = schedule.resizeScratch(@intCast(target)) orelse
+        return call.complete(.{ecl.Scalar.int(0)});
+    return call.complete(.{ecl.Scalar.int(@intFromBool(resized[0] == 0xa5))});
+}
+
 fn scratchHold(call: *ecl.Call("length --"), schedule: *TwoSliceSchedule) ecl.CallbackResult {
     const length = call.input(0).int() orelse return call.fail(.type, "scratch-hold expects an integer");
     if (length < 0) return call.fail(.domain, "scratch-hold expects a nonnegative length");
@@ -649,6 +662,7 @@ pub const Extension = ecl.module(.{
         ecl.word("scratch-reverse", "Reverse text held in call scratch across yields.", scratchReverse),
         ecl.word("scratch-grant", "Report whether call scratch of a length is granted.", scratchGrant),
         ecl.word("scratch-hold", "Hold call scratch of a length until cancelled.", scratchHold),
+        ecl.word("scratch-resize", "Fill call scratch to a length, then resize it to a target.", scratchResize),
         ecl.word("symbol-burst", "Build a list of long symbols across scheduler turns.", symbolBurst),
     },
 });

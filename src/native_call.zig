@@ -1243,17 +1243,18 @@ fn hostContinuationScratch(
         .resize => {
             const length = std.math.cast(usize, length_wire) orelse return .out_of_memory;
             if (length != call.scratch.len) {
-                const replacement: []align(64) u8 = if (length == 0)
-                    &.{}
-                else
-                    call.instance.allocateNative(length) orelse return .out_of_memory;
                 const kept = @min(length, call.scratch.len);
-                @memcpy(replacement[0..kept], call.scratch[0..kept]);
-                // The copy is work the call asked for; it spends budget so the
-                // next metered step yields, but never fails the resize.
+                if (length == 0) {
+                    call.instance.releaseNative(call.scratch);
+                    call.scratch = &.{};
+                } else if (call.scratch.len == 0) {
+                    call.scratch = call.instance.allocateNative(length) orelse return .out_of_memory;
+                } else {
+                    call.scratch = call.instance.resizeNative(call.scratch, length) orelse return .out_of_memory;
+                }
+                // A moved prefix is work the call asked for; it spends budget so
+                // the next metered step yields, but never fails the resize.
                 _ = call.activeFiber().workBudget().take(kept / abi.max_bulk_units + 1);
-                if (call.scratch.len != 0) call.instance.releaseNative(call.scratch);
-                call.scratch = replacement;
             }
         },
         _ => return .invalid,

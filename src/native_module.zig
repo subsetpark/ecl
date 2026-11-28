@@ -358,6 +358,15 @@ const InstanceState = struct {
         self.memory_used += length;
         return bytes.ptr;
     }
+    fn resizeNative(self: *InstanceState, bytes: []align(64) u8, length: usize) ?[]align(64) u8 {
+        if (self.refs.load(.acquire) == 0) return null;
+        std.Io.Threaded.mutexLockUncancelable(&self.memory_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.memory_mutex);
+        if (length > bytes.len and length - bytes.len > self.memory_limit - self.memory_used) return null;
+        const resized = self.host.allocator().realloc(bytes, length) catch return null;
+        self.memory_used = self.memory_used - bytes.len + length;
+        return resized;
+    }
     fn releaseNative(raw: *anyopaque, bytes: [*]align(64) u8, size: u64) callconv(.c) void {
         const self: *InstanceState = @ptrCast(@alignCast(raw));
         std.Io.Threaded.mutexLockUncancelable(&self.memory_mutex);
@@ -462,6 +471,14 @@ pub const ModuleInstance = opaque {
 
     pub fn releaseNative(self: *ModuleInstance, bytes: []align(64) u8) void {
         InstanceState.releaseNative(self.mutableState(), bytes.ptr, bytes.len);
+    }
+
+    /// Resizes a nonempty native allocation in place or by moving it, keeping
+    /// the common prefix. Only growth is charged to the limit, so shrinking
+    /// never fails on it; a refused resize leaves the allocation unchanged.
+    pub fn resizeNative(self: *ModuleInstance, bytes: []align(64) u8, length: usize) ?[]align(64) u8 {
+        std.debug.assert(bytes.len != 0 and length != 0);
+        return InstanceState.resizeNative(self.mutableState(), bytes, length);
     }
 
     pub fn name(self: *const ModuleInstance) intern.ModuleName {

@@ -1538,9 +1538,13 @@ test "native: call scratch survives yields and is released when the call ends" {
     try expectOk(&runtime, "1048576 sample.scratch-grant 1048577 sample.scratch-grant 1048576 sample.scratch-grant");
     try expectOk(&runtime, "(1048576 sample.scratch-hold) @spawn dup 1 task.await-for pop " ++
         "1 sample.scratch-grant swap dup task.cancel task.await pop 1048576 sample.scratch-grant");
+    // A resize is charged only its growth: a full region still shrinks, and
+    // grows to the limit rather than to half of it.
+    try expectOk(&runtime, "1048576 1 sample.scratch-resize 524288 1048576 sample.scratch-resize " ++
+        "524288 1048577 sample.scratch-resize");
     var display = try runtime.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("1 1 1 0 1 0 1", display.bytes());
+    try std.testing.expectEqualStrings("1 1 1 0 1 0 1 1 1 0", display.bytes());
 }
 
 test "native: symbol scalars spend the budget instead of failing when it runs out" {
