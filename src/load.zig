@@ -189,7 +189,8 @@ const AutoLoadDriver = struct {
             entry: usize,
         },
         committed: heap.Owned(modules.Registry.AcquireCursor),
-        /// A source request whose file another request already loaded.
+        /// Between states, holding nothing; also where a source request
+        /// whose file was already loaded ends.
         done,
         path_value: struct {
             loading: heap.Owned(modules.LoadingLease),
@@ -418,14 +419,12 @@ const AutoLoadDriver = struct {
                     .granted => |lease| {
                         const file = begin.file;
                         begin.cursor.deinit();
+                        self.state.borrowMut().* = .done;
                         var loading = heap.Owned(modules.LoadingLease).init(lease);
                         defer loading.deinit(fiber.releases, fiber.allocator);
                         if (file.loaded()) {
                             loading.borrowMut().deinit();
-                            if (self.request == .source) {
-                                self.state.borrowMut().* = .done;
-                                return .completed;
-                            }
+                            if (self.request == .source) return .completed;
                             self.state.borrowMut().* = .{ .committed = .init(fiber.inherited.registry.acquireCursor(self.request.module.name)) };
                             continue;
                         }
