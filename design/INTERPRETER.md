@@ -2253,6 +2253,19 @@ initialization finds a module's configuration by name in that immutable index,
 with bounded binary lookup; it selects no image, which the ordinary loader
 finds.
 
+A suspendable native call owns two pieces of state across its yields: a fixed,
+pointer-free continuation record, and variable-length scratch bytes drawn from
+its instance's native memory. Both belong to the call's transaction, which
+holds an instance pin for its whole life and releases the scratch before that
+pin however the call ends, so the instance's accounting outlives every
+allocation charged to it. Extension code sees only the bytes for one turn and
+keeps offsets, never addresses, in its continuation.
+
+Host registration policy is copied and sorted during Session construction.
+Name resolution and instance publication use the same immutable index, with
+bounded binary lookup. A registered static descriptor enters the ordinary loader
+and owns the same instance lifecycle as a dynamic image.
+
 Host configuration is bound to a loaded instance by the module's name. An extension sees only its immutable
 configuration bytes and its own native storage authority; no extension-facing
 lookup accepts a module name. Resource-open arguments cannot replace this

@@ -1118,7 +1118,8 @@ test "native: the SDK generates a descriptor the production validator accepts" {
         "increment",     "discard",        "twin",                  "forward",        "nested-port", "fail-user",      "fail-kind",
         "make-char",     "singleton",      "pair-dict",             "sum-list",       "sum-dict",    "cooperative",    "draft-fail",
         "yield-forever", "builder-budget", "forward-values-budget", "text-span",      "bulk-budget", "bulk-immediate", "bulk-values-budget",
-        "large-list",    "large-dict",     "duplicate-dict",        "noncooperative", "nan-scalar",  "nan-bulk",
+        "large-list",    "large-dict",     "duplicate-dict",        "noncooperative", "nan-scalar",  "nan-bulk",       "scratch-reverse",
+        "scratch-grant", "scratch-hold",   "scratch-resize",        "symbol-burst",
     };
     try std.testing.expectEqual(expected_names.len, validated.definitions().len);
     for (validated.definitions(), expected_names) |definition, expected| {
@@ -1159,6 +1160,8 @@ test "native: a discovered artifact publishes its complete table atomically" {
         "sample.nested-port",        "sample.make-char",      "sample.forward-values-budget",
         "sample.text-span",          "sample.bulk-budget",    "sample.bulk-immediate",
         "sample.bulk-values-budget", "sample.nan-scalar",     "sample.nan-bulk",
+        "sample.scratch-reverse",    "sample.scratch-grant",  "sample.scratch-hold",
+        "sample.scratch-resize",     "sample.symbol-burst",
     };
     var completion = try runtime.completionCandidates("sample.");
     defer completion.deinit();
@@ -1512,6 +1515,49 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
     );
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
+test "native: call scratch survives yields and is released when the call ends" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+        .native_instances = &.{.{ .name = "sample", .memory_limit = 1 << 20 }},
+    }), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    // Long enough that reading and building each span many turns.
+    try expectOk(&runtime, "\"héllo wörld ✓ \" 60000 take dup sample.scratch-reverse swap reverse match?");
+    try expectOk(&runtime, "\"\" sample.scratch-reverse \"\" match?");
+    try expectOk(&runtime, "1048576 sample.scratch-grant 1048577 sample.scratch-grant 1048576 sample.scratch-grant");
+    try expectOk(&runtime, "(1048576 sample.scratch-hold) @spawn dup 1 task.await-for pop " ++
+        "1 sample.scratch-grant swap dup task.cancel task.await pop 1048576 sample.scratch-grant");
+    // A resize is charged only its growth: a full region still shrinks, and
+    // grows to the limit rather than to half of it.
+    try expectOk(&runtime, "1048576 1 sample.scratch-resize 524288 1048576 sample.scratch-resize " ++
+        "524288 1048577 sample.scratch-resize");
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1 1 1 0 1 0 1 1 1 0", display.bytes());
+}
+
+test "native: symbol scalars spend the budget instead of failing when it runs out" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try initRuntime(&runtime_inputs, &output.writer, &diagnostics.writer, native_fixture.directory);
+    defer runtime.deinit();
+    try expectOk(&runtime, "5000 sample.symbol-burst len");
+    try std.testing.expectEqual(@as(i64, 5000), runtime.stackItems()[0].int);
 }
 
 test "native: bulk value builders remain schedulable" {

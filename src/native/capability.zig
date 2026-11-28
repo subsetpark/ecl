@@ -431,6 +431,8 @@ fn buildResult(status: abi.HostStatus, output: abi.Candidate) error{OutOfMemory}
 /// or ephemeral capabilities, and survives only while the native call's real
 /// scheduler WorkDriver is alive. The API exposes budget charging and yield,
 /// never an allocator, scheduler, Fiber, or raw ECL storage.
+var empty_scratch: [0]u8 align(64) = .{};
+
 pub fn Reschedule(comptime Spec: type) type {
     comptime validateContinuationSpec(Spec);
     return opaque {
@@ -489,6 +491,41 @@ pub fn Reschedule(comptime Spec: type) type {
                 .invalid => unreachable,
                 _ => unreachable,
             }
+        }
+
+        /// The call's scratch bytes: host-owned storage that survives yields
+        /// and is released when the call ends, however it ends. The slice is
+        /// valid until the next resize or the end of this turn, so State
+        /// records offsets into it, never addresses.
+        pub fn scratch(self: *Self) []align(64) u8 {
+            return self.scratchRequest(.observe, 0) orelse unreachable;
+        }
+
+        /// Resizes the scratch bytes, keeping their common prefix. Growth draws
+        /// on the module instance's native-memory limit; a refused resize
+        /// returns null and leaves the bytes unchanged.
+        pub fn resizeScratch(self: *Self, length: usize) ?[]align(64) u8 {
+            return self.scratchRequest(.resize, length);
+        }
+
+        fn scratchRequest(self: *Self, action: abi.ScratchAction, length: usize) ?[]align(64) u8 {
+            var bytes: ?[*]align(64) u8 = null;
+            var bytes_len: u64 = 0;
+            switch ((self.adapterState().invocation.host.continuation_scratch orelse unreachable)(
+                self.adapterState().invocation.context,
+                action,
+                length,
+                &bytes,
+                &bytes_len,
+            )) {
+                .ok => {},
+                .out_of_memory => return null,
+                .invalid, .yield_required => unreachable,
+                _ => unreachable,
+            }
+            const result_len: usize = @intCast(bytes_len);
+            if (result_len == 0) return &empty_scratch;
+            return bytes.?[0..result_len];
         }
 
         pub fn initState(raw: *anyopaque) callconv(.c) void {

@@ -518,6 +518,116 @@ fn duplicateDict(
     };
 }
 
+const ScratchReverse = struct {
+    pub const State = struct { length: u64 = 0, read: u64 = 0, written: u64 = 0, sized: bool = false };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn deinit(state: *State) void {
+        state.* = undefined;
+    }
+};
+const ScratchReverseSchedule = ecl.Reschedule(ScratchReverse);
+
+/// Holds every input unit in scratch across yields, then emits them reversed.
+fn scratchReverse(call: *ecl.Call("text -- result"), build: *ecl.BuildValues, schedule: *ScratchReverseSchedule) ecl.CallbackResult {
+    const state = schedule.state();
+    if (!state.sized) {
+        state.length = call.input(0).aggregateLength() orelse return call.fail(.type, "scratch-reverse expects a list");
+        _ = schedule.resizeScratch(@intCast(state.length * 4)) orelse return call.fail(.domain, "scratch refused");
+        state.sized = true;
+    }
+    const units: []align(64) u32 = @ptrCast(schedule.scratch());
+    while (state.read < state.length) {
+        var chunk: [256]u32 = undefined;
+        const want: usize = @intCast(@min(chunk.len, state.length - state.read));
+        switch (try call.readUnits(0, state.read, chunk[0..want])) {
+            .units => |read| {
+                @memcpy(units[@intCast(state.read)..][0..read.count], chunk[0..read.count]);
+                state.read += read.count;
+            },
+            .yield_required => return schedule.yield(),
+            .invalid => return call.fail(.type, "scratch-reverse expects text"),
+        }
+    }
+    while (state.written < state.length) {
+        var chunk: [256]u64 = undefined;
+        const count: usize = @intCast(@min(chunk.len, state.length - state.written));
+        for (chunk[0..count], 0..) |*word, index|
+            word.* = units[@intCast(state.length - 1 - state.written - index)];
+        switch (try build.appendBulk(0, .char4, state.length, false, chunk[0..count])) {
+            .appended => state.written += count,
+            .yield_required => return schedule.yield(),
+            .invalid => return call.fail(.domain, "scratch-reverse append was rejected"),
+        }
+    }
+    return switch (try build.finishBulk(0, .char4, state.length, false)) {
+        .candidate => |result| call.complete(.{result}),
+        .yield_required => schedule.yield(),
+        .invalid => call.fail(.domain, "scratch-reverse finish was rejected"),
+    };
+}
+
+fn scratchGrant(call: *ecl.Call("length -- granted"), schedule: *TwoSliceSchedule) ecl.CallbackResult {
+    const length = call.input(0).int() orelse return call.fail(.type, "scratch-grant expects an integer");
+    if (length < 0) return call.fail(.domain, "scratch-grant expects a nonnegative length");
+    const granted = schedule.resizeScratch(@intCast(length)) != null;
+    return call.complete(.{ecl.Scalar.int(@intFromBool(granted))});
+}
+
+/// Fills scratch to `length`, then resizes it to `target`, reporting whether
+/// the second resize was granted and the first byte survived it.
+fn scratchResize(call: *ecl.Call("length target -- granted"), schedule: *TwoSliceSchedule) ecl.CallbackResult {
+    const length = call.input(0).int() orelse return call.fail(.type, "scratch-resize expects integers");
+    const target = call.input(1).int() orelse return call.fail(.type, "scratch-resize expects integers");
+    if (length <= 0 or target <= 0) return call.fail(.domain, "scratch-resize expects positive lengths");
+    const filled = schedule.resizeScratch(@intCast(length)) orelse return call.fail(.domain, "scratch refused");
+    filled[0] = 0xa5;
+    const resized = schedule.resizeScratch(@intCast(target)) orelse
+        return call.complete(.{ecl.Scalar.int(0)});
+    return call.complete(.{ecl.Scalar.int(@intFromBool(resized[0] == 0xa5))});
+}
+
+fn scratchHold(call: *ecl.Call("length --"), schedule: *TwoSliceSchedule) ecl.CallbackResult {
+    const length = call.input(0).int() orelse return call.fail(.type, "scratch-hold expects an integer");
+    if (length < 0) return call.fail(.domain, "scratch-hold expects a nonnegative length");
+    if (schedule.scratch().len == 0)
+        _ = schedule.resizeScratch(@intCast(length)) orelse return call.fail(.domain, "scratch refused");
+    return schedule.yield();
+}
+
+const SymbolBurst = struct {
+    pub const State = struct { appended: u64 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn deinit(state: *State) void {
+        state.* = undefined;
+    }
+};
+const SymbolBurstSchedule = ecl.Reschedule(SymbolBurst);
+
+/// Builds a list of long symbols, so symbol construction meets an exhausted
+/// budget at an arbitrary point between appends.
+fn symbolBurst(call: *ecl.Call("count -- result"), build: *ecl.BuildValues, schedule: *SymbolBurstSchedule) ecl.CallbackResult {
+    const count = call.input(0).int() orelse return call.fail(.type, "symbol-burst expects an integer");
+    if (count < 0) return call.fail(.domain, "symbol-burst expects a nonnegative count");
+    const state = schedule.state();
+    while (state.appended < count) {
+        const item = try build.scalar(ecl.Scalar.symbol("a-long-symbol-name-that-costs-more-than-one-unit-of-work-to-intern-each-time"));
+        switch (try build.appendList(0, @intCast(count), item)) {
+            .appended => state.appended += 1,
+            .yield_required => return schedule.yield(),
+            .invalid => return call.fail(.domain, "symbol-burst append was rejected"),
+        }
+    }
+    return switch (try build.finishList(0, @intCast(count))) {
+        .candidate => |result| call.complete(.{result}),
+        .yield_required => schedule.yield(),
+        .invalid => call.fail(.domain, "symbol-burst finish was rejected"),
+    };
+}
+
 pub const Extension = ecl.module(.{
     .name = "sample",
     .doc = "Sample extension used by ecl's native acceptance suite.",
@@ -549,6 +659,11 @@ pub const Extension = ecl.module(.{
         ecl.word("noncooperative", "Demonstrate the opt-in native overrun diagnostic.", noncooperative),
         ecl.word("nan-scalar", "Return a NaN float scalar, which the host must reject.", nanScalar),
         ecl.word("nan-bulk", "Append a NaN to a float list, which the host must reject.", nanBulk),
+        ecl.word("scratch-reverse", "Reverse text held in call scratch across yields.", scratchReverse),
+        ecl.word("scratch-grant", "Report whether call scratch of a length is granted.", scratchGrant),
+        ecl.word("scratch-hold", "Hold call scratch of a length until cancelled.", scratchHold),
+        ecl.word("scratch-resize", "Fill call scratch to a length, then resize it to a target.", scratchResize),
+        ecl.word("symbol-burst", "Build a list of long symbols across scheduler turns.", symbolBurst),
     },
 });
 

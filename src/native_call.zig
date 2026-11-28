@@ -401,6 +401,9 @@ const Transaction = struct {
     candidate_generation: u32 = 0,
     terminal: Terminal = .idle,
     continuation: ?[]align(64) u8 = null,
+    /// Variable-length companion to the continuation, drawn from the instance's
+    /// native memory and released before the instance pin.
+    scratch: []align(64) u8 = &.{},
     yield_requested: bool = false,
 
     fn create(
@@ -453,6 +456,7 @@ const Transaction = struct {
             self.definition.body.call.deinit_continuation.?(state.ptr);
             self.allocator.free(state);
         }
+        if (self.scratch.len != 0) self.instance.releaseNative(self.scratch);
         self.instance.releasePin();
     }
 
@@ -644,6 +648,7 @@ const full_host_table = abi.HostTable{
     .continuation_state = hostContinuationState,
     .consume = hostConsume,
     .request_yield = hostRequestYield,
+    .continuation_scratch = hostContinuationScratch,
     .list_at = hostListAt,
     .dict_at = hostDictAt,
     .read_path = hostReadPath,
@@ -1029,7 +1034,9 @@ fn hostScalar(
         _ => return .invalid,
     };
     if (units > abi.max_guest_scalar_bytes) return .invalid;
-    if (units != 0 and charge(call, units) != .ok) return .yield_required;
+    // A scalar is bounded work and has no resumable half, so it never yields:
+    // it spends what remains and the next metered step asks for the yield.
+    _ = call.activeFiber().workBudget().take(units);
     const item: Value = switch (scalar.kind) {
         .int => .{ .int = @bitCast(scalar.bits) },
         // ECL has no NaN value, so a NaN bit pattern is an invalid scalar,
@@ -1219,5 +1226,40 @@ fn hostRequestYield(context: *anyopaque) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
     if (call.terminal != .idle or call.continuation == null) return .invalid;
     call.yield_requested = true;
+    return .ok;
+}
+
+fn hostContinuationScratch(
+    context: *anyopaque,
+    action: abi.ScratchAction,
+    length_wire: u64,
+    output_ptr: *?[*]align(64) u8,
+    output_len: *u64,
+) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    if (call.terminal != .idle or call.continuation == null) return .invalid;
+    switch (action) {
+        .observe => {},
+        .resize => {
+            const length = std.math.cast(usize, length_wire) orelse return .out_of_memory;
+            if (length != call.scratch.len) {
+                const kept = @min(length, call.scratch.len);
+                if (length == 0) {
+                    call.instance.releaseNative(call.scratch);
+                    call.scratch = &.{};
+                } else if (call.scratch.len == 0) {
+                    call.scratch = call.instance.allocateNative(length) orelse return .out_of_memory;
+                } else {
+                    call.scratch = call.instance.resizeNative(call.scratch, length) orelse return .out_of_memory;
+                }
+                // A moved prefix is work the call asked for; it spends budget so
+                // the next metered step yields, but never fails the resize.
+                _ = call.activeFiber().workBudget().take(kept / abi.max_bulk_units + 1);
+            }
+        },
+        _ => return .invalid,
+    }
+    output_ptr.* = if (call.scratch.len == 0) null else call.scratch.ptr;
+    output_len.* = call.scratch.len;
     return .ok;
 }

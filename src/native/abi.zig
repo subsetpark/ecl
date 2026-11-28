@@ -6,7 +6,7 @@
 const builtin = @import("builtin");
 
 pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v24";
-pub const abi_version: u32 = 25;
+pub const abi_version: u32 = 26;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -393,6 +393,16 @@ pub const ConsumeFn = *const fn (
     units: u32,
 ) callconv(.c) HostStatus;
 pub const RequestYieldFn = *const fn (call_context: *anyopaque) callconv(.c) HostStatus;
+pub const ScratchAction = enum(u32) { observe, resize, _ };
+/// Observes or resizes the call's scratch bytes. A resize keeps the common
+/// prefix; a refused resize reports `out_of_memory` and changes nothing.
+pub const ContinuationScratchFn = *const fn (
+    call_context: *anyopaque,
+    action: ScratchAction,
+    length: u64,
+    output_ptr: *?[*]align(64) u8,
+    output_len: *u64,
+) callconv(.c) HostStatus;
 
 /// Bulk operations copy at most this many scalar units per invocation.
 pub const max_bulk_units: u32 = 256;
@@ -423,6 +433,7 @@ pub const HostTable = extern struct {
     bulk_build: ?BulkBuildFn = null,
     instance_state: ?InstanceStateFn = null,
     input_resource_kind: ?*const fn (*anyopaque, u32, *const anyopaque) callconv(.c) bool = null,
+    continuation_scratch: ?ContinuationScratchFn = null,
 };
 
 pub const Invoke = *const fn (
@@ -521,7 +532,7 @@ comptime {
     assertRecord(ValueView, 48, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 168, 8);
+    assertRecord(HostTable, 176, 8);
     assertRecord(Descriptor, 112, 8);
     assertRecord(PortDefinition, 136, 8);
     assertRecord(CapacityFailureDefinition, 40, 8);
