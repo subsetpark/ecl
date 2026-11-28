@@ -1,7 +1,8 @@
 # Package data APIs
 
-These modules ship with the package application and use its module map.
-They are ordinary ECL sources, available within that application.
+These modules ship with the package application, which finds them by module
+search in its own directory. They are ordinary ECL sources, available within
+that application.
 
 ## pkg.data
 

@@ -14,11 +14,10 @@ const native_module = @import("native_module.zig");
 const reader = @import("reader.zig");
 const poll_api = @import("poll.zig");
 const turn_core = @import("turn_core.zig");
-const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
 const standard_streams = @import("standard_streams.zig");
-const map_state = @import("module_snapshot.zig");
+const module_search = @import("module_search.zig");
 const external = @import("external.zig");
 const scheduler_api = @import("scheduler.zig");
 const idioms = @import("idioms.zig");
@@ -176,11 +175,9 @@ const FailureSite = union(enum) {
 };
 /// Where a fiber's root activation runs.
 const RootEntry = union(enum) {
-    /// The fiber's own root scope.
-    own,
-    /// A root the fiber does not own: a task in its spawner's, or a Session's
-    /// root fiber in the Session's. The scope's owner outlives the fiber.
-    scope: *env.Scope,
+    /// A root by its scope: the session's for a root fiber, core's for the
+    /// bootstrap fiber, and a task's spawner's.
+    scope: env.ScopeId,
     /// One registered module's own code, under the provenance of the
     /// registration it was read from.
     module: modules.ModuleRoot,
@@ -188,9 +185,10 @@ const RootEntry = union(enum) {
 /// Who runs a fiber, and so what it may do. A root fiber runs a submission
 /// or a host-driven load and may define. A task fiber runs in its spawner's
 /// scope without being a root of its own, so it may not define. The bootstrap
-/// fiber builds the prelude before any scheduler exists.
+/// fiber builds the prelude before any scheduler exists, and alone holds the
+/// authority to publish into core while it does.
 pub const Role = union(enum) {
-    bootstrap,
+    bootstrap: env.CorePublisher,
     root: Membership,
     task: Membership,
 
@@ -343,7 +341,6 @@ pub fn stringValue(
     var work = poll_api.unbounded();
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
-/// How an evaluation's words reach their targets.
 /// How an evaluation holds the code it runs. Every evaluation resolves each
 /// word when it is reached, against the definitions current then.
 const Program = union(enum) {
@@ -483,7 +480,7 @@ const Activation = struct {
 };
 comptime {
     if (@sizeOf(Activation) != 24) @compileError("an activation must remain three words");
-    if (@sizeOf(Eval) > 104) @compileError("an evaluation must remain at most 104 bytes: every call copies one");
+    if (@sizeOf(Eval) > 80) @compileError("an evaluation must remain at most 80 bytes: every call copies one");
     // `entered` copies a `Program` tag into a `Hold`.
     const ProgramTag = @typeInfo(Program).@"union".tag_type.?;
     for ([_][]const u8{ "owned", "borrowed", "definition" }) |name| {
@@ -544,9 +541,7 @@ const Eval = struct {
         redispatch: u32,
     },
 
-    /// The root this body runs in, the provenance it registers under, and
-    /// whether it may define. One value, so a construction site cannot set
-    /// one part and leave another describing different code.
+    /// The root this body runs in.
     site: ExecutionSite,
     /// The word this evaluation is traced under, and that word's call site.
     /// The evaluation owns it: retiring the evaluation releases it, and an
@@ -643,8 +638,8 @@ const Eval = struct {
     }
 
     /// The root this body runs in: where its own definitions land.
-    fn scope(self: Eval) *env.Scope {
-        return self.site.scope;
+    fn scope(self: Eval) env.ScopeId {
+        return self.site;
     }
 };
 /// A module construction boundary. The body builds the image `@defm` declared
@@ -665,8 +660,9 @@ const BoundaryMode = union(enum) {
     attempt,
     module: ModuleBoundary,
     /// `@load`: the loaded file's stack-isolated unit. Its failure is not
-    /// caught here; it propagates to the enclosing unit.
-    load,
+    /// caught here; it propagates to the enclosing unit. It holds what the
+    /// unit it interrupted may register, restored as it leaves.
+    load: modules.RegistrationProvenance,
 };
 const Boundary = struct {
     mode: BoundaryMode,
@@ -828,84 +824,52 @@ fn encodeApplicationProvenanceTarget(
     return @ptrFromInt(raw);
 }
 
-pub const ExecutionSite = struct {
-    /// The current root: where this body's own definitions land, and, when it
-    /// is a module's scope, the module whose code is running. A module word
-    /// runs in its module's scope; every other word, and every quotation
-    /// applied as a value, runs in its caller's. Where a word resolves is
-    /// carried by the word itself.
-    scope: *env.Scope,
-    /// Authority carried only while evaluating an embedded source module.
-    /// A named module constructed by that source moves it into the immutable
-    /// registration; ordinary source always carries ordinary provenance.
-    registration_provenance: modules.RegistrationProvenance = .ordinary,
-    /// Whether definitions may land in `scope`. Set where a root is entered:
-    /// true for a root fiber and a module construction body, false for a
-    /// task, which runs in its spawner's root without owning it. Everything
-    /// else, every combinator application and `@attempt` included, inherits
-    /// it unchanged.
-    defining: bool,
+/// The current root of an activation: where its own definitions land, and,
+/// when it is a module's scope, the module whose code is running. A module
+/// word runs in its module's scope; every other word, and every quotation
+/// applied as a value, runs in its caller's. Where a word resolves, what it
+/// may register, and whether its call is checked are carried by the word.
+pub const ExecutionSite = env.ScopeId;
 
-    /// The base case: a fiber's root activation, built from nothing.
-    fn root(fiber: *Fiber) ExecutionSite {
-        const defining = fiber.role != .task;
-        return switch (fiber.root_entry) {
-            .module => |home| module(home, defining),
-            .own, .scope => .{
-                .scope = fiber.lexicalScope(),
-                .defining = defining,
-                .registration_provenance = if (fiber.inherited.module_snapshot) |module_snapshot|
-                    .{ .root_scope = module_snapshot.localScope() }
-                else
-                    .ordinary,
-            },
-        };
-    }
-
-    /// Code running as one module, under the provenance of the registration
-    /// it belongs to.
-    fn module(home: modules.ModuleRoot, defining: bool) ExecutionSite {
-        return .{
-            .scope = home.scope,
-            .defining = defining,
-            .registration_provenance = home.provenance,
-        };
-    }
-
-    /// The site of a quotation this activation applies as a value: a dynamic
-    /// `apply`, a combinator's quotation, an `@attempt` body, or a resumed
-    /// qualified load. It runs in the same root with the same right to
-    /// define. The value may have come from any caller, so it does not
-    /// inherit embedded registration trust; a resumed load sets the
-    /// provenance it registers under itself.
-    pub fn applied(self: ExecutionSite) ExecutionSite {
-        return .{
-            .scope = self.scope,
-            .registration_provenance = self.registration_provenance.applied(),
-            .defining = self.defining,
-        };
-    }
-};
+/// The site of a fiber's root activation, built from nothing.
+fn rootSite(fiber: *const Fiber) ExecutionSite {
+    return switch (fiber.root_entry) {
+        .module => |home| home.scope,
+        .scope => |scope| scope,
+    };
+}
 
 pub const ApplicationProvenance = union(enum) {
     boundary,
     selected_target: *const ApplicationProvenanceTarget,
 };
-pub const Application = struct {
-    quotation: *Header,
+/// What stays the same across every quotation one application runs: the
+/// combinator state, how to resume and free it, and where its quotations
+/// run. An application carries it to its frame, and the frame to the next
+/// application, whole.
+pub const ApplicationDriver = struct {
     context: *anyopaque,
     resume_fn: *const fn (*Fiber, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     site: ExecutionSite,
+    /// Where a finite iteration keeps what its call remembers of its
+    /// quotation's words. Borrowed from the state `context` points to.
+    plan: ?*ResolutionPlan = null,
+
+    fn deinit(self: ApplicationDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.deinit_fn(releases, allocator, self.context);
+    }
+};
+
+pub const Application = struct {
+    quotation: *Header,
+    driver: ApplicationDriver,
     seeded: u32,
     provenance: ApplicationProvenance,
-    /// Where a finite iteration keeps what its call has decided for its
-    /// quotation's words.
-    plan: ?*ResolutionPlan = null,
 
     /// Releases an application that never became a frame.
     fn discard(self: Application, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        self.deinit_fn(releases, allocator, self.context);
+        self.driver.deinit(releases, allocator);
     }
 };
 
@@ -993,10 +957,12 @@ pub fn HousedApplication(comptime Driver: type) type {
             const housing: *ApplicationHousing(Driver) = @ptrCast(@alignCast(self));
             return .{
                 .quotation = quotation,
-                .context = @ptrCast(&housing.driver),
-                .resume_fn = ApplicationAdapters(Driver).run,
-                .deinit_fn = ApplicationAdapters(Driver).deinitHoused,
-                .site = site,
+                .driver = .{
+                    .context = @ptrCast(&housing.driver),
+                    .resume_fn = ApplicationAdapters(Driver).run,
+                    .deinit_fn = ApplicationAdapters(Driver).deinitHoused,
+                    .site = site,
+                },
                 .seeded = seeded,
                 .provenance = .boundary,
             };
@@ -1022,10 +988,7 @@ pub fn typedApplication(
     const adapters = ApplicationAdapters(Driver);
     return .{
         .quotation = quotation,
-        .context = @ptrCast(driver),
-        .resume_fn = adapters.run,
-        .deinit_fn = adapters.deinit,
-        .site = site,
+        .driver = .{ .context = @ptrCast(driver), .resume_fn = adapters.run, .deinit_fn = adapters.deinit, .site = site },
         .seeded = seeded,
         .provenance = .boundary,
     };
@@ -1039,27 +1002,19 @@ const ApplicationMode = union(enum) {
     measured: *SoftFloor,
 };
 const ApplicationFrame = struct {
-    context: *anyopaque,
-    resume_fn: *const fn (*Fiber, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
-    deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
-    site: ExecutionSite,
+    driver: ApplicationDriver,
     mode: ApplicationMode,
     /// The activation every quotation this application runs is traced under.
     /// The frame owns it; each launched evaluation borrows it.
     activation: Activation,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
-    /// Borrowed from the combinator state `context` points to.
-    plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         self.activation.release(releases);
         var selection = self.selection;
         selection.deinit(releases);
-        switch (self.mode) {
-            // A soft floor's lists belong to the context that holds it.
-            .in_place, .isolated, .measured => {},
-        }
-        self.deinit_fn(releases, allocator, self.context);
+        // A measured mode's soft floor belongs to the context, which frees it.
+        self.driver.deinit(releases, allocator);
     }
 };
 const Frame = union(enum(u8)) {
@@ -1112,12 +1067,10 @@ comptime {
     // A load-return frame owns the complete qualified-operation continuation
     // across nested source execution. Keeping that tagged state in the frame
     // makes replay-vs-dispatch ownership unrepresentable rather than relying
-    // on correlated Fiber fields. Application frames likewise own the lexical scope
-    // provenance every sibling resumption must preserve.
-    // File-owned execution provenance carries a Session-scoped source capability.
-    // Every eval and application frame also records its activation's call
-    // site; the activation packs into three words to stay within this.
-    if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
+    // on correlated Fiber fields. Every eval and application frame records
+    // its activation's execution site and call site; the activation packs
+    // into three words to stay within this.
+    if (@sizeOf(Frame) > 120) @compileError("machine frames must remain at most 120 bytes");
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
 pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan, lex_cmp, stencil };
@@ -1127,14 +1080,14 @@ pub const IdiomFallback = *const fn (*Fiber) MachineError!void;
 /// Configuration and semantic services inherited by every spawned Fiber.
 /// Keeping this as one value makes addition of a new inherited service an
 /// atomic parent-to-child copy instead of a scheduler-site field checklist.
-const InheritedContext = struct {
+pub const InheritedContext = struct {
     registry: *modules.Registry,
     test_observation: ?*const modules.TestObservationAccess = null,
     test_execution: ?*const modules.TestExecutionAccess = null,
     native_diagnostics: bool = false,
     tls_trust: ?TlsTrust = null,
-    ecl_path: ?[]const u8 = null,
-    module_snapshot: ?*const map_state.Snapshot = null,
+    /// The Session's module search path and the files found on it.
+    module_search: ?*module_search.Search = null,
     idiom_mode: IdiomMode = .automatic,
     phase: union(enum) { bootstrap, runtime: RuntimeContext },
 
@@ -1145,12 +1098,6 @@ const InheritedContext = struct {
         };
     }
 
-    fn libraries(self: *const InheritedContext) EmbeddedLibraries {
-        return switch (self.phase) {
-            .bootstrap => .bundled,
-            .runtime => |context| .{ .registered = context.native_loader },
-        };
-    }
     pub fn runtime(self: *const InheritedContext) *const RuntimeContext {
         return switch (self.phase) {
             .runtime => |*context| context,
@@ -1288,7 +1235,6 @@ const WorkDriver = struct {
     resume_fn: *const fn (*Fiber, *anyopaque) MachineError!WorkProgress,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     site: ?ErrorSite,
-    trace_parent: ?intern.TraceWord = null,
 
     fn advance(self: WorkDriver, fiber: *Fiber) MachineError!WorkProgress {
         return self.resume_fn(fiber, self.context);
@@ -1420,13 +1366,6 @@ pub const RootExecutionMetrics = struct {
     driver_resumes: u64 = 0,
     application_resumes: u64 = 0,
     scheduler_handoffs: u64 = 0,
-    qualified_cache_hits: u64 = 0,
-    qualified_cache_misses: u64 = 0,
-    qualified_cache_heals: u64 = 0,
-    local_cache_hits: u64 = 0,
-    local_cache_misses: u64 = 0,
-    plain_cache_hits: u64 = 0,
-    plain_cache_misses: u64 = 0,
     /// The deepest the frame stack grew.
     max_frames: usize = 0,
     /// Recognized idiom applications.
@@ -1501,10 +1440,10 @@ pub const Loading = opaque {
         self.fiber().finishIncomplete(incomplete);
     }
 
-    /// Opens one `@load` boundary over a read source. Consumes `body` on
-    /// success and failure.
-    pub fn openLoad(self: *Loading, body: *Header, word: intern.TraceWord, provenance: modules.RegistrationProvenance) error{OutOfMemory}!void {
-        return self.fiber().openLoad(body, word, provenance);
+    /// Opens one `@load` boundary over a read source, which registers as
+    /// ordinary code. Consumes `body` on success and failure.
+    pub fn openLoad(self: *Loading, body: *Header, word: intern.TraceWord) error{OutOfMemory}!void {
+        return self.fiber().openLoad(body, word);
     }
 
     /// Runs `body` as a registering source in place of the running
@@ -1513,10 +1452,9 @@ pub const Loading = opaque {
     pub fn enterRegistration(
         self: *Loading,
         body: *Header,
-        provenance: modules.RegistrationProvenance,
         after: load.AfterLoad,
     ) error{OutOfMemory}!void {
-        return self.fiber().enterRegistration(body, provenance, after);
+        return self.fiber().enterRegistration(body, after);
     }
 
     /// Dispatches the word a completed load was started for, by explicit
@@ -1525,20 +1463,8 @@ pub const Loading = opaque {
         self: *Loading,
         word: value.Symbol,
         site: ?ErrorSite,
-        trace_parent: ?intern.TraceWord,
     ) error{OutOfMemory}!void {
-        return self.fiber().dispatchAfterLoad(word, site, trace_parent);
-    }
-
-    /// Puts back the symbol operand a primitive consumed before its module
-    /// turned out to be unloaded, and rewinds so the primitive runs again.
-    pub fn replayOperand(self: *Loading, requested: value.Symbol) error{OutOfMemory}!void {
-        return self.fiber().replayOperand(requested);
-    }
-
-    /// The embedded or registered standard library named `name`, if any.
-    pub fn embeddedLibrary(self: *Loading, name: intern.ModuleName) ?stdlib.Entry {
-        return self.fiber().inherited.libraries().find(name);
+        return self.fiber().dispatchAfterLoad(word, site);
     }
 };
 
@@ -1561,66 +1487,14 @@ pub const Fiber = struct {
         }
     };
 
-    const LifetimeGuard = struct {
-        const State = union(enum) {
-            active,
-            scope: env.Scope.EmbeddedTeardownCursor,
-            complete,
-        };
-        // Activations point at this address, so it must never move while the
-        // fiber is alive. Teardown state moves around it instead.
-        root_scope: env.Scope,
-        state: State,
-
-        fn init(allocator: std.mem.Allocator, environment: *env.Env) LifetimeGuard {
-            return .{
-                .root_scope = environment.sessionRoot(allocator),
-                .state = .active,
-            };
-        }
-
-        fn replaceRoot(self: *LifetimeGuard, root: env.Scope) void {
-            std.debug.assert(self.state == .active);
-            self.root_scope.releaseTrivial();
-            self.root_scope = root;
-        }
-
-        fn rootScope(self: *LifetimeGuard) *env.Scope {
-            std.debug.assert(self.state == .active);
-            return &self.root_scope;
-        }
-
-        fn advanceTeardown(self: *LifetimeGuard) bool {
-            return switch (self.state) {
-                .active => result: {
-                    self.state = .{ .scope = .init(&self.root_scope) };
-                    break :result false;
-                },
-                .scope => |*cursor| result: {
-                    if (!cursor.advance()) break :result false;
-                    self.state = .complete;
-                    break :result true;
-                },
-                .complete => true,
-            };
-        }
-
-        fn deinit(self: *LifetimeGuard) void {
-            while (!self.advanceTeardown()) {}
-            self.* = undefined;
-        }
-    };
-
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    module_access: *const modules.ExecutionAccess,
     frames: std.ArrayList(Frame) = .empty,
     stack: std.ArrayList(Value),
     environment: *env.Env,
     /// The way to the content of `environment`'s word cells.
     cells: env.WordCells,
     inherited: InheritedContext,
-    lifetime: LifetimeGuard,
     archive: *spans.SpanArchive,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
@@ -1651,6 +1525,10 @@ pub const Fiber = struct {
     current: ?Eval = null,
     active_index: u32 = 0,
     active_word: intern.TraceWord = no_word,
+    /// What the unit running now may register: the file a load is reading,
+    /// the standard library while an embedded module loads, and ordinary
+    /// otherwise. Set as a load enters its unit and restored as it leaves.
+    registrant: modules.RegistrationProvenance = .ordinary,
     /// Scratch for spelling one qualified trace word in a diagnostic message.
     /// A module-local word's qualified spelling is never interned, so there is
     /// no string to point at. Written before it is read on
@@ -1678,7 +1556,6 @@ pub const Fiber = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        module_access: *const modules.ExecutionAccess,
         stack: std.ArrayList(Value),
         environment: *env.Env,
         archive: *spans.SpanArchive,
@@ -1690,11 +1567,9 @@ pub const Fiber = struct {
         return .{
             .allocator = allocator,
             .releases = releases,
-            .module_access = module_access,
             .stack = stack,
             .environment = environment,
             .cells = environment.wordCells(),
-            .lifetime = .init(allocator, environment),
             .archive = archive,
             .inherited = inherited,
             .cancelled = cancelled,
@@ -1728,21 +1603,12 @@ pub const Fiber = struct {
         return self.stack.pop();
     }
 
-    pub fn replaceRootScope(self: *Fiber, root: env.Scope) void {
-        self.lifetime.replaceRoot(root);
-    }
-
-    fn rootScope(self: *Fiber) *env.Scope {
-        return self.lifetime.rootScope();
-    }
-
     /// The chain a homeless binding — a primitive or an embedded prelude
     /// definition — resolves against. It is the session root over core, so
     /// session-level redefinition still reaches prelude bodies while a module
     /// body executing further down the stack does not.
-    pub fn lexicalScope(self: *Fiber) *env.Scope {
+    pub fn lexicalScope(self: *Fiber) env.ScopeId {
         return switch (self.root_entry) {
-            .own => self.rootScope(),
             .scope => |scope| scope,
             .module => |root| root.scope,
         };
@@ -1977,10 +1843,6 @@ pub const Fiber = struct {
                 },
                 .evaluating, .unwinding, .incomplete, .exit => {},
             }
-            if (!self.lifetime.advanceTeardown()) {
-                consumed += 1;
-                continue;
-            }
             self.boundary_index = null;
             self.floor.set(0, null);
             return .{ .complete = true, .consumed = consumed };
@@ -2005,19 +1867,23 @@ pub const Fiber = struct {
     /// root's top-level directory, or the directory of the running module's
     /// current registration.
     pub fn visibleNameRoot(self: *Fiber) reflection.VisibleNameRoot {
-        return switch (self.currentScope().storage) {
-            .module_root => |module| {
-                const lease = self.inherited.registry.currentGeneration(module.name) orelse return .core;
-                return .{ .image = .{ .entries = lease.entries(), .lease = lease } };
+        return switch (self.environment.scopeOf(self.currentScope())) {
+            .module => |name| {
+                var view = self.inherited.registry.view();
+                const generation = view.moduleFind(name) orelse {
+                    view.deinit();
+                    return .core;
+                };
+                return .{ .image = .{ .entries = generation.entries(), .view = view } };
             },
-            .core_build => .core,
+            .core => .core,
             .session => .{ .session = self.inherited.registry.view() },
         };
     }
 
     /// The image under construction whose root is `scope`, found through the
     /// open module boundaries: the one place its staged names are written.
-    pub fn stagingImage(self: *Fiber, scope: *env.Scope) ?*modules.OwnedImage {
+    pub fn stagingImage(self: *Fiber, scope: env.ScopeId) ?*modules.OwnedImage {
         var index = self.boundary_index;
         while (index) |frame_index| {
             const boundary = &self.frames.items[@backingInt(frame_index)].boundary;
@@ -2041,11 +1907,9 @@ pub const Fiber = struct {
         return false;
     }
 
-    /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
-    /// Includes native registration authority and a reference to the Fiber's
-    /// bounded lexical observations for lookup and idiom recognition. Preserve the
-    /// complete ownership state without allocating on ordinary resolution.
-    const driver_slot_len = 736;
+    /// Sized to the largest driver that opts in, a numeric reduction, and
+    /// checked by `inlineDriverCapable`.
+    const driver_slot_len = 648;
     const driver_slot_align = 16;
 
     /// Sized to the application states that opt in, checked by
@@ -2125,13 +1989,21 @@ pub const Fiber = struct {
         // After every evaluation, frame, driver and failure that could hold a
         // flattened list's code.
         self.flattened.deinit(self.allocator, self.releases);
-        self.lifetime.deinit();
         self.* = undefined;
     }
 
     fn deinitPoppedFrame(self: *Fiber, popped: Frame) void {
         var frame = popped;
         if (frame == .effect_check) frame.effect_check.restoreActive(self);
+        // A load that fails leaves its unit, and what that unit may register
+        // goes with it.
+        switch (frame) {
+            .qualified_after_load => |after| self.registrant = after.outer,
+            .boundary => |boundary| if (boundary.mode == .load) {
+                self.registrant = boundary.mode.load;
+            },
+            .eval, .effect_check, .application => {},
+        }
         // An unwind pops a measured frame before it restores the boundary's
         // floor; nothing requires operands in between, but the pointer must
         // not outlive the state the frame's context owns.
@@ -2202,44 +2074,42 @@ pub const Fiber = struct {
             settleAdvisoryDiagnostic(console.writeDiagnostics(line, false));
         }
     }
-    pub fn currentScope(self: *const Fiber) *env.Scope {
+    pub fn currentScope(self: *const Fiber) env.ScopeId {
         return self.current.?.scope();
     }
-    /// Links words written into `scope`, a root, by code of `provenance`. A
-    /// word written in a module's root refers to the module by name.
-    pub fn rootLinker(
-        self: *Fiber,
-        scope: *env.Scope,
-        provenance: modules.RegistrationProvenance,
-    ) env.SymbolLinker {
-        const root = switch (scope.storage) {
-            .session => self.environment.sessionScopeId(),
-            .core_build => self.environment.coreScopeId(),
-            .module_root => |module| module.id,
-        };
-        return self.environment.linker(root, provenance.sourceId());
+    /// Links words written into `scope`, a root. A word written in a
+    /// module's root refers to the module by name.
+    pub fn rootLinker(self: *Fiber, scope: env.ScopeId) env.SymbolLinker {
+        return self.environment.linker(scope);
     }
     /// The word `name` as the running activation would have written it: in
-    /// that activation's root, by its source.
+    /// that activation's root.
     pub fn linkedWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = self.rootLinker(self.currentScope(), self.current.?.site.registration_provenance);
+        const linker = self.rootLinker(self.currentScope());
         return .{ .name = name, .slot = try linker.link(name) };
     }
-    /// The word `name` linked to core as standard-library source, as a word
-    /// the implementation builds for itself is: it means core's binding
-    /// wherever it runs.
+    /// The word `name` linked to core, as a word the implementation builds
+    /// for itself is: it means core's binding wherever it runs.
     pub fn coreWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = self.environment.linker(
-            self.environment.coreScopeId(),
-            modules.RegistrationProvenance.sourceId(.standard_library),
-        );
+        const linker = self.environment.linker(self.environment.coreScopeId());
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The root a definition, removal, or import writes. Refused inside a
     /// task, which runs in its spawner's root without owning it.
-    pub fn definitionScope(self: *Fiber) MachineError!*env.Scope {
+    /// What publishes a definition made in core: the bootstrap fiber's
+    /// authority, and nothing for any other fiber.
+    pub fn corePublisher(self: *const Fiber) ?env.CorePublisher {
+        return switch (self.role) {
+            .bootstrap => |publisher| publisher,
+            .root, .task => null,
+        };
+    }
+    pub fn definitionScope(self: *Fiber) MachineError!env.ScopeId {
         const scope = self.currentScope();
-        if (!self.current.?.site.defining) return self.fail(
+        // A task runs in its spawner's root without owning it. A module
+        // scope admits definitions only while its construction stages them,
+        // which the definition word checks.
+        if (self.role == .task and scope == self.environment.sessionScopeId()) return self.fail(
             .domain,
             "definitions are not legal inside a task; a task runs in its spawner's root without owning it",
         );
@@ -2258,7 +2128,10 @@ pub const Fiber = struct {
     }
     /// The module whose code is running, if the current root is a module's.
     pub fn currentModule(self: *const Fiber) ?intern.ModuleName {
-        return self.currentScope().moduleName();
+        return switch (self.environment.scopeOf(self.currentScope())) {
+            .module => |name| name,
+            .core, .session => null,
+        };
     }
     /// Begin publishing one first-class test into the candidate owned by the
     /// immediately enclosing module-construction boundary. Requiring that
@@ -2290,7 +2163,7 @@ pub const Fiber = struct {
     }
     /// The site a combinator's quotation runs at, captured when it launches.
     pub fn applicationSite(self: *const Fiber) ExecutionSite {
-        return self.current.?.site.applied();
+        return self.current.?.site;
     }
     fn installDriver(self: *Fiber, context: anytype) void {
         const Context = @TypeOf(context);
@@ -2475,7 +2348,6 @@ pub const Fiber = struct {
         self.active_word = .plain(intern.moduleId(name));
         try self.autoLoadModule(name, .{
             .qualified = intern.moduleId(name),
-            .context = self.current.?.site.registration_provenance,
             .continuation = .load_only,
         });
     }
@@ -2487,23 +2359,14 @@ pub const Fiber = struct {
     pub fn retryQualifiedOperandAfterLoad(
         self: *Fiber,
         requested: value.Symbol,
-        outcome: binder.Miss,
+        module: binder.UnregisteredModule,
     ) MachineError!WorkProgress {
-        if (self.current == null)
-            return self.undefinedNameIn(requested.name, .qualified);
-        switch (outcome) {
-            .unregistered_module => |module| {
-                try self.replayOperand(requested);
-                try self.autoLoadModule(module.name, .{
-                    .qualified = requested.name,
-                    .context = module.searcher,
-                    .continuation = .replay,
-                });
-                return .detached;
-            },
-            .unresolved => |chain| return self.undefinedNameIn(requested.name, chain),
-            .alias_cycle => return self.failUnbound(requested, .alias_cycle),
-        }
+        try self.replayOperand(requested);
+        try self.autoLoadModule(module.name, .{
+            .qualified = requested.name,
+            .continuation = .replay,
+        });
+        return .detached;
     }
     /// A completed auto-load registers the module before resuming the tagged
     /// qualified operation. The requested spelling also identifies a
@@ -2515,7 +2378,7 @@ pub const Fiber = struct {
     ) MachineError!void {
         return load.autoLoadModule(.of(self), name, request);
     }
-    pub fn loadSourceOnly(self: *Fiber, source: *const map_state.SourceScope) MachineError!void {
+    pub fn loadSourceOnly(self: *Fiber, source: *const module_search.Source) MachineError!void {
         return load.loadSource(.of(self), source);
     }
 
@@ -2523,9 +2386,9 @@ pub const Fiber = struct {
     /// registers them, so a stdlib name means the same module in every scope,
     /// whether or not it has loaded. User registration and removal under one
     /// are `'domain`.
-    pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
-        if (provenance == .standard_library) return;
-        if (self.inherited.libraries().find(name) == null) return;
+    pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName) MachineError!void {
+        if (self.registrant == .standard_library) return;
+        if (module_lookup.embeddedLibrary(name) == null) return;
         return self.failFmt(
             .domain,
             "module name `{s}` is reserved for the standard library",
@@ -2533,21 +2396,21 @@ pub const Fiber = struct {
         );
     }
 
-    /// A named module lookup as the source that wrote `operand`, the symbol
-    /// that refers to the module, sees it.
-    pub fn moduleLookup(self: *Fiber, operand: value.Symbol, name: intern.ModuleName) ModuleLookupCursor {
-        return .init(self.inherited.registry, self.inherited.module_snapshot, self.inherited.libraries(), binder.sourceOf(self.environment, operand), name);
+    /// A named module lookup in a view the lookup holds.
+    pub fn moduleLookup(self: *Fiber, name: intern.ModuleName) module_lookup.HeldModuleLookup {
+        const view = self.inherited.registry.view();
+        return .{ .view = view, .cursor = view.moduleCursor(name) };
     }
 
-    /// A mapped source file registers only the modules its artifact exports;
-    /// code with no source identity registers any name.
-    pub fn refuseUnexportedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
-        const source = provenance.sourceScope() orelse return;
+    /// A found file's load, including any `@load` it makes, registers only
+    /// the modules the file declares; any other unit registers any name.
+    pub fn refuseUnexportedModule(self: *Fiber, name: intern.ModuleName) MachineError!void {
+        const source = self.registrant.foundSource() orelse return;
         if (source.exports(name)) return;
         return self.failFmt(
             .domain,
-            "module `{s}` is not exported by its source file `{s}`",
-            .{ intern.get(intern.moduleId(name)), source.location().relative_path },
+            "module `{s}` is not declared by its source file `{s}`",
+            .{ intern.get(intern.moduleId(name)), source.path() },
         );
     }
     /// Consumes `source` on success and failure.
@@ -2824,9 +2687,6 @@ pub const Fiber = struct {
     }
     pub fn setWorkDriverSite(self: *Fiber, code: *Header, index: u32) void {
         if (self.workDriver()) |driver| driver.site = .{ .code = code, .index = index };
-    }
-    fn setWorkDriverTraceParent(self: *Fiber, word: intern.TraceWord) void {
-        if (self.workDriver()) |driver| driver.trace_parent = word;
     }
 
     /// The single parking choke point. A parked fiber would hold its slot's
@@ -3107,7 +2967,7 @@ pub const Fiber = struct {
     /// Runs `quotation` inline with the caller, resolving one form at a time.
     pub fn callProgramOwned(self: *Fiber, quotation: *Header, program: Program) error{OutOfMemory}!void {
         std.debug.assert(program == .owned);
-        const site = self.current.?.site.applied();
+        const site = self.current.?.site;
         const application_tail = self.tailApplicationIndex();
         // An application that selects its quotation for a contract is found
         // by that quotation's own code, so it runs as written.
@@ -3272,7 +3132,7 @@ pub const Fiber = struct {
         const select_initial = application.provenance != .boundary;
         // An application that selects its quotation for a contract is found
         // by that quotation's own code, so it runs as written.
-        const flattened = if (select_initial) null else flatten.of(self, application.site, application.quotation) catch {
+        const flattened = if (select_initial) null else flatten.of(self, application.driver.site, application.quotation) catch {
             inherited.release(self.releases);
             application.discard(self.releases, self.allocator);
             return error.OutOfMemory;
@@ -3296,10 +3156,7 @@ pub const Fiber = struct {
             return error.OutOfMemory;
         };
         frame_slot.* = .{ .application = .{
-            .context = application.context,
-            .resume_fn = application.resume_fn,
-            .deinit_fn = application.deinit_fn,
-            .site = application.site,
+            .driver = application.driver,
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = self.floor.beneath() },
@@ -3307,7 +3164,6 @@ pub const Fiber = struct {
             },
             .activation = activation,
             .selection = .{},
-            .plan = application.plan,
         } };
         self.noteFrameDepth();
         switch (launch) {
@@ -3334,16 +3190,11 @@ pub const Fiber = struct {
             .program = if (flattened != null) .owned else .borrowed,
             .flattened = flattened != null,
             .position = .{ .source = 0 },
-            .site = application.site,
+            .site = application.driver.site,
             .activation = lent,
             .application_tail = .some(provenance_target orelse application_index),
             .application_selection = if (select_initial) .some(provenance_target.?) else .none,
         };
-    }
-    /// Opens `@attempt`'s boundary on an owned body. Consuming on success and
-    /// failure alike.
-    pub fn attemptOwned(self: *Fiber, body: *Header) error{OutOfMemory}!void {
-        return self.openAttempt(body);
     }
     /// Opens a construction boundary for `@defm`. The name has already been
     /// validated; the body evaluates against a fresh image, and completion
@@ -3354,8 +3205,9 @@ pub const Fiber = struct {
         name: intern.ModuleName,
         body_header: *Header,
         doc: ?*env.DocumentationString,
+        provenance: modules.RegistrationProvenance,
     ) MachineError!void {
-        return module_construction.begin(.of(self), name, body_header, doc);
+        return module_construction.begin(.of(self), name, body_header, doc, provenance);
     }
     /// Opens one construction boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure, and the image is
@@ -3366,7 +3218,7 @@ pub const Fiber = struct {
         word: intern.TraceWord,
         body_header: *Header,
     ) MachineError!void {
-        const site = ExecutionSite.module(candidate.root(), true);
+        const site: ExecutionSite = candidate.root().scope;
         const dropped = self.suspendCurrent() catch {
             self.releases.releaseHeader(body_header);
             return error.OutOfMemory;
@@ -3393,30 +3245,25 @@ pub const Fiber = struct {
             .activation = .none,
         };
     }
-    /// The context a binding or explicit lookup resolves under, over `view`,
-    /// which the context then owns.
-    pub fn resolutionContext(self: *Fiber, view: modules.View) binder.Context {
+    /// The context an explicit lookup resolves under: the current view, which
+    /// the context owns, and how this fiber finds modules.
+    fn resolutionContext(self: *Fiber) binder.Context {
         return .{
             .environment = self.environment,
-            .view = view,
-            .registry = self.inherited.registry,
-            .project = self.inherited.module_snapshot,
-            .libraries = self.inherited.libraries(),
+            .view = self.inherited.registry.view(),
         };
     }
 
     /// The cell of `word`: the one its link identifies, or, for a word the
     /// implementation built for itself, the cell of its spelling written in
-    /// core by no source, which is the place such a word resolves in. So
+    /// core, which is the place such a word resolves in. So
     /// every word that runs has a cell, and one rule answers for it.
-    fn cellOf(self: *Fiber, word: value.Symbol) error{OutOfMemory}!env.CellId {
+    pub fn cellOf(self: *Fiber, word: value.Symbol) error{OutOfMemory}!env.CellId {
         return switch (env.wordTarget(word.slot)) {
             .cell => |id| id,
-            .unlinked => @fromBackingInt(try self.environment.linker(
-                self.environment.coreScopeId(),
-                modules.RegistrationProvenance.sourceId(.ordinary),
-            ).link(word.name)),
-            .local => unreachable,
+            // A lowered locals operation handed over as a value is a name
+            // like any other.
+            .unlinked, .local => @fromBackingInt(try self.environment.linker(self.environment.coreScopeId()).link(word.name)),
         };
     }
 
@@ -3431,59 +3278,48 @@ pub const Fiber = struct {
     }
 
     noinline fn resolveDenoted(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?*env.Definition {
-        const id = try self.cellOf(word);
-        const link = @backingInt(id);
-        if (self.cells.of(link).definition.load(.seq_cst)) |definition| return definition;
-        var context = self.resolutionContext(self.inherited.registry.view());
-        defer context.deinit();
-        var resolver = binder.Resolver.init(&context, .{ .name = word.name, .slot = link });
-        defer resolver.deinit();
-        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+        var lookup = try ExplicitLookup.init(self, word);
+        defer lookup.deinit();
+        return switch (poll_api.drive(binder.Outcome, &lookup, .{self})) {
             .resolved => |definition| definition,
-            .missed => return null,
+            .missed => null,
         };
-        self.inherited.registry.fillCell(&context.view, id, found);
-        return found;
     }
 
-    /// What a word resolves to now, for idiom recognition.
-    pub fn peekWord(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
+    /// The trace word of `word` when it denotes, now, a builtin of core or
+    /// of the standard library, and `primitive` when one is given: what
+    /// idiom recognition trusts. Null for anything else.
+    pub fn trustedBuiltin(self: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) error{OutOfMemory}!?intern.TraceWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
         const definition = try self.denoted(word) orelse return null;
-        const home = modules.definitionModule(definition);
-        return .{
-            .definition = definition,
-            .trace_word = definitionTraceWord(definition, home, word.name),
-            .origin = definitionOrigin(definition, home),
-        };
+        if (definition.root == .session or (definition.root == .module and !ofStandardLibrary(definition))) return null;
+        const code = definition.code();
+        if (code != .builtin or (primitive != null and code.builtin != primitive.?)) return null;
+        return definitionTraceWord(definition, word.name);
     }
 
-    /// What a stack summary reads of one word of code running at `site`. A
-    /// summary reads its words before the quotation runs, which may be while
-    /// no evaluation is current.
-    pub fn summaryTarget(self: *Fiber, word: value.Symbol, site: ExecutionSite) error{OutOfMemory}!SummaryTarget {
+    /// What a stack summary reads of one word. A summary reads its words
+    /// before the quotation runs, which may be while no evaluation is
+    /// current, and wherever it runs.
+    pub fn summaryTarget(self: *Fiber, word: value.Symbol) error{OutOfMemory}!SummaryTarget {
         if (binder.executableWord(.{ .symbol = word }) == null) return .none;
         const definition = try self.denoted(word) orelse return .none;
         // Asked after the cell is read: a summary made of words read on both
         // sides of a store would be kept under a counter value that outlasts
         // the store. A walk that began earlier fails its own closing check.
         if (self.inherited.registry.publishing()) return .none;
-        // A call that crosses into a module checks the word's declared
-        // effect, and that check's failure reports the depth it found: only
-        // the call itself can say that.
+        // A checked call's failure reports the depth it found: only the call
+        // itself can say that.
         const home = modules.definitionModule(definition);
-        if (home) |target| {
-            const crosses = target.scope != site.scope;
-            if (crosses and definitionOrigin(definition, home) != .standard_library) return .none;
-        }
+        if (crossesChecked(self.environment, home, word)) return .none;
         return switch (definition.code()) {
             .native => .none,
             .builtin => |primitive| .{ .builtin = .{ .primitive = primitive, .effect = definition.effect } },
             .source => |executable| .{ .source = .{
                 .definition = definition,
                 .code = executable.code(),
-                .site = if (home) |target| .module(target, site.defining) else site,
-                .trace_word = definitionTraceWord(definition, home, word.name),
+                .home = home,
+                .trace_word = definitionTraceWord(definition, word.name),
                 .attribution = definition.attribution,
             } },
         };
@@ -3501,7 +3337,7 @@ pub const Fiber = struct {
         const current = &self.current.?;
         const index = current.application_tail.get() orelse return null;
         const plan = switch (self.frames.items[@backingInt(index)]) {
-            .application => |application| application.plan orelse return null,
+            .application => |application| application.driver.plan orelse return null,
             else => return null,
         };
         return if (plan.code == current.code) plan else null;
@@ -3635,7 +3471,7 @@ pub const Fiber = struct {
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
         if (env.isCell(word.slot)) if (self.cells.of(word.slot).definition.load(.seq_cst)) |definition|
-            return invokeDefinition(self, definition, word.name);
+            return invokeDefinition(self, definition, word);
         return self.executeUnfilled(word);
     }
 
@@ -3644,42 +3480,15 @@ pub const Fiber = struct {
     noinline fn executeUnfilled(self: *Fiber, word: value.Symbol) MachineError!void {
         const linked: value.Symbol = .{ .name = word.name, .slot = @backingInt(try self.cellOf(word)) };
         if (self.cells.of(linked.slot).definition.load(.seq_cst)) |definition|
-            return invokeDefinition(self, definition, word.name);
+            return invokeDefinition(self, definition, linked);
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
-        try self.startDriver(LookupDispatchDriver{
-            .word = linked,
-            .site = site,
-            .context = .init(self.resolutionContext(self.inherited.registry.view())),
-            .resolver = .none,
-        });
+        try self.startDriver(LookupDispatchDriver{ .word = linked, .site = site, .lookup = .init(try .init(self, linked)) });
     }
 
-    /// The failure for a word that did not bind and will not after a load.
-    pub fn failUnbound(self: *Fiber, word: value.Symbol, miss: binder.Unbound) MachineError {
+    /// The failure for a word whose imports never reach a definition.
+    pub fn failAliasCycle(self: *Fiber, word: value.Symbol) MachineError {
         self.active_word = .plain(word.name);
-        return switch (miss) {
-            .unresolved => |chain| self.undefinedWordIn(word.name, chain),
-            .alias_cycle => self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)}),
-        };
-    }
-
-    /// Fails a lookup miss for `word`, starting a module load when one may
-    /// make it resolvable. `continuation` says how to resume after the load.
-    fn missOrLoad(
-        self: *Fiber,
-        word: value.Symbol,
-        miss: binder.Miss,
-        continuation: load.QualifiedLoadContinuation,
-    ) MachineError!void {
-        self.active_word = .plain(word.name);
-        switch (miss) {
-            .unregistered_module => |module| try self.autoLoadModule(
-                module.name,
-                .{ .qualified = word.name, .context = module.searcher, .continuation = continuation },
-            ),
-            .unresolved => |chain| return self.failUnbound(word, .{ .unresolved = chain }),
-            .alias_cycle => return self.failUnbound(word, .alias_cycle),
-        }
+        return self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)});
     }
 
     pub fn raiseOwned(self: *Fiber, raised: Value) MachineError {
@@ -3690,7 +3499,7 @@ pub const Fiber = struct {
     }
     /// Opens one `@attempt` boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure.
-    fn openAttempt(self: *Fiber, body: *Header) error{OutOfMemory}!void {
+    pub fn attemptOwned(self: *Fiber, body: *Header) error{OutOfMemory}!void {
         const invoker = self.current.?;
         const word = self.active_word;
         const dropped = self.suspendCurrent() catch {
@@ -3705,7 +3514,7 @@ pub const Fiber = struct {
         // The body runs in its invoker's scope with its invoker's right to
         // define. A failure restores the stack, not the environment: like IO,
         // a definition the body made survives it.
-        const site = invoker.site.applied();
+        const site = invoker.site;
         try self.openBoundary(
             .attempt,
             @intCast(self.stack.items.len),
@@ -3728,7 +3537,6 @@ pub const Fiber = struct {
         self: *Fiber,
         body: *Header,
         word: intern.TraceWord,
-        provenance: modules.RegistrationProvenance,
     ) error{OutOfMemory}!void {
         const invoker = self.current.?;
         const dropped = self.suspendCurrent() catch {
@@ -3740,9 +3548,10 @@ pub const Fiber = struct {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         }
-        var site = invoker.site.applied();
-        site.registration_provenance = provenance;
-        try self.openBoundary(.load, @intCast(self.stack.items.len), word, body);
+        const site = invoker.site;
+        // The body keeps the invoker's registrant: a nested load made while a
+        // found file registers is still that file's registration.
+        try self.openBoundary(.{ .load = self.registrant }, @intCast(self.stack.items.len), word, body);
         self.current = .{
             .code = body,
             .program = .owned,
@@ -3792,11 +3601,12 @@ pub const Fiber = struct {
         _ = owned.take();
         self.noteFrameDepth();
     }
-    fn enterRegistration(self: *Fiber, body: *Header, provenance: modules.RegistrationProvenance, after: load.AfterLoad) error{OutOfMemory}!void {
-        var continuation = OwnedFrame.init(.{ .qualified_after_load = after });
+    fn enterRegistration(self: *Fiber, body: *Header, after: load.AfterLoad) error{OutOfMemory}!void {
+        var saved = after;
+        saved.outer = self.registrant;
+        var continuation = OwnedFrame.init(.{ .qualified_after_load = saved });
         defer continuation.deinit(self.releases, self.allocator);
-        var site = self.current.?.site.applied();
-        site.registration_provenance = provenance;
+        const site = self.current.?.site;
         const dropped = (if (after.request.preservesCaller())
             self.suspendCurrentForQualifiedLoad()
         else
@@ -3809,6 +3619,7 @@ pub const Fiber = struct {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         };
+        self.registrant = after.registrant;
         self.current = .{
             .code = body,
             .program = .owned,
@@ -3817,29 +3628,25 @@ pub const Fiber = struct {
             .activation = .none,
         };
     }
-    fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite, trace_parent: ?intern.TraceWord) error{OutOfMemory}!void {
+    fn dispatchAfterLoad(self: *Fiber, word: value.Symbol, site: ?ErrorSite) error{OutOfMemory}!void {
         self.active_word = .plain(word.name);
-        try self.startDriver(LookupDispatchDriver{
-            .word = word,
-            .site = site,
-            .context = .init(self.resolutionContext(self.inherited.registry.view())),
-            .resolver = .none,
-        });
+        try self.startDriver(LookupDispatchDriver{ .word = word, .site = site, .lookup = .init(try .init(self, word)) });
         if (site) |at| self.setWorkDriverSite(at.code, at.index);
-        if (trace_parent) |parent| self.setWorkDriverTraceParent(parent);
     }
     fn replayOperand(self: *Fiber, requested: value.Symbol) error{OutOfMemory}!void {
         try self.pushBorrowed(.{ .symbol = requested });
         self.current.?.rewind(self.active_index);
     }
-    fn beginModuleSeal(self: *Fiber) MachineError!*modules.OwnedImage {
-        const frame = &self.frames.items[self.frames.items.len - 1].boundary;
-        const observed = self.stack.items.len - frame.stack_base;
+    /// Closes the construction boundary on top once its body has run, and
+    /// returns the image it held. A body that left values on its stack
+    /// closes it and fails instead.
+    fn closeModuleBoundary(self: *Fiber) MachineError!modules.OwnedImage {
+        const boundary = self.popFrame(.boundary);
+        self.boundary_index = boundary.previous_boundary;
+        self.floor.restore(boundary.beneath);
+        self.active_word = boundary.word;
+        const observed = self.stack.items.len - boundary.stack_base;
         if (observed != 0) {
-            const boundary = self.popFrame(.boundary);
-            self.boundary_index = boundary.previous_boundary;
-            self.floor.restore(boundary.beneath);
-            self.active_word = boundary.word;
             boundary.deinit();
             return self.failFmt(
                 .domain,
@@ -3847,15 +3654,7 @@ pub const Fiber = struct {
                 .{ observed, if (observed == 1) "" else "s" },
             );
         }
-        self.active_word = frame.word;
-        return &frame.mode.module.image;
-    }
-    fn closeModuleBoundary(self: *Fiber) modules.OwnedImage {
         releaseCurrent(self);
-        const boundary = self.popFrame(.boundary);
-        self.boundary_index = boundary.previous_boundary;
-        self.floor.restore(boundary.beneath);
-        self.active_word = boundary.word;
         return boundary.mode.module.image;
     }
     /// Establishes completion before invoking foreign implementation code.
@@ -4042,7 +3841,7 @@ pub fn initialize(fiber: *Fiber, code: *Header) void {
         .code = code,
         .program = program,
         .position = .{ .source = 0 },
-        .site = .root(fiber),
+        .site = rootSite(fiber),
         .activation = .none,
     };
 }
@@ -4140,7 +3939,6 @@ fn loop(self: *Fiber) MachineError!RunStatus {
                         if (err == error.Ecl and self.pendingFailure().site == null) {
                             if (driver.site) |site| self.pendingFailure().site = .{ .token = site };
                         }
-                        if (err == error.Ecl) if (driver.trace_parent) |word| self.setFailureTraceParent(word, .own);
                         clearWorkDriver(self);
                         switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
@@ -4260,7 +4058,7 @@ fn loop(self: *Fiber) MachineError!RunStatus {
                 if (cell.primitive.load(.seq_cst)) |primitive|
                     break :resolved invokeBuiltin(self, .plain(form.symbol.name), primitive);
                 if (cell.definition.load(.seq_cst)) |definition|
-                    break :resolved invokeDefinition(self, definition, form.symbol.name);
+                    break :resolved invokeDefinition(self, definition, form.symbol);
             }
             break :resolved dispatch(self, form);
         };
@@ -4438,8 +4236,7 @@ fn invokeBuiltin(self: *Fiber, trace_word: intern.TraceWord, primitive: env.Prim
 const LookupDispatchDriver = struct {
     word: value.Symbol,
     site: ?ErrorSite,
-    context: heap.Owned(binder.Context),
-    resolver: heap.Owned(binder.Resolver),
+    lookup: heap.Owned(ExplicitLookup),
 
     /// Started once per explicitly looked-up word, so it uses the inline slot.
     pub const inline_driver = true;
@@ -4449,24 +4246,15 @@ const LookupDispatchDriver = struct {
     pub const cancellation: DriverCancellation = .own;
 
     fn advance(fiber: *Fiber, self: *LookupDispatchDriver) MachineError!WorkProgress {
-        if (!self.resolver.isPresent()) self.resolver = .init(binder.Resolver.init(self.context.borrowMut(), self.word));
         const work = fiber.workBudget();
-        while (work.spend()) switch (self.resolver.borrowMut().advance(self.context.borrowMut())) {
+        while (work.spend()) switch (self.lookup.borrowMut().advance(fiber)) {
             .pending => {},
             .complete => |outcome| {
                 const word = self.word;
                 switch (outcome) {
                     .resolved => |definition| {
-                        // The view keeps a counted definition alive; hold it
-                        // across the invocation, which retains what it keeps.
-                        const counted = definition.lifetime == .counted;
-                        if (counted) definition.retain();
-                        defer if (counted) definition.release(fiber.releases);
-                        fiber.inherited.registry.fillCell(
-                            &self.context.borrow().view,
-                            env.wordTarget(word.slot).cell,
-                            definition,
-                        );
+                        // The turn keeps the definition alive once the view
+                        // is released; the invocation retains what it keeps.
                         const site = self.site;
                         fiber.retireDriver(self);
                         // A module load ran other code in between, so the
@@ -4475,13 +4263,23 @@ const LookupDispatchDriver = struct {
                         if (site) |at| if (fiber.current) |current| if (current.code == at.code) {
                             fiber.active_index = at.index;
                         };
-                        try invokeDefinition(fiber, definition, word.name);
+                        try invokeDefinition(fiber, definition, word);
                         return .detached;
                     },
                     .missed => |miss| {
                         const site = self.site;
                         fiber.retireDriver(self);
-                        try fiber.missOrLoad(word, miss, .{ .dispatch = .{ .word = word, .site = site, .trace_parent = null } });
+                        fiber.active_word = .plain(word.name);
+                        switch (miss) {
+                            // A load may make the word resolvable: dispatch
+                            // it again once the module is registered.
+                            .unregistered_module => |module| try fiber.autoLoadModule(module.name, .{
+                                .qualified = word.name,
+                                .continuation = .{ .dispatch = .{ .word = word, .site = site } },
+                            }),
+                            .unresolved => |chain| return fiber.undefinedWordIn(word.name, chain),
+                            .alias_cycle => return fiber.failAliasCycle(word),
+                        }
                         return .detached;
                     },
                 }
@@ -4491,25 +4289,47 @@ const LookupDispatchDriver = struct {
     }
 };
 
-/// One explicit lookup of a supplied symbol, in the root its link identifies and
-/// against the current view: what reflection and `execute` resolve.
+/// One explicit lookup of a word: what its cell answers, or, when the cell
+/// is empty, what a resolution against the current view finds, which the
+/// registry is then asked to keep in the cell. Dispatch of an empty cell,
+/// `execute`, and reflection ask this way. What it answers is borrowed for
+/// the turn that answered.
 pub const ExplicitLookup = struct {
-    context: binder.Context,
-    resolver: binder.Resolver,
+    cell: env.CellId,
+    resolution: ?struct {
+        context: binder.Context,
+        resolver: binder.Resolver,
+    } = null,
 
-    pub fn init(fiber: *Fiber, word: value.Symbol) ExplicitLookup {
-        const context = fiber.resolutionContext(fiber.inherited.registry.view());
-        return .{ .context = context, .resolver = binder.Resolver.init(&context, word) };
+    pub fn init(fiber: *Fiber, word: value.Symbol) error{OutOfMemory}!ExplicitLookup {
+        return .{ .cell = try fiber.cellOf(word) };
     }
 
     pub fn deinit(self: *ExplicitLookup) void {
-        self.resolver.deinit();
-        self.context.deinit();
+        if (self.resolution) |*resolution| {
+            resolution.resolver.deinit();
+            resolution.context.deinit();
+        }
         self.* = undefined;
     }
 
-    pub fn advance(self: *ExplicitLookup) binder.Resolver.Progress {
-        return self.resolver.advance(&self.context);
+    pub fn advance(self: *ExplicitLookup, fiber: *Fiber) binder.Resolver.Progress {
+        const resolution = if (self.resolution) |*resolving| resolving else {
+            if (fiber.cells.of(@backingInt(self.cell)).definition.load(.seq_cst)) |definition|
+                return .{ .complete = .{ .resolved = definition } };
+            const context = fiber.resolutionContext();
+            self.resolution = .{ .context = context, .resolver = .init(&context, self.cell) };
+            return .pending;
+        };
+        const progress = resolution.resolver.advance(&resolution.context);
+        switch (progress) {
+            .complete => |outcome| switch (outcome) {
+                .resolved => |definition| fiber.inherited.registry.fillCell(&resolution.context.view, self.cell, definition),
+                .missed => {},
+            },
+            .pending => {},
+        }
+        return progress;
     }
 };
 
@@ -4519,91 +4339,102 @@ pub const Reflected = struct {
     trace_word: intern.TraceWord,
     releases: *heap.ReleaseDomain,
 
-    /// Holds a definition the lookup's view kept alive.
+    /// Holds, across turns, a definition the turn that resolved it kept
+    /// alive.
     pub fn hold(fiber: *Fiber, definition: *env.Definition, name: u32) Reflected {
-        if (definition.lifetime == .counted) definition.retain();
+        definition.retain();
         return .{
             .definition = definition,
-            .trace_word = definitionTraceWord(definition, modules.definitionModule(definition), name),
+            .trace_word = definitionTraceWord(definition, name),
             .releases = fiber.releases,
         };
     }
 
     pub fn deinit(self: *Reflected) void {
-        if (self.definition.lifetime == .counted) self.definition.release(self.releases);
+        self.definition.release(self.releases);
         self.* = undefined;
     }
 };
 
-/// What one definition is, as dispatch and recognition see it.
 /// One word as a stack summary reads it.
 pub const SummaryTarget = union(enum) {
     /// Nothing a summary can read: unresolved, native, or behind a checked
     /// module boundary.
     none,
     builtin: struct { primitive: env.PrimitiveImpl, effect: ?env.ValidatedEffect },
-    source: struct {
+    source: Source,
+
+    pub const Source = struct {
         definition: *const env.Definition,
         code: *Header,
-        /// Where the body runs: the caller's site, or the word's own module.
-        site: ExecutionSite,
+        /// The word's module, which its body runs as; null for a word that
+        /// runs where its caller does.
+        home: ?modules.ModuleRoot,
         /// What an activation of the word is traced under, and whose
         /// failure a failure in it is.
         trace_word: intern.TraceWord,
         attribution: env.Attribution,
-    },
-};
-
-pub const PeekedWord = struct {
-    definition: *env.Definition,
-    trace_word: intern.TraceWord,
-    origin: ResolutionOrigin,
-};
-
-const ResolutionOrigin = enum { direct, module, standard_library, core };
-
-fn definitionOrigin(definition: *const env.Definition, home: ?modules.ModuleRoot) ResolutionOrigin {
-    if (home) |owner| return switch (owner.provenance) {
-        .standard_library => .standard_library,
-        .ordinary, .root_scope, .source => .module,
     };
+};
+
+/// Whether a definition belongs to a standard-library module.
+inline fn ofStandardLibrary(definition: *const env.Definition) bool {
     return switch (definition.root) {
-        .core => .core,
-        .session, .module => .direct,
+        .core, .session => false,
+        .module => |module| module.home.provenance == .standard_library,
     };
 }
 
-/// How a trace identifies a called definition: a module-local one by its
-/// module's name, during construction as well as after, and anything else by
-/// the name the call used.
-fn definitionTraceWord(definition: *const env.Definition, home: ?modules.ModuleRoot, name: u32) intern.TraceWord {
-    if (home) |owner| if (definition.traceWord()) |local| return .moduleLocal(owner.name(), local);
-    return .plain(name);
+/// Whether a call by `word` of a definition whose module is `home` crosses
+/// into that module under a check of the definition's declared effect: when
+/// the word was written anywhere but that module, wherever it runs. A
+/// standard-library word's effects are reflective metadata, and its arity
+/// failures are those of the code it runs.
+inline fn crossesChecked(environment: *const env.Env, home: ?modules.ModuleRoot, word: value.Symbol) bool {
+    const owner = home orelse return false;
+    if (owner.provenance == .standard_library) return false;
+    const written: env.ScopeId = switch (env.wordTarget(word.slot)) {
+        .cell => |id| environment.place(id).root,
+        .unlinked, .local => environment.coreScopeId(),
+    };
+    return written != owner.scope;
+}
+
+/// How a trace identifies a called definition: a module's by its module's
+/// name and its own there, during construction as well as after, and
+/// anything else by the name the call used.
+fn definitionTraceWord(definition: *const env.Definition, name: u32) intern.TraceWord {
+    return switch (definition.root) {
+        .core, .session => .plain(name),
+        .module => |module| .moduleLocal(module.home.name(), module.name),
+    };
 }
 
 /// Invokes one fixed target. A module word's declared effect is a contract
-/// checked where a call crosses into its module, except a standard-library
-/// word's: its effects are reflective metadata, and its arity failures are
-/// those of the code it runs.
-fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) MachineError!void {
-    // A builtin of no module has no effect boundary: the common case, run
-    // directly.
-    const home = modules.definitionModule(definition);
-    if (home == null) switch (definition.code()) {
-        .builtin => |primitive| return invokeBuiltin(self, .plain(name), primitive),
-        else => {},
-    };
-    const trace_word = definitionTraceWord(definition, home, name);
+/// checked where `crossesChecked` says the call crosses into its module.
+fn invokeDefinition(self: *Fiber, definition: *env.Definition, word: value.Symbol) MachineError!void {
+    const name = word.name;
+    // One read of the root says both where the word runs and what it is
+    // traced as; `definitionTraceWord` is the same rule for other readers.
+    var home: ?modules.ModuleRoot = null;
+    var trace_word: intern.TraceWord = .plain(name);
+    switch (definition.root) {
+        // A builtin of no module has no effect boundary: the common case,
+        // run directly.
+        .core, .session => switch (definition.code()) {
+            .builtin => |primitive| return invokeBuiltin(self, trace_word, primitive),
+            else => {},
+        },
+        .module => |module| {
+            home = module.home;
+            trace_word = .moduleLocal(module.home.name(), module.name);
+        },
+    }
     self.active_word = trace_word;
-    const origin = definitionOrigin(definition, home);
-    const cross_home = if (home) |target|
-        target.scope != self.current.?.scope()
-    else
-        false;
-    const checked = cross_home and origin != .standard_library;
+    const checked = crossesChecked(self.environment, home, word);
     const cross_home_effect = if (checked) definition.effect else null;
     switch (definition.code()) {
-        .source => |executable| try scheduleWord(self, executable, .{ .word = trace_word, .attribution = definition.attribution }, home, cross_home_effect),
+        .source => |executable| try enterBody(self, executable, .{ .word = trace_word, .attribution = definition.attribution }, home, cross_home_effect),
         .builtin => |primitive| {
             // A declared effect is the called word's contract, so its check
             // reports that word; a failure inside the builtin reports it too.
@@ -4644,10 +4475,13 @@ pub const LookupChain = enum {
 
 pub const PlanEntry = resolution_plan.PlanEntry;
 pub const ResolutionPlan = resolution_plan.ResolutionPlan;
-pub const EmbeddedLibraries = module_lookup.EmbeddedLibraries;
-pub const ModuleLookupCursor = module_lookup.ModuleLookupCursor;
+pub const HeldModuleLookup = module_lookup.HeldModuleLookup;
 
-fn scheduleWord(
+/// Suspends the caller and makes `executable` the running evaluation, under
+/// a check of `effect` if it has one. The callee's owner is secured before
+/// the caller can retire: in tail position the caller's executable may hold
+/// the callee's last reference.
+fn enterBody(
     self: *Fiber,
     executable: *const env.Executable,
     word: EnteredWord,
@@ -4655,21 +4489,13 @@ fn scheduleWord(
     effect: ?env.Effect,
 ) MachineError!void {
     // A module word runs as its module; any other word runs at its caller's
-    // site. Either way it defines where its caller could, and no further.
-    const caller = self.current.?.site;
-    const site: ExecutionSite = if (resolved_home) |home|
-        .module(home, caller.defining)
-    else
-        caller;
-    const check = if (effect != null) try prepareEffectCheck(self, effect, word.word) else null;
-    return enterBody(self, executable, word, site, check);
-}
-/// Suspends the caller and makes `executable` the running evaluation at
-/// `site`, under its effect check if it has one. The callee's owner is secured
-/// before the caller can retire: in tail position the caller's executable may
-/// hold the callee's last reference.
-fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
-    var check = effect;
+    // site.
+    const site: ExecutionSite = if (resolved_home) |home| home.scope else self.current.?.site;
+    // Beside `effect` rather than an optional of its own, which is copied
+    // whole on every call that has none.
+    // SAFETY: read only when `effect` is present, which sets it first.
+    var effect_check: EffectCheck = undefined;
+    if (effect) |declared| effect_check = try prepareEffectCheck(self, declared, word.word);
     // Held before the turn can end: a definition read from a word's cell
     // is kept by the turn alone, and the evaluation outlives the turn.
     executable.owner().retain();
@@ -4700,10 +4526,10 @@ fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord,
     };
     var installed = false;
     defer if (!installed) activation.release(self.releases);
-    if (check) |*effect_check| {
+    if (effect != null) {
         const check_index: EffectCheckIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.frames.items.len))));
         effect_check.activateSource(executable.code(), check_index, self.effect_check_index);
-        var continuation = OwnedFrame.init(.{ .effect_check = effect_check.* });
+        var continuation = OwnedFrame.init(.{ .effect_check = effect_check });
         defer continuation.deinit(self.releases, self.allocator);
         try self.appendFrame(&continuation);
         self.effect_check_index = check_index;
@@ -4741,13 +4567,9 @@ fn enterBody(self: *Fiber, executable: *const env.Executable, word: EnteredWord,
 }
 fn prepareEffectCheck(
     self: *Fiber,
-    effect: ?env.Effect,
+    declared: env.Effect,
     word: intern.TraceWord,
 ) MachineError!EffectCheck {
-    const declared = effect orelse {
-        self.active_word = word;
-        return self.fail(.domain, "module word has no effect declaration");
-    };
     // Inputs beneath a soft floor count: the word admits them as
     // originals, like any operand check across the floor.
     if (self.available() < declared.inputs) _ = try floor_api.cover(self, declared.inputs);
@@ -4809,39 +4631,32 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
             };
             if (comptime root_execution_metrics_enabled)
                 self.root_execution_metrics.application_resumes += 1;
-            const next = continuation.resume_fn(
+            const driver = continuation.driver;
+            const next = driver.resume_fn(
                 self,
-                continuation.context,
+                driver.context,
                 base,
                 @ptrCast(&application_selection),
             ) catch |err| {
                 if (activation.traced()) |word| self.setFailureTraceParent(word, activation.attribution);
                 activation.release(self.releases);
-                continuation.deinit_fn(self.releases, self.allocator, continuation.context);
+                driver.deinit(self.releases, self.allocator);
                 return err;
             };
             if (next) |step| switch (step) {
                 .apply => |application| {
                     try self.launchApplication(.relaunch, .{
                         .quotation = application.quotation,
-                        .context = continuation.context,
-                        .resume_fn = continuation.resume_fn,
-                        .deinit_fn = continuation.deinit_fn,
-                        .site = continuation.site,
+                        .driver = driver,
                         .seeded = application.seeded,
                         .provenance = application.provenance,
-                        .plan = continuation.plan,
                     }, application.launch, activation);
                     return true;
                 },
                 .suspend_inline => |suspension| {
                     const installed = self.workDriver() orelse {
                         activation.release(self.releases);
-                        continuation.deinit_fn(
-                            self.releases,
-                            self.allocator,
-                            continuation.context,
-                        );
+                        driver.deinit(self.releases, self.allocator);
                         return self.fail(.domain, "application suspension has no installed work");
                     };
                     // A frame resumed over a soft floor suspends in place:
@@ -4851,24 +4666,16 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         @intFromPtr(suspension) != @intFromPtr(installed.context))
                     {
                         activation.release(self.releases);
-                        continuation.deinit_fn(
-                            self.releases,
-                            self.allocator,
-                            continuation.context,
-                        );
+                        driver.deinit(self.releases, self.allocator);
                         clearWorkDriver(self);
                         return self.fail(.domain, "application suspension is stale or foreign");
                     }
                     var suspended = OwnedFrame.init(.{ .application = .{
-                        .context = continuation.context,
-                        .resume_fn = continuation.resume_fn,
-                        .deinit_fn = continuation.deinit_fn,
-                        .site = continuation.site,
+                        .driver = driver,
                         .mode = .{ .in_place = base },
                         .activation = activation,
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
-                        .plan = continuation.plan,
                     } });
                     application_selection = .{};
                     defer suspended.deinit(self.releases, self.allocator);
@@ -4877,7 +4684,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                 },
             };
             activation.release(self.releases);
-            continuation.deinit_fn(self.releases, self.allocator, continuation.context);
+            driver.deinit(self.releases, self.allocator);
             // Native work installed by an application continuation is the
             // continuation's tail. Do not cross later continuation frames until
             // that owned work has produced its stack result. A continuation
@@ -4887,6 +4694,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
         },
         .qualified_after_load => {
             const continuation = self.popFrame(.qualified_after_load);
+            self.registrant = continuation.outer;
             // Source loading temporarily replaces the caller's evaluation.
             // Replay requests resume at their restored primitive operands;
             // dispatch requests resume the exact stored word without replay.
@@ -4901,7 +4709,6 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
         },
         .boundary => {
             if (self.frames.items[self.frames.items.len - 1].boundary.mode == .module) {
-                // The image stays in its frame until it is sealed.
                 try module_construction.startSeal(.of(self));
                 return true;
             }
@@ -4917,7 +4724,10 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                     return true;
                 },
                 .module => unreachable,
-                .load => try finishLoad(self, boundary.stack_base),
+                .load => |outer| {
+                    self.registrant = outer;
+                    try finishLoad(self, boundary.stack_base);
+                },
             }
         },
     };
@@ -5070,22 +4880,10 @@ pub const Construction = opaque {
         return self.fiber().openImageBoundary(candidate, word, body);
     }
 
-    /// The image the innermost frame, a construction boundary, is building.
-    pub fn image(self: *Construction) *modules.OwnedImage {
-        const frames = self.fiber().frames.items;
-        return &frames[frames.len - 1].boundary.mode.module.image;
-    }
-
-    /// Begins sealing the module whose construction boundary is the top
-    /// frame. A module body defines words and keeps no state, so a residual
-    /// operand window closes the boundary and fails.
-    pub fn beginSeal(self: *Construction) MachineError!*modules.OwnedImage {
-        return self.fiber().beginModuleSeal();
-    }
-
-    /// Closes the construction boundary once its directory is built, and
-    /// returns the image it held.
-    pub fn closeBoundary(self: *Construction) modules.OwnedImage {
+    /// Closes the construction boundary on top once its body has run, and
+    /// returns the image it held. A module body defines words and keeps no
+    /// state, so a residual operand window closes the boundary and fails.
+    pub fn closeBoundary(self: *Construction) MachineError!modules.OwnedImage {
         return self.fiber().closeModuleBoundary();
     }
 };

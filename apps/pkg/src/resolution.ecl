@@ -242,7 +242,7 @@
  `graph-validation test
 
  ### test closed-portable-schema
- (-- : "Installation locations, generation identifiers, and unpinned sources cannot enter a lock.")
+ (-- : "Installation locations and unpinned sources cannot enter a lock.")
  ((locked `store `vendor put pkg.resolution.validate) rejected
   (locked `generation "local" put pkg.resolution.validate) rejected
   (locked `format 2 put pkg.resolution.validate) rejected

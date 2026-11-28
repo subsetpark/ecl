@@ -9,7 +9,6 @@ const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const native_port = @import("native_port.zig");
-pub const NativeWorkQuantum = native_port.WorkQuantum;
 const native_module = @import("native_module.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");
@@ -21,7 +20,7 @@ const reflection = @import("reflection.zig");
 const scheduler_api = @import("scheduler.zig");
 const console_api = @import("console.zig");
 const standard_streams = @import("standard_streams.zig");
-const map_state = @import("module_snapshot.zig");
+const module_search = @import("module_search.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
 const bundled_proc = @import("bundled-proc");
@@ -124,13 +123,15 @@ pub const RuntimeInputs = struct {
     diagnostics: *std.Io.Writer,
     tls_trust: ?TlsTrustOverride = null,
     ecl_path: ?[]const u8 = null,
-    /// An explicit map overrides nearest-map discovery, relative to initial_cwd.
-    module_map: ?[]const u8 = null,
+    /// The project root modules are searched from. Null finds it from
+    /// `initial_cwd`: the nearest ancestor holding `ecl.pkg`, or that
+    /// directory itself.
+    module_root: ?[]const u8 = null,
     /// Borrowed name/value pairs; the Session owns its own copy.
     environ: []const machine.Environ.Entry,
     /// Whether the process has already claimed stdin as the program source.
     standard_input: machine.StandardInput.Availability = .data,
-    /// Absolute startup directory for process execution and module-map discovery.
+    /// Absolute startup directory for process execution and module search.
     initial_cwd: []const u8,
     process_limits: bundled_proc.Limits = .{},
     filesystem: filesystem_port.Config = .{},
@@ -247,41 +248,29 @@ fn releaseDisplayBlocks(
 const EnvironSnapshot = @import("startup_environment.zig").Snapshot;
 
 const SessionCore = struct {
-    module_access_seal: u8 = 0,
     host_owner: *heap.HostOwner,
     environment: env.Env,
     registry: modules.Registry,
     test_authority: ?modules.TestAuthority,
     native_owner: *native_module.Owner,
-    startup_cwd: []const u8,
     filesystem_owner: *filesystem_port.FilesystemOwner,
     http_owner: *http_service.Owner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
     archive: spans.SpanArchive,
-    host_io: std.Io,
-    tls_trust: ?machine.TlsTrust,
-    wall_clock: machine.WallClock,
-    ecl_path: ?[]u8,
-    module_snapshot: ?*map_state.Snapshot,
+    /// What every root unit's fiber inherits, built once. The Session owns the
+    /// copied strings and the argument list it borrows.
+    inherited: machine.InheritedContext,
+    module_search: *module_search.Search,
     local_preload: LocalPreloadState = .idle,
     environ: EnvironSnapshot,
     standard_streams: standard_streams.Devices,
-    arguments: Value,
     console: console_api.Console,
     scheduler: scheduler_api.Scheduler,
     root_tasks: scheduler_api.TaskScope,
-    root_scope: ?*env.Scope = null,
-    cancelled: std.atomic.Value(bool) = .init(false),
     requested_exit: ?u8 = null,
     last_polls: u64 = 0,
     last_root_execution_metrics: if (machine.root_execution_metrics_enabled) machine.RootExecutionMetrics else void = if (machine.root_execution_metrics_enabled) .{} else {},
-    idiom_mode: machine.IdiomMode = .automatic,
-    native_diagnostics: bool = false,
-
-    fn moduleAccess(self: *const SessionCore) *const modules.ExecutionAccess {
-        return @ptrCast(&self.module_access_seal);
-    }
 
     fn allocator(self: *const SessionCore) std.mem.Allocator {
         return self.host_owner.cleanup().allocator();
@@ -295,24 +284,19 @@ comptime {
     heap.requireSingleHostOwner(SessionCore);
 }
 const OpaqueSessionCore = opaque {};
+
+/// Nothing cancels a root unit: the host runs each one to its end, and a task
+/// is cancelled through its own handle.
+const root_never_cancelled: std.atomic.Value(bool) = .init(false);
 const LocalPreloadState = union(enum) {
     idle,
-    cursor: map_state.LocalSourceCursor,
+    cursor: module_search.ProjectSourceCursor,
     complete,
-
-    fn deinit(self: *LocalPreloadState) void {
-        switch (self.*) {
-            .cursor => |*cursor| cursor.deinit(),
-            .idle, .complete => {},
-        }
-        self.* = .complete;
-    }
 };
 
 pub const LocalPreloadProgress = union(enum) {
     pending,
     complete,
-    no_map,
     invalid: []const u8,
     err: Value,
 };
@@ -427,8 +411,8 @@ pub const Session = enum(usize) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
-        const owned_ecl_path = if (host.ecl_path) |path| try allocator.dupe(u8, path) else null;
-        errdefer if (owned_ecl_path) |path| allocator.free(path);
+        const owned_search = try module_search.Search.init(host_owner.cleanup(), host.io, host.initial_cwd, host.module_root, host.ecl_path);
+        errdefer owned_search.deinit();
         const owned_tls_trust: ?machine.TlsTrust = if (host.tls_trust) |trust| .{
             .ca_file = try allocator.dupe(u8, trust.ca_file),
             .now = trust.now,
@@ -439,25 +423,6 @@ pub const Session = enum(usize) {
             error.InvalidConfig => return diagnostic.fail("HTTP limits or TLS trust configuration are invalid", .{}),
         };
         errdefer http_owner.deinit();
-        const owned_module_snapshot = discovery: {
-            const maps = @import("module_map.zig");
-            var rejection: maps.Diagnostic = .{};
-            const map_path = maps.discover(allocator, host.io, host.initial_cwd, host.module_map, &rejection) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Invalid => return diagnostic.fail("invalid module map: {s}", .{rejection.message()}),
-            };
-            if (map_path) |path| {
-                defer allocator.free(path);
-                const map = maps.load(host_owner.cleanup(), host.io, path, &rejection) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Invalid => return diagnostic.fail("invalid module map: {s}", .{rejection.message()}),
-                };
-                errdefer map.deinit();
-                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), map, host.initial_cwd);
-            }
-            break :discovery null;
-        };
-        errdefer if (owned_module_snapshot) |module_snapshot| module_snapshot.deinit();
         var test_authority = if (mode == .language_tests)
             @as(?modules.TestAuthority, try registry.createTestAuthority())
         else
@@ -506,26 +471,18 @@ pub const Session = enum(usize) {
             .registry = registry,
             .test_authority = test_authority,
             .native_owner = native_owner,
-            .startup_cwd = startup_cwd,
             .filesystem_owner = filesystem_owner,
             .http_owner = http_owner,
             .archive_owner = archive_owner,
             .archive = archive,
-            .host_io = host.io,
-            .tls_trust = owned_tls_trust,
-            .wall_clock = switch (clock_policy.wall) {
-                .host => .{ .host = host.io },
-                .fixed => |timestamp| .{ .fixed = timestamp },
-                .anchored => |base| .{ .anchored = base },
-            },
-            .ecl_path = owned_ecl_path,
-            .module_snapshot = owned_module_snapshot,
+            // SAFETY: the devices and the inherited context borrow fields of
+            // this core, so they are initialized on the lines after the core
+            // is; nothing reads either field before that.
+            .inherited = undefined,
+            .module_search = owned_search,
             .environ = snapshot,
-            // SAFETY: the devices borrow the console, which lives in this
-            // core, so they are initialized on the line after the core is;
-            // nothing reads the field before that.
+            // SAFETY: see `inherited` above.
             .standard_streams = undefined,
-            .arguments = argv.take(),
             .console = console_api.Console.init(
                 host.output,
                 host.diagnostics,
@@ -534,6 +491,29 @@ pub const Session = enum(usize) {
             .root_tasks = root_tasks,
         };
         core.standard_streams = .init(allocator, host.io, host.standard_input, &core.console);
+        core.inherited = .{
+            .registry = &core.registry,
+            .test_observation = if (test_authority) |authority| authority.observation() else null,
+            .test_execution = if (test_authority) |authority| authority.execution() else null,
+            .tls_trust = owned_tls_trust,
+            .module_search = owned_search,
+            .phase = .{ .runtime = .{
+                .native_loader = native_owner.loader(),
+                .console = &core.console,
+                .host_io = host.io,
+                .startup_cwd = startup_cwd,
+                .filesystem_access = filesystem_owner.access(),
+                .http_access = http_owner.access(),
+                .wall_clock = switch (clock_policy.wall) {
+                    .host => .{ .host = host.io },
+                    .fixed => |timestamp| .{ .fixed = timestamp },
+                    .anchored => |base| .{ .anchored = base },
+                },
+                .environ = core.environ.view(),
+                .standard_streams = &core.standard_streams,
+                .arguments = argv.take(),
+            } },
+        };
         core.scheduler.attachRetirement();
         test_authority = null;
         return @fromBackingInt(@intCast(@intFromPtr(core)));
@@ -544,16 +524,13 @@ pub const Session = enum(usize) {
         const host = core.host_owner.cleanup();
         const closing_native_owner = core.native_owner.closeCalls();
         core.scheduler.deinit(&core.root_tasks);
-        if (core.root_scope) |root_scope| root_scope.retire(core.releaseDomain());
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
-        core.releaseDomain().releaseValue(core.arguments);
+        const services = core.inherited.runtime();
+        core.releaseDomain().releaseValue(services.arguments);
         core.standard_streams.deinit(core.releaseDomain());
         core.http_owner.deinit();
-        if (core.ecl_path) |path| core.allocator().free(path);
-        if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
-        core.local_preload.deinit();
-        if (core.module_snapshot) |module_snapshot| module_snapshot.deinit();
+        if (core.inherited.tls_trust) |trust| core.allocator().free(trust.ca_file);
         if (core.test_authority) |*authority| authority.deinit();
         core.registry.deinit();
         core.archive_owner.deinit();
@@ -566,7 +543,8 @@ pub const Session = enum(usize) {
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
         host.drain();
-        core.allocator().free(core.startup_cwd);
+        core.allocator().free(services.startup_cwd);
+        core.module_search.deinit();
         core.environ.deinit();
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
@@ -613,8 +591,6 @@ pub const Session = enum(usize) {
         committed: bool = false,
 
         fn begin(core: *SessionCore) error{OutOfMemory}!RootTransaction {
-            if (core.root_scope == null)
-                core.root_scope = try core.environment.createSessionRoot(core.allocator());
             var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
             for (core.stack.items) |item| checkpoint.appendBorrowed(item);
             const fiber = initRootFiber(core);
@@ -638,35 +614,13 @@ pub const Session = enum(usize) {
         const fiber = machine.Fiber.init(
             core.allocator(),
             core.releaseDomain(),
-            core.moduleAccess(),
             core.stack,
             &core.environment,
             &core.archive,
-            .{
-                .registry = &core.registry,
-                .test_observation = if (core.test_authority) |authority| authority.observation() else null,
-                .test_execution = if (core.test_authority) |authority| authority.execution() else null,
-                .native_diagnostics = core.native_diagnostics,
-                .tls_trust = core.tls_trust,
-                .ecl_path = core.ecl_path,
-                .module_snapshot = core.module_snapshot,
-                .idiom_mode = core.idiom_mode,
-                .phase = .{ .runtime = .{
-                    .native_loader = core.native_owner.loader(),
-                    .console = &core.console,
-                    .host_io = core.host_io,
-                    .startup_cwd = core.startup_cwd,
-                    .filesystem_access = core.filesystem_owner.access(),
-                    .http_access = core.http_owner.access(),
-                    .wall_clock = core.wall_clock,
-                    .environ = core.environ.view(),
-                    .standard_streams = &core.standard_streams,
-                    .arguments = core.arguments,
-                } },
-            },
-            &core.cancelled,
+            core.inherited,
+            &root_never_cancelled,
             .{ .root = .{ .scheduler = core.scheduler.worker(), .scope = &core.root_tasks } },
-            .{ .scope = core.root_scope.? },
+            .{ .scope = core.environment.sessionScopeId() },
         );
         return fiber;
     }
@@ -690,15 +644,11 @@ pub const Session = enum(usize) {
         const core = self.coreState();
         var acquisition = core.registry.acquireCursor(name);
         defer acquisition.deinit();
-        if (poll.drive(?modules.GenerationLease, &acquisition, .{})) |generation| {
-            var lease = generation;
-            lease.deinit();
-            return .ok;
-        }
+        if (poll.drive(?modules.Generation, &acquisition, .{}) != null) return .ok;
         return self.loadTarget(.{ .module = name });
     }
 
-    const LoadTarget = union(enum) { module: intern.ModuleName, source: *const map_state.SourceScope };
+    const LoadTarget = union(enum) { module: intern.ModuleName, source: *const module_search.Source };
 
     fn loadTarget(self: *Session, target: LoadTarget) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
@@ -728,17 +678,27 @@ pub const Session = enum(usize) {
         return .ok;
     }
 
-    /// Advance local-scope preload by at most one artifact observation and one
-    /// ordinary source load. Cursor authority remains inside SessionCore, so a
-    /// host cannot retain a Snapshot borrow past Session teardown.
+    /// Advance loading the project root's source files by at most one file
+    /// observation and one ordinary source load, scanning the search path
+    /// first if no lookup has. Cursor authority remains inside SessionCore,
+    /// so a host cannot retain a catalog borrow past Session teardown.
     pub fn advanceLocalPreload(self: *Session) error{OutOfMemory}!LocalPreloadProgress {
         const core = self.coreState();
         if (core.local_preload == .idle) {
-            const module_snapshot = core.module_snapshot orelse {
-                core.local_preload = .complete;
-                return .no_map;
+            const catalog = core.module_search.current() orelse scanned: {
+                var scan = core.module_search.scan();
+                defer scan.deinit();
+                const built = while (true) switch (try scan.advance()) {
+                    .pending => {},
+                    .complete => |done| break done,
+                };
+                break :scanned core.module_search.publish(built);
             };
-            core.local_preload = .{ .cursor = module_snapshot.localSourceCursor() };
+            if (catalog.failure) |reason| {
+                core.local_preload = .complete;
+                return .{ .invalid = reason };
+            }
+            core.local_preload = .{ .cursor = catalog.projectSources() };
         }
         return switch (core.local_preload) {
             .idle => unreachable,
@@ -746,14 +706,13 @@ pub const Session = enum(usize) {
             .cursor => |*cursor| switch (cursor.advance()) {
                 .pending => .pending,
                 .complete => result: {
-                    cursor.deinit();
                     core.local_preload = .complete;
                     break :result .complete;
                 },
                 .item => |source| switch (try self.loadTarget(.{ .source = source })) {
                     .ok => .pending,
                     .err => |failure| .{ .err = failure },
-                    .incomplete => .{ .invalid = "local-scope source loader returned incomplete source" },
+                    .incomplete => .{ .invalid = "project source loader returned incomplete source" },
                 },
             },
         };
@@ -817,11 +776,8 @@ pub const Session = enum(usize) {
                 if (intern.moduleName(namespace_id) catch null) |module_name| {
                     var acquisition = core.registry.acquireCursor(module_name);
                     defer acquisition.deinit();
-                    if (poll.drive(?modules.GenerationLease, &acquisition, .{})) |generation| {
-                        var generation_lease = generation;
-                        defer generation_lease.deinit();
-                        var names = generation_lease.publicNameCursor();
-                        defer names.deinit();
+                    if (poll.drive(?modules.Generation, &acquisition, .{})) |generation| {
+                        var names = generation.publicNameCursor();
                         while (true) switch (names.advance()) {
                             .pending => {},
                             .complete => break,
@@ -912,17 +868,11 @@ pub const Session = enum(usize) {
             return err;
         };
     }
-    fn requestCancellationForTest(self: *Session) void {
-        self.coreState().cancelled.store(true, .release);
-    }
-    fn clearCancellationForTest(self: *Session) void {
-        self.coreState().cancelled.store(false, .release);
-    }
     fn setIdiomModeForTest(self: *Session, mode: machine.IdiomMode) void {
-        self.coreState().idiom_mode = mode;
+        self.coreState().inherited.idiom_mode = mode;
     }
     pub fn setNativeDiagnostics(self: *Session, enabled: bool) void {
-        self.coreState().native_diagnostics = enabled;
+        self.coreState().inherited.native_diagnostics = enabled;
     }
     pub fn requestedExit(self: *const Session) ?u8 {
         return self.coreState().requested_exit;
@@ -935,12 +885,6 @@ pub const Session = enum(usize) {
     }
     pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeDiagnostics(bytes, true);
-    }
-    fn schedulerWorkerThreadCountForTest(self: *const Session) usize {
-        return self.coreState().scheduler.workerThreadCount();
-    }
-    fn schedulerTimerThreadCountForTest(self: *const Session) usize {
-        return self.coreState().scheduler.timerThreadCount();
     }
     fn schedulerTimerEntryCountForTest(self: *Session) usize {
         return self.coreState().scheduler.timerEntryCount();
@@ -965,11 +909,7 @@ pub const Session = enum(usize) {
     pub const stackItems = testOnly(stackItemsForTest);
     pub const pushBorrowed = testOnly(pushBorrowedForTest);
     pub const pushOwned = testOnly(pushOwnedForTest);
-    pub const requestCancellation = testOnly(requestCancellationForTest);
-    pub const clearCancellation = testOnly(clearCancellationForTest);
     pub const setIdiomMode = testOnly(setIdiomModeForTest);
-    pub const schedulerWorkerThreadCount = testOnly(schedulerWorkerThreadCountForTest);
-    pub const schedulerTimerThreadCount = testOnly(schedulerTimerThreadCountForTest);
     pub const schedulerTimerEntryCount = testOnly(schedulerTimerEntryCountForTest);
     pub const advanceManualClock = testOnly(advanceManualClockForTest);
 };
@@ -1058,7 +998,7 @@ fn sessionTypeExposesAuthority(
     comptime depth: u8,
     comptime position: SessionAuthorityPosition,
 ) bool {
-    if (T == env.Definition or T == modules.GenerationLease) return true;
+    if (T == env.Definition or T == modules.Generation) return true;
     if (position == .result and
         (T == std.mem.Allocator or
             T == std.Io or
@@ -1186,6 +1126,8 @@ fn argumentsValue(
     }
     return list.fromValuesGeneric(allocator, items);
 }
+
+/// The text of the symbol a failure dictionary holds under `name`.
 fn dictSymbol(
     allocator: std.mem.Allocator,
     dictionary: Value,

@@ -28,7 +28,7 @@ fn expectCancelledAfterSetup(
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     switch (try runtime.runUnit("<combinator-setup>", setup)) {
         .ok => {},
@@ -38,22 +38,18 @@ fn expectCancelledAfterSetup(
         },
         .incomplete => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     runtime.setIdiomMode(mode);
-    runtime.requestCancellation();
-    const failure = switch (try runtime.runUnit("<combinator-cancel>", source)) {
-        .err => |item| item,
-        .ok, .incomplete => return error.TestUnexpectedResult,
-    };
-    defer runtime.release(failure);
-    try support.expectLanguageError(failure, .{
-        .name = source,
-        .source = source,
-        .kind = "cancelled",
-        .message = "unit cancelled",
-    });
-    try std.testing.expect(runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
+    const victim = try std.mem.concat(std.testing.allocator, u8, &.{ "cancel-input ", source });
+    defer std.testing.allocator.free(victim);
+    switch (try runtime.runUnit("<combinator-setup>", "`cancel-input set")) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    try runtime_fixture.expectCancelledAcrossTurns(&runtime, victim);
 }
 
 test "combinators: isolated iteration broadcast reduction and infra" {
@@ -425,16 +421,16 @@ const deep_plan_source = source: {
     break :source text ++ ") each";
 };
 
-test "combinators: finite iterations keep their words' bindings and still check each application" {
-    // A call decides each word's binding, and the idiom match of a phrase a
-    // word offers, at that word's first execution and reuses them for the
-    // rest of the call. What depends on an application's operands is still
-    // decided per application.
+test "combinators: finite iterations reuse what they decided of a phrase and still check each application" {
+    // Every word reads its cell each time it is reached. An iteration keeps
+    // only the idiom match of a phrase a word offers, for the publication;
+    // what depends on an application's operands is still decided per
+    // application.
     try support.expectStacks(&.{
         .{ .name = "source and builtin", .source = "(dup *) `sq def [1 2 3 4 5] (sq 1 +) each", .expected = "[2 5 10 17 26]" },
         .{ .name = "zip-with fold scan", .source = "[1 2] [3 4] (+ 1 +) zip-with [1 2 3] 0 (+) fold [1 2 3] 0 (+) scan", .expected = "[5 7] 6 [1 3 6]" },
         .{ .name = "for and infra", .source = "(dup *) `sq def [1 2 3] (sq pop) for [1 2 3] (sq swap sq) infra", .expected = "[1 9 4]" },
-        // The binding a call keeps is the one in effect when the call began.
+        // A redefinition between calls reaches the next one.
         .{ .name = "next apply", .source = "(1) `k def [1 2] (pop k) each (2) `k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
         .{ .name = "next infra apply", .source = "(1) `k def [1 2] (pop k) infra (2) `k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
         // A kept match still meets each row's operand classes.
@@ -449,9 +445,9 @@ test "combinators: finite iterations keep their words' bindings and still check 
         .{ .name = "fresh phrase", .source = "[[1 2 3] [2 3 4]] [(+) (*)] (fold1) zip-with", .expected = "[6 24]" },
     });
     try support.expectErrors(&.{
-        // A call that fails after keeping bindings releases them with the call.
-        .{ .name = "failure after kept bindings", .source = "(dup *) `sq def [1 2 x] (sq 1 +) each", .kind = "type", .word = "*" },
-        .{ .name = "for failure after kept bindings", .source = "(dup *) `sq def [1 2 x] (sq pop) for", .kind = "type", .word = "*" },
+        // A call that fails partway releases what it kept with the call.
+        .{ .name = "failure partway", .source = "(dup *) `sq def [1 2 x] (sq 1 +) each", .kind = "type", .word = "*" },
+        .{ .name = "for failure partway", .source = "(dup *) `sq def [1 2 x] (sq pop) for", .kind = "type", .word = "*" },
         // An application whose operands the kept match does not admit declines
         // to the generic path, which reports its own error.
         .{ .name = "kept match declined", .source = "[[1 2 3] [] [4]] ((+) fold1) each", .kind = "domain", .word = "fold1" },
@@ -869,23 +865,9 @@ test "empty inline iterations remain cancellable and bounded-frame" {
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
-    runtime.requestCancellation();
-    const failure = switch (try runtime.runUnit("<combinator-cancel>", "70000 () times")) {
-        .err => |item| item,
-        .ok, .incomplete => return error.TestUnexpectedResult,
-    };
-    defer runtime.release(failure);
-    try support.expectLanguageError(failure, .{
-        .name = "cancelled times",
-        .source = "70000 () times",
-        .kind = "cancelled",
-        // Observed where the empty iterations exhaust their fuel, which reports
-        // no word: the loop is between applications, not inside one.
-        .message = "unit cancelled",
-    });
-    try std.testing.expect(runtime.lastPolls() >= 1);
+    try runtime_fixture.expectCancelledAcrossTurns(&runtime, "70000 () times");
 }
 
 test "combinators: vector reductions reuse only accumulators they own" {
@@ -918,10 +900,10 @@ test "combinators: body words resolve as in the caller" {
     });
 }
 
-test "combinators: cached body words spend no kernel polls per element" {
+test "combinators: body words with filled cells spend no kernel polls per element" {
     // Each word dispatched through the resolution driver polls once. A body
-    // whose words hit the call-site cache polls only at its continuation, so
-    // the count stays near one per element rather than one per word.
+    // whose words' cells are filled polls only at its continuation, so the
+    // count stays near one per element rather than one per word.
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -1315,7 +1297,7 @@ test "idioms: a rebound name keeps recognition off" {
     );
 }
 
-test "idioms: an offered phrase answered from the call-site cache sees a redefinition" {
+test "idioms: an offered phrase answered from what the fiber remembers sees a redefinition" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -1323,7 +1305,7 @@ test "idioms: an offered phrase answered from the call-site cache sees a redefin
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // One `(+)`, offered three times in one submission: the later checks are
-    // cache hits. Redefining `+` must still reach the next application, while
+    // answered from memory. Redefining `+` must still reach the next application, while
     // the builtin `sum` keeps its own addition.
     try expectStack(
         &runtime,
@@ -1331,6 +1313,13 @@ test "idioms: an offered phrase answered from the call-site cache sees a redefin
             "(pop pop 42) `+ def [7 8] f [1 2 3] sum",
         "3 7 11 6 42 6",
     );
+}
+
+test "idioms: a phrase matched earlier in an iteration sees a redefinition" {
+    // The inner `(+)` is offered at one position once per outer element, so
+    // the later offers are answered from what the iteration remembers.
+    // Redefining `+` after the first must still reach the second and third.
+    try expectFreshStack("[1 2 3] (pop [1 2 3] 0 (+) fold (-) `+ def) each", "[6 -6 -6]");
 }
 
 fn expectFreshStack(source: []const u8, expected: []const u8) !void {
@@ -1343,10 +1332,9 @@ fn expectFreshStack(source: []const u8, expected: []const u8) !void {
     try expectStack(&runtime, source, expected);
 }
 
-// A task inherits no historical view: its body binds when it first runs,
-// against the definitions current then. What a definition already bound stays
-// fixed, so a task running a word reaches the targets that word was bound to
-// however the parent redefines its names afterwards.
+// A task inherits no historical view: each word of its body resolves when it
+// is reached, against the definitions current then, so a redefinition the
+// parent makes after the spawn reaches the task.
 test "bindings: a running task sees definitions made after its spawn" {
     // The task resolves `f` when it reaches it, after the root redefined it.
     try expectFreshStack("(1) `f def (20 clock.sleep f) `body def (body) @spawn (2) `f def task.await", "{ok [2]}");

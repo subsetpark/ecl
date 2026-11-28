@@ -219,7 +219,7 @@ fn printCase(
 ) !void {
     if (mode == .counters) {
         const sample = try runSample(io, workers, case);
-        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
+        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
             case.name,
             workers,
             size,
@@ -230,13 +230,6 @@ fn printCase(
             sample.metrics.driver_resumes,
             sample.metrics.application_resumes,
             sample.metrics.scheduler_handoffs,
-            sample.metrics.qualified_cache_hits,
-            sample.metrics.qualified_cache_misses,
-            sample.metrics.qualified_cache_heals,
-            sample.metrics.local_cache_hits,
-            sample.metrics.local_cache_misses,
-            sample.metrics.plain_cache_hits,
-            sample.metrics.plain_cache_misses,
         });
         return;
     }
@@ -564,7 +557,7 @@ pub fn main(init: std.process.Init) !void {
     if (mode == .timing)
         try out.writeAll("case,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\n")
     else
-        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals,local_cache_hits,local_cache_misses,plain_cache_hits,plain_cache_misses\n");
+        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs\n");
     if (custom_source) |source| {
         // One Session per process lets an external driver alternate artifacts
         // and discard exactly one warmup independently of instrumentation.

@@ -1,9 +1,9 @@
 # Package application contract
 
 The maintained package application owns project discovery, manifests, lockfiles,
-source selection, fetching, installation, verification, and publication. The
-interpreter consumes only `ecl.modules`; it never discovers or interprets
-`ecl.pkg`, `ecl.lock`, or application recovery records.
+source selection, fetching, installation, and verification. The interpreter
+reads none of its files: it finds installed packages by module search beneath
+`.ecl/packages`, and uses `ecl.pkg` only to locate the project root.
 
 See [manifest and source conventions](FORMATS.md) and the
 [pure data API reference](API.md). Verification evidence and separate core/complete
@@ -14,7 +14,7 @@ distribution measurements are recorded in [VALIDATION.md](VALIDATION.md).
 `ecl.pkg` remains the project manifest. The root `ecl.lock` is portable project
 data intended for version control. It pins the complete resolved graph: exact
 versions, source identities, full Git commits, archive hashes, and dependency
-edges. It contains no machine-specific cache paths or generation identifiers.
+edges. It contains no machine-specific cache or installation paths.
 A fresh checkout containing these two files must reproduce the locked graph.
 
 Ordinary `sync` uses the existing lock without reselecting dependencies or
@@ -48,47 +48,48 @@ used solely by superseded minima are removed. Normal locked synchronization
 bypasses this discovery and selection entirely.
 
 `pkg.resolution` owns validation, canonical serialization, compatibility, and
-sealed-manifest checks. `zig build test-pkg-app` invokes ECL's built-in test
-runner against the application's test map. Unit tests live in the modules whose
-logic they test, sharing the assertions in `pkg.test.support`; tests that need
-repository fixtures or write to the working directory stay under `test/`.
+sealed-manifest checks. `zig build test-pkg-app` runs ECL's built-in test
+command with the application directory as the project. Unit tests live in the
+modules whose logic they test, sharing the assertions in `pkg.test.support`;
+tests that need repository fixtures or write to the working directory stay
+under `test/`. Acceptance under `test/acceptance/` declares no tests: each file
+exports a `run` word that a build step selects as the runner.
 Separate-process orchestration and controlled external services remain host
 integration fixtures.
 
 ## Commands and installation
 
-The distribution ships the entry script `main.ecl`, the module map
-`ecl.modules`, ECL module sources, and `git.eclmod` together beneath `share/ecl/apps/pkg/`.
-The entry passes ordinary process arguments to `pkg.command.main`. Application
-loading uses its own map, so project-local modules cannot replace package
-application modules and broken project runtime state does not prevent startup.
+The distribution ships the entry script `main.ecl`, ECL module sources, and
+`git.eclmod` together beneath `share/ecl/apps/pkg/`. The entry passes ordinary
+process arguments to `pkg.command.main`. The application searches only its own
+directory, so project-local modules cannot replace package application modules
+and broken project state does not prevent startup.
 
-- `init [name]` creates `src/`, `ecl.pkg`, an empty portable `ecl.lock`, and a
-  usable local-source `ecl.modules`. Existing project state is not overwritten.
+- `init [name]` creates `src/`, `ecl.pkg`, and an empty portable `ecl.lock`.
+  Existing project state is not overwritten.
 - `add <name> <version> <https-url>` validates an archive and records its exact
   source and hash in the manifest. `add <https-git-url> --tag|--commit <revision>`
   obtains the package identity from its source manifest and records the resolved
   full commit and archive hash. A dependency edit requires `update` to select
   the new graph.
-- `sync [--offline]` honors an existing lock. `update [--offline]` explicitly
-  reruns dependency selection. `vendor [--offline]` requires a lock and activates
-  an equivalent generation beneath `vendor/`, preserving the portable lock.
-- `verify` reads the active generation without recovery or repair. `tree` shows
+- `sync [--offline]` honors an existing lock and installs it. `update [--offline]`
+  explicitly reruns dependency selection.
+- `verify` checks the installed packages without repair. `tree` shows
   sorted direct selected edges; `why <module>` shows one canonical shortest
   root-to-owner path, using a search bounded by the selected graph.
 - `gc <retained-lock>...` collects only unretained regular files in the shared
   download cache. Inputs may be absolute or caller-relative portable lock paths.
-  Unrecognized entries are preserved; project generations are never collected.
+  Unrecognized entries are preserved; installed packages are never collected.
 
 `zig build test-pkg-application` owns a temporary caller directory and cache,
 then invokes the built-in ECL test runner for command assertions. The host
 fixture supplies process isolation and does not duplicate package policy tests.
 
 `zig build test-pkg-git` launches the installed application in isolated caller
-processes against a controlled HTTPS Git server. ECL tests cover mixed archive
+processes against a controlled HTTPS Git server. ECL phases cover mixed archive
 and Git sources, moved tags, unavailable commits, corrupt project state,
-explicit updates, portable-lock reproduction in fresh checkouts, and vendoring
-after relocation and removal of the shared cache. The host fixture only creates repositories,
+explicit updates, portable-lock reproduction in fresh checkouts, and
+reinstallation after relocation and removal of the shared cache. The host fixture only creates repositories,
 serves Git, copies checkout inputs, and launches test phases.
 
 ## Source package archives
@@ -105,14 +106,15 @@ Manifest patterns select at most 4,096 source artifacts, each at most 16 MiB.
 components. The application matcher uses dynamic programming through ordinary
 ECL evaluation, so pattern processing remains cancellable without exponential
 backtracking. Selected files are parsed without execution. Every literal
-top-level module declaration enters the artifact map as an export; each must be
-package-owned and occur exactly once.
-Unselected regular data files are retained by installation.
+top-level module declaration is an export; each must be package-owned and occur
+exactly once. Installation keeps every regular file, so module search also
+reads unselected `.ecl` files; a module they declare matters only if
+requested.
 
 ## Application orchestration
 
 `pkg.project` searches upward from the captured startup directory for `ecl.pkg`.
-Discovery reads neither a project lock nor a runtime map. All subsequent project
+Discovery reads no project lock. All subsequent project
 access uses an explicitly opened directory resource. Mutations coordinate with
 the advisory lock at `.ecl/mutation.lock`.
 
@@ -135,110 +137,37 @@ its full commit. Archive requests use the public bounded HTTP facility.
 `zig build test-pkg-fetch` provides a controlled HTTPS service and runs the
 application's fetch assertions with `ecl test`.
 
-`pkg.map` projects direct dependency edges and inspected artifact exports into a
-general module map. It keeps the project's source patterns live. Before any
-directory publication, it sends the candidate map to the current executable's
-public validator, with the eventual document path and a bounded subprocess
-deadline. Neither project state nor executable search through `PATH` participates
-in that validation.
+`pkg.obtain` retains each verified artifact in a private download directory
+before releasing its bytes or populating the shared cache. It tries those
+private pins, the project's kept archives, the optional download cache, and
+finally the exact network source. Offline mode omits that last step. Cache
+collection cannot remove a private pin needed by an in-progress installation.
 
-Each immutable generation contains its own complete resolution snapshot,
-installed dependencies, sealed artifacts, and a complete relative module map.
-The snapshot supplements the root lock: a running generation always uses its own
-snapshot, even while the root lock is being updated. Neither synchronization nor
-recovery deletes previous project generations.
+## Installation
 
-Application generation references use `.ecl/generations/<64 lowercase hex>` or
-`vendor/<64 lowercase hex>`. Both locations use the same publication protocol;
-the complete map locates live project sources relative to its own document.
-The root lock contains neither location.
+All application mutations hold the project's advisory mutation lock.
+`pkg.install` validates each selected manifest against the lock, unpacks the
+package into a staged sibling of `.ecl/packages`, and keeps its exact archive
+in a staged sibling of `.ecl/archives`. Once every package is in place it
+replaces the installed trees with the staged ones and then publishes
+`ecl.lock` with a same-directory atomic rename. A failure before that point
+leaves the previous installation and lock untouched. The two trees and the lock
+are not replaced as one transaction; an interrupted replacement is repaired by
+running `sync` again, which needs no network when the archives are kept or
+cached. `pkg.verify` checks that `.ecl/packages` and `.ecl/archives` hold
+exactly the locked packages and archives, each archive's hash, and every
+installed regular file against its archive, rejecting links, special objects,
+missing files, and extra files without repair.
 
-`pkg.obtain` retains each verified artifact in the private generation before
-releasing its bytes or populating the shared cache. It tries private pins, the
-captured active generation's seals, the optional download cache, and finally
-the exact network source. Offline mode omits that last step. Cache collection
-cannot remove a private pin needed by an in-progress installation.
+`zig build test-pkg-install` runs offline installation, exact lock
+preservation, explicit-update refusal, reinstallation from kept archives,
+module search over the installed package from a new interpreter, and
+verification of a damaged installation. It is included in the full test suite;
+the fast precommit tier retains the smaller policy cases in `test-pkg-app`.
 
-`pkg.generation` validates selected manifests, extracts source packages, records
-their exact archives under `archives/`, and writes `ecl.pkg`, `ecl.lock`, and
-the complete map before publishing the staged directory. `pkg.verify` checks
-the closed generation layout, every seal, installed regular-file contents, and
-the reconstructed map against that generation's own inputs. It rejects links,
-special objects, missing files, and extra installed files without repair.
-Publication validation additionally requires the root manifest to match the
-generation's manifest snapshot. `pkg.install` coordinates recovery, lock
-selection, construction, and activation under the project mutation lock.
-
-`zig build test-pkg-generation` runs this full acceptance through ECL's test
-runner, including initial resolution, exact lock preservation, explicit update
-selection, offline reproduction, activation, and independent verification of
-older generations. It also rejects a conflicting candidate map before directory
-publication and recovers an interrupted root-lock write using the full generation
-validator while the previous snapshot stays consistent. It is included in the full test suite; the fast precommit
-tier retains the smaller policy cases in `test-pkg-app`.
-
-## Publication and recovery
-
-All application mutations hold the project's advisory mutation lock. Publication
-uses this order:
-
-1. Materialize and validate a private generation against the proposed project
-   lock. Publish the complete generation to its absent immutable destination.
-2. Atomically create an application recovery record beneath `.ecl/`. It records
-   the manifest observed for this operation, the previous root lock and map
-   states (including absence), the proposed lock, and the new generation map
-   reference. The generation's resolution snapshot must match that proposed
-   lock exactly. No root file has changed yet.
-3. Atomically publish the root `ecl.lock`.
-4. Atomically publish the root `ecl.modules` reference. This is activation.
-5. Remove the recovery record.
-
-The two root files cannot be atomically replaced together. Interruption after
-step 3 can leave a newer project lock beside the previous active generation.
-That generation remains runnable and internally consistent because its map and
-resolution snapshot are immutable. A fresh checkout of the newer root lock
-reproduces the newer locked graph independently of local recovery state.
-
-Before another mutation, the application validates any recovery record and its
-generation, then completes the publication idempotently. It requires the
-manifest to match the recorded observation and each root file to match either
-its recorded previous state or its proposed state. Unexpected edits, malformed
-records, or invalid generations cause an explicit recovery conflict; recovery
-must not overwrite unrelated user edits or resolve a different graph. A valid
-pending transaction is completed before selecting work for the new command.
-
-Failure before activation leaves the previous runnable generation available.
-Cancellation after activation never rolls it back; a surviving recovery record
-is completed or removed by the next mutating command. Read-only startup and
-verification do not recover, repair, fetch, or write package state. Verification
-checks the active generation against its own snapshot and reports any pending
-publication or root-lock mismatch separately.
-
-Namespace operations promise atomic visibility under process interruption.
-Filesystem or machine crash durability is limited by the host filesystem APIs;
-the protocol must not claim a multi-file durable transaction.
-
-The `pkg.transaction` module implements record preparation and idempotent replay
-through public filesystem resources. Its caller holds the project mutation lock
-and supplies a generation validator with stack effect `(project path --)`.
-That validator checks the complete generation, including its runtime map and
-artifact seals, without repairing or resolving sources. The transaction module
-also independently checks the generation's exact resolution-snapshot bytes.
-Records contain data only; recovery never executes their contents. The ordinary
-coordination guarantee covers writers participating in the application lock.
-The ECL test suite checks initial publication, every root-write boundary,
-idempotent replay, and conflicting edits through public directory resources.
-The host fixture checks separate interpreter processes loading the old or new
-generation at those boundaries.
-
-## Required publication acceptance
+## Required acceptance
 
 Acceptance must reproduce a fresh checkout from its manifest and root lock,
 preserve pinned commits after tags move, and prove that ordinary sync leaves
 the locked graph unchanged. Explicit updates must produce a new portable lock.
-Interruption at every boundary above must preserve an internally consistent
-active generation and allow idempotent recovery without network resolution.
-Recovery must reject intervening root or manifest edits, damaged generation
-snapshots, and malformed records. Repeated recovery and cancellation after
-activation must preserve the committed generation. Vendoring must retain an
-equivalent resolution snapshot without making the root lock machine-specific.
+A failed command must leave the installed packages and lock unchanged.

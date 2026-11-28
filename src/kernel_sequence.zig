@@ -1039,7 +1039,7 @@ fn scalarMatchesElement(
             .char => |codepoint| codepoint == @as(u32, candidate),
             else => false,
         },
-        .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
+        .generic_spine, .dict, .task, .port, .address => unreachable,
     };
 }
 
@@ -1517,7 +1517,7 @@ const RazeDriver = struct {
                     copyWidened(heap.LeafElement(out_kind), out, heap.leafElements(kind, child)[from..][0..out.len]);
                 }
             },
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .address => unreachable,
         }
     }
 
@@ -2167,7 +2167,7 @@ const FlipDriver = struct {
     fn leafKind(kind: value.HeapKind) ?value.HeapKind {
         return switch (kind) {
             .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => kind,
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => null,
+            .generic_spine, .dict, .task, .port, .address => null,
         };
     }
 
@@ -2282,7 +2282,7 @@ const FlipDriver = struct {
                     for (line, sources[0..children.len]) |*slot, source| slot.* = source[column];
                 }
             },
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .address => unreachable,
         }
     }
 
@@ -3100,7 +3100,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// a reversed or cyclic one reads positions already stored over.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn mayOverwrite(shape: CopyShape, _: usize) bool {
+            pub fn mayOverwrite(shape: CopyShape) bool {
                 return shape == .contiguous;
             }
             pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, fiber: *Fiber) MachineError!void {

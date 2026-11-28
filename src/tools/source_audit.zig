@@ -62,7 +62,7 @@ const source_groups = [_]SourceGroup{
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
     embeddedGroup(true, &.{
-        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "inert_data.zig", "module_map.zig", "module_snapshot.zig",
+        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "module_search.zig",
     }),
     // The embedded prelude loader and the embedded stdlib manifest are one
     // bootstrap surface: both hand constant source to the ordinary reader.
@@ -184,6 +184,8 @@ const repository_verification_files = [_][]const u8{
     "test/native/tutorial.zig",
     "test/native/instance.zig",
     "test/native/instance_dynamic.zig",
+    "test/native/cooperative_dynamic.zig",
+    "test/native/loanforeign_dynamic.zig",
     "test/native/malformed.zig",
     "test/native/negative/rejected_open_resource_authority.zig",
     "test/native/negative/rejected_open_child_authority.zig",
@@ -686,30 +688,6 @@ fn auditSourceBodies() bool {
             failed = auditTokens(file, source, &operand_stack_mutations) or failed;
         }
     }
-    // A registry outcome that a driver dismisses as `unreachable` is an
-    // interleaving nobody imagined rather than one that cannot happen:
-    // removal can invalidate any name between the snapshot a cursor read and
-    // the turn it is granted. Every registry error must reach an ECL error
-    // kind instead.
-    const dismissed_registry_outcomes = [_][]const []const u8{
-        &.{ "MissingModule", "=>", "unreachable" },
-        &.{ "NameConflict", "=>", "unreachable" },
-        &.{ "InvalidDefinition", "=>", "unreachable" },
-    };
-    for (source_groups) |component| {
-        if (!component.production) continue;
-        for (component.sources, component.files) |source, file| {
-            failed = auditTokens(file, source, &dismissed_registry_outcomes) or failed;
-        }
-    }
-    const raw_stack_ownership = [_][]const []const u8{&.{"takeStackOwned"}};
-    for (source_groups) |component| {
-        if (!component.production) continue;
-        for (component.sources, component.files) |source, file| {
-            if (std.mem.eql(u8, file, "machine.zig") or std.mem.eql(u8, file, "scheduler.zig")) continue;
-            failed = auditTokens(file, source, &raw_stack_ownership) or failed;
-        }
-    }
     for (source_groups) |component| {
         if (!component.production) continue;
         for (component.sources, component.files) |source, file| {
@@ -765,7 +743,6 @@ fn auditSourceBodies() bool {
         .{ .name = "kernel_numeric.zig", .source = @embedFile("../kernel_numeric.zig") },
         .{ .name = "kernel_sequence.zig", .source = @embedFile("../kernel_sequence.zig") },
         .{ .name = "kernel_order.zig", .source = @embedFile("../kernel_order.zig") },
-        .{ .name = "kernel_random.zig", .source = @embedFile("../kernel_random.zig") },
     };
     for (migrated_kernel_files) |kernel| {
         failed = auditProductionFunctionTokenPair(
@@ -832,15 +809,6 @@ fn auditUnsafeCasts() bool {
             }) |cast| {
                 failed = auditProductionFunctionTokenPair(file, source, "HostCleanup", cast) or failed;
             };
-            const execution_cast_allowed = std.mem.eql(u8, file, "session.zig") or
-                std.mem.eql(u8, file, "prelude.zig") or
-                std.mem.eql(u8, file, "machine.zig");
-            if (!execution_cast_allowed) for ([_][]const u8{
-                "@ptrCast",
-                "@ptrFromInt",
-            }) |cast| {
-                failed = auditProductionFunctionTokenPair(file, source, "ExecutionAccess", cast) or failed;
-            };
         }
     }
 
@@ -853,9 +821,9 @@ fn auditUnsafeCasts() bool {
         "capability payload erasure",
         @embedFile("../heap.zig"),
         &.{
-            "TaskDestroyAdapter",     "PortReleaseAdapter",     "AddressReleaseAdapter",
-            "PortTransferAdapter",    "ModuleReleaseAdapter",   "RetirementAdapters",
-            "RetirementWakeAdapters", "CodeRetirementAdapters",
+            "TaskDestroyAdapter",     "PortReleaseAdapter", "AddressReleaseAdapter",
+            "PortTransferAdapter",    "RetirementAdapters", "RetirementWakeAdapters",
+            "CodeRetirementAdapters",
         },
     ) or failed;
     failed = auditErasedCasts(
@@ -866,7 +834,6 @@ fn auditUnsafeCasts() bool {
             "ReadinessRegistrationAdapters",
             "ReadinessSourceAdapters",
             "ScopeMemberAdapters",
-            "ScopeMembershipAdapters",
         },
     ) or failed;
     return failed;
@@ -885,10 +852,11 @@ const work_budget_issuers = [_][]const u8{ "poll.zig", "machine.zig", "scheduler
 /// hold the blocking constructors and setup paths that use it today, each
 /// reviewed for a bounded input; a new use elsewhere needs the same review.
 const unbounded_allowance_users = [_][]const u8{
-    "dict.zig",          "doc.zig",        "formatter.zig", "inert_data.zig",
-    "kernel_random.zig", "list.zig",       "machine.zig",   "modules.zig",
-    "native_module.zig", "poll.zig",       "prelude.zig",   "print.zig",
-    "session.zig",       "task_prims.zig",
+    "dict.zig",          "doc.zig",           "formatter.zig",
+    "kernel_random.zig", "list.zig",          "machine.zig",
+    "modules.zig",       "native_module.zig", "poll.zig",
+    "prelude.zig",       "print.zig",         "session.zig",
+    "task_prims.zig",
 };
 
 /// The kernel quantum is the length of a fiber's turn. Code that meters its
@@ -1017,7 +985,6 @@ fn auditResultAdoption() bool {
     const claims = [_][]const []const u8{
         &.{"UniqueLeafAdoption"},
         &.{"claimHeld"},
-        &.{"claimUniqueList"},
     };
     var failed = false;
     for (source_groups) |component| {

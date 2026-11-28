@@ -6,7 +6,7 @@
 
  ### test explicit-retention
  (-- : "Collect only unretained regular cache archives and preserve unrelated entries.")
- (`cwd "apps/pkg/test/fixtures/gc-unused" fs.stage-dir
+ (`cwd "test/fixtures/gc-unused" fs.stage-dir
   (|directory|
    directory [1 2] pkg.fetch.hash [1 2] pkg.cache.write-at
    directory [3 4] pkg.fetch.hash [3 4] pkg.cache.write-at

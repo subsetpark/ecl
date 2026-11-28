@@ -116,41 +116,11 @@ pub fn Resource(
         const Allocation = struct {
             issuer: *Issuer,
             allocator: std.mem.Allocator,
-            capacity: enum { vacant, held, returned } = .held,
+            capacity: enum { held, returned } = .held,
             cell: Cell,
         };
         fn allocation(cell: *Cell) *Allocation {
             return @alignCast(@fieldParentPtr("cell", cell));
-        }
-        /// Storage can precede capacity when a pending request waits for a
-        /// resource. Its owner keeps this candidate until activation succeeds.
-        pub const Candidate = opaque {
-            fn state(self: *@This()) *Allocation {
-                return @ptrCast(@alignCast(self));
-            }
-            pub fn deinit(self: *@This()) void {
-                const owned = self.state();
-                owned.allocator.destroy(owned);
-            }
-            /// Failure retains the candidate. Success transfers its allocation
-            /// into the initialized cell; the request replaces its state.
-            pub fn activate(self: *@This(), args: anytype, comptime initialize: anytype) (@typeInfo(@typeInfo(@TypeOf(reserve)).@"fn".return_type.?).error_union.error_set ||
-                @typeInfo(@typeInfo(@TypeOf(initialize)).@"fn".return_type.?).error_union.error_set)!*Cell {
-                const owned = self.state();
-                try reserve(owned.issuer);
-                errdefer release(owned.issuer);
-                try @call(.auto, initialize, .{ &owned.cell, owned.issuer } ++ args);
-                owned.capacity = .held;
-                return &owned.cell;
-            }
-        };
-        pub fn prepare(issuer: *Issuer) error{OutOfMemory}!*Candidate {
-            const allocator = allocatorOf(issuer);
-            const owned = try allocator.create(Allocation);
-            owned.issuer = issuer;
-            owned.allocator = allocator;
-            owned.capacity = .vacant;
-            return @ptrCast(owned);
         }
         pub fn create(issuer: *Issuer, args: anytype, comptime initialize: anytype) (error{OutOfMemory} ||
             @typeInfo(@typeInfo(@TypeOf(reserve)).@"fn".return_type.?).error_union.error_set ||
@@ -177,7 +147,7 @@ pub fn Resource(
                     owned.capacity = .returned;
                     release(owned.issuer);
                 },
-                .vacant, .returned => {},
+                .returned => {},
             }
         }
         /// Consumes final allocation ownership after backend destruction.

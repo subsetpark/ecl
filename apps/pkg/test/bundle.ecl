@@ -6,7 +6,7 @@
 
  ### defp fixture
  (name -- bytes : "Decode a checked-in inert archive fixture.")
- ("apps/pkg/test/fixtures/" swap cat ".tgz.hex" cat `cwd swap fs.read-text str.trim
+ ("test/fixtures/" swap cat ".tgz.hex" cat `cwd swap fs.read-text str.trim
   ("0123456789abcdef" swap find) each
   dup len 2 div 2 pair reshape (|pair| pair first 16 * pair 1 at +) each) `fixture defp
 

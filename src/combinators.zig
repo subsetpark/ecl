@@ -637,7 +637,7 @@ fn countedInputs(
     var inputs: usize = 0;
     for (0..count) |index| {
         if (!quotations.isQuotation(index)) return null;
-        const summary = try stack_summary.of(fiber, fiber.applicationSite(), quotations.at(index)) orelse return null;
+        const summary = try stack_summary.of(fiber, quotations.at(index)) orelse return null;
         counts.consumed[index] = @intCast(summary.consumed);
         counts.produced[index] = @intCast(summary.produced);
         inputs = switch (sharing) {
@@ -676,7 +676,6 @@ fn launchCountedCleave(
         .expected = fiber.stack.items.len,
         .site = fiber.applicationSite(),
         .word = fiber.active_word,
-        .publication = counts.publication,
     };
     state.recheck(fiber) catch |err| {
         heap.deinitDriverFields(fiber.releases, fiber.allocator, &state);
@@ -712,16 +711,13 @@ const CountedCleave = struct {
     site: machine.ExecutionSite,
     word: intern.TraceWord,
     next: usize = 0,
-    /// The publication the counts were read under.
-    publication: u64,
 
     /// What each quotation consumes and leaves, by its index. A cleave of
     /// more quotations than these hold runs over the soft floor.
     const Counts = struct {
         consumed: [max_counted]u8 = @splat(0),
         produced: [max_counted]u8 = @splat(0),
-        /// The publication read before any summary was, which every count
-        /// here was read under.
+        /// The publication every count here was read under.
         publication: u64 = 0,
     };
 
@@ -739,14 +735,14 @@ const CountedCleave = struct {
     /// runs in. Stops rather than run on counts that no longer hold.
     fn recheck(self: *CountedCleave, fiber: *Fiber) MachineError!void {
         const now = fiber.currentPublication();
-        if (now == self.publication) return;
+        if (now == self.counts.publication) return;
         const total = self.quotations.borrow().count();
         for (self.next..total) |step| {
             const index = switch (self.sharing) {
                 .cleave => step,
                 .spread => total - 1 - step,
             };
-            const again = try stack_summary.of(fiber, self.site, self.quotations.borrow().at(index));
+            const again = try stack_summary.of(fiber, self.quotations.borrow().at(index));
             const same = if (again) |summary|
                 summary.consumed == self.counts.consumed[index] and summary.produced == self.counts.produced[index]
             else
@@ -755,7 +751,7 @@ const CountedCleave = struct {
         }
         // A publication during the reads leaves them under two.
         if (fiber.currentPublication() != now) return stack_summary.failDefinitionsChanged(fiber);
-        self.publication = now;
+        self.counts.publication = now;
     }
     /// Copies the next quotation's inputs to the top of the stack.
     fn prepare(self: *CountedCleave, fiber: *Fiber) error{OutOfMemory}!void {
@@ -787,7 +783,7 @@ const CountedCleave = struct {
         fiber.chargeContinuationStep();
         // A publication while the quotation ran may have changed a word it
         // called, so its counts cannot be trusted to describe what it did.
-        if (fiber.currentPublication() != self.publication)
+        if (fiber.currentPublication() != self.counts.publication)
             return stack_summary.failDefinitionsChanged(fiber);
         // A summary that disagreed with what its quotation did would have
         // been read from a wrong effect declaration.
@@ -1309,12 +1305,12 @@ const IterationState = struct {
     index: usize = 0,
     count: usize,
     word: intern.TraceWord,
-    /// An iteration over a finite collection is atomic under its bindings.
-    plan: ?heap.Owned(machine.ResolutionPlan) = null,
+    /// What the call remembers of the phrases its quotation's words offer.
+    plan: heap.Owned(machine.ResolutionPlan),
 
     fn application(self: *IterationState, seeded: u32) Application {
         var application_value = machine.typedApplication(self, self.quotation.borrow(), self.site, seeded);
-        if (self.plan) |*plan| application_value.plan = plan.borrowMut();
+        application_value.driver.plan = self.plan.borrowMut();
         return application_value;
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
@@ -1983,7 +1979,7 @@ const StencilBootstrapDriver = struct {
                 self.fill_index += run;
                 return self.fill_index == control.width;
             },
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => return null,
+            .generic_spine, .dict, .task, .port, .address => return null,
         }
     }
 
@@ -2153,7 +2149,7 @@ fn nextWindow(fiber: *Fiber, control: *const StencilControl) error{OutOfMemory}!
                 },
             };
         },
-        .dict, .task, .port, .address, .reserved_mask => unreachable,
+        .dict, .task, .port, .address => unreachable,
     }
 }
 
@@ -2768,17 +2764,18 @@ fn createIteration(
     count: usize,
 ) error{OutOfMemory}!*IterationState {
     const state = try fiber.allocator.create(IterationState);
+    const code = quotation.take().list;
     state.* = .{
         .kind = kind,
         .left = .init(left.take()),
         .right = if (right) |item| .init(item.take()) else null,
-        .quotation = .init(quotation.take().list),
+        .quotation = .init(code),
         .expected = if (expected) |item| .init(item.take()) else null,
         .site = fiber.applicationSite(),
         .count = count,
         .word = fiber.active_word,
+        .plan = .init(.init(code)),
     };
-    state.plan = .init(.init(state.quotation.borrow()));
     return state;
 }
 

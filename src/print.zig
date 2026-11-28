@@ -147,7 +147,7 @@ pub const RenderCursor = struct {
                         try self.writeByte(writer, '[');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
-                    .dict, .task, .port, .address, .reserved_mask => unreachable,
+                    .dict, .task, .port, .address => unreachable,
                 },
                 .dict => |header| {
                     try self.writeByte(writer, '{');
@@ -795,7 +795,7 @@ fn isFlatRow(item: Value) bool {
     if (item != .list) return false;
     return switch (item.list.kind()) {
         .leaf_u8, .leaf_i64, .leaf_f64 => true,
-        .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
+        .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .port, .address => false,
     };
 }
 

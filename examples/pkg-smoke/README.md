@@ -12,7 +12,7 @@ offline.
 ```sh
 zig build -Doptimize=safe
 export ECL_CACHE="$PWD/.zig-cache/pkg-example-cache"
-./zig-out/bin/ecl --module-map apps/pkg/ecl.modules examples/pkg-smoke/seed-cache.ecl
+ECL_PATH=apps/pkg ./zig-out/bin/ecl examples/pkg-smoke/seed-cache.ecl
 cd examples/pkg-smoke
 ECL=../../zig-out/bin/ecl
 "$ECL" pkg sync --offline
@@ -20,13 +20,12 @@ ECL=../../zig-out/bin/ecl
 "$ECL" pkg verify
 "$ECL" pkg tree
 "$ECL" pkg why a.answer
-"$ECL" pkg vendor --offline
-"$ECL" main.ecl
 git diff --exit-code -- ecl.pkg ecl.lock
 ```
 
-Both executions print `42`. Synchronization and vendoring preserve the portable
-lock; generated dependency trees live in immutable local generations. The
-interpreter loads only `ecl.modules`. A fresh checkout of the manifest and lock
-reproduces the same graph when its pinned artifact is available. Dependency
-changes require `ecl pkg update`; ordinary sync never silently updates a lock.
+The execution prints `42`. Synchronization preserves the portable lock and
+unpacks the dependency beneath `.ecl/packages/`, where module search finds it;
+nothing is written for the interpreter to read. A fresh checkout of the
+manifest and lock reproduces the same graph when its pinned artifact is
+available. Dependency changes require `ecl pkg update`; ordinary sync never
+silently updates a lock.

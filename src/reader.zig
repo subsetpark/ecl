@@ -1,10 +1,8 @@
 //! Public reader facade over the single resumable implementation.
 const types = @import("reader_types.zig");
 const implementation = @import("reader_cursor.zig");
-const env = @import("env.zig");
 
 pub const Value = types.Value;
-pub const Header = types.Header;
 pub const Span = types.Span;
 pub const Diag = types.Diag;
 pub const Error = types.Error;
@@ -12,11 +10,9 @@ pub const Incomplete = types.Incomplete;
 pub const SpanTable = types.SpanTable;
 pub const SourceSlice = types.SourceSlice;
 pub const Parsed = types.Parsed;
-pub const HostParsed = types.HostParsed;
 pub const ReadResult = types.HostReadResult;
 pub const ReadCursor = implementation.ReadCursor;
 pub const ReadProgress = implementation.ReadProgress;
-pub const LexicalContext = implementation.LexicalContext;
 
 /// Accumulated source for a partly typed submission, and the only way to ask where
 /// a cursor sits inside one. Callers that need to know whether they are in a
@@ -25,7 +21,7 @@ pub const LexicalContext = implementation.LexicalContext;
 pub const PendingSubmission = implementation.PendingSubmission;
 
 /// The module constructor, whose operands end in a literal name.
-pub fn isRegistrationWord(bytes: []const u8) bool {
+fn isRegistrationWord(bytes: []const u8) bool {
     const std = @import("std");
     return std.mem.eql(u8, bytes, "@defm");
 }
@@ -54,22 +50,5 @@ pub const DeclarationScan = struct {
 
 /// Synchronous hosts drive the same explicit continuation to completion.
 /// Scheduler callers retain the cursor and advance it in bounded slices.
-pub fn read(
-    host: *const @import("heap.zig").HostCleanup,
-    source_name: []const u8,
-    source: []const u8,
-    diag: *Diag,
-) Error!ReadResult {
-    return implementation.read(host, source_name, source, diag);
-}
-
-pub fn readCode(
-    host: *const @import("heap.zig").HostCleanup,
-    source_name: []const u8,
-    source: []const u8,
-    diag: *Diag,
-    provenance_namespace: @import("heap.zig").CodeProvenanceNamespace,
-    symbol_linker: ?env.SymbolLinker,
-) Error!ReadResult {
-    return implementation.readCode(host, source_name, source, diag, provenance_namespace, symbol_linker);
-}
+pub const read = implementation.read;
+pub const readCode = implementation.readCode;

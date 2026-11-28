@@ -4,6 +4,7 @@ import gzip
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import ssl
 import subprocess
@@ -68,32 +69,20 @@ def main():
             caller.mkdir()
             scratch = root / 'scratch'
             scratch.mkdir()
-            module_map = caller / 'map'
-            module_map.write_text(
-                "{format 1 local \"root\" scopes {\"root\" {root "
-                + json.dumps(str(extension.parent))
-                + " visible [] sources [] artifacts [{path "
-                + json.dumps(extension.name) + " kind native exports [\"git\"]}]}}}"
-            )
+            native = root / 'native'
+            native.mkdir()
+            shutil.copy2(extension, native / 'git.eclmod')
+            search = str(native)
             origin = f'https://127.0.0.1:{server.server_port}'
 
             if args.application:
                 entry = args.application.resolve()
-                module_map.write_text(
-                    "{format 1 local \"application\" scopes {\"application\" {root "
-                    + json.dumps(str(entry.parents[2]))
-                    + " visible [\"native\"] sources [\"src/**/*.ecl\" "
-                    + json.dumps(str(entry.relative_to(entry.parents[2])))
-                    + "] artifacts []} \"native\" {root "
-                    + json.dumps(str(extension.parent))
-                    + " visible [] sources [] artifacts [{path "
-                    + json.dumps(extension.name) + " kind native exports [\"git\"]}]}}}"
-                )
-                for name in ['ecl.pkg', 'ecl.lock', 'ecl.modules']:
+                for name in ['ecl.pkg', 'ecl.lock']:
                     (caller / name).write_text('corrupt caller state')
                 result = subprocess.run(
-                    [binary, '--module-map', str(module_map), 'test', '--runner', 'pkg.test.fetch.run', '--', origin + '/repo.git', commit],
-                    cwd=caller, env={**os.environ, 'ECL_WORKERS': '4', 'ECL_GIT_CA_FILE': str(certs / 'ca.pem'), 'TMPDIR': str(scratch)},
+                    [binary, 'test', '--runner', 'pkg.test.fetch.run', '--', origin + '/repo.git', commit],
+                    cwd=caller, env={**os.environ, 'ECL_WORKERS': '4', 'ECL_GIT_CA_FILE': str(certs / 'ca.pem'), 'TMPDIR': str(scratch),
+                                     'ECL_PATH': os.pathsep.join([str(entry.parents[2]), search])},
                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
                 )
                 assert result.returncode == 0, (result.stdout, result.stderr)
@@ -112,8 +101,8 @@ def main():
 
             def invoke(source, ok=True):
                 result = subprocess.run(
-                    [binary, '--module-map', str(module_map), '-e', source], cwd=caller,
-                    env={**os.environ, 'ECL_WORKERS': '4'}, stdin=subprocess.DEVNULL,
+                    [binary, '-e', source], cwd=caller,
+                    env={**os.environ, 'ECL_WORKERS': '4', 'ECL_PATH': search}, stdin=subprocess.DEVNULL,
                     capture_output=True, text=True, timeout=20,
                 )
                 assert result.returncode in ((0,) if ok else (1, 2)), (result.returncode, result.stderr)
@@ -205,10 +194,10 @@ def main():
             # io.stdin after the server enters its stalled handler. Both the
             # handler wait and request timeout exceed the child's exit budget.
             with subprocess.Popen(
-                [binary, '--module-map', str(module_map), '-e',
+                [binary, '-e',
                  begin + "io.stdin pop x port.cancel (x port.result) @attempt "
                  "`err at `kind at x port.close p port.close"],
-                cwd=caller, env={**os.environ, 'ECL_WORKERS': '4'},
+                cwd=caller, env={**os.environ, 'ECL_WORKERS': '4', 'ECL_PATH': search},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True,
             ) as child:

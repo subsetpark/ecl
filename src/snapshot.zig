@@ -60,17 +60,6 @@ pub fn Publisher(comptime T: type) type {
             reader: Reader,
             active: bool = true,
 
-            /// A second lease on the same snapshot, counted under the same
-            /// epoch. Sound because this lease keeps that epoch's count
-            /// nonzero, so nothing it observes can be reclaimed before the
-            /// clone is counted.
-            pub fn clone(self: *const Lease) Lease {
-                std.debug.assert(self.active);
-                const old = @constCast(self.publisher).readers[self.reader.epoch].fetchAdd(1, .seq_cst);
-                std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-                return .{ .publisher = self.publisher, .snapshot = self.snapshot, .reader = self.reader };
-            }
-
             /// Returns true when this reader emptied its epoch. The caller
             /// then rotates under its writer lock, and reclaims what the
             /// rotation hands back after releasing that lock.

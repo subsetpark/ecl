@@ -28,7 +28,6 @@ pub const HeapKind = enum(u8) {
     task,
     port,
     address,
-    reserved_mask,
 };
 
 /// The heap representation is deliberately opaque outside heap.zig. Values
@@ -178,7 +177,7 @@ pub const Value = union(Tag) {
         if (self != .list) return false;
         return switch (self.list.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
-            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => false,
+            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address => false,
         };
     }
 };
@@ -192,6 +191,6 @@ pub fn unicodeScalar(codepoint: u64) ?u21 {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-    if (@typeInfo(HeapKind).@"enum".field_names.len != 12)
+    if (@typeInfo(HeapKind).@"enum".field_names.len != 11)
         @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }

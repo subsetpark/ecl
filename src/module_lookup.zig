@@ -1,106 +1,32 @@
-//! Named module observation: which registry, catalog, and embedded library a
-//! module name is looked up in, and in what order.
+//! Named module observation: the embedded library a module name is reserved
+//! for, and a registry lookup that holds the view it reads.
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const modules = @import("modules.zig");
-const native_module = @import("native_module.zig");
 const poll_api = @import("poll.zig");
 const stdlib = @import("stdlib.zig");
-const map_state = @import("module_snapshot.zig");
 
-/// The libraries a named module lookup consults before the registry.
-pub const EmbeddedLibraries = union(enum) {
-    bundled,
-    registered: *native_module.Loader,
-    pub fn find(self: EmbeddedLibraries, name: intern.ModuleName) ?stdlib.Entry {
-        if (stdlib.find(intern.get(intern.moduleId(name)))) |entry| return entry;
-        switch (self) {
-            .bundled => {},
-            .registered => |loader| if (loader.registeredDescriptor(name)) |descriptor| return .{ .native = descriptor },
-        }
-        return null;
-    }
-};
+/// The embedded standard-library module `name`, which a named module lookup
+/// consults before the registry.
+pub fn embeddedLibrary(name: intern.ModuleName) ?stdlib.Entry {
+    return stdlib.find(intern.get(intern.moduleId(name)));
+}
 
-pub const ModuleLookupCursor = struct {
-    registry: *modules.Registry,
-    /// The captured view public lookups read, when the lookup belongs to one
-    /// binding; a fresh snapshot otherwise.
-    view: ?modules.View = null,
-    libraries: EmbeddedLibraries,
-    project: ?*const map_state.Snapshot,
-    context: modules.RegistrationProvenance,
-    name: intern.ModuleName,
-    state: union(enum) {
-        catalog: map_state.LookupCursor,
-        public: modules.Registry.AcquireCursor,
-        complete,
-    },
+/// A named module lookup that holds the view it reads, for a primitive that
+/// has no resolution's view to borrow.
+pub const HeldModuleLookup = struct {
+    view: modules.View,
+    cursor: modules.ModuleCursor,
     pub const owned_disposal: heap.OwnedDisposal = .deinit;
 
-    pub fn init(registry: *modules.Registry, project: ?*const map_state.Snapshot, libraries: EmbeddedLibraries, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
-        var result: ModuleLookupCursor = .{ .registry = registry, .libraries = libraries, .project = project, .context = context, .name = name, .state = .complete };
-        result.beginPublic();
-        return result;
+    /// The registration found is borrowed from `view`, which the caller may
+    /// take before releasing the rest.
+    pub fn advance(self: *HeldModuleLookup) poll_api.Progress(?modules.Generation) {
+        return self.cursor.advance();
     }
 
-    /// A lookup whose public registry reads come from `view`.
-    pub fn initIn(view: *const modules.View, registry: *modules.Registry, project: ?*const map_state.Snapshot, libraries: EmbeddedLibraries, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
-        var result: ModuleLookupCursor = .{ .registry = registry, .view = view.clone(), .libraries = libraries, .project = project, .context = context, .name = name, .state = .complete };
-        result.beginPublic();
-        return result;
-    }
-
-    fn publicCursor(self: *const ModuleLookupCursor) modules.Registry.AcquireCursor {
-        if (self.view) |*captured| return captured.acquireCursor(self.name);
-        return self.registry.acquireCursor(self.name);
-    }
-
-    fn beginPublic(self: *ModuleLookupCursor) void {
-        if (self.project) |project| {
-            if (self.libraries.find(self.name) == null and
-                !(if (self.context.sourceScope()) |source| source.exports(self.name) else false))
-            {
-                self.state = .{ .catalog = project.lookupCursor(self.context.scopeId(), intern.get(intern.moduleId(self.name))) };
-                return;
-            }
-        }
-        self.state = .{ .public = self.publicCursor() };
-    }
-
-    pub fn advance(self: *ModuleLookupCursor) poll_api.Progress(?modules.GenerationLease) {
-        return switch (self.state) {
-            .catalog => |*cursor| switch (cursor.advance()) {
-                .pending => .pending,
-                .complete => |outcome| result: {
-                    cursor.deinit();
-                    self.state = .complete;
-                    if (outcome == .matched and self.project.?.artifactCommitted(outcome.matched.artifact_id)) {
-                        self.state = .{ .public = self.publicCursor() };
-                        break :result .pending;
-                    }
-                    break :result .{ .complete = null };
-                },
-            },
-            .public => |*cursor| switch (cursor.advance()) {
-                .pending => .pending,
-                .complete => |generation| result: {
-                    cursor.deinit();
-                    self.state = .complete;
-                    break :result .{ .complete = generation };
-                },
-            },
-            .complete => unreachable,
-        };
-    }
-
-    pub fn deinit(self: *ModuleLookupCursor) void {
-        switch (self.state) {
-            .public => |*cursor| cursor.deinit(),
-            .catalog => |*cursor| cursor.deinit(),
-            .complete => {},
-        }
-        if (self.view) |*captured| captured.deinit();
+    pub fn deinit(self: *HeldModuleLookup) void {
+        self.view.deinit();
         self.* = undefined;
     }
 };

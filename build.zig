@@ -52,6 +52,20 @@ fn addCheckCommand(b: *std.Build, name: []const u8, rerun: Rerun) *std.Build.Ste
     return run;
 }
 
+/// Runs one runner of the package application's acceptance as `ecl test` in
+/// a fresh build-owned directory, with the application's directory on
+/// ECL_PATH.
+fn addPkgAcceptance(b: *std.Build, exe: *std.Build.Step.Compile, name: []const u8, runner: []const u8) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{ "sh", "-c", "ECL_PATH=\"$(cd \"$1\" && pwd)\" exec \"$2\" test --runner \"$3\" >&2", "sh" });
+    run.setName(name);
+    captureCheck(run, .always);
+    run.addDirectoryArg(b.path("apps/pkg"));
+    run.addArtifactArg(exe);
+    run.addArg(runner);
+    run.setCwd(b.tmpPath());
+    return run;
+}
+
 /// Runs a test artifact as a captured check; the test runner reports on stderr.
 fn addTestRun(b: *std.Build, tests: *std.Build.Step.Compile) *std.Build.Step.Run {
     const run = b.addRunArtifact(tests);
@@ -136,16 +150,25 @@ pub fn build(b: *std.Build) void {
     tutorial.root_module.link_libc = true;
     native_fixture_step.dependOn(native_build.installExtension(b, tutorial, "native-fixture"));
     _ = fixture_files.addCopyFile(tutorial.getEmittedBin(), "tutorial.eclmod");
-    const instance_fixture = native_build.addExtension(b, .{
-        .name = "instanceprobe",
-        .root_source_file = b.path("test/native/instance_dynamic.zig"),
-        .target = target,
-        .optimize = optimize,
-        .ecl_native = native_sdk,
-    });
-    instance_fixture.root_module.link_libc = true;
-    native_fixture_step.dependOn(native_build.installExtension(b, instance_fixture, "native-fixture"));
-    _ = fixture_files.addCopyFile(instance_fixture.getEmittedBin(), "instanceprobe.eclmod");
+    // The instance probe and two separately loaded modules from the same
+    // source: one with only a cooperative resource, and one whose resources
+    // are issued by an instance foreign to the probe's.
+    for ([_]struct { library: []const u8, module: []const u8, root: []const u8 }{
+        .{ .library = "instanceprobe", .module = "instanceprobe", .root = "test/native/instance_dynamic.zig" },
+        .{ .library = "cooperativeprobe", .module = "cooperative.probe", .root = "test/native/cooperative_dynamic.zig" },
+        .{ .library = "loanforeign", .module = "loanforeign", .root = "test/native/loanforeign_dynamic.zig" },
+    }) |probe| {
+        const instance_fixture = native_build.addExtension(b, .{
+            .name = probe.library,
+            .root_source_file = b.path(probe.root),
+            .target = target,
+            .optimize = optimize,
+            .ecl_native = native_sdk,
+        });
+        instance_fixture.root_module.link_libc = true;
+        native_fixture_step.dependOn(native_build.installExtension(b, instance_fixture, "native-fixture"));
+        _ = fixture_files.addCopyFile(instance_fixture.getEmittedBin(), b.fmt("{s}.eclmod", .{probe.module}));
+    }
     const native_fixture_options = namedOptions(b, "native fixture options");
     native_fixture_options.addOptionPathDirectory(
         "directory",
@@ -169,7 +192,6 @@ pub fn build(b: *std.Build) void {
     archive_fixture_options.addOption([]const u8, "malformed_pax", @embedFile("test/fixtures/archive/malformed-pax.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "malformed", @embedFile("test/fixtures/archive/malformed.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "long_path", "pkg/" ++ (&@as([110]u8, @splat('s'))) ++ ".ecl");
-    archive_fixture_options.addOption([]const u8, "package_valid", @embedFile("test/fixtures/pkg/valid.tgz.hex"));
 
     const malformed_defects = [_][]const u8{
         "wrong-name",
@@ -364,7 +386,6 @@ pub fn build(b: *std.Build) void {
             .install_subdir = "share/ecl/apps/pkg/src",
         });
         b.installFile("apps/pkg/main.ecl", "share/ecl/apps/pkg/main.ecl");
-        b.installFile("apps/pkg/installed.modules", "share/ecl/apps/pkg/ecl.modules");
         b.getInstallStep().dependOn(native_build.installExtension(b, extension, "share/ecl/apps/pkg"));
         const pkg_git_acceptance = addCheckCommand(b, "pkg git acceptance", .always);
         pkg_git_acceptance.addArgs(&.{ "python3", "test/package_git_application.py" });
@@ -469,10 +490,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const test_options = namedOptions(b, "test runtime options");
-    test_options.addOption(usize, "default_worker_count", 1);
-    test_options.addOption(bool, "instrument_root_execution", false);
-    configureRuntime(test_mod, native_abi, native_sdk, test_options);
+    configureRuntime(test_mod, native_abi, native_sdk, runtime_options);
     addTestInputs(test_mod, &test_imports, &test_fixture_inputs);
     const tests = addEclTest(b, .{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
@@ -495,34 +513,25 @@ pub fn build(b: *std.Build) void {
     );
     ecl_test_step.dependOn(&run_ecl_tests.step);
     test_step.dependOn(&run_ecl_tests.step);
+    // The application's directory is the project its policy tests run in.
     const run_pkg_tests = addCheckCommand(b, "ecl pkg tests", .always);
     run_pkg_tests.addArtifactArg(exe);
-    run_pkg_tests.addArg("--module-map");
-    run_pkg_tests.addFileArg(b.path("apps/pkg/test/ecl.modules"));
     run_pkg_tests.addArg("test");
+    run_pkg_tests.setCwd(b.path("apps/pkg"));
     const pkg_test_step = b.step("test-pkg-app", "Run package application policy through ECL's built-in test runner");
     pkg_test_step.dependOn(&run_pkg_tests.step);
     test_step.dependOn(&run_pkg_tests.step);
-    // Full generation verification repeatedly inspects sealed archives. Keep this
-    // public ECL acceptance outside the fast precommit policy-test tier.
-    const run_pkg_generations = addCheckCommand(b, "ecl pkg generations", .always);
-    run_pkg_generations.addArtifactArg(exe);
-    run_pkg_generations.addArg("--module-map");
-    run_pkg_generations.addFileArg(b.path("apps/pkg/test/acceptance/ecl.modules"));
-    run_pkg_generations.addArgs(&.{ "test", "--runner", "pkg.test.generation.run" });
-    const pkg_generation_step = b.step("test-pkg-generation", "Run offline generation, lock selection, and verification acceptance in ECL");
-    pkg_generation_step.dependOn(&run_pkg_generations.step);
-    test_step.dependOn(&run_pkg_generations.step);
-    // The command workflow initializes a project in its working directory, so
-    // it runs in a fresh build-owned temporary directory. The application
-    // resolves relative cache and temporary settings against that directory,
-    // which keeps every write out of the caller's real cache.
-    const pkg_command_acceptance = addCheckCommand(b, "ecl pkg command acceptance", .always);
-    pkg_command_acceptance.addArtifactArg(exe);
-    pkg_command_acceptance.addArg("--module-map");
-    pkg_command_acceptance.addFileArg(b.path("apps/pkg/test/acceptance/command.modules"));
-    pkg_command_acceptance.addArgs(&.{ "test", "--runner", "pkg.test.command.run" });
-    pkg_command_acceptance.setCwd(b.tmpPath());
+    // Installation and the command workflow each work in a fresh build-owned
+    // temporary directory and find the application's modules on ECL_PATH.
+    // Full installation verification repeatedly inspects archives, so it
+    // stays outside the fast precommit policy-test tier. The application
+    // resolves relative cache and temporary settings against the working
+    // directory, which keeps every write out of the caller's real cache.
+    const run_pkg_install = addPkgAcceptance(b, exe, "ecl pkg install acceptance", "pkg.test.install.run");
+    const pkg_install_step = b.step("test-pkg-install", "Run offline installation, lock selection, and verification acceptance in ECL");
+    pkg_install_step.dependOn(&run_pkg_install.step);
+    test_step.dependOn(&run_pkg_install.step);
+    const pkg_command_acceptance = addPkgAcceptance(b, exe, "ecl pkg command acceptance", "pkg.test.command.run");
     pkg_command_acceptance.setEnvironmentVariable("ECL_CACHE", "cache");
     pkg_command_acceptance.setEnvironmentVariable("TMPDIR", ".");
     const pkg_command_step = b.step("test-pkg-application", "Run the package application's command acceptance through ECL tests");
@@ -637,7 +646,7 @@ pub fn build(b: *std.Build) void {
             // panics and sanitizer crashes still retain their diagnostics.
             .error_tracing = false,
         });
-        configureRuntime(fuzz_mod, native_abi, native_sdk, test_options);
+        configureRuntime(fuzz_mod, native_abi, native_sdk, runtime_options);
         fuzz_mod.addOptions("native_runtime_options", native_runtime_options);
         const fuzz_tests = b.addTest(.{
             .root_module = fuzz_mod,
@@ -663,7 +672,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .safe,
     });
-    configureRuntime(oom_mod, native_abi, native_sdk, test_options);
+    configureRuntime(oom_mod, native_abi, native_sdk, runtime_options);
     addTestInputs(oom_mod, &.{.{ .name = "native-instance", .module = native_instance }}, &host_fixture_inputs);
     const oom_tests = addEclTest(b, .{
         .root_module = oom_mod,
@@ -922,7 +931,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .safe,
         .sanitize_thread = tsan_supported,
     });
-    configureRuntime(tsan_mod, tsan_native.abi, tsan_native.sdk, test_options);
+    configureRuntime(tsan_mod, tsan_native.abi, tsan_native.sdk, runtime_options);
     const tsan_imports = [_]std.Build.Module.Import{
         .{ .name = "minish", .module = b.dependency("minish", .{ .optimize = .safe }).module("minish") },
         .{ .name = "native-sample", .module = tsan_native.sample },
@@ -1111,7 +1120,6 @@ pub fn build(b: *std.Build) void {
             "dict.test.",
             "equal.test.",
             "print.test.",
-            "module_map.test.",
             "spans.test.",
             "env.test.",
             "console.test.",
@@ -1338,17 +1346,18 @@ pub fn build(b: *std.Build) void {
         "sh", "-c", "command -v zlint >/dev/null || exit 0; " ++ lint_sources,
     });
 
-    // CLI acceptance launches copies of the binary under test from ECL, so it
-    // runs in a fresh build-owned directory where each test owns a subdirectory.
-    const cli_acceptance = addCheckCommand(b, "ecl cli acceptance", .always);
+    // CLI acceptance launches copies of the binary under test from ECL. Its
+    // files are a project of their own, copied into a fresh build-owned
+    // directory where each test owns a subdirectory.
+    const cli_acceptance = b.addSystemCommand(&.{ "sh", "-c", "cp -R \"$1\"/. . && exec \"$2\" test >&2", "sh" });
+    cli_acceptance.setName("ecl cli acceptance");
+    captureCheck(cli_acceptance, .always);
+    cli_acceptance.addDirectoryArg(b.path("test/cli-acceptance"));
     cli_acceptance.addArtifactArg(exe);
-    cli_acceptance.addArg("--module-map");
-    cli_acceptance.addFileArg(b.path("test/cli-acceptance/ecl.modules"));
-    cli_acceptance.addArg("test");
     cli_acceptance.setCwd(b.tmpPath());
     const cli_acceptance_step = b.step(
         "test-cli-acceptance",
-        "Verify installed dispatch, host metadata, module-map validation, and package publication through the public CLI",
+        "Verify installed dispatch and host metadata through the public CLI",
     );
     cli_acceptance_step.dependOn(&cli_acceptance.step);
 

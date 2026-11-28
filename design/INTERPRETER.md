@@ -114,7 +114,7 @@ That state owns:
   state belongs to the native-module owner.
 
 Grouping these objects under one owner correlates every dependent lifetime.
-Values, module pins, source cursors, task cells, and deferred destruction all
+Values, module views, source cursors, task cells, and deferred destruction all
 lead back to the same allocation and reclamation root. Callers receive that
 pairing as one fact, while worker code receives a narrower authority that can
 advance bounded reclamation and cannot drain or destroy the root.
@@ -157,8 +157,8 @@ Fibers. The CLI captures its startup directory and environment snapshot once
 and shares those inputs across every execution entrypoint. One private CLI
 runtime owns writer buffers, writers, named-root storage, and its Session. It
 is initialized at its final address and remains there until Session teardown
-releases every borrow. Failed construction retains no live Session. Module-map
-discovery begins at that startup directory.
+releases every borrow. Failed construction retains no live Session. Project
+root discovery begins at that startup directory.
 
 Host operations are exposed to executing code through narrow facades. A Fiber
 may enqueue work, write through the console, load through the module loader, or
@@ -441,8 +441,8 @@ entry, so their errors omit position and preserve the precision of the
 available evidence.
 Moving or destroying a value cannot leave a raw source pointer behind. Source
 slices retain their backing allocation, while cursors over independently
-published module and environment storage carry the corresponding leases or
-generation pins.
+published module and environment storage hold the registry view that keeps
+that storage.
 
 Only the archive that read a code object may assign or interpret its code
 identity. Absorption validates a complete reader result before publication,
@@ -590,7 +590,7 @@ Release drop before reuse begins.
 
 There is no tracing collector. Lists and dictionaries are built bottom-up;
 ordinary words retain scope identities; and module ownership uses opaque homes,
-pins, and non-owning directory identities. Those representation constraints
+views, and non-owning directory identities. Those representation constraints
 keep environment cycles outside the value graph. A proposed value or binding
 edge must be reviewed against the acyclicity argument. The known exception is a
 task whose result contains its own handle; that creates one bounded self-cycle
@@ -649,15 +649,14 @@ current definitions.
 
 Definitions live in roots: the session, each module, and core. A word's
 link is the id of a cell in a table the Session's `Env` owns. A cell records
-where the word was written: the `ScopeId` of the root, the source whose text
-it came from, and its spelling. One root, source, and spelling always yield
-the same cell, so a link stands for a place rather than for one occurrence.
-`Env` is the only minter of cells, and every producer of words obtains links
-through a linker built for one root and one source. The reader links each
-occurrence as it reads it, with the source being read; a module construction
-body is relinked to its module's name and its image's source; a word built at run
-time is linked as the activation that built it would have written it; and one
-the implementation builds for itself links to nothing and means core. Copying,
+where the word was written: the `ScopeId` of the root and its spelling. One
+root and spelling always yield the same cell, so a link stands for a place
+rather than for one occurrence. `Env` is the only minter of cells, and every
+producer of words obtains links through a linker built for one root. The
+reader links each occurrence as it reads it; a module construction body is
+relinked to its module's name; a word built at run time is linked as the
+activation that built it would have written it; and one the implementation
+builds for itself links to nothing and means core. Copying,
 moving, or splicing a word copies its link, so a single quotation may contain
 words from several places.
 
@@ -676,9 +675,7 @@ context.
 Cells are appended and neither move nor die before the `Env`, and their ids
 are issued monotonically below the link's flag bits. Reading a cell from its
 id is an index, with no hash and no lock; finding the cell for a place is a
-keyed lookup that only producers of links pay. A source is an opaque value to
-`Env`: the registry encodes a registration provenance into it and is the only
-decoder.
+keyed lookup that only producers of links pay.
 
 What a spelling is as a word is a function of its bytes: a plain name, `core.`
 and a name, a module name and a binding name, or none of these. The intern
@@ -704,20 +701,18 @@ definition. A definition is sealed by its constructor, so every holder of one
 holds code that execution, publication, and reflection can read, and a
 directory never holds an entry that is not one. Creating a definition reads
 nothing of its body's words; each resolves when it is reached, so a body may
-call itself or a word defined later. The one check of a body is of a
-host-built module's literal table entry, which is refused when it executes a
-word.
+call itself or a word defined later.
 
 A module's definition carries its root by value: the scope of the module's
-name and the provenance of the registration that made it. An activation of
-the definition is built from those two alone, so a definition holds nothing
-of the image that owns it.
+name, and what the unit that registered it could register, which marks a
+standard-library module. An activation of the definition is built from its
+root alone, so a definition holds nothing of the image that owns it.
 
 Ownership follows the root. Core's definitions live as long as the `Env`.
 Every other definition is counted. The session's directory owns one reference
 to each top-level definition, and a module image owns one to each of its own;
-an image is owned in turn by the directories that map it, by leases and pins
-on it, and by its construction. Replacing a definition or a registration
+an image is owned in turn by the directories that map it and by its
+construction. Replacing a definition or a registration
 therefore reclaims the old one once the last directory that reaches it is
 reclaimed and nothing else holds it. Two rules keep running code safe. Within
 a turn, the turn is a reader of the registry's directories, so whatever it
@@ -732,20 +727,16 @@ The resolver resolves one word: by its link to a root, then the root's
 directory and core, or, for a dotted spelling, a module registration and its
 public entry; `core.` selects core alone. It scans no spelling: it begins at
 the lookup the word's spelling was decided to select. A module root is looked up by name
-in the captured snapshot, with no visibility check, and the word in that
-image's directory, private names included; an unregistered name leaves core
-alone. A name alias is followed through the
+in the captured snapshot, and the word in that image's directory, private
+names included; an unregistered name leaves core alone. A name alias is followed through the
 same resolver, as the module holding it would resolve it, and one whose module
 is `core` as the spelling `core.x`; Brent's algorithm
 detects a cycle without bounding the length of an acyclic chain.
 
-Whose view of the module map finds a module is a property of the word, never
-of the site resolving it: the source its cell records, and the holding
-module's source along an alias chain. A word with no cell has no source. A primitive that takes a module name
-keeps the operand's link and looks the module up as that symbol's source. A
-miss that a load might cure reports the view it searched under, and the load
-asks as that view, so a load can succeed only where the lookup that follows it
-will.
+A module name means one registration wherever a word naming it was written
+or runs, so the answer is a function of the cell's root and name alone. A miss
+on an unregistered module is one a load might cure; the load runs and the
+lookup is made again.
 
 The resolver has one mode and no construction state: it answers with a
 published definition or a miss, and nothing that is not yet published is
@@ -765,7 +756,7 @@ the same resolver against the current view.
 A cell holds, beside its place, the definition its word resolves to now, or
 nothing; for a builtin that belongs to no module it also holds the builtin's
 code. Invariant: a filled cell holds exactly what the resolver answers for the
-cell's root, source, and name against the current directory, at every instant
+cell's root and name against the current directory, at every instant
 a fiber can read it. A cell borrows. Directories and images own definitions,
 and a turn's standing as a reader is what keeps one read from a cell alive.
 
@@ -833,14 +824,14 @@ up. Dispatch and `execute` resolve an empty cell in bounded steps and may load
 a module; a reader that looks before the word runs resolves it in one call
 and reads a miss as a word it knows nothing of.
 
-A word with no link has a cell too: the one for its spelling written in core
-by no source, which is the place the resolver gives such a word. It is found,
+A word with no link has a cell too: the one for its spelling written in core,
+which is the place the resolver gives such a word. It is found,
 or minted, when the word runs, by the keyed lookup every producer of links
 pays, so the word then runs as a linked one does.
 
 What these readers get is borrowed for the turn (§9) and is not kept past it.
 What a fiber remembers of a source word across turns holds no definition: the
-summary of the word's body run in one root, in a table of constant size found
+summary of the word's body, in a table of constant size found
 by the definition's address and good for one value of the publication counter. Under
 one value an address read from a cell or a directory is one definition's:
 another definition can take the address only once the first is reclaimed, and
@@ -848,39 +839,46 @@ it becomes readable only in a publication, which advances the counter first.
 
 ### An execution site is the current root
 
-An activation runs in one root, and its `ExecutionSite` identifies it by that
-root's scope. The scope is where the activation's own definitions land. `Env`
-owns one scope per module name for the life of the Session, recording the
-name and the scope id words written in the module carry. When an activation's
-scope is a module's, that module is the one whose code is running, and the
-site derives it from the scope instead of carrying it: an activation cannot
-run in one module's scope as another module, or as none.
+An activation runs in one root, and its `ExecutionSite` is that root's scope
+id, the same id the words written there carry. The scope is
+where the activation's own definitions land. Core, the session, and each
+module name have one id for the life of the `Env`; an id is a label, not
+counted and never retired, and the `Env` answers which root it denotes. When
+an activation's scope is a module's, that module is the one whose code is
+running, and the site derives it from the scope instead of carrying it: an
+activation cannot run in one module's scope as another module, or as none.
+Core's scope is the bootstrap fiber's, which alone holds the authority to
+publish into core while it is built.
 
 No site and no definition refers to an image; the one frame that holds one is
-a construction boundary, which owns the image it stages. The few readers that
+a construction boundary, which owns the image its body stages until the body
+completes and sealing takes it. The few readers that
 need an image find it. A definition word finds the image being staged through
 the open construction boundary whose image has the current scope, and
-reflection finds the module's current registration by name, under a lease.
+reflection finds the module's current registration by name, in a view it
+holds.
 
-A module word runs in its module's scope, under the provenance its definition
-carries. Every other word runs at its caller's
-site unchanged, and a quotation applied as a value, by `apply`, a combinator,
-`@attempt`, or a resumed load, runs in its caller's root without the caller's
-embedded registration trust. A task runs in its spawner's root; a protected
-test invocation runs as its module, under the provenance of the registration
-its body was read from. A fiber records which of these
-its root activation is as one tagged value.
+A module word runs in its module's scope. Every other word runs at its
+caller's site unchanged, and so does a quotation applied as a value, by
+`apply`, a combinator, `@attempt`, or a resumed load. A task runs in its
+spawner's root; a protected test invocation runs as its module. A fiber
+records which of these its root activation is as one tagged value.
 
-Whether definitions may land is a flag on the site, set only where a root is
-entered: a root fiber and module construction set it, and a task clears it,
-because a task runs in its spawner's root without owning it. Everything else,
-every combinator application and `@attempt` included, inherits it unchanged,
-so whether a word may define never depends on which combinator reached it.
+Whether definitions may land follows from the fiber and the root alone. A
+task may not define in the session, because it runs in its spawner's root
+without owning it; a module's scope admits definitions only while its
+construction stages them, whichever fiber runs it. No combinator application
+or `@attempt` changes either, so whether a word may define never depends on
+which combinator reached it, and a site is nothing but the root's scope id.
 
-A site's registration provenance is authority, not lookup context: it says
-what the running code may register, and it is the source recorded for the
-words that code builds at run time. Where a word resolves, and which modules
-it may reach, is carried by the word.
+A site carries no authority. What `@defm` may register is the fiber's
+registrant: the unit it is running. Entering a registering load sets it to
+what that load may register, a found file or the standard library, and
+leaving the load, by completing or unwinding, restores the value its frame
+saved; a `@load` boundary does the same with ordinary code. A task starts as
+ordinary code. Nothing per word or per evaluation carries it, so dispatch,
+`execute`, and resumed lookups pay nothing for it, and a prelude wrapper
+lends no authority: it runs in its caller's unit.
 
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.
@@ -896,9 +894,9 @@ that scope, as the module's code does once registered. While its construction bo
 cannot run a definition it has made. When the body completes, the module is
 sealed: the staged names become the image's directory, and a name staged
 twice fails construction. Sealing reads no body. The image
-stays in its construction frame throughout, and the frame's unwind discards it
-on failure, so a failure never registers part of a module. A construction
-body that leaves values on its stack is refused
+is owned by its construction frame while the body runs and by the sealing work
+after it, and either discards it on failure, so a failure never registers part
+of a module. A construction body that leaves values on its stack is refused
 before sealing, so no image carries state out of its body.
 
 Module documentation is a property of the image, like its name. A source
@@ -926,33 +924,28 @@ and gains no module lifecycle by being nameable: the registry refuses the exact
 name `core`, which is the single boundary that owns registry names, so no later
 registration can capture the qualifier.
 
-### Module visibility belongs to the defining source
+### Module search is scanned once
 
-A Session owns one immutable validated module map and the source identities
-minted from it. The generic validator owns inert decoding, reference integrity,
-path rules, direct visibility edges, uniqueness, and size limits. Discovery and
-explicit selection share this boundary. A reference is limited to one hop;
-each document owns the base directory for its paths. No runtime component reads
-package manifests, locks, cache metadata, or recovery records.
+A Session owns its search path and at most one catalog scanned from it, both
+for the Session's life. The first lookup that misses the registry and the
+embedded library scans as ordinary bounded work of the fiber that needs it,
+one directory entry, and at most one bounded file read and inert parse, per
+step; it publishes the catalog with a compare-and-swap, so racing scans
+converge on the first published and the rest are discarded. A published
+catalog is immutable apart from each file's loaded flag. A failed scan is
+published too, so every later lookup reports the same bound.
 
-Local source discovery and public source inspection share the reader's inert
-declaration scanner. It observes adjacent top-level forms without executing
-code or descending into containers. Literal names retain order and duplicates;
-the consuming schema owns export validation. Public inspection materializes
-results in bounded passes with ordinary driver retirement.
+The scan shares the reader's inert declaration scanner with public source
+inspection. It observes adjacent top-level forms without executing code or
+descending into containers. A file's declarations are ordered by nominal
+module-name ID for bounded membership checks, and finding a name inspects
+each declaration once.
 
-The Session's snapshot consumes the validated map on successful construction;
-on failure the caller retains it. Each artifact owns its absolute source
-identity and commitment state. Public exports are ordered by
-nominal module-name ID for bounded membership checks. Lookup and local-source
-cursors advance by one export, edge, or artifact, retaining lexical context
-across scheduler suspension. Already-published modules pass the same visibility
-check as cold loads.
-
-ECL and native artifacts commit through their loading lease before another
-loader can observe completion. Provenance carries the artifact's publication
-identity. Failed loads publish neither partial public registrations nor a
-committed artifact; retry uses the same source identity.
+A found file loads under its own loading lease, and is recorded loaded only
+after every module it declares is found registered, so a racing request waits
+for it and `ecl test` never runs it twice. A registration made before a load
+failed stays, as one made by a failing `@load` does. No runtime component
+reads package manifests, locks, or cache metadata.
 
 An import is a directory entry that refers to its target by module name and
 binding name. Publishing one loads no module and reads no other directory; the
@@ -960,16 +953,10 @@ resolver follows the entry when its word is reached, and loads the target then.
 A load therefore never waits on a module that imports from it, and modules that
 import from each other need no loading order.
 
-Standalone validation owns bounded input and the validated map through a host
-cleanup owner without constructing a Session. An unpublished document supplies
-its intended filename as the relative-path base; validation does not require
-or publish that file. The same validator handles file and stdin input, including
-the one-reference limit and inert discovery of live sources.
-
 Installed-application dispatch looks only beneath the executable's installation
-prefix, before Session construction. An application directory's `main.ecl` and
-`ecl.modules` are the entry source and complete map; the startup directory
-remains the caller's.
+prefix, before Session construction. An application directory's `main.ecl` is
+the entry source, and the directory is the Session's whole search path; the
+startup directory remains the caller's.
 This keeps application resolution independent of project discovery without
 granting a separate execution mode or application-specific runtime authority.
 
@@ -979,39 +966,25 @@ rename after sealing the complete contents. Before commit, cancellation and
 failure leave staging owned by the driver for retirement; after commit, the
 destination owns the published contents and cancellation cannot undo it.
 
-The map separates source selection from exact exports. A mapped file registers
-only the modules its artifact exports, so the Session's one registry holds
-every registration and no name has a second, file-local meaning.
-
-Module images retain their defining source identity independently of any
-registration name. Execution, module-value invocation, escaped quotations,
-and test bodies preserve that identity. Qualified lookup and import authorize
-public exports against it. Suspended loads retain the same lexical context
-through authorization and resumed dispatch.
-
-File identity and resolution scope are carried by one opaque source
-capability. The Session keeps it alive until execution stops;
-registry teardown uses the existing host-owned retirement protocol. Frame
-storage accommodates the lexical capability retained by a suspended load and
-the activation call site every evaluation and application frame carries,
-with a 144-byte ceiling.
+A found file registers only the modules it declares, so the Session's one
+registry holds every registration and no name has a second, file-local
+meaning.
 
 ### Loading resumes a lookup
 
 A word referring to an unregistered module suspends the
 lookup that reaches it, or a primitive, while
-the loader searches the embedded standard-library manifest, the module map,
-source paths, or native artifacts according to `ENVIRONMENT.md`. The
+the loader searches the embedded standard-library manifest and then the
+search path according to `ENVIRONMENT.md`. The
 continuation says how to resume: dispatch the exact word again, replay a
 primitive whose operands it restores, or only load. Each resumes against a
 view that holds what the load published, and none of it is part of the
 language contract.
 
-Root test discovery enumerates source artifacts rather than public module
-names. Source-only requests and qualified requests share artifact loading
-leases and commit state, so discovering an already loaded source does not
-evaluate it again. A source with no exports commits after successful
-evaluation; sources with exports also verify their declared publications.
+Root test discovery enumerates the project root's declaring files rather
+than public module names. Source-only requests and qualified requests share
+file loading leases and the loaded flag, so discovering an already loaded file
+does not evaluate it again; each verifies its declared publications.
 Test authority spans the registry, so a test descriptor's module and test name
 identify its registration.
 
@@ -1053,7 +1026,9 @@ Each variant owns exactly the fields meaningful in that phase. Transitions
 consume one state and construct another, giving continuation modes,
 publication phases, and teardown an exhaustive representation.
 
-Declared effects at a module boundary belong to the language invocation, not
+A module word's call is checked when the word calling it was written outside
+the word's module, wherever it runs: the boundary is fixed by the word, like
+everything else about it. Declared effects at a module boundary belong to the language invocation, not
 to an implementation callback's return. Input contracts are validated before
 execution; the frame stack owns output checking until successful completion.
 Builtin and native invocations retain a suspended caller beneath that check.
@@ -1168,14 +1143,17 @@ through the words that only move them and through locals, and each
 combinator's rule is stated there once. A summary is that walk keeping
 nothing of a value but its place; a scalar program (§7) is the same walk
 keeping a register. Any other word has no
-summary: a word that reaches itself, a native word, and a word behind a checked module
-boundary, whose check reports the depth it found. So does any quotation or
+summary: a word that reaches itself, a native word, and a word whose call is
+checked because it was written outside the module that defines it, whose
+check reports the depth it found. Which words those are is fixed by the words
+themselves, so a summary is a function of the quotation and the publication,
+wherever the quotation runs. So does any quotation or
 body past a constant size, so the walk is bounded by a constant and an absent
 summary is always a correct answer. A summary depends on what the words it
 read resolve to, so nothing keeps one past a publication, and a redefinition,
 of a word or of anything its body reaches, is read as redefined. A body's
-summary is remembered by the fiber for its definition and the root it ran in. A
-quotation's is remembered by the fiber for the site it ran at, in a table of
+summary is remembered by the fiber for its definition. A
+quotation's is remembered by the fiber for the quotation, in a table of
 constant size whose entries hold their quotations: a fiber may keep that many
 quotations alive that it would otherwise have let go. It is an optimization and nothing observes it: what acts
 on one must leave the stack, the failures, and every enclosing floor's
@@ -1193,7 +1171,7 @@ anything else can see, so applying it and running its forms where the
 combinator stands compute the same thing. The first time a fiber enters a code
 list at a site it rewrites the phrases of this kind into one flattened list and
 remembers it for the publication, in a table of constant size beside its
-resolutions and summaries; later entries run the flattened list. The words
+summaries; later entries run the flattened list. The words
 inside an expanded quotation stay ordinary forms and resolve when they are
 reached. Core is built with every list as written.
 
@@ -1492,12 +1470,14 @@ therefore never stands in for a definition's frame, and a fault inside a
 recognized application is reported at the user's own word.
 
 Recognition is guarded by binding identity. Every named token in the pattern
-must resolve, where the quotation runs, to the builtin the entry expects from
+must denote, from where it was written, the builtin the entry expects from
 the core or standard-library modules.
 Shadowing, escaped code from another module, wrong literal shape, or any other
 mismatch selects the combinator's generic path. A quotation is checked when it
 is offered, against the definitions current then, since user scopes can
-change.
+change. An iteration over a finite collection remembers what recognition made
+of a phrase its quotation offered, and that answer, like every other a fiber
+keeps, is good for one value of the publication counter.
 
 Every site uses one matcher over one table. Recognition always happens when a
 frozen word executes, whether the code around it was written inline, passed to
@@ -1517,11 +1497,11 @@ one, as a combinator offers its quotation; every other word keeps its
 primitive unchanged and pays nothing. A phrase entry is the only change a new
 phrase needs, and a head that is not a kernel word fails to compile. A
 primitive reached other than as the word being dispatched declines. The following words
-are checked where the phrase runs, against the current definitions, so a user
+are checked when the phrase runs, against the current definitions, so a user
 definition of `sum` takes effect for the phrase and it then runs as written. The
-phrase consumes those words instead of dispatching them, so it records what
-they resolve to as dispatch would, and a phrase on every iteration costs one
-probe per word. A word reached other than
+phrase consumes those words instead of dispatching them, so it asks their
+cells as dispatch would, and a phrase on every iteration costs one cell read
+per word. A word reached other than
 from a source position, a phrase split across a definition, or a shape the fold
 cannot take runs the words as written. A fault inside the phrase is reported
 as the last following word's own.
@@ -1996,8 +1976,8 @@ outside those locks.
 Readers pair every immutable pointer with evidence that its allocation remains
 alive:
 
-- a directory or generation lease, or a lookup's captured view;
-- a module generation pin, taken on an image before its directory is read;
+- a captured view, for what is read from its snapshot across turns, including
+  a module generation and its directory;
 - a running turn, for what the turn read from a directory or a word's cell;
 - an evaluation's hold on its definition; or
 - a source slice that retains its backing allocation.
@@ -2007,7 +1987,7 @@ announces one reader when its turn begins and withdraws it on every exit, and
 holds none while parked or queued. Nothing superseded during a turn is
 reclaimed before the turn ends, so what the turn read from a directory needs
 no further evidence within it. A cell extends that to a pointer read with no
-lease at all: a cell is emptied before the directory owning its answer is
+view at all: a cell is emptied before the directory owning its answer is
 superseded, in the same critical section or ahead of it, and the store
 and the read are sequentially consistent like the publisher's own, so a turn
 either reads what the store left or is counted by the flip that would reclaim
@@ -2023,7 +2003,7 @@ waits for every reader that could have loaded it. Reclamation thus lags a
 supersession by at most two flips, each bounded by the turns running when it
 happens; a held view is a reader of its epoch for as long as it is held.
 
-Observation capabilities return metadata or pinned cursors. They do not expose
+Observation capabilities return metadata or cursors over a held view. They do not expose
 raw homes, mutable scopes, owner factories, or an upgrade path to execution.
 Upgrading, when legal, consumes a distinct owner-issued capability.
 
@@ -2047,8 +2027,8 @@ replacement and reclamation. Each weaker ordering requires a proof for that
 publisher; debug assertions serve only as secondary checks.
 
 The RCU analogy supplies the removal/reclamation split. The local proof covers
-ecl's specific combination of reference counts, leases, pins, mutex-protected
-commits, and deferred cursors.
+ecl's specific combination of reference counts, reader epochs, views,
+mutex-protected commits, and deferred cursors.
 
 ## 10. Standard code and native extensions
 
@@ -2204,8 +2184,8 @@ through the common result owner. Neither operation admission nor exchange
 observation dispatches on a backend family or uses backend readiness codes.
 
 Maintained applications own their policy and enter through ordinary ECL
-execution with an installation-selected map. Package publication journals,
-locks, generations, and source selection are application data. The core inert
+execution searching their installation directory. Package locks, installed
+packages, and source selection are application data. The core inert
 record decoder is shared only by general metadata schemas.
 
 The Git extension owns its native allocations, scratch repository, and joined
@@ -2268,13 +2248,12 @@ registered-capability pins. State retirement uses the common bounded retirement
 domain, including for instances that never published a binding; it admits no new
 native allocations. The host joins that work before unloading the image.
 
-Host registration policy is copied and sorted during Session construction.
-Name resolution and instance publication use the same immutable index, with
-bounded binary lookup. A registered static descriptor enters the ordinary loader
-and owns the same instance lifecycle as a dynamic image.
+Host configuration is copied and sorted during Session construction. Instance
+initialization finds a module's configuration by name in that immutable index,
+with bounded binary lookup; it selects no image, which the ordinary loader
+finds.
 
-Host configuration is copied during Session construction and bound to a loaded
-instance by the host registration policy. An extension sees only its immutable
+Host configuration is bound to a loaded instance by the module's name. An extension sees only its immutable
 configuration bytes and its own native storage authority; no extension-facing
 lookup accepts a module name. Resource-open arguments cannot replace this
 configuration. Native storage accounting is serialized by its issuing instance.
@@ -2716,13 +2695,6 @@ diagnostic envelope through final release. After commit, selection validates an
 opaque token against that exchange and changes only the selected alternative;
 it neither allocates nor mutates published values. Joined terminal observation
 uses that selected report and retains its diagnostics even after resource close.
-Host registration selects deferred discovery or an eager linked descriptor.
-Eager startup uses the ordinary bounded descriptor validator and instance
-lifecycle before Session publication. Its initialized instance pin belongs to the
-registration; later module publication borrows that cached instance rather than
-reinitializing it. The registration releases its pin during joined owner
-settlement, after admission closes. Startup failure retires every completed and
-partial instance through the same reclamation protocol as lazy loading.
 Structured native message grants belong to the registered instance. Factory and
 operation capabilities retain the issuer's immutable validation limits, and native
 builders derive the same grant from their resource owner. Message footprint and
@@ -2972,8 +2944,8 @@ and retirement remain separately bounded.
 ### Separate publication from reclamation
 
 Build before the lock, commit in constant time, and retire after unlocking.
-Every reader owns a lease, pin, or borrow for as long as it uses snapshot-owned
-storage. Residual retired memory must be bounded after delayed readers release
+A reader uses snapshot-owned storage within its turn, whose reader epoch keeps
+it, or across turns under a view it holds. Residual retired memory must be bounded after delayed readers release
 and settlement runs.
 
 ### Enforce architecture with the strongest available mechanism

@@ -81,10 +81,11 @@ publication, reclamation, or architectural enforcement. The short rules in
   public mutation operation, blocking or resumable, settles or explicitly
   transfers its retirement work on every exit path, and opaque Session APIs
   must not expose lower-level mutable aliases that bypass that postcondition.
-- Every cursor borrowing snapshot-owned storage owns the corresponding snapshot
-  lease for its complete lifetime and, when that storage belongs to a
-  generation, an independent generation pin. Releasing the originating lease
-  must not invalidate an independent cursor.
+- Within a turn, the turn's reader epoch is the evidence for what it read from
+  a published snapshot. A cursor that borrows snapshot-owned storage across
+  turns, a module generation's directory included, holds the view of that
+  snapshot for its complete lifetime, or borrows one its holder keeps for
+  longer.
 
 ## Bounded work and scheduling
 

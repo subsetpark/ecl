@@ -1,6 +1,6 @@
 //! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
-const map_state = @import("module_snapshot.zig");
+const module_search = @import("module_search.zig");
 const builtin = @import("builtin");
 const env = @import("env.zig");
 const value = @import("value.zig");
@@ -11,7 +11,6 @@ const poll = @import("poll.zig");
 const snapshot_api = @import("snapshot.zig");
 const list = @import("list.zig");
 const kernel_storage = @import("kernel_storage.zig");
-const poll_api = @import("poll.zig");
 
 /// Immutable metadata for one first-class module test. The executable body is
 /// deliberately absent from this public projection: discovery may expose
@@ -67,17 +66,12 @@ const TestCatalog = struct {
     entries_head: ?*Entry = null,
     entries_tail: ?*Entry = null,
     branches: ?*Branch = null,
-    frozen: bool = false,
 
     fn init(allocator: std.mem.Allocator) TestCatalog {
         return .{ .allocator = allocator };
     }
 
-    fn freeze(self: *TestCatalog) void {
-        self.frozen = true;
-    }
-
-    const DeclareError = error{ OutOfMemory, DuplicateTest, Frozen };
+    const DeclareError = error{ OutOfMemory, DuplicateTest };
     const DeclareProgress = poll.Progress(void);
     const DeclareCursor = struct {
         catalog: *TestCatalog,
@@ -97,7 +91,6 @@ const TestCatalog = struct {
 
         fn advance(self: *DeclareCursor) DeclareError!DeclareProgress {
             std.debug.assert(!self.complete);
-            if (self.catalog.frozen) return error.Frozen;
             return switch (self.state) {
                 .lookup => |maybe_link| result: {
                     const link = maybe_link orelse {
@@ -303,30 +296,25 @@ pub const TestDeclarationCursor = struct {
     }
 };
 
-/// One module: the directory its definitions live in, the scope of the name
-/// it was built for, and the provenance it registers under. The name is
+/// One module: the directory its definitions live in, and the scope of the
+/// name it was built for with the provenance it registers under. The name is
 /// fixed before the body runs. While the constructing body runs, definitions
 /// and imports are staged; sealing turns the staged names into an immutable
 /// directory. An image owns one reference to each of its definitions. The
-/// directories that map it, leases and pins on it, and its construction own
-/// the image; a replaced image retires with the last directory that maps it.
+/// directories that map it and its construction own the image; a replaced
+/// image retires with the last directory that maps it.
 const ModuleImage = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    name: intern.ModuleName,
-    provenance: RegistrationProvenance,
-    /// Set once the registry has published the image. Before then only its
-    /// constructor may resolve against its directory.
-    published: std.atomic.Value(bool) = .init(false),
     /// Names introduced by the construction body, not yet visible to anyone.
     staging: poll.ChunkStack(StagedName),
     staged_count: usize = 0,
     /// The directory, built from the staged names as the image is sealed;
     /// null until then.
     names: ?env.NameMap = null,
-    /// The scope of the module's name, which the `Env` owns: what code
-    /// running as this module, of this generation or another, runs in.
-    scope: *env.Scope,
+    /// What code of this generation runs as. The scope is the one of the
+    /// module's name, which the `Env` owns and every generation shares.
+    home: ModuleRoot,
     tests: TestCatalog,
     /// The module's documentation as written, one reference owned by the
     /// image. A generation carries its own: reload replaces the text with the
@@ -344,17 +332,15 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        scope: *env.Scope,
+        module: env.ModuleIdentity,
         provenance: RegistrationProvenance,
     ) error{OutOfMemory}!*ModuleImage {
         const result = try allocator.create(ModuleImage);
         result.* = .{
             .allocator = allocator,
             .releases = releases,
-            .name = scope.moduleName().?,
-            .provenance = provenance,
             .staging = .init(allocator),
-            .scope = scope,
+            .home = .{ .scope = module.id, .module = module.name, .provenance = provenance },
             .tests = .init(allocator),
         };
         return result;
@@ -382,11 +368,8 @@ const ModuleImage = struct {
         self.staged_count += 1;
     }
 
-    /// Whether a word written in this image may resolve against its
-    /// directory now: once published, or by the construction sealing it.
-    fn directory(self: *const ModuleImage) ?*const env.NameMap {
-        if (!self.published.load(.acquire)) return null;
-        return &(self.names orelse return null);
+    fn moduleName(self: *const ModuleImage) intern.ModuleName {
+        return self.home.name();
     }
 
     pub fn advanceRetirement(
@@ -403,7 +386,9 @@ const ModuleImage = struct {
             },
             .staging => {
                 if (self.staging.pop()) |staged| {
-                    retireEntry(staged.entry, releases);
+                    // Constant work: a definition nothing else holds
+                    // retires as its own owner.
+                    staged.entry.release(releases);
                     return false;
                 }
                 self.staging.deinit();
@@ -415,7 +400,7 @@ const ModuleImage = struct {
             .names => |*entries| switch (entries.advance()) {
                 .pending => return false,
                 .item => |entry| {
-                    retireEntry(entry.value, releases);
+                    entry.value.release(releases);
                     return false;
                 },
                 .complete => self.names.?.deinit(),
@@ -425,12 +410,6 @@ const ModuleImage = struct {
         allocator.destroy(self);
         return true;
     }
-
-    /// Drops the image's reference to one name's entry. Constant work: a
-    /// definition nothing else holds retires as its own owner.
-    fn retireEntry(entry: env.Entry, releases: *heap.ReleaseDomain) void {
-        entry.release(releases);
-    }
 };
 
 /// One name a construction body introduced, owned by its image until sealing.
@@ -439,86 +418,41 @@ const StagedName = struct {
     entry: env.Entry,
 };
 
-/// Nominal publication provenance. Embedded definitions retain their trusted
-/// origin. Cataloged code carries its defining-file capability, which also
-/// identifies its resolution scope, direct visibility, and the modules it may
-/// register. Interactive root code has local-scope visibility.
-pub const RegistrationProvenance = union(enum) {
-    ordinary,
-    standard_library,
-    root_scope: map_state.ScopeId,
-    source: *const map_state.SourceScope,
+/// What a unit may register, one word: anything, for an embedded library
+/// load; only its declarations, for a found file's load; and any name not
+/// reserved for the standard library, for other code. A fiber holds the
+/// value of the unit it is running, and an image records the one it was
+/// registered under.
+///
+/// A found file is its address, which is never zero or one.
+pub const RegistrationProvenance = enum(u64) {
+    ordinary = 0,
+    standard_library = 1,
+    _,
 
-    pub fn scopeId(self: RegistrationProvenance) ?map_state.ScopeId {
+    pub const Kind = union(enum) {
+        ordinary,
+        standard_library,
+        source: *const module_search.Source,
+    };
+
+    pub fn source(found: *const module_search.Source) RegistrationProvenance {
+        return @fromBackingInt(@intFromPtr(found));
+    }
+
+    pub fn kind(self: RegistrationProvenance) Kind {
         return switch (self) {
-            .root_scope => |id| id,
-            .source => |source| source.scopeId(),
+            .ordinary => .ordinary,
+            .standard_library => .standard_library,
+            _ => .{ .source = @ptrFromInt(@as(usize, @intCast(@backingInt(self)))) },
+        };
+    }
+
+    /// The found file this provenance is, if it is one.
+    pub fn foundSource(self: RegistrationProvenance) ?*const module_search.Source {
+        return switch (self.kind()) {
+            .source => |found| found,
             .ordinary, .standard_library => null,
-        };
-    }
-
-    pub fn sourceScope(self: RegistrationProvenance) ?*const map_state.SourceScope {
-        return switch (self) {
-            .source => |source| source,
-            else => null,
-        };
-    }
-
-    /// This provenance as the source a word's cell records. The variant is
-    /// the two low bits, which a source scope's address leaves clear.
-    pub fn sourceId(self: RegistrationProvenance) env.SourceId {
-        return @fromBackingInt(switch (self) {
-            .ordinary => 0,
-            .standard_library => 1,
-            .root_scope => |scope| 2 | (@as(u64, @backingInt(scope)) << 2),
-            .source => |source| tagged: {
-                const address: u64 = @intFromPtr(source);
-                std.debug.assert(address & 3 == 0);
-                break :tagged address | 3;
-            },
-        });
-    }
-
-    /// The provenance `sourceId` encoded.
-    pub fn fromSourceId(id: env.SourceId) RegistrationProvenance {
-        const raw = @backingInt(id);
-        return switch (@as(u2, @truncate(raw))) {
-            0 => .ordinary,
-            1 => .standard_library,
-            2 => .{ .root_scope = @fromBackingInt(@intCast(raw >> 2)) },
-            3 => .{ .source = @ptrFromInt(@as(usize, @intCast(raw & ~@as(u64, 3)))) },
-        };
-    }
-
-    /// The provenance of a quotation this code applies as a value (`apply`,
-    /// `@attempt`, a combinator). The value may have come from any caller, so
-    /// embedded trust stays with embedded code and never passes to it.
-    pub fn applied(self: RegistrationProvenance) RegistrationProvenance {
-        return switch (self) {
-            .standard_library => .ordinary,
-            .ordinary, .root_scope, .source => self,
-        };
-    }
-};
-
-pub const ModuleLookupProgress = poll.Progress(?env.Entry);
-/// One name in a published image's directory, under a pin that keeps the image
-/// alive across a resumable lookup. Visibility is the caller's to check: an
-/// export lookup refuses private entries, and a word written in the module
-/// may use them.
-pub const ModuleNameLookupCursor = struct {
-    lookup: ?env.NameMap.RawLookupCursor,
-    pin: GenerationPin,
-
-    pub fn deinit(self: *ModuleNameLookupCursor) void {
-        self.pin.deinit();
-        self.* = undefined;
-    }
-    pub fn advance(self: *ModuleNameLookupCursor) ModuleLookupProgress {
-        const lookup = &(self.lookup orelse return .{ .complete = null });
-        return switch (lookup.advance()) {
-            .pending => .pending,
-            .complete => |found| .{ .complete = found },
         };
     }
 };
@@ -533,15 +467,9 @@ pub fn entryIsPublic(entry: env.Entry) bool {
 
 pub const ModulePublicNameProgress = poll.StreamProgress(u32);
 pub const ModulePublicNameCursor = struct {
-    entries: ?env.NameMap.RawEntryCursor,
-    pin: GenerationPin,
-    pub fn deinit(self: *ModulePublicNameCursor) void {
-        self.pin.deinit();
-        self.* = undefined;
-    }
+    entries: env.NameMap.RawEntryCursor,
     pub fn advance(self: *ModulePublicNameCursor) ModulePublicNameProgress {
-        const entries = &(self.entries orelse return .complete);
-        return switch (entries.advance()) {
+        return switch (self.entries.advance()) {
             .pending => .pending,
             .complete => .complete,
             .item => |entry| if (entryIsPublic(entry.value))
@@ -551,13 +479,6 @@ pub const ModulePublicNameCursor = struct {
         };
     }
 };
-fn publicNameCursorFor(image: *ModuleImage) ModulePublicNameCursor {
-    image.retain();
-    return .{
-        .entries = if (image.names) |*names| names.rawEntries() else null,
-        .pin = .initRetained(image),
-    };
-}
 
 /// One immutable snapshot of the registry: its module names and
 /// for the Session's public registry the top-level name directory. A binding
@@ -622,22 +543,6 @@ const Directory = struct {
 };
 const DirectoryPublisher = snapshot_api.Publisher(Directory);
 
-const DirectoryLease = struct {
-    registry: *const Registry,
-    lease: DirectoryPublisher.Lease,
-    directory: ?*const Directory,
-
-    fn clone(self: *const DirectoryLease) DirectoryLease {
-        return .{ .registry = self.registry, .lease = self.lease.clone(), .directory = self.directory };
-    }
-
-    fn deinit(self: *DirectoryLease) void {
-        const registry = @constCast(self.registry);
-        if (self.lease.deinit()) registry.retireSuperseded();
-        self.* = undefined;
-    }
-};
-
 /// One running turn as a reader of the registry's directories. It holds no
 /// snapshot: while it lives, no directory superseded since it began, and so
 /// no image or definition one owns, is reclaimed.
@@ -653,45 +558,54 @@ pub const TurnLease = struct {
 /// The session's top-level names in one snapshot, one per step.
 pub const SessionNameCursor = Directory.NameMap.RawEntryCursor;
 
-/// One captured registry snapshot: what a validation or explicit lookup resolves
-/// session names and qualified module names against. Holding it retains the
-/// snapshot, not the definitions bound through it.
+/// One captured registry snapshot: what a resolution reads session names and
+/// module names from, and what a registry cursor holds while it reads a
+/// directory. Holding it keeps the snapshot, and so every image and
+/// definition the snapshot maps, from being reclaimed.
 pub const View = struct {
-    directory: DirectoryLease,
+    registry: *const Registry,
+    lease: DirectoryPublisher.Lease,
 
     pub fn deinit(self: *View) void {
-        self.directory.deinit();
+        const registry = @constCast(self.registry);
+        if (self.lease.deinit()) registry.retireSuperseded();
         self.* = undefined;
     }
 
-    /// A second hold on the same snapshot.
-    pub fn clone(self: *const View) View {
-        return .{ .directory = self.directory.clone() };
+    /// The snapshot held: null before the registry's first publication.
+    fn directory(self: *const View) ?*const Directory {
+        return self.lease.snapshot;
     }
 
     /// One session top-level name in this snapshot, borrowed while the view
     /// is held. Constant work.
     pub fn sessionFind(self: *const View, name: intern.BindingName) ?env.Entry {
-        const current = self.directory.directory orelse return null;
+        const current = self.directory() orelse return null;
         return current.names.find(name);
     }
 
-    /// The image a module name selects in this snapshot.
-    pub fn acquireCursor(self: *const View, name: intern.ModuleName) Registry.AcquireCursor {
-        return Registry.AcquireCursor.initIn(self.directory.clone(), name);
+    /// The registration a module name selects in this snapshot, read in
+    /// bounded steps while the view is held.
+    pub fn moduleCursor(self: *const View, name: intern.ModuleName) ModuleCursor {
+        return .{ .state = if (self.directory()) |current|
+            .{ .module = current.modules.rawLookup(name) }
+        else
+            .absent };
+    }
+
+    /// The registration a module name selects in this snapshot. Constant
+    /// work.
+    pub fn moduleFind(self: *const View, name: intern.ModuleName) ?Generation {
+        const current = self.directory() orelse return null;
+        return .of(current.modules.find(name) orelse return null);
     }
 
     /// The session's top-level names in this snapshot.
     pub fn sessionEntries(self: *const View) ?SessionNameCursor {
-        const current = self.directory.directory orelse return null;
+        const current = self.directory() orelse return null;
         return current.names.rawEntries();
     }
 };
-
-/// Session-owned authority required to turn observation state into frame
-/// execution state. Session and Fiber storage own the seal; registered native
-/// callbacks never receive it.
-pub const ExecutionAccess = opaque {};
 
 const TestAuthorityState = struct {
     // Keep the opaque registry value itself. The caller's movable enum wrapper
@@ -752,94 +666,57 @@ pub const TestExecutionAccess = opaque {
     }
 };
 
-/// A module as running code refers to it: the scope of the module's name,
-/// which fixes same-module dispatch and diagnostic spelling, and the
-/// provenance one registration of the module was made under. It holds
-/// nothing of an image.
-pub const ModuleRoot = struct {
-    scope: *env.Scope,
-    provenance: RegistrationProvenance,
-
-    pub fn name(self: ModuleRoot) intern.ModuleName {
-        return self.scope.moduleName().?;
-    }
-};
+pub const ModuleRoot = env.ModuleRoot;
 
 /// The module a definition belongs to, or null for a core or session
 /// definition.
 pub inline fn definitionModule(definition: *const env.Definition) ?ModuleRoot {
     return switch (definition.root) {
         .core, .session => null,
-        .module => |module| .{ .scope = module.scope, .provenance = .fromSourceId(module.provenance) },
+        .module => |module| module.home,
     };
 }
 
-/// An owned execution reference to one image. The raw image is never exposed,
-/// so a pin can only be consumed by `deinit` and cannot invoke retirement
-/// directly.
-pub const GenerationPin = enum(usize) {
-    consumed = 0,
+/// One published registration of a module, borrowed: valid while the view
+/// it was found in is held, and within the turn that found it. The raw image
+/// is never exposed.
+pub const Generation = enum(usize) {
     _,
 
-    fn initRetained(retained: *ModuleImage) GenerationPin {
-        return @fromBackingInt(@intCast(@intFromPtr(retained)));
+    fn of(published: *ModuleImage) Generation {
+        return @fromBackingInt(@intCast(@intFromPtr(published)));
     }
-    fn image(self: GenerationPin) *ModuleImage {
-        std.debug.assert(self != .consumed);
+    fn image(self: Generation) *ModuleImage {
         return @ptrFromInt(@backingInt(self));
     }
-    pub fn deinit(self: *GenerationPin) void {
-        if (self.* == .consumed) return;
-        self.image().release();
-        self.* = .consumed;
+    pub fn name(self: Generation) intern.ModuleName {
+        return self.image().moduleName();
     }
-};
-
-/// Opaque observation capability owning one reference to a published image.
-pub const GenerationLease = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn initRetained(retained: *ModuleImage) GenerationLease {
-        return @fromBackingInt(@intCast(@intFromPtr(retained)));
+    pub fn provenance(self: Generation) RegistrationProvenance {
+        return self.image().home.provenance;
     }
-    fn image(self: GenerationLease) *ModuleImage {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    pub fn name(self: GenerationLease) intern.ModuleName {
-        return self.image().name;
-    }
-    pub fn provenance(self: GenerationLease) RegistrationProvenance {
-        return self.image().provenance;
-    }
-    /// The generation's documentation as written, borrowed for the lease.
-    pub fn documentation(self: GenerationLease) ?*env.DocumentationString {
+    /// The generation's documentation as written.
+    pub fn documentation(self: Generation) ?*env.DocumentationString {
         return self.image().doc;
     }
-    /// One name in this published generation's directory.
-    pub fn lookupCursor(self: GenerationLease, binding: intern.BindingName) ModuleNameLookupCursor {
-        const retained = self.image();
-        retained.retain();
-        return .{
-            .lookup = if (retained.directory()) |names| names.rawLookup(binding) else null,
-            .pin = .initRetained(retained),
-        };
+    /// One name in this generation's directory, private ones included.
+    /// Visibility is the caller's to check: an export lookup refuses private
+    /// entries, and a word written in the module may use them.
+    pub fn lookupCursor(self: Generation, binding: intern.BindingName) env.NameMap.RawLookupCursor {
+        return self.image().names.?.rawLookup(binding);
     }
-    pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
-        return publicNameCursorFor(self.image());
+    pub fn publicNameCursor(self: Generation) ModulePublicNameCursor {
+        return .{ .entries = self.entries() };
     }
-    /// Every name of the generation's directory, private ones included,
-    /// borrowed for the lease.
-    pub fn entries(self: GenerationLease) ?env.NameMap.RawEntryCursor {
-        const names = self.image().directory() orelse return null;
-        return names.rawEntries();
+    /// Every name of the generation's directory, private ones included.
+    pub fn entries(self: Generation) env.NameMap.RawEntryCursor {
+        return self.image().names.?.rawEntries();
     }
-    fn testNameCursor(self: GenerationLease) TestCatalog.NameCursor {
+    fn testNameCursor(self: Generation) TestCatalog.NameCursor {
         return .{ .next = self.image().tests.entries_head };
     }
     fn testLookupCursor(
-        self: GenerationLease,
+        self: Generation,
         test_name: intern.BindingName,
     ) TestCatalog.LookupCursor {
         return .{
@@ -847,24 +724,37 @@ pub const GenerationLease = enum(usize) {
             .name = test_name,
         };
     }
-    /// Session-gated transfer from observation to execution. The raw image
-    /// stays hidden on both sides.
-    pub fn enterExecution(
-        self: *GenerationLease,
-        _: *const ExecutionAccess,
-    ) GenerationPin {
-        const retained = self.image();
-        self.* = .consumed;
-        return .initRetained(retained);
-    }
-    pub fn deinit(self: *GenerationLease) void {
-        if (self.* == .consumed) return;
-        self.image().release();
-        self.* = .consumed;
+};
+
+/// The registration a module name selects in one view, read in bounded steps.
+/// It borrows the view it was made from, which its holder keeps.
+pub const ModuleCursor = struct {
+    state: union(enum) {
+        absent,
+        module: Directory.ModuleMap.RawLookupCursor,
+        complete,
+    },
+
+    pub const Progress = poll.Progress(?Generation);
+
+    pub fn advance(self: *ModuleCursor) Progress {
+        switch (self.state) {
+            .absent => {
+                self.state = .complete;
+                return .{ .complete = null };
+            },
+            .module => |*lookup| switch (lookup.advance()) {
+                .pending => return .pending,
+                .complete => |found| {
+                    self.state = .complete;
+                    return .{ .complete = if (found) |image| .of(image) else null };
+                },
+            },
+            .complete => unreachable,
+        }
     }
 };
 
-/// A borrowed reference to one immutable image, valid for the call it is passed
 /// Unique ownership of an image that no registration holds yet. Every exit
 /// either seals it into a `SealedImage` or releases it.
 pub const OwnedImage = enum(usize) {
@@ -881,21 +771,20 @@ pub const OwnedImage = enum(usize) {
     /// What the construction body, and code of the module once registered,
     /// runs as.
     pub fn root(self: *const OwnedImage) ModuleRoot {
-        const image = self.borrow();
-        return .{ .scope = image.scope, .provenance = image.provenance };
+        return self.borrow().home;
     }
     pub fn moduleName(self: *const OwnedImage) intern.ModuleName {
-        return self.borrow().name;
+        return self.borrow().moduleName();
     }
     pub fn provenance(self: *const OwnedImage) RegistrationProvenance {
-        return self.borrow().provenance;
+        return self.borrow().home.provenance;
     }
     /// Records the module's documentation, retaining it; the caller keeps its
     /// own reference. Each construction documents its image at most once,
     /// before publication.
     pub fn document(self: *const OwnedImage, doc: *env.DocumentationString) void {
         const image = self.borrow();
-        std.debug.assert(image.doc == null and !image.published.load(.acquire));
+        std.debug.assert(image.doc == null);
         heap.incRef(env.documentationHeader(doc));
         image.doc = doc;
     }
@@ -907,55 +796,31 @@ pub const OwnedImage = enum(usize) {
         publication: env.ModulePublication,
     ) error{OutOfMemory}!void {
         const image = self.borrow();
-        const origin: env.BindingOrigin = .{ .module_local = .{ .trace_word = name } };
-        const home: env.DefinitionRoot = .{ .module = .{
-            .scope = image.scope,
-            .provenance = image.provenance.sourceId(),
-        } };
+        const home: env.DefinitionRoot = .{ .module = .{ .home = image.home, .name = name } };
         const created: env.Entry = .{ .definition = switch (publication) {
-            .word => |word| try env.Definition.createSource(image.allocator, .counted, env.quotationHeader(word.body), .{
+            .word => |word| try env.Definition.createSource(image.allocator, env.quotationHeader(word.body), .{
                 .visibility = word.visibility,
-                .origin = origin,
                 .effect = word.effect,
                 .doc = word.doc,
                 .source = word.source,
                 .root = home,
                 .attribution = word.attribution,
             }),
-            .native => |native| try env.Definition.create(image.allocator, .counted, .{ .native = native.callable }, .{
-                .visibility = native.visibility,
-                .origin = origin,
+            .native => |native| try env.Definition.create(image.allocator, .{ .native = native.callable }, .{
                 .effect = native.effect,
                 .doc = native.doc,
                 .root = home,
             }),
-            .builtin => |primitive| try env.Definition.create(image.allocator, .counted, .{ .builtin = primitive.primitive }, .{
-                .visibility = primitive.visibility,
-                .origin = origin,
+            .builtin => |primitive| try env.Definition.create(image.allocator, .{ .builtin = primitive.primitive }, .{
                 .effect = primitive.effect,
                 .doc = primitive.doc,
                 .root = home,
             }),
         } };
         image.stage(name, created) catch |err| {
-            ModuleImage.retireEntry(created, image.releases);
+            created.release(image.releases);
             return err;
         };
-    }
-    pub const LiteralError = error{ OutOfMemory, UnboundWord };
-
-    /// Stages one definition of a host-built module. A source body there is
-    /// a literal table entry, refused when it executes a word.
-    pub fn stageLiteral(
-        self: *const OwnedImage,
-        name: intern.BindingName,
-        publication: env.ModulePublication,
-    ) LiteralError!void {
-        switch (publication) {
-            .word => |word| if (env.executesWord(env.quotationHeader(word.body))) return error.UnboundWord,
-            .native, .builtin => {},
-        }
-        return self.stageDefinition(name, publication);
     }
     /// Stages one name alias.
     pub fn stageAlias(self: *const OwnedImage, name: intern.BindingName, alias: env.Alias) error{OutOfMemory}!void {
@@ -1002,7 +867,6 @@ pub const OwnedImage = enum(usize) {
     pub fn seal(self: *OwnedImage) SealedImage {
         const image = self.borrow();
         std.debug.assert(image.names != null and image.staging.isEmpty());
-        image.tests.freeze();
         self.* = .consumed;
         return .init(image);
     }
@@ -1014,8 +878,7 @@ pub const OwnedImage = enum(usize) {
     }
     pub fn deinit(self: *OwnedImage) void {
         if (self.* == .consumed) return;
-        // Rollback drops the construction owner's reference; an activation
-        // still pinning the image keeps it alive until it unwinds.
+        // Rollback drops the construction owner's reference.
         self.borrow().release();
         self.* = .consumed;
     }
@@ -1038,8 +901,8 @@ pub const GroupCursor = struct {
     pub fn deinit(self: *GroupCursor) void {
         if (self.init) |*cursor| cursor.deinit();
         // A pending insertion holds its entry until it lands in the directory.
-        if (self.put) |pending| ModuleImage.retireEntry(pending.value, self.image.releases);
-        if (self.lookup) |pending| ModuleImage.retireEntry(pending.staged.entry, self.image.releases);
+        if (self.put) |pending| pending.value.release(self.image.releases);
+        if (self.lookup) |pending| pending.staged.entry.release(self.image.releases);
         self.* = undefined;
     }
 
@@ -1071,7 +934,7 @@ pub const GroupCursor = struct {
                     const staged = pending.staged;
                     self.lookup = null;
                     if (existing != null) {
-                        ModuleImage.retireEntry(staged.entry, image.releases);
+                        staged.entry.release(image.releases);
                         self.duplicate = staged.name;
                         return error.Duplicate;
                     }
@@ -1106,7 +969,7 @@ pub const SealedImage = enum(usize) {
         return self.borrow().names.?.rawEntries();
     }
     pub fn moduleName(self: *const SealedImage) intern.ModuleName {
-        return self.borrow().name;
+        return self.borrow().moduleName();
     }
     pub fn move(self: *SealedImage) SealedImage {
         const result = self.*;
@@ -1148,7 +1011,7 @@ const free_loading_owner: usize = 0;
 
 const LoadingKey = union(enum) {
     module: intern.ModuleName,
-    artifact: map_state.ArtifactId,
+    artifact: module_search.FileId,
 
     fn eql(left: LoadingKey, right: LoadingKey) bool {
         return switch (left) {
@@ -1174,18 +1037,17 @@ const LoadingNode = struct {
     next: ?*LoadingNode,
 };
 
-/// The authority to make one artifact's registrations visible. Only
+/// The authority to record a found file as loaded. Only
 /// `LoadingLease.artifactCommit` mints one, and only from a live lease keyed
-/// to that artifact, so a holder of the project lock cannot publish an
-/// artifact whose declarations nobody verified. An `ArtifactId` identifies an
-/// artifact; this represents the right to publish it.
+/// to that file, so no file is recorded loaded whose declarations nobody
+/// verified.
 pub const ArtifactCommit = enum(u32) {
     _,
 
-    fn init(published: map_state.ArtifactId) ArtifactCommit {
+    fn init(published: module_search.FileId) ArtifactCommit {
         return @fromBackingInt(@intCast(@backingInt(published)));
     }
-    pub fn artifact(self: ArtifactCommit) map_state.ArtifactId {
+    pub fn artifact(self: ArtifactCommit) module_search.FileId {
         return @fromBackingInt(@intCast(@backingInt(self)));
     }
 };
@@ -1197,14 +1059,14 @@ pub const LoadingLease = enum(usize) {
     fn init(loading: *LoadingNode) LoadingLease {
         return @fromBackingInt(@intCast(@intFromPtr(loading)));
     }
-    /// Trade a live artifact lease for the authority to publish that
-    /// artifact. The lease is not released here: publication must become
-    /// visible before the lease frees, or a contender would find the artifact
-    /// uncommitted and reload it. `finish` follows on the same step.
+    /// Trade a live file lease for the authority to record the file loaded.
+    /// The lease is not released here: the record must be visible before the
+    /// lease frees, or a contender would find the file unloaded and load it
+    /// again. `deinit` follows on the same step.
     pub fn artifactCommit(self: *LoadingLease) ArtifactCommit {
         return switch (self.node().key) {
             .artifact => |artifact| .init(artifact),
-            .module => @panic("a module loading lease cannot publish an artifact"),
+            .module => @panic("a module loading lease cannot record a file loaded"),
         };
     }
     fn node(self: LoadingLease) *LoadingNode {
@@ -1217,15 +1079,11 @@ pub const LoadingLease = enum(usize) {
         self.* = .finished;
         return result;
     }
-    pub fn finish(self: *LoadingLease) void {
-        const loading = self.node();
-        loading.owner.store(free_loading_owner, .release);
-        self.* = .finished;
-    }
+    /// Frees the name for the next loader. Nothing for a lease already
+    /// finished or moved from.
     pub fn deinit(self: *LoadingLease) void {
         if (self.* == .finished) return;
-        const loading = self.node();
-        loading.owner.store(free_loading_owner, .release);
+        self.node().owner.store(free_loading_owner, .release);
         self.* = .finished;
     }
 };
@@ -1326,25 +1184,16 @@ pub const Registry = enum(usize) {
         std.Io.Threaded.mutexUnlock(&self.privateState().writer);
     }
 
-    fn acquireDirectory(self: *const Registry) DirectoryLease {
-        const lease = self.privateState().directories.acquire();
-        return .{
-            .registry = self,
-            .directory = lease.snapshot,
-            .lease = lease,
-        };
-    }
-
     pub const NamespaceProgress = poll.StreamProgress(u32);
     /// Snapshot-owning enumeration of module names. The directory
     /// representation remains private and the lease survives until the cursor
     /// is explicitly released, including when iteration is abandoned early.
     pub const NamespaceCursor = struct {
-        directory: DirectoryLease,
+        view: View,
         modules: ?Directory.ModuleMap.RawEntryCursor = null,
 
         pub fn deinit(self: *NamespaceCursor) void {
-            self.directory.deinit();
+            self.view.deinit();
             self.* = undefined;
         }
 
@@ -1362,10 +1211,10 @@ pub const Registry = enum(usize) {
     };
 
     pub fn namespaceCursor(self: *const Registry) NamespaceCursor {
-        const directory = self.acquireDirectory();
+        const captured = self.view();
         return .{
-            .directory = directory,
-            .modules = if (directory.directory) |current| current.modules.rawEntries() else null,
+            .view = captured,
+            .modules = if (captured.directory()) |current| current.modules.rawEntries() else null,
         };
     }
 
@@ -1376,41 +1225,25 @@ pub const Registry = enum(usize) {
     pub const TestDiscoveryProgress = poll.StreamProgress(DiscoveredTest);
 
     /// Discovery over one directory snapshot, visiting each module once. The
-    /// cursor owns
-    /// both the directory lease and each generation lease for the complete
-    /// time it borrows that generation's catalog.
+    /// view the cursor owns keeps every generation whose catalog it reads.
     pub const TestDiscoveryCursor = struct {
-        registry: *Registry,
-        directory: DirectoryLease,
+        view: View,
         modules: ?Directory.ModuleMap.RawEntryCursor,
         current_module: ?intern.ModuleName = null,
-        current_generation: ?GenerationLease = null,
         names: ?TestCatalog.NameCursor = null,
         complete: bool = false,
 
         fn init(registry: *Registry) TestDiscoveryCursor {
-            const directory = registry.acquireDirectory();
+            const captured = registry.view();
             return .{
-                .registry = registry,
-                .directory = directory,
-                .modules = if (directory.directory) |current| current.modules.rawEntries() else null,
+                .view = captured,
+                .modules = if (captured.directory()) |current| current.modules.rawEntries() else null,
             };
         }
 
         pub fn deinit(self: *TestDiscoveryCursor) void {
-            if (self.current_generation) |*generation| generation.deinit();
-            self.directory.deinit();
+            self.view.deinit();
             self.* = undefined;
-        }
-
-        fn beginGeneration(
-            self: *TestDiscoveryCursor,
-            module_name: intern.ModuleName,
-            generation: GenerationLease,
-        ) void {
-            self.current_module = module_name;
-            self.current_generation = generation;
-            self.names = generation.testNameCursor();
         }
 
         pub fn advance(self: *TestDiscoveryCursor) TestDiscoveryProgress {
@@ -1423,8 +1256,6 @@ pub const Registry = enum(usize) {
                 } },
                 .complete => {
                     self.names = null;
-                    self.current_generation.?.deinit();
-                    self.current_generation = null;
                     self.current_module = null;
                     return .pending;
                 },
@@ -1441,56 +1272,28 @@ pub const Registry = enum(usize) {
                     break :result .complete;
                 },
                 .item => |entry| result: {
-                    entry.value.retain();
-                    self.beginGeneration(entry.key, GenerationLease.initRetained(entry.value));
+                    self.current_module = entry.key;
+                    self.names = Generation.of(entry.value).testNameCursor();
                     break :result .pending;
                 },
             };
         }
     };
 
+    /// A test found in the current registration: the module it runs as
+    /// and its body, borrowed from the lookup's view.
     pub const TestInvocation = struct {
-        generation: GenerationLease,
+        root: ModuleRoot,
         body: *env.Quotation,
 
-        pub fn enter(
-            self: *TestInvocation,
-            access: *const ExecutionAccess,
-        ) TestExecutionTarget {
-            const body = self.body;
-            return .{
-                .generation = self.generation.enterExecution(access),
-                .body = body,
-            };
-        }
-        pub fn deinit(self: *TestInvocation) void {
-            self.generation.deinit();
-            self.* = undefined;
-        }
-    };
-
-    pub const TestExecutionTarget = struct {
-        generation: GenerationPin,
-        body: *env.Quotation,
-
-        pub fn quotation(self: *const TestExecutionTarget) *value.ListHandle {
+        pub fn quotation(self: TestInvocation) *value.ListHandle {
             return env.quotationHeader(self.body);
-        }
-        /// The module the test runs as.
-        pub fn root(self: *const TestExecutionTarget) ModuleRoot {
-            const image = self.generation.image();
-            return .{ .scope = image.scope, .provenance = image.provenance };
-        }
-        pub fn deinit(self: *TestExecutionTarget) void {
-            self.generation.deinit();
-            self.* = undefined;
         }
     };
 
     pub const TestLookupProgress = poll.Progress(?TestInvocation);
     pub const TestLookupCursor = struct {
-        registry: *Registry,
-        directory: DirectoryLease,
+        view: View,
         module_name: intern.ModuleName,
         test_name: intern.BindingName,
         state: State,
@@ -1499,7 +1302,7 @@ pub const Registry = enum(usize) {
             absent,
             module: Directory.ModuleMap.RawLookupCursor,
             catalog: struct {
-                lease: GenerationLease,
+                generation: Generation,
                 cursor: TestCatalog.LookupCursor,
             },
             complete,
@@ -1510,13 +1313,12 @@ pub const Registry = enum(usize) {
             module_name: intern.ModuleName,
             test_name: intern.BindingName,
         ) TestLookupCursor {
-            const directory = registry.acquireDirectory();
+            const captured = registry.view();
             return .{
-                .registry = registry,
-                .directory = directory,
+                .view = captured,
                 .module_name = module_name,
                 .test_name = test_name,
-                .state = if (directory.directory) |current|
+                .state = if (captured.directory()) |current|
                     .{ .module = current.modules.rawLookup(module_name) }
                 else
                     .absent,
@@ -1524,19 +1326,8 @@ pub const Registry = enum(usize) {
         }
 
         pub fn deinit(self: *TestLookupCursor) void {
-            switch (self.state) {
-                .catalog => |*catalog| catalog.lease.deinit(),
-                .absent, .module, .complete => {},
-            }
-            self.directory.deinit();
+            self.view.deinit();
             self.* = undefined;
-        }
-
-        fn beginCatalog(self: *TestLookupCursor, lease: GenerationLease) void {
-            self.state = .{ .catalog = .{
-                .lease = lease,
-                .cursor = lease.testLookupCursor(self.test_name),
-            } };
         }
 
         pub fn advance(self: *TestLookupCursor) TestLookupProgress {
@@ -1548,29 +1339,26 @@ pub const Registry = enum(usize) {
                 .module => |*lookup| switch (lookup.advance()) {
                     .pending => .pending,
                     .complete => |image| result: {
-                        const found = image orelse {
+                        const found: Generation = .of(image orelse {
                             self.state = .complete;
                             break :result .{ .complete = null };
-                        };
-                        found.retain();
-                        self.beginCatalog(GenerationLease.initRetained(found));
+                        });
+                        self.state = .{ .catalog = .{
+                            .generation = found,
+                            .cursor = found.testLookupCursor(self.test_name),
+                        } };
                         break :result .pending;
                     },
                 },
                 .catalog => |*catalog| switch (catalog.cursor.advance()) {
                     .pending => .pending,
                     .complete => |body| result: {
-                        if (body) |quotation| {
-                            const lease = catalog.lease;
-                            self.state = .complete;
-                            break :result .{ .complete = .{
-                                .generation = lease,
-                                .body = quotation,
-                            } };
-                        }
-                        catalog.lease.deinit();
+                        const root = catalog.generation.image().home;
                         self.state = .complete;
-                        break :result .{ .complete = null };
+                        break :result .{ .complete = if (body) |quotation|
+                            .{ .root = root, .body = quotation }
+                        else
+                            null };
                     },
                 },
                 .complete => unreachable,
@@ -1587,7 +1375,7 @@ pub const Registry = enum(usize) {
         const backing = self.privateState();
         self.lockBlocking();
         defer self.unlock();
-        if (backing.fills_closed == 0 and backing.directories.isCurrent(resolved.directory.directory))
+        if (backing.fills_closed == 0 and backing.directories.isCurrent(resolved.directory()))
             backing.cells.fill(id, definition);
     }
 
@@ -1636,21 +1424,10 @@ pub const Registry = enum(usize) {
     /// publication, which is the boundary that owns registry names.
     pub fn createImage(
         self: *Registry,
-        scope: *env.Scope,
+        module: env.ModuleIdentity,
         provenance: RegistrationProvenance,
     ) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), scope, provenance));
-    }
-
-    /// The generation registered under `name` now, or null when none is.
-    /// Constant work: one lookup in the current directory.
-    pub fn currentGeneration(self: *const Registry, name: intern.ModuleName) ?GenerationLease {
-        var directory = self.acquireDirectory();
-        defer directory.deinit();
-        const current = directory.directory orelse return null;
-        const image = current.modules.find(name) orelse return null;
-        image.retain();
-        return .initRetained(image);
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), module, provenance));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);
@@ -1666,11 +1443,11 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            scope: *env.Scope,
+            module: env.ModuleIdentity,
             provenance: RegistrationProvenance,
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
-            const candidate = try registry.createImage(scope, provenance);
+            const candidate = try registry.createImage(module, provenance);
             // The descriptor's module documentation was validated with it.
             candidate.document(instance.validated().documentation());
             return .{
@@ -1685,7 +1462,7 @@ pub const Registry = enum(usize) {
             self.* = undefined;
         }
 
-        pub fn advance(self: *NativeCandidateCursor) OwnedImage.LiteralError!NativeCandidateProgress {
+        pub fn advance(self: *NativeCandidateCursor) error{OutOfMemory}!NativeCandidateProgress {
             const definitions = self.instance.validated().definitions();
             if (self.definition_index == definitions.len) {
                 const completed = self.candidate.?.move();
@@ -1702,7 +1479,6 @@ pub const Registry = enum(usize) {
                         .instance = self.instance,
                         .definition = @intCast(self.definition_index),
                     },
-                    .visibility = .public,
                     .effect = definition.effect,
                     .doc = definition.doc,
                 } },
@@ -1718,7 +1494,7 @@ pub const Registry = enum(usize) {
                     } };
                 },
             };
-            try self.candidate.?.stageLiteral(definition.name, publication);
+            try self.candidate.?.stageDefinition(definition.name, publication);
             self.definition_index += 1;
             return .pending;
         }
@@ -1739,7 +1515,7 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            scope: *env.Scope,
+            scope: env.ModuleIdentity,
             provenance: RegistrationProvenance,
             module: env.BuiltinModule,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
@@ -1780,7 +1556,6 @@ pub const Registry = enum(usize) {
                 try intern.internNamespace(word.name),
                 .{ .builtin = .{
                     .primitive = word.primitive,
-                    .visibility = .public,
                     .effect = effect,
                     .doc = document,
                 } },
@@ -1797,8 +1572,8 @@ pub const Registry = enum(usize) {
         ) error{OutOfMemory}!*env.DocumentationString {
             var materializer = kernel_storage.TextMaterializer.init(self.allocator, source);
             defer materializer.retire(self.releases);
-            var work = poll_api.unbounded();
-            const text = try poll_api.driveFallible(value.Value, &materializer, .{&work});
+            var work = poll.unbounded();
+            const text = try poll.driveFallible(value.Value, &materializer, .{&work});
             return env.documentation(text.list) orelse {
                 self.releases.releaseValue(text);
                 return error.OutOfMemory;
@@ -1825,27 +1600,26 @@ pub const Registry = enum(usize) {
 
     const EditKind = enum { register, define };
 
-    /// The one registry mutation. Snapshot the current directory, validate the
-    /// request against it, build a successor with the edit applied, and publish
-    /// the successor under the writer lock if the snapshot is still current;
-    /// otherwise discard the candidate and start over. A racing edit of any
-    /// kind is therefore observed as exactly one restart, never as a
-    /// half-applied entry or a lost update. Registration and a top-level
-    /// definition differ only in validation and in which entry changes, so
-    /// each is this cursor specialized at compile time.
+    /// The one registry mutation. Capture the current directory, build a
+    /// successor with the edit applied, and publish the successor under the
+    /// writer lock if the captured one is still current; otherwise discard
+    /// the candidate and start over. A racing edit of any kind is therefore
+    /// observed as exactly one restart, never as a half-applied entry or a
+    /// lost update. Registration and a top-level definition differ only in
+    /// which entry changes and in what they do to the word cells, so each is
+    /// this cursor specialized at compile time.
     ///
     /// The edit keeps the word cells true to the directory it publishes. A
     /// definition changes what one session name resolves to, so it empties
     /// that name's cells, publishes, and stores them, in one critical
-    /// section. A
-    /// registration can change what any name outside core resolves to, so
-    /// before it commits it closes fills and empties those cells, a fixed
-    /// number per step; fills stay closed until it commits or is abandoned,
-    /// so no cell holds an answer read from the directory it replaces.
+    /// section. A registration can change what any name outside core
+    /// resolves to, so before it commits it closes fills and empties those
+    /// cells, a fixed number per step; fills stay closed until it commits or
+    /// is abandoned, so no cell holds an answer read from the directory it
+    /// replaces.
     ///
-    /// Validation and the build are each one bounded step: lookups and a
-    /// persistent map's edit cost its depth, and the candidate shares every
-    /// unchanged node with the snapshot. Both outcomes retire the candidate
+    /// The build is one bounded step: a persistent map's edit costs its
+    /// depth, and the candidate shares every unchanged node with the snapshot. Both outcomes retire the candidate
     /// through `Directory.advanceRetirement`: publication chains it in front
     /// of the snapshot, and discard retires it alone.
     fn EditCursor(comptime kind: EditKind) type {
@@ -1867,7 +1641,8 @@ pub const Registry = enum(usize) {
             };
 
             const Build = struct {
-                directory: DirectoryLease,
+                /// The snapshot the candidate was built from.
+                view: View,
                 candidate: *Directory,
             };
             const State = union(enum) {
@@ -1909,20 +1684,13 @@ pub const Registry = enum(usize) {
             fn discard(self: *Self, build: *Build) void {
                 build.candidate.previous = null;
                 self.registry.releaseDomain().retire(build.candidate, &build.candidate.retirement);
-                build.directory.deinit();
+                build.view.deinit();
             }
 
             /// The top-level name a define edit publishes.
             pub fn definedName(self: *const Self) intern.BindingName {
                 comptime std.debug.assert(kind == .define);
                 return self.request.name;
-            }
-
-            fn requestedName(self: *const Self) intern.ModuleName {
-                return switch (kind) {
-                    .register => self.request.borrow().name,
-                    .define => unreachable,
-                };
             }
 
             pub fn advance(self: *Self) Error!Progress {
@@ -1942,24 +1710,23 @@ pub const Registry = enum(usize) {
                     .snapshot => return self.beginSnapshot(),
                     .commit => |*build| {
                         self.registry.lockBlocking();
-                        if (!self.registry.privateState().directories.isCurrent(build.directory.directory)) {
+                        if (!self.registry.privateState().directories.isCurrent(build.view.directory())) {
                             self.registry.unlock();
                             var stale = build.*;
                             self.state = .snapshot;
                             self.discard(&stale);
                             return .pending;
                         }
-                        self.apply();
                         // Read from the snapshot this edit replaces, which is
                         // current under the lock.
                         const defined = switch (kind) {
-                            .define => if (build.directory.directory) |old|
+                            .define => if (build.view.directory()) |old|
                                 if (old.names.find(self.request.name) == null) DefineOutcome.introduced else DefineOutcome.replaced
                             else
                                 DefineOutcome.introduced,
                             .register => {},
                         };
-                        build.candidate.previous = @constCast(build.directory.directory);
+                        build.candidate.previous = @constCast(build.view.directory());
                         const backing = self.registry.privateState();
                         _ = backing.publications.fetchAdd(1, .acq_rel);
                         // The name's cells are empty across the publication,
@@ -1990,7 +1757,7 @@ pub const Registry = enum(usize) {
                         released.retire(self.registry.releaseDomain());
                         var published = build.*;
                         self.state = .complete;
-                        published.directory.deinit();
+                        published.view.deinit();
                         return switch (kind) {
                             .register => .complete,
                             .define => .{ .complete = defined },
@@ -2002,28 +1769,22 @@ pub const Registry = enum(usize) {
 
             fn beginSnapshot(self: *Self) Error!Progress {
                 switch (kind) {
-                    .register => if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(self.request.borrow().name))))
+                    .register => if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(self.request.borrow().moduleName()))))
                         return error.ReservedName,
                     .define => {},
                 }
-                var directory = self.registry.acquireDirectory();
-                const target: intern.ModuleName = switch (kind) {
-                    .register => self.requestedName(),
-                    // SAFETY: a top-level definition edits no module entry, so
-                    // its target's module name is never read.
-                    .define => undefined,
-                };
-                const candidate = self.buildCandidate(directory.directory, target) catch |err| {
-                    directory.deinit();
+                var captured = self.registry.view();
+                const candidate = self.buildCandidate(captured.directory()) catch |err| {
+                    captured.deinit();
                     return err;
                 };
-                self.state = .{ .commit = .{ .directory = directory, .candidate = candidate } };
+                self.state = .{ .commit = .{ .view = captured, .candidate = candidate } };
                 return .pending;
             }
 
             /// The successor directory: the snapshot's maps with this edit's
             /// one entry changed. Bounded by the maps' depth.
-            fn buildCandidate(self: *Self, snapshot: ?*const Directory, target: intern.ModuleName) error{OutOfMemory}!*Directory {
+            fn buildCandidate(self: *Self, snapshot: ?*const Directory) error{OutOfMemory}!*Directory {
                 const releases = self.registry.releaseDomain();
                 // Read the maps alone: `previous` is rewritten under the writer
                 // lock when readers quiesce, so copying the whole snapshot
@@ -2035,7 +1796,10 @@ pub const Registry = enum(usize) {
                     .names = source.names,
                 };
                 var modules = switch (kind) {
-                    .register => try old.modules.put(releases, target, self.request.borrow()),
+                    .register => register: {
+                        const image = self.request.borrow();
+                        break :register try old.modules.put(releases, image.moduleName(), image);
+                    },
                     .define => old.modules.retain(),
                 };
                 errdefer modules.release(releases);
@@ -2047,15 +1811,6 @@ pub const Registry = enum(usize) {
                 const candidate = try releases.allocator.create(Directory);
                 candidate.* = .{ .modules = modules, .names = names };
                 return candidate;
-            }
-
-            /// The edit's effect on the image itself, applied under the
-            /// writer lock just before the candidate becomes current.
-            fn apply(self: *Self) void {
-                switch (kind) {
-                    .register => self.request.borrow().published.store(true, .release),
-                    .define => {},
-                }
             }
         };
     }
@@ -2072,68 +1827,29 @@ pub const Registry = enum(usize) {
         return .{ .registry = self, .request = .{ .name = name, .entry = entry } };
     }
 
-    pub const AcquireProgress = poll.Progress(?GenerationLease);
-    /// Resolution of a module name to an observation lease on
-    /// its current generation. The directory lease held across the lookup is
-    /// what makes the retain safe: the directory owns the entry until the
-    /// lease is released.
+    /// The registration a module name selects in a snapshot this cursor
+    /// captures and holds, for a holder that has no view of its own.
     pub const AcquireCursor = struct {
-        directory: DirectoryLease,
-        name: intern.ModuleName,
-        state: State,
-
-        const State = union(enum) {
-            absent,
-            module: Directory.ModuleMap.RawLookupCursor,
-            complete,
-        };
-
-        fn initIn(directory: DirectoryLease, name: intern.ModuleName) AcquireCursor {
-            return .{
-                .directory = directory,
-                .name = name,
-                .state = if (directory.directory) |current|
-                    .{ .module = current.modules.rawLookup(name) }
-                else
-                    .absent,
-            };
-        }
+        view: View,
+        cursor: ModuleCursor,
 
         pub fn deinit(self: *AcquireCursor) void {
-            self.directory.deinit();
+            self.view.deinit();
             self.* = undefined;
         }
-        fn found(self: *AcquireCursor, image: *ModuleImage) AcquireProgress {
-            image.retain();
-            self.state = .complete;
-            return .{ .complete = GenerationLease.initRetained(image) };
-        }
-        pub fn advance(self: *AcquireCursor) AcquireProgress {
-            while (true) switch (self.state) {
-                .absent => {
-                    self.state = .complete;
-                    return .{ .complete = null };
-                },
-                .module => |*lookup| switch (lookup.advance()) {
-                    .pending => return .pending,
-                    .complete => |image| if (image) |present| {
-                        return self.found(present);
-                    } else {
-                        self.state = .complete;
-                        return .{ .complete = null };
-                    },
-                },
-                .complete => unreachable,
-            };
+        /// The registration found is borrowed from this cursor's view.
+        pub fn advance(self: *AcquireCursor) ModuleCursor.Progress {
+            return self.cursor.advance();
         }
     };
     pub fn acquireCursor(self: *const Registry, name: intern.ModuleName) AcquireCursor {
-        return .initIn(self.acquireDirectory(), name);
+        const captured = self.view();
+        return .{ .view = captured, .cursor = captured.moduleCursor(name) };
     }
 
     /// Captures the current snapshot as one coherent view.
     pub fn view(self: *const Registry) View {
-        return .{ .directory = self.acquireDirectory() };
+        return .{ .registry = self, .lease = self.privateState().directories.acquire() };
     }
 
     pub const BeginLoadingProgress = poll.Progress(LoadingOutcome);
@@ -2273,7 +1989,7 @@ pub const Registry = enum(usize) {
 
     pub fn beginArtifactLoadingCursor(
         self: *Registry,
-        artifact: map_state.ArtifactId,
+        artifact: module_search.FileId,
         owner: LoadingOwner,
     ) BeginLoadingCursor {
         const head = self.privateState().loading.load(.acquire);
@@ -2294,10 +2010,11 @@ comptime {
 /// an operation nothing calls — and one that lets a test skip the very
 /// resumability it should be exercising.
 pub const testing = if (builtin.is_test) struct {
-    pub fn acquire(registry: *const Registry, name: intern.ModuleName) ?GenerationLease {
+    /// Whether `name` is registered now.
+    pub fn registered(registry: *const Registry, name: intern.ModuleName) bool {
         var cursor = registry.acquireCursor(name);
         defer cursor.deinit();
-        return poll.drive(?GenerationLease, &cursor, .{});
+        return poll.drive(?Generation, &cursor, .{}) != null;
     }
 
     pub fn register(registry: *Registry, image: *SealedImage) CommitError!void {

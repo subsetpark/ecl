@@ -950,23 +950,11 @@ test "public parse cancellation reaches UTF-8 materialization" {
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<parse-encoding-setup>", source)) == .ok);
-    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
-    runtime.requestCancellation();
-    const failure = switch (try runtime.runUnit("<parse-encoding-cancel>", "parse")) {
-        .err => |item| item,
-        .ok, .incomplete => return error.TestUnexpectedResult,
-    };
-    defer runtime.release(failure);
-    try std.testing.expectEqualStrings("cancelled", try errorKind(allocator, failure));
-    const rendered = try printer.toOwnedString(allocator, failure);
-    defer allocator.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
-    try std.testing.expect(runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
-    try std.testing.expectEqual(@as(u32, text_len), runtime.stackItems()[0].list.length());
+    try std.testing.expect((try runtime.runUnit("<parse-encoding-setup>", "`text set")) == .ok);
+    try runtime_fixture.expectCancelledAcrossTurns(&runtime, "text parse");
 }
 
 test "public parse cancellation reaches ignored-source scanning" {
@@ -983,18 +971,7 @@ test "public parse cancellation reaches ignored-source scanning" {
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
-    runtime.requestCancellation();
-    const failure = switch (try runtime.runUnit("<parse-cancel-test>", command)) {
-        .err => |item| item,
-        .ok, .incomplete => return error.TestUnexpectedResult,
-    };
-    defer runtime.release(failure);
-    try std.testing.expectEqualStrings("cancelled", try errorKind(allocator, failure));
-    const rendered = try printer.toOwnedString(allocator, failure);
-    defer allocator.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
-    try std.testing.expect(runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 0), runtime.stackItems().len);
+    try runtime_fixture.expectCancelledAcrossTurns(&runtime, command);
 }

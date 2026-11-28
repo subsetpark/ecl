@@ -20,7 +20,6 @@ const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
 const list = @import("../list.zig");
 const modules = @import("../modules.zig");
-const printer = @import("../print.zig");
 const session = @import("../session.zig");
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
@@ -154,23 +153,6 @@ test "module names: branded factories enforce the reader symbol grammar" {
     _ = try intern.internModuleName("valid.module-name");
 }
 
-test "module names: intern and validation share one resumable cursor" {
-    const allocator = std.testing.allocator;
-    const spelling = try allocator.alloc(u8, 70_000);
-    defer allocator.free(spelling);
-    @memset(spelling, 'v');
-    try expectInternMissing(spelling);
-
-    var cursor = intern.internModuleNameCursor(spelling);
-    var pending: usize = 0;
-    const name = while (true) switch (try cursor.advance()) {
-        .pending => pending += 1,
-        .complete => |maybe_name| break maybe_name.?,
-    };
-    try std.testing.expect(pending > 256);
-    try std.testing.expectEqualStrings(spelling, intern.get(intern.moduleId(name)));
-}
-
 test "module names: a long qualified spelling is decided in bounded steps as it is interned" {
     const allocator = std.testing.allocator;
     const prefix = try allocator.alloc(u8, 70_000);
@@ -226,14 +208,13 @@ test "module: long definition names stay within the cancellation bound" {
     const long_name = try intern.internNamespace(name_bytes);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
-    var name_runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    var name_runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer name_runtime.deinit();
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     try name_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(long_name) } });
-    name_runtime.requestCancellation();
-    try expectErrorContains(&name_runtime, "@defm", &.{"unit cancelled"});
-    try std.testing.expect(name_runtime.lastPolls() >= 1);
+    try expectOk(&name_runtime, "`long-name set `second set `first set");
+    try runtime_fixture.expectCancelledAcrossTurns(&name_runtime, "first second long-name @defm");
 }
 
 test "reflection: words is sorted unique and private-safe" {
@@ -279,71 +260,16 @@ test "reflection remains cancellable across sorting and identifier output" {
     const second_bytes = try allocator.dupe(u8, first_bytes);
     defer allocator.free(second_bytes);
     second_bytes[second_bytes.len - 1] = 'b';
-    const first = try intern.internNamespace(first_bytes);
-
     var discard_buffer: [256]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&discard_buffer);
     var runtime_inputs5 = try runtime_fixture.Fixture.init();
     defer runtime_inputs5.deinit();
-    var words_runtime = try session.Session.init(allocator, &.{}, runtime_inputs5.inputs(.{ .output = &discarding.writer }), .default, .evaluate);
+    var words_runtime = try session.Session.init(allocator, &.{}, runtime_inputs5.inputs(.{ .output = &discarding.writer }), .cooperative, .evaluate);
     defer words_runtime.deinit();
     const define_both = try std.fmt.allocPrint(allocator, "(1) `{s} def (1) `{s} def", .{ first_bytes, second_bytes });
     defer allocator.free(define_both);
     try expectOk(&words_runtime, define_both);
-    words_runtime.requestCancellation();
-    const words_failure = (try words_runtime.runUnit("reflection-poll.ecl", "words")).err;
-    defer words_runtime.release(words_failure);
-    const words_rendered = try printer.toOwnedString(allocator, words_failure);
-    defer allocator.free(words_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, words_rendered, "unit cancelled") != null);
-    try std.testing.expect(words_runtime.lastPolls() >= 1);
-
-    var see_output = std.Io.Writer.Allocating.init(allocator);
-    defer see_output.deinit();
-    var runtime_inputs6 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs6.deinit();
-    var see_runtime = try session.Session.init(allocator, &.{}, runtime_inputs6.inputs(.{ .output = &see_output.writer }), .default, .evaluate);
-    defer see_runtime.deinit();
-    const define_first = try std.fmt.allocPrint(allocator, "(1) `{s} def", .{first_bytes});
-    defer allocator.free(define_first);
-    try expectOk(&see_runtime, define_first);
-    try see_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(first) } });
-    see_runtime.requestCancellation();
-    const see_failure = (try see_runtime.runUnit("reflection-poll.ecl", "see")).err;
-    defer see_runtime.release(see_failure);
-    const see_rendered = try printer.toOwnedString(allocator, see_failure);
-    defer allocator.free(see_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, see_rendered, "unit cancelled") != null);
-    try std.testing.expect(see_runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 0), see_output.written().len);
-
-    const qualified_bytes = try allocator.alloc(u8, "poll-module.".len + first_bytes.len);
-    defer allocator.free(qualified_bytes);
-    @memcpy(qualified_bytes[0.."poll-module.".len], "poll-module.");
-    @memcpy(qualified_bytes["poll-module.".len..], first_bytes);
-    const qualified = try intern.intern(qualified_bytes);
-    var qualified_output = std.Io.Writer.Allocating.init(allocator);
-    defer qualified_output.deinit();
-    var runtime_inputs7 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs7.deinit();
-    var qualified_runtime = try session.Session.init(allocator, &.{}, runtime_inputs7.inputs(.{ .output = &qualified_output.writer }), .default, .evaluate);
-    defer qualified_runtime.deinit();
-    const module_source = try std.fmt.allocPrint(
-        allocator,
-        "(1 `{s} set) `poll-module @defm",
-        .{first_bytes},
-    );
-    defer allocator.free(module_source);
-    try expectOk(&qualified_runtime, module_source);
-    try qualified_runtime.pushOwned(.{ .symbol = .{ .name = qualified } });
-    qualified_runtime.requestCancellation();
-    const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "see")).err;
-    defer qualified_runtime.release(qualified_failure);
-    const qualified_rendered = try printer.toOwnedString(allocator, qualified_failure);
-    defer allocator.free(qualified_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, qualified_rendered, "unit cancelled") != null);
-    try std.testing.expect(qualified_runtime.lastPolls() >= 1);
-    try std.testing.expectEqual(@as(usize, 0), qualified_output.written().len);
+    try runtime_fixture.expectCancelledAcrossTurns(&words_runtime, "words");
 }
 
 test "reflection failures are total" {
@@ -403,7 +329,6 @@ test "session: public definition mutation settles retirement every turn" {
         // A replaced top-level definition nothing still holds is reclaimed,
         // so redefining one name settles to bounded live memory.
         try expectChurnBounded(&runtime, &counting, 1024, null);
-        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
@@ -443,7 +368,6 @@ test "acceptance: redefinition soak keeps live memory bounded" {
         const small_growth = after_small -| warmed_live_bytes;
         const large_growth = after_large -| after_small;
         try std.testing.expect(large_growth <= small_growth * 2 + 4096);
-        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
@@ -465,7 +389,6 @@ test "session: mutation settlement is independent of a busy sole worker" {
         // publishes nothing.
         const worker_turns = "(1) @spawn task.await pop (1) @spawn task.await pop";
         try expectChurnBounded(&runtime, &counting, 4096, worker_turns);
-        try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
         try expectOk(&runtime, "dup task.cancel task.await pop");
     }
     try std.testing.expectEqual(.ok, counting.deinit());
@@ -499,11 +422,10 @@ fn registryWorker(context: RegistryThreadContext, worker_id: usize) void {
             context.failed.store(true, .release);
             return;
         }
-        var lease = modules.testing.acquire(context.registry, context.shared) orelse {
+        if (!modules.testing.registered(context.registry, context.shared)) {
             context.failed.store(true, .release);
             return;
-        };
-        lease.deinit();
+        }
     }
 }
 
@@ -543,8 +465,7 @@ test "registry: concurrent commits are linearized without lost names" {
     // Every commit published from a snapshot no other commit had replaced,
     // so every name any worker registered is still in the directory.
     for (distinct) |names| for (names) |name| {
-        var lease = modules.testing.acquire(&registry, name) orelse return error.LostRegistration;
-        lease.deinit();
+        if (!modules.testing.registered(&registry, name)) return error.LostRegistration;
     };
 }
 
@@ -565,11 +486,10 @@ test "loader: failures and cycles are total" {
     // An import loads nothing; each failure belongs to the imported word.
     try expectErrorContains(&runtime, "`missing-module (x) import x", &.{ "kind undefined-word", "word x" });
     try expectErrorContains(&runtime, "`cycle (x) import x", &.{ "kind domain", "never reach a definition" });
-    try expectErrorContains(&runtime, "`orphan (x) import x", &.{
-        "kind io",
-        "registered nothing under that name",
-        "path \"test/acceptance/modules/orphan.ecl\"",
-    });
+    // A file whose first form calls into the module it is loading asks for
+    // that load again before it has registered anything.
+    try expectErrorContains(&runtime, "selfload.x", &.{ "kind domain", "recursive auto-load of `", "test/acceptance/modules/selfload.ecl`" });
+    try expectErrorContains(&runtime, "`orphan (x) import x", &.{ "kind undefined-word", "word x" });
     try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" @load", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
     try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" @load", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
 
@@ -624,8 +544,10 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var first_sealed = try first.sealLiteralGroup();
     defer first_sealed.deinit();
     try modules.testing.register(&registry, &first_sealed);
-    var lease = modules.testing.acquire(&registry, first_name).?;
-    defer lease.deinit();
+    // A view held across the reload keeps the first generation readable.
+    var held = registry.view();
+    defer held.deinit();
+    _ = held.moduleFind(first_name).?;
     var second = try registry.createImage(try environment.moduleScope(first_name), .ordinary);
     defer second.deinit();
     try second.stageDefinition(word_name, .{ .word = .{

@@ -115,7 +115,7 @@ test "native runtime: SDK char scalars enforce Unicode scalar bounds" {
     }
 }
 
-test "native runtime: source precedence and path-root order are observable" {
+test "native runtime: a source declaration takes precedence over a native library" {
     const fixture_path = try std.fs.path.join(
         allocator,
         &.{ build_options.fixture_dir, "sample.eclmod" },
@@ -180,9 +180,11 @@ test "native runtime: source precedence and path-root order are observable" {
         .{ native_root_path, std.fs.path.delimiter, source_root_path },
     );
     defer allocator.free(ordered_path);
-    var native_first = try runPath("41 sample.increment", ordered_path);
-    defer native_first.deinit();
-    try native_first.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
+    // A source in any entry is found before a native library in an earlier
+    // one.
+    var source_anywhere = try runPath("sample.increment", ordered_path);
+    defer source_anywhere.deinit();
+    try source_anywhere.expect(.{ .exit_code = 0, .stdout = "100\n", .stderr = "" });
 }
 
 test "native runtime: malformed artifacts are authoritative" {

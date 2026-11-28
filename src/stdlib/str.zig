@@ -52,7 +52,7 @@ fn isString(fiber: *Fiber) MachineError!void {
         .list => |header| if (header.length() == 0) true else switch (header.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
             .generic_spine => return fiber.startDriver(ScanDriver{ .collection = .init(item.take()) }),
-            .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => false,
+            .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address => false,
         },
         else => false,
     };

@@ -13,13 +13,11 @@ const help =
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
     \\    ecl fmt <FILE|->           Format source to standard output
     \\    ecl fmt -w <FILE>          Format and atomically rewrite a file
-    \\    ecl check-map <FILE>       Validate an inert module map
     \\    ecl <APPLICATION> [ARGS...] Run an installed application
-    \\    ecl test [OPTIONS] [-- ARGS...]  Run the local module scope tests
+    \\    ecl test [OPTIONS] [-- ARGS...]  Run the project's tests
     \\
     \\OPTIONS:
     \\    -e, --eval <SOURCE>        Evaluate source text
-    \\    --module-map <FILE>       Load an explicit module map (before command)
     \\    -h, --help                 Show this help
     \\    -V, --version              Show the version
     \\
@@ -44,7 +42,12 @@ const Startup = struct {
     process: std.process.Init,
     cwd: []const u8,
     environ: []const ecl.machine.Environ.Entry,
-    module_map: ?[]const u8 = null,
+    /// The project root an installed application runs in, in place of the
+    /// caller's project and `ECL_PATH`.
+    module_root: ?[]const u8 = null,
+    /// Set by `configuredWorkers`, which every command that starts a Session
+    /// passes through first.
+    worker_count: usize = 1,
 };
 
 // Debug builds otherwise inherit `std.start`'s checked allocator, which unwinds
@@ -74,16 +77,11 @@ fn dispatch(startup: Startup) AppError!u8 {
     var init = startup;
     const arguments = init.process.minimal.args.toSlice(init.process.arena.allocator()) catch
         return error.OutOfMemory;
-    var cli = arguments[1..];
-    if (cli.len != 0 and std.mem.eql(u8, cli[0], "--module-map")) {
-        if (cli.len < 2) return emitSyntheticError(init, .io, "--module-map requires a file", null);
-        init.module_map = cli[1];
-        cli = cli[2..];
-    }
+    const cli = arguments[1..];
     if (cli.len == 0) {
-        const worker_count = try configuredWorkers(init) orelse return 2;
+        init = try configuredWorkers(init) orelse return 2;
         const tty = std.Io.File.stdin().isTty(init.process.io) catch return error.Io;
-        return if (tty) repl(init, worker_count) else runStdin(init, &.{}, worker_count);
+        return if (tty) repl(init) else runStdin(init, &.{});
     }
     const first = cli[0];
     if (std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
@@ -98,9 +96,8 @@ fn dispatch(startup: Startup) AppError!u8 {
         return 0;
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
-    if (std.mem.eql(u8, first, "check-map")) return checkMapCommand(init, cli[1..]);
     if (std.mem.eql(u8, first, "test")) return testCommand(init, cli[1..]);
-    const worker_count = try configuredWorkers(init) orelse return 2;
+    init = try configuredWorkers(init) orelse return 2;
     if (std.mem.eql(u8, first, "-e") or std.mem.eql(u8, first, "--eval")) {
         if (cli.len < 2) return emitSyntheticError(
             init,
@@ -108,10 +105,10 @@ fn dispatch(startup: Startup) AppError!u8 {
             "-e/--eval requires source text",
             null,
         );
-        return executeSource(init, "<command>", cli[1], cli[2..], true, .data, worker_count);
+        return executeSource(init, "<command>", cli[1], cli[2..], true, .data);
     }
-    if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..], worker_count);
-    if (try installedApplication(init, first, cli[1..], worker_count)) |status| return status;
+    if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..]);
+    if (try installedApplication(init, first, cli[1..])) |status| return status;
     const is_file: bool = file: {
         std.Io.Dir.cwd().access(init.process.io, first, .{ .read = true }) catch |err| switch (err) {
             error.FileNotFound, error.NameTooLong, error.BadPathName => break :file false,
@@ -127,7 +124,7 @@ fn dispatch(startup: Startup) AppError!u8 {
             .unlimited,
         ) catch |err| return emitIoError(init, "cannot read script", err);
         defer init.process.gpa.free(source);
-        return executeSource(init, first, source, cli[1..], false, .data, worker_count);
+        return executeSource(init, first, source, cli[1..], false, .data);
     }
     if (std.mem.endsWith(u8, first, ".ecl")) {
         var buffer: [512]u8 = undefined;
@@ -138,40 +135,7 @@ fn dispatch(startup: Startup) AppError!u8 {
         ) catch "script file does not exist";
         return emitSyntheticError(init, .io, message, null);
     }
-    return executeSource(init, "<command>", first, cli[1..], true, .data, worker_count);
-}
-
-fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
-    const from_stdin = arguments.len == 3 and std.mem.eql(u8, arguments[0], "--document") and std.mem.eql(u8, arguments[2], "-");
-    if (!from_stdin and (arguments.len != 1 or std.mem.eql(u8, arguments[0], "-"))) {
-        try writeFile(init.process.io, .stderr, "ecl check-map: usage: ecl check-map <FILE> | --document <FILE> -\n");
-        return 1;
-    }
-    const path = try std.fs.path.resolve(init.process.gpa, &.{ init.cwd, arguments[if (from_stdin) 1 else 0] });
-    defer init.process.gpa.free(path);
-    var host = ecl.heap.HostOwner.init(init.process.gpa);
-    defer host.cleanup().drain();
-    var diagnostic: ecl.module_map.Diagnostic = .{};
-    const map = (if (from_stdin) input: {
-        var buffer: [8192]u8 = undefined;
-        var stream = std.Io.File.stdin().reader(init.process.io, &buffer);
-        const source = stream.interface.allocRemaining(init.process.gpa, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return emitIoError(init, "cannot read bounded module map input", err),
-        };
-        defer init.process.gpa.free(source);
-        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true, &diagnostic);
-    } else ecl.module_map.load(host.cleanup(), init.process.io, path, &diagnostic)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => {
-            var buffer: [512]u8 = undefined;
-            const message = std.fmt.bufPrint(&buffer, "invalid module map: {s}", .{diagnostic.message()}) catch
-                buffer[0..ecl.console.completeUtf8Len(&buffer)];
-            return emitSyntheticError(init, .io, message, null);
-        },
-    };
-    defer map.deinit();
-    return 0;
+    return executeSource(init, "<command>", first, cli[1..], true, .data);
 }
 
 fn applicationName(name: []const u8) bool {
@@ -180,7 +144,7 @@ fn applicationName(name: []const u8) bool {
     return true;
 }
 
-fn installedApplication(init: Startup, name: []const u8, arguments: []const []const u8, worker_count: usize) AppError!?u8 {
+fn installedApplication(init: Startup, name: []const u8, arguments: []const []const u8) AppError!?u8 {
     if (!applicationName(name)) return null;
     const allocator = init.process.gpa;
     const executable = std.process.executablePathAlloc(init.process.io, allocator) catch |err| switch (err) {
@@ -192,12 +156,10 @@ fn installedApplication(init: Startup, name: []const u8, arguments: []const []co
     const prefix = std.fs.path.dirname(bin) orelse return null;
     const app_dir = try std.fs.path.join(allocator, &.{ prefix, "share", "ecl", "apps", name });
     defer allocator.free(app_dir);
-    // An installed application is a directory holding `main.ecl`, which runs
-    // under the `ecl.modules` beside it.
+    // An installed application is a directory holding `main.ecl`, which
+    // finds its modules in that directory alone.
     const entry_path = try std.fs.path.join(allocator, &.{ app_dir, "main.ecl" });
     defer allocator.free(entry_path);
-    const map = try std.fs.path.join(allocator, &.{ app_dir, "ecl.modules" });
-    defer allocator.free(map);
     const source = std.Io.Dir.cwd().readFileAlloc(init.process.io, entry_path, allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
         error.OutOfMemory => return error.OutOfMemory,
@@ -205,8 +167,8 @@ fn installedApplication(init: Startup, name: []const u8, arguments: []const []co
     };
     defer allocator.free(source);
     var application = init;
-    application.module_map = map;
-    return try executeSource(application, entry_path, source, arguments, false, .data, worker_count);
+    application.module_root = app_dir;
+    return try executeSource(application, entry_path, source, arguments, false, .data);
 }
 
 const test_help =
@@ -251,7 +213,6 @@ const CliRuntime = struct {
         self: *CliRuntime,
         startup: Startup,
         arguments: []const []const u8,
-        worker_count: usize,
         standard_input: ecl.machine.StandardInput.Availability,
         mode: ecl.session.CommandMode,
     ) AppError!void {
@@ -266,15 +227,14 @@ const CliRuntime = struct {
                 .io = startup.process.io,
                 .output = &self.output_writer.interface,
                 .diagnostics = &self.diagnostic_writer.interface,
-                .ecl_path = startup.process.environ_map.get("ECL_PATH"),
-                .module_map = startup.module_map,
+                .ecl_path = if (startup.module_root == null) startup.process.environ_map.get("ECL_PATH") else null,
+                .module_root = startup.module_root,
                 .environ = startup.environ,
                 .standard_input = standard_input,
                 .initial_cwd = startup.cwd,
                 .filesystem = .{ .roots = &self.roots },
-                .clock = .{ .wall = .host },
             },
-            .{ .worker_pool = worker_count },
+            .{ .worker_pool = startup.worker_count },
             mode,
             &diagnostic,
         ) catch |err| switch (err) {
@@ -321,23 +281,17 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
         null,
     );
 
-    const worker_count = try configuredWorkers(init) orelse return 2;
+    const configured = try configuredWorkers(init) orelse return 2;
     // SAFETY: init fills borrowed storage and the Session before use; only a
     // successful init installs the teardown defer, and cli stays at this address.
     var cli: CliRuntime = undefined;
-    try cli.init(init, trailing, worker_count, .data, .language_tests);
+    try cli.init(configured, trailing, .data, .language_tests);
     defer cli.deinit();
     const runtime = &cli.session;
 
     while (true) switch (try runtime.advanceLocalPreload()) {
         .pending => {},
         .complete => break,
-        .no_map => return emitSyntheticError(
-            init,
-            .io,
-            "ecl test requires an ecl.modules map with a designated local scope",
-            null,
-        ),
         .invalid => |message| return emitSyntheticError(init, .io, message, null),
         .err => |failure| {
             defer runtime.release(failure);
@@ -379,28 +333,24 @@ fn environSnapshot(init: std.process.Init) AppError![]const ecl.machine.Environ.
         variable.* = .{ .name = name, .value = value };
     return entries;
 }
-fn configuredWorkers(init: Startup) AppError!?usize {
-    const raw = init.process.environ_map.get("ECL_WORKERS") orelse
-        return @max(@as(usize, 1), std.Thread.getCpuCount() catch 1);
-    if (raw.len == 0) {
+/// `init` with the worker count ECL_WORKERS asks for, or one per CPU. Null
+/// after reporting a value that is not a positive base-10 integer.
+fn configuredWorkers(init: Startup) AppError!?Startup {
+    var configured = init;
+    const raw = init.process.environ_map.get("ECL_WORKERS") orelse {
+        configured.worker_count = @max(@as(usize, 1), std.Thread.getCpuCount() catch 1);
+        return configured;
+    };
+    // `parseInt` alone would also accept a sign and digit separators.
+    const digits = std.mem.indexOfNone(u8, raw, "0123456789") == null;
+    configured.worker_count = if (digits) std.fmt.parseInt(usize, raw, 10) catch 0 else 0;
+    if (configured.worker_count == 0) {
         try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
         return null;
     }
-    for (raw) |byte| if (!std.ascii.isDigit(byte)) {
-        try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
-        return null;
-    };
-    const count = std.fmt.parseInt(usize, raw, 10) catch {
-        try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
-        return null;
-    };
-    if (count == 0) {
-        try writeFile(init.process.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
-        return null;
-    }
-    return count;
+    return configured;
 }
-fn runStdin(init: Startup, arguments: []const []const u8, worker_count: usize) AppError!u8 {
+fn runStdin(init: Startup, arguments: []const []const u8) AppError!u8 {
     var buffer: [8192]u8 = undefined;
     var file_reader = std.Io.File.stdin().reader(init.process.io, &buffer);
     const source = file_reader.interface.allocRemaining(init.process.gpa, .unlimited) catch |err| switch (err) {
@@ -408,7 +358,7 @@ fn runStdin(init: Startup, arguments: []const []const u8, worker_count: usize) A
         else => return emitIoError(init, "cannot read stdin", err),
     };
     defer init.process.gpa.free(source);
-    return executeSource(init, "<stdin>", source, arguments, true, .program_source, worker_count);
+    return executeSource(init, "<stdin>", source, arguments, true, .program_source);
 }
 
 fn readFormatStdin(init: Startup) AppError![]u8 {
@@ -524,12 +474,11 @@ fn executeSource(
     arguments: []const []const u8,
     print_stack: bool,
     standard_input: ecl.machine.StandardInput.Availability,
-    worker_count: usize,
 ) AppError!u8 {
     // SAFETY: init fills borrowed storage and the Session before use; only a
     // successful init installs the teardown defer, and cli stays at this address.
     var cli: CliRuntime = undefined;
-    try cli.init(init, arguments, worker_count, standard_input, .evaluate);
+    try cli.init(init, arguments, standard_input, .evaluate);
     defer cli.deinit();
     const session = &cli.session;
     const outcome = try session.runUnit(source_name, source);
@@ -552,11 +501,11 @@ fn executeSource(
         },
     }
 }
-fn repl(init: Startup, worker_count: usize) AppError!u8 {
+fn repl(init: Startup) AppError!u8 {
     // SAFETY: init fills borrowed storage and the Session before use; only a
     // successful init installs the teardown defer, and cli stays at this address.
     var cli: CliRuntime = undefined;
-    try cli.init(init, &.{}, worker_count, .program_source, .evaluate);
+    try cli.init(init, &.{}, .program_source, .evaluate);
     defer cli.deinit();
     const session = &cli.session;
     const history_path = if (init.process.environ_map.get("HOME")) |home|

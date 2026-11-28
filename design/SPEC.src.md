@@ -546,13 +546,14 @@ different places (eg., in a module and the session, or in the session and in
 core...). This is the quality of "syntactic closure": quotation *bindings* are
 stable when used as callbacks, even absent of lexical scoping.
 
-The same holds for which modules a word may reach. A qualified word, or one
-that reaches a module through an import, is resolved as the source it was
-written in would resolve it, against the modules that source may refer to.
-Applying a quotation somewhere else changes nothing about which module its
-words reach. A symbol built at run time counts as written by the code that
-built it, and a word that takes a module name resolves it as the source of
-that symbol.
+Every module name means the same registration wherever a word naming it is
+written or run.
+
+What `@defm` may register follows the unit running it, not where the word was
+written: while a file found by module search loads, only the modules that file
+declares (see `ENVIRONMENT.md`); while an embedded module loads, any name;
+and otherwise any name the standard library does not reserve. A task, and a
+file read by `@load`, register as any other code does.
 
 ### Definition annotations
 
@@ -576,9 +577,11 @@ Annotations are optional everywhere. Module `def`/`defp` accept the same four
 forms as top-level `def`: no annotation, effect only, documentation only, or
 both. A top-level effect is reflective metadata only, whereas a module word's
 declared effect functions as a runtime arity contract, checked dynamically
-against the observed effect when application crosses a module boundary
-(violation: `` `contract ``). An omitted module effect means there is no such
-check. 
+against the observed effect when the word calling it was written outside its
+module (violation: `` `contract ``). Where the calling word was written
+decides, not where it runs: a session quotation that module code applies is
+checked, and a module's own quotation that the session applies is not. An
+omitted module effect means there is no such check. 
 
 #### Variable rows
 
@@ -613,7 +616,7 @@ first element:
 
 The words `--`, `:`, and `...` are reserved against binding: they remain
 legal symbol values and can be built into annotations at runtime, but cannot be
-introduced as definitions, values, locals, module names, aliases, exports, or
+introduced as definitions, values, locals, module names, imports, exports, or
 native entries. Binding attempts are `` `domain ``; use as a local name is a
 parse error. Longer names containing the same punctuation remain legal.
 

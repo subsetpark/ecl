@@ -56,7 +56,7 @@ pub const ListProfile = struct {
             .leaf_char1 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u8) },
             .leaf_char2 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u16) },
             .leaf_char4 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u21) },
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => .{ .kind = .mixed },
+            .generic_spine, .dict, .task, .port, .address => .{ .kind = .mixed },
         };
     }
 
@@ -166,7 +166,7 @@ pub const LeafRangeMaterializer = union(enum) {
             .leaf_char1 => .{ .char1 = .init(allocator, heap.chars8(header)[first..end]) },
             .leaf_char2 => .{ .char2 = .init(allocator, heap.chars16(header)[first..end]) },
             .leaf_char4 => .{ .char4 = .init(allocator, heap.chars32(header)[first..end]) },
-            .dict, .task, .port, .address, .reserved_mask => unreachable,
+            .dict, .task, .port, .address => unreachable,
         };
     }
     pub fn advance(self: *LeafRangeMaterializer, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeResult {
@@ -541,7 +541,7 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
         .leaf_char1 => .{ .char = heap.chars8(header)[index] },
         .leaf_char2 => .{ .char = heap.chars16(header)[index] },
         .leaf_char4 => .{ .char = heap.chars32(header)[index] },
-        .dict, .task, .port, .address, .reserved_mask => unreachable,
+        .dict, .task, .port, .address => unreachable,
     };
 }
 
@@ -556,7 +556,7 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
             .leaf_char2,
             .leaf_char4,
             => header,
-            .dict, .task, .port, .address, .reserved_mask => error.NotAList,
+            .dict, .task, .port, .address => error.NotAList,
         },
         .int, .float, .char, .symbol, .dict, .task, .port, .address => error.NotAList,
     };

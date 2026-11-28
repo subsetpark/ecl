@@ -24,14 +24,6 @@ pub const WakeReason = union(enum) {
     overflow,
     external_ready,
     external_io,
-
-    pub fn eql(a: WakeReason, b: WakeReason) bool {
-        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
-        return switch (a) {
-            .task => |index| index == b.task,
-            .timeout, .cancellation, .io, .out_of_memory, .overflow, .external_ready, .external_io => true,
-        };
-    }
 };
 
 const Active = struct {

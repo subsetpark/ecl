@@ -147,7 +147,7 @@ fn binaryPrimitive(fiber: *Fiber, comptime operation: BinaryOp) MachineError!voi
             return scalarFailure(fiber, fault, null);
         return fiber.pushIntoFreed(result);
     }
-    if (try startTypedBinary(fiber, operation, &left, &right, .{})) return;
+    if (try startTypedBinary(fiber, operation, &left, &right, .indexed)) return;
 
     const cursor = try PervadeCursor.initBinary(
         fiber.releases,
@@ -172,7 +172,7 @@ fn unaryPrimitive(fiber: *Fiber, comptime operation: UnaryOp) MachineError!void 
             return scalarFailure(fiber, fault, null);
         return fiber.pushIntoFreed(result);
     }
-    if (try startTypedUnary(fiber, operation, &operand, .{})) return;
+    if (try startTypedUnary(fiber, operation, &operand, .indexed)) return;
     const cursor = try PervadeCursor.initUnary(
         fiber.releases,
         fiber.allocator,
@@ -512,7 +512,7 @@ pub const PervadeCursor = struct {
                 node.left,
                 node.right,
                 self.rootCandidate(node),
-                .{},
+                .indexed,
             )) |typed| return self.runTyped(typed);
             const left_count: usize = if (node.left == .list) @intCast(node.left.list.length()) else 0;
             const right_count: usize = if (node.right == .list) @intCast(node.right.list.length()) else 0;
@@ -574,7 +574,7 @@ pub const PervadeCursor = struct {
             return .framed;
         }
         if (node.operand == .list) {
-            if (try startNestedUnary(fiber, node.operation, node.operand, .{})) |typed|
+            if (try startNestedUnary(fiber, node.operation, node.operand, .indexed)) |typed|
                 return self.runTyped(typed);
             const count: usize = @intCast(node.operand.list.length());
             var values = try heap.OwnedValueBuffer.init(self.releases, count);
@@ -691,7 +691,7 @@ pub const PervadeCursor = struct {
             shape,
         ) orelse return null;
         const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-        return try self.runTyped(try data.startNested(fiber, .{ node.left, node.right }, null, .{}, length));
+        return try self.runTyped(try data.startNested(fiber, .{ node.left, node.right }, null, .indexed, length));
     }
 
     fn acceptListChild(self: *PervadeCursor, frame: *ListFrame) void {
@@ -1441,21 +1441,16 @@ fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPo
     return .scalar_checked;
 }
 
-/// Whether a fault carries a logical index.
+/// What a numeric kernel needs besides its operands: whether a fault carries
+/// a logical index. Whether an operand's buffer may become the output is the
+/// executor's to decide, from which operands the call owns.
 ///
 /// Direct pervasion over a list reports the failing element's index, exactly as
 /// the boxed route does. A recognized `each`/`zip-with` idiom does not: the
 /// generic combinator it stands in for applies the quotation to one element at a
 /// time and its fault has no list position, so the fused path must not invent
 /// one.
-const FaultReport = struct { index: bool = true };
-
-/// What a numeric kernel needs besides its operands: how a fault is reported.
-/// Whether an operand's buffer may become the output is the executor's to
-/// decide, from which operands the call owns.
-const NumericParams = struct {
-    report: FaultReport = .{},
-};
+const FaultReport = enum { indexed, unindexed };
 
 fn failTypedScalar(
     fiber: *Fiber,
@@ -1464,7 +1459,7 @@ fn failTypedScalar(
     index: usize,
 ) MachineError {
     const diagnostic = scalarDiagnostic(fault);
-    if (report.index) return fiber.failAtIndex(diagnostic.kind, diagnostic.message, index);
+    if (report == .indexed) return fiber.failAtIndex(diagnostic.kind, diagnostic.message, index);
     return fiber.fail(diagnostic.kind, diagnostic.message);
 }
 
@@ -1576,8 +1571,8 @@ fn mirroredBinaryKernel(comptime operation: BinaryOp, comptime left_class: Numbe
     const out = comptime binaryResult(operation, left_class, right_class).?;
     comptime std.debug.assert(binaryResult(twin, right_class, left_class).? == out);
     return struct {
-        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
-            return @call(.never_inline, Twin.chunk, .{ params, [2]Value{ operands[1], operands[0] }, output, range, fiber });
+        fn chunk(report: FaultReport, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
+            return @call(.never_inline, Twin.chunk, .{ report, [2]Value{ operands[1], operands[0] }, output, range, fiber });
         }
     };
 }
@@ -2026,7 +2021,7 @@ fn binaryKernel(
 
         /// The operation's range loop over these classes, as
         /// `BinaryKernel` calls it.
-        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
+        fn chunk(report: FaultReport, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
             const left: Left = if (shape == .scalar_leaf)
                 left_class.unboxed(operands[0])
             else
@@ -2037,7 +2032,7 @@ fn binaryKernel(
                 heap.leafElements(right_class.kind(), operands[1].list);
             const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
             if (runPieces(left, right, output, placement, range)) |faulted|
-                return replayDirect(fiber, params.report, left, right, faulted);
+                return replayDirect(fiber, report, left, right, faulted);
         }
 
         noinline fn replayDirect(fiber: *Fiber, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
@@ -2174,11 +2169,11 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
 
         /// The operation's range loop over this class, as `UnaryKernel`
         /// calls it.
-        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
+        fn chunk(report: FaultReport, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, fiber: *Fiber) MachineError!void {
             const elements = heap.leafElements(operand_class.kind(), operands[0].list);
             const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
             if (runPieces(elements, output, placement, range)) |faulted|
-                return replayDirect(fiber, params.report, elements, faulted);
+                return replayDirect(fiber, report, elements, faulted);
         }
 
         noinline fn replayDirect(fiber: *Fiber, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
@@ -2246,13 +2241,13 @@ const KernelOutput = union(enum) {
 const BinaryChunk = *const anyopaque;
 
 fn BinaryLoop(comptime out: Number) type {
-    return *const fn (NumericParams, [2]Value, *support.LeafResult(out.kind()), flat.Chunk, *Fiber) MachineError!void;
+    return *const fn (FaultReport, [2]Value, *support.LeafResult(out.kind()), flat.Chunk, *Fiber) MachineError!void;
 }
 
 /// What a binary kernel runs with: the caller's parameters and the plan's
 /// range loop.
 const BinaryParams = struct {
-    numeric: NumericParams,
+    report: FaultReport,
     chunk: BinaryChunk,
 };
 
@@ -2274,7 +2269,7 @@ fn BinaryKernel(comptime out: Number) type {
 
             pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
                 const loop: BinaryLoop(out) = @ptrCast(@alignCast(params.chunk));
-                return loop(params.numeric, operands, output, range, fiber);
+                return loop(params.report, operands, output, range, fiber);
             }
 
             pub const finish = Output.finish;
@@ -2290,11 +2285,11 @@ fn BinaryKernel(comptime out: Number) type {
 const UnaryChunk = *const anyopaque;
 
 fn UnaryLoop(comptime out: Number) type {
-    return *const fn (NumericParams, [1]Value, *support.LeafResult(out.kind()), flat.Chunk, *Fiber) MachineError!void;
+    return *const fn (FaultReport, [1]Value, *support.LeafResult(out.kind()), flat.Chunk, *Fiber) MachineError!void;
 }
 
 const UnaryParams = struct {
-    numeric: NumericParams,
+    report: FaultReport,
     chunk: UnaryChunk,
 };
 
@@ -2311,7 +2306,7 @@ fn UnaryKernel(comptime out: Number) type {
 
             pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, fiber: *Fiber) MachineError!void {
                 const loop: UnaryLoop(out) = @ptrCast(@alignCast(params.chunk));
-                return loop(params.numeric, operands, output, range, fiber);
+                return loop(params.report, operands, output, range, fiber);
             }
 
             pub const finish = Output.finish;
@@ -2340,13 +2335,13 @@ const NumericBinaryPlan = opaque {
         chunk: BinaryChunk,
 
         /// Runs the operation inline or as a driver.
-        fn start(self: *const Data, fiber: *Fiber, owners: [2]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
-            return self.run(fiber, owners, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn start(self: *const Data, fiber: *Fiber, owners: [2]*heap.OwnedValue, report: FaultReport, length: usize) MachineError!void {
+            return self.run(fiber, owners, .{ .report = report, .chunk = self.chunk }, length);
         }
 
         /// Runs the operation for a leaf inside pervasion.
-        fn startNested(self: *const Data, fiber: *Fiber, operands: [2]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
-            return self.nested(fiber, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn startNested(self: *const Data, fiber: *Fiber, operands: [2]Value, root: ?*heap.OwnedValue, report: FaultReport, length: usize) MachineError!support.NestedOutcome {
+            return self.nested(fiber, operands, root, .{ .report = report, .chunk = self.chunk }, length);
         }
     };
 
@@ -2414,7 +2409,7 @@ fn firstFlatElement(item: Value) ?Value {
         .leaf_char1 => .{ .char = heap.chars8(item.list)[0] },
         .leaf_char2 => .{ .char = heap.chars16(item.list)[0] },
         .leaf_char4 => .{ .char = @intCast(heap.chars32(item.list)[0]) },
-        .generic_spine, .dict, .task, .port, .address, .reserved_mask => null,
+        .generic_spine, .dict, .task, .port, .address => null,
     };
 }
 
@@ -2443,7 +2438,7 @@ fn rejectUnsupportedFlatBinary(
         (right == .list and right.list.length() == 0)) return false;
     _ = (switch (operation) {
         inline else => |selected| scalarBinary(selected, left_first orelse left, right_first orelse right),
-    }) catch |fault| return scalarFailure(fiber, fault, if (report.index) 0 else null);
+    }) catch |fault| return scalarFailure(fiber, fault, if (report == .indexed) 0 else null);
     return false;
 }
 
@@ -2455,7 +2450,7 @@ fn rejectUnsupportedFlatUnary(
 ) MachineError!bool {
     const first = firstFlatElement(operand) orelse return false;
     _ = selectUnary(operation)(first) catch |fault|
-        return scalarFailure(fiber, fault, if (report.index) 0 else null);
+        return scalarFailure(fiber, fault, if (report == .indexed) 0 else null);
     return false;
 }
 
@@ -2485,7 +2480,7 @@ fn startNestedNumericBinary(
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    return try data.startNested(fiber, .{ left_item, right_item }, root, .{ .report = report }, length);
+    return try data.startNested(fiber, .{ left_item, right_item }, root, report, length);
 }
 
 /// A typed leaf inside pervasion. `root`, when present, owns `left` and is
@@ -2518,13 +2513,13 @@ const NumericUnaryPlan = opaque {
         chunk: UnaryChunk,
 
         /// Runs the operation inline or as a driver.
-        fn start(self: *const Data, fiber: *Fiber, owners: [1]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
-            return self.run(fiber, owners, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn start(self: *const Data, fiber: *Fiber, owners: [1]*heap.OwnedValue, report: FaultReport, length: usize) MachineError!void {
+            return self.run(fiber, owners, .{ .report = report, .chunk = self.chunk }, length);
         }
 
         /// Runs the operation for a leaf inside pervasion.
-        fn startNested(self: *const Data, fiber: *Fiber, operands: [1]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
-            return self.nested(fiber, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
+        fn startNested(self: *const Data, fiber: *Fiber, operands: [1]Value, root: ?*heap.OwnedValue, report: FaultReport, length: usize) MachineError!support.NestedOutcome {
+            return self.nested(fiber, operands, root, .{ .report = report, .chunk = self.chunk }, length);
         }
     };
 
@@ -2563,7 +2558,7 @@ fn startNestedUnary(
     const length: usize = @intCast(operand.list.length());
     if (length == 0) return null;
     const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
-    return try data.startNested(fiber, .{operand}, null, .{ .report = report }, length);
+    return try data.startNested(fiber, .{operand}, null, report, length);
 }
 
 /// A numeric operation runs through its plan's kernel, inline or as a
@@ -2597,7 +2592,7 @@ fn startNumericBinary(
         shape,
     ) orelse return false;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    try data.start(fiber, .{ left, right }, .{ .report = report }, length);
+    try data.start(fiber, .{ left, right }, report, length);
     return true;
 }
 
@@ -2629,7 +2624,7 @@ fn startTypedUnary(
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
     const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
-    try data.start(fiber, .{operand}, .{ .report = report }, length);
+    try data.start(fiber, .{operand}, report, length);
     return true;
 }
 
@@ -3458,7 +3453,7 @@ pub fn idiomUnaryStart(operation: UnaryOp) IdiomStart.Unary {
     return switch (operation) {
         inline else => |selected| struct {
             fn run(fiber: *Fiber, operand: *heap.OwnedValue) MachineError!void {
-                const started = try startTypedUnary(fiber, selected, operand, .{ .index = false });
+                const started = try startTypedUnary(fiber, selected, operand, .unindexed);
                 std.debug.assert(started);
             }
         }.run,
@@ -3473,7 +3468,7 @@ pub fn idiomBinaryStart(operation: BinaryOp) IdiomStart.Binary {
                 left: *heap.OwnedValue,
                 right: *heap.OwnedValue,
             ) MachineError!void {
-                const started = try startTypedBinary(fiber, selected, left, right, .{ .index = false });
+                const started = try startTypedBinary(fiber, selected, left, right, .unindexed);
                 std.debug.assert(started);
             }
         }.run,

@@ -24,21 +24,19 @@
  (-- : "Resolve installed applications from the executable's own prefix, never the caller's.")
  ("installed-apps/distribution" install
   `cwd "installed-apps/distribution" app fs.mkdirs
-  "{format 1 local \"app\" scopes {\"app\" {root \".\" visible [] sources [\"*.ecl\"] artifacts []}}}"
-  "installed-apps/distribution" app "ecl.modules" pair path.join write
   "((42) `answer def) `appfixture @defm"
   "installed-apps/distribution" app "library.ecl" pair path.join write
   "appfixture.answer str io.prin args str io.prin `cwd \"sentinel\" fs.read-text io.prin"
   "installed-apps/distribution" entry
   `cwd "installed-apps/caller" fs.mkdirs
   "caller directory" "installed-apps/caller/sentinel" write
-  "broken project map" "installed-apps/caller/ecl.modules" write
+  # Neither the caller's project nor ECL_PATH supplies the application's
+  # modules: a caller file declaring the same module is never found.
+  "broken manifest" "installed-apps/caller/ecl.pkg" write
   "((999) `answer def) `appfixture @defm" "installed-apps/caller/appfixture.ecl" write
-  dup ["fixture" "one" "two"] in-caller "application dispatch" succeeds
+  dup ["fixture" "one" "two"] in-caller `env {} "ECL_PATH" "installed-apps/caller" absolute put put
+  "application dispatch" succeeds
   "42(\"one\" \"two\")caller directory" "application output" expect
-  # An explicit caller map also cannot replace the application's own map.
-  dup ["--module-map" "missing" "fixture" "three"] in-caller "explicit caller map" succeeds
-  "42(\"three\")" "explicit caller map output" expect-contains
   # Standard input stays available as program data.
   "io.stdin io.prin" "installed-apps/distribution" entry
   dup ["fixture"] in-caller `stdin "input bytes" bytes put "standard input" succeeds
@@ -54,7 +52,7 @@
   "passed" "environment output" expect
   # Installed names are not discovered in the caller's project or PATH. The
   # PATH candidate is a real executable, so running it would exit 0.
-  `cwd "installed-apps/caller/ecl.modules" fs.remove-file
+  `cwd "installed-apps/caller/ecl.pkg" fs.remove-file
   `cwd "installed-apps/caller/share/ecl/apps/unregistered" fs.mkdirs
   "installed-apps/moved" app "installed-apps/caller/share/ecl/apps/unregistered" "main.ecl"
   copy-into
@@ -65,9 +63,7 @@
   proc.run `term at `code at 0 match? not 1 "unregistered name is not dispatched" expect
   # Built-in commands retain precedence over installed application names.
   `cwd "installed-apps/moved/share/ecl/apps/test" fs.mkdirs
-  ["ecl.modules" "library.ecl"]
-  ("installed-apps/moved" app "installed-apps/moved/share/ecl/apps/test" rolldown copy-into 0) each
-  pop
+  "installed-apps/moved" app "installed-apps/moved/share/ecl/apps/test" "library.ecl" copy-into
   "\"installed test application ran\" io.prin"
   "installed-apps/moved/share/ecl/apps/test/main.ecl" write
   ["test"] in-caller proc.run `stdout at chars "installed test application ran"

@@ -1,6 +1,6 @@
-//! Module and source loading: finding a qualified module's source, native
-//! library, or builtin table, running it, and verifying what it registered
-//! before the suspended operation resumes.
+//! Module and source loading: finding the file that declares a qualified
+//! module, or its native library or builtin table, running it, and verifying
+//! what it registered before the suspended operation resumes.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -13,8 +13,9 @@ const native_abi = @import("native-abi");
 const reader = @import("reader.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
-const map_state = @import("module_snapshot.zig");
+const module_search = @import("module_search.zig");
 const machine = @import("machine.zig");
+const module_lookup = @import("module_lookup.zig");
 const Value = value.Value;
 const Header = value.ListHandle;
 const Loading = machine.Loading;
@@ -32,12 +33,10 @@ pub const QualifiedLoadContinuation = union(enum) {
     dispatch: struct {
         word: value.Symbol,
         site: ?ErrorSite,
-        trace_parent: ?intern.TraceWord,
     },
     load_only,
 };
 pub const QualifiedLoadRequest = struct {
-    context: modules.RegistrationProvenance,
     qualified: u32,
     continuation: QualifiedLoadContinuation,
 };
@@ -55,25 +54,15 @@ const SourceLoadRequest = union(enum) {
         };
     }
 };
-const ArtifactLoad = enum(u32) {
-    none = std.math.maxInt(u32),
-    _,
-
-    fn init(maybe_artifact: ?map_state.ArtifactId) ArtifactLoad {
-        return if (maybe_artifact) |id| @fromBackingInt(@intCast(@backingInt(id))) else .none;
-    }
-    fn artifact(self: ArtifactLoad) ?map_state.ArtifactId {
-        return if (self == .none) null else @fromBackingInt(@intCast(@backingInt(self)));
-    }
-};
 /// What a registering source's return frame owns until the load is verified:
-/// the loading lease, the path its failures report, and the operation to
-/// resume.
+/// the loading lease, the path its failures report, the operation to resume,
+/// what the source may register, and what the unit it interrupted may.
 pub const AfterLoad = struct {
     loading: modules.LoadingLease,
     path: Value,
     request: SourceLoadRequest,
-    artifact: ArtifactLoad,
+    registrant: modules.RegistrationProvenance,
+    outer: modules.RegistrationProvenance = .ordinary,
 
     pub fn deinit(self: AfterLoad, releases: *heap.ReleaseDomain) void {
         var loading = self.loading;
@@ -81,6 +70,12 @@ pub const AfterLoad = struct {
         releases.releaseValue(self.path);
     }
 };
+
+/// The Session's published catalog. Only a load that found its file asks,
+/// so the catalog is there.
+fn catalogOf(fiber: *machine.Fiber) *const module_search.Catalog {
+    return fiber.inherited.module_search.?.current().?;
+}
 
 /// A completed auto-load registers the module before resuming the tagged
 /// qualified operation. The requested spelling also identifies a misspelled
@@ -93,22 +88,14 @@ pub fn autoLoadModule(via: *Loading, name: intern.ModuleName, request: Qualified
     });
 }
 
-/// Loads one mapped source artifact without resuming any qualified operation.
-pub fn loadSource(via: *Loading, source: *const map_state.SourceScope) MachineError!void {
+/// Loads one found source file without resuming any qualified operation.
+pub fn loadSource(via: *Loading, source: *const module_search.Source) MachineError!void {
     const fiber = via.fiber();
-    const location = source.location();
     try via.startDriver(AutoLoadDriver{
         .request = .source,
-        .state = .init(.{ .artifact_begin = .{
-            .target = .{
-                .scope_name = location.scope_name,
-                .root = location.root,
-                .relative_path = location.relative_path,
-                .scope_id = location.scope_id,
-                .artifact_id = location.artifact_id,
-                .kind = location.kind,
-            },
-            .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(location.artifact_id, .of(fiber)),
+        .state = .init(.{ .file_begin = .{
+            .file = source,
+            .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(source.id(), .of(fiber)),
         } }),
     });
 }
@@ -131,7 +118,7 @@ pub fn parseSource(via: *Loading, source: []u8) MachineError!void {
 pub fn sessionSource(via: *Loading, source_name: []const u8, source: []const u8) error{OutOfMemory}!void {
     try via.startDriver(SourceDriver{
         .text = .init(.{ .borrowed = .{ .source_name = source_name, .source = source } }),
-        .completion = .init(.{ .session = null }),
+        .completion = .init(.session),
     });
 }
 
@@ -151,79 +138,36 @@ pub fn verifyAfterLoad(via: *Loading, after: AfterLoad) MachineError!bool {
     defer path.deinit();
     // The registration check bounds the retry and gives every transport the
     // same post-load handoff.
-    const artifact = after.artifact.artifact();
-    const first_name = if (artifact) |artifact_id| name: {
-        const names = fiber.inherited.module_snapshot.?.artifactModules(artifact_id);
+    const file = after.registrant.foundSource();
+    const first_name = if (file) |found| name: {
+        const names = found.declared();
         if (names.len == 0) {
-            fiber.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
-            lease.finish();
+            catalogOf(fiber).markLoaded(lease.artifactCommit());
+            lease.deinit();
             return false;
         }
         break :name names[0];
     } else after.request.module.name;
-    // The lease stays held through verification: an artifact commits only
-    // once every module it declares is found registered.
+    // The lease stays held through verification: a file is recorded loaded
+    // only once every module it declares is found registered.
     try via.startDriver(QualifiedRegistrationDriver{
         .path = .init(path.take()),
         .acquisition = .init(fiber.inherited.registry.acquireCursor(first_name)),
         .request = after.request,
         .loading = .init(lease.move()),
-        .artifact = artifact,
+        .file = file,
     });
     return true;
 }
 
+/// Finds and loads what supplies one module: the registry first, then the
+/// embedded library, then the one source file on the search path that
+/// declares it, and then the first entry holding `<name>.eclmod`.
 const AutoLoadDriver = struct {
-    const FileKind = enum { source, native };
-    const CandidateOrigin = union(enum) {
-        search_path: struct {
-            component_start: usize,
-            component_end: usize,
-            next_search: usize,
-        },
-        mapped: struct {
-            scope_name: []const u8,
-            root: []const u8,
-            scope_id: map_state.ScopeId,
-            artifact_id: map_state.ArtifactId,
-        },
-    };
-    const FilenameTarget = union(enum) {
-        component_start: usize,
-        candidate: CandidateOrigin,
-    };
-    const FilenameState = struct {
-        loading: heap.Owned(modules.LoadingLease),
-        filename: heap.Owned([]u8),
-        index: usize = 0,
-        kind: FileKind,
-        target: FilenameTarget,
-    };
-    const CandidateState = struct {
-        loading: heap.Owned(modules.LoadingLease),
-        filename: heap.Owned([]u8),
-        kind: FileKind,
-        origin: CandidateOrigin,
-        candidate: heap.Owned([]u8),
-        index: usize = 0,
-        separator: bool,
-    };
     const Disposition = union(enum) {
-        source: struct {
-            provenance: modules.RegistrationProvenance,
-            artifact: ?map_state.ArtifactId,
-        },
-        native: ?map_state.ArtifactId,
+        source: *const module_search.Source,
+        native,
         embedded: stdlib.Entry,
-        fail: []const u8,
-    };
-    const MappedTarget = struct {
-        scope_name: []const u8,
-        root: []const u8,
-        relative_path: []const u8,
-        scope_id: map_state.ScopeId,
-        artifact_id: map_state.ArtifactId,
-        kind: @import("module_map.zig").Kind,
     };
     const State = union(enum) {
         begin: modules.Registry.BeginLoadingCursor,
@@ -231,35 +175,23 @@ const AutoLoadDriver = struct {
             loading: heap.Owned(modules.LoadingLease),
             cursor: heap.Owned(modules.Registry.AcquireCursor),
         },
-        map_lookup: struct {
+        scanning: struct {
             loading: heap.Owned(modules.LoadingLease),
-            cursor: heap.Owned(map_state.LookupCursor),
+            cursor: heap.Owned(module_search.ScanCursor),
         },
-        artifact_begin: struct {
-            target: MappedTarget,
+        file_begin: struct {
+            file: *const module_search.Source,
             cursor: modules.Registry.BeginLoadingCursor,
         },
+        /// The next search-path entry to look in for the native library.
+        native_probe: struct {
+            loading: heap.Owned(modules.LoadingLease),
+            entry: usize,
+        },
         committed: heap.Owned(modules.Registry.AcquireCursor),
-        mapped_root: struct {
-            loading: heap.Owned(modules.LoadingLease),
-            target: MappedTarget,
-        },
-        filename: FilenameState,
-        component_start: struct {
-            loading: heap.Owned(modules.LoadingLease),
-            filename: heap.Owned([]u8),
-            kind: FileKind,
-            search_index: usize,
-        },
-        component_end: struct {
-            loading: heap.Owned(modules.LoadingLease),
-            filename: heap.Owned([]u8),
-            kind: FileKind,
-            search_index: usize,
-            component_start: usize,
-        },
-        candidate: CandidateState,
-        access: CandidateState,
+        /// Between states, holding nothing; also where a source request
+        /// whose file was already loaded ends.
+        done,
         path_value: struct {
             loading: heap.Owned(modules.LoadingLease),
             candidate: heap.Owned([]u8),
@@ -284,30 +216,14 @@ const AutoLoadDriver = struct {
                     registered.cursor.deinit(releases, storage_allocator);
                     registered.loading.deinit(releases, storage_allocator);
                 },
-                .map_lookup => |*lookup| {
-                    lookup.cursor.deinit(releases, storage_allocator);
-                    lookup.loading.deinit(releases, storage_allocator);
+                .scanning => |*scanning| {
+                    scanning.cursor.deinit(releases, storage_allocator);
+                    scanning.loading.deinit(releases, storage_allocator);
                 },
-                .artifact_begin => |*begin| begin.cursor.deinit(),
+                .file_begin => |*begin| begin.cursor.deinit(),
+                .native_probe => |*probe| probe.loading.deinit(releases, storage_allocator),
                 .committed => |*cursor| cursor.deinit(releases, storage_allocator),
-                .mapped_root => |*mapped| mapped.loading.deinit(releases, storage_allocator),
-                .filename => |*filename| {
-                    filename.filename.deinit(releases, storage_allocator);
-                    filename.loading.deinit(releases, storage_allocator);
-                },
-                .component_start => |*component| {
-                    component.filename.deinit(releases, storage_allocator);
-                    component.loading.deinit(releases, storage_allocator);
-                },
-                .component_end => |*component| {
-                    component.filename.deinit(releases, storage_allocator);
-                    component.loading.deinit(releases, storage_allocator);
-                },
-                .candidate, .access => |*candidate| {
-                    candidate.candidate.deinit(releases, storage_allocator);
-                    candidate.filename.deinit(releases, storage_allocator);
-                    candidate.loading.deinit(releases, storage_allocator);
-                },
+                .done => {},
                 .path_value => |*path| {
                     path.materializer.deinit(releases, storage_allocator);
                     path.candidate.deinit(releases, storage_allocator);
@@ -326,62 +242,27 @@ const AutoLoadDriver = struct {
     request: SourceLoadRequest,
     state: heap.Owned(State),
 
-    fn makeFilename(
+    /// Materializes `candidate` as the path value the load reports, then
+    /// transfers it as `disposition`. Takes `loading` and `candidate`.
+    fn beginPath(
         self: *AutoLoadDriver,
         via: *Loading,
         loading: *heap.Owned(modules.LoadingLease),
-        kind: FileKind,
-        target: FilenameTarget,
-    ) error{OutOfMemory}!FilenameState {
-        const fiber = via.fiber();
-        const module_name = intern.get(intern.moduleId(self.request.module.name));
-        const extension = switch (kind) {
-            .source => ".ecl",
-            .native => ".eclmod",
-        };
-        const length = std.math.add(usize, module_name.len, extension.len) catch
-            return error.OutOfMemory;
-        const filename = try fiber.allocator.alloc(u8, length);
-        return .{
+        candidate: []u8,
+        disposition: Disposition,
+    ) void {
+        const materializer = kernel_storage.Utf8Materializer.init(via.fiber().allocator, candidate);
+        // Built apart from the state: `loading` may live in the state this
+        // replaces.
+        const next: State = .{ .path_value = .{
             .loading = .init(loading.take()),
-            .filename = .init(filename),
-            .kind = kind,
-            .target = target,
-        };
-    }
-    fn makeCandidate(
-        via: *Loading,
-        loading: *heap.Owned(modules.LoadingLease),
-        filename: *heap.Owned([]u8),
-        kind: FileKind,
-        origin: CandidateOrigin,
-    ) error{OutOfMemory}!CandidateState {
-        const fiber = via.fiber();
-        const directory = switch (origin) {
-            .mapped => |mapped| mapped.root,
-            .search_path => |legacy| legacy_directory: {
-                const search = fiber.inherited.ecl_path.?;
-                break :legacy_directory search[legacy.component_start..legacy.component_end];
-            },
-        };
-        const separator = directory.len != 0 and !std.fs.path.isSep(directory[directory.len - 1]);
-        var length = std.math.add(usize, directory.len, filename.borrow().len) catch
-            return error.OutOfMemory;
-        if (separator) length = std.math.add(usize, length, 1) catch
-            return error.OutOfMemory;
-        const candidate = try fiber.allocator.alloc(u8, length);
-        return .{
-            .loading = .init(loading.take()),
-            .filename = .init(filename.take()),
-            .kind = kind,
-            .origin = origin,
             .candidate = .init(candidate),
-            .separator = separator,
-        };
+            .materializer = .init(materializer),
+            .disposition = disposition,
+        } };
+        self.state.borrowMut().* = next;
     }
-    /// Embedded modules reuse the candidate slot for their provenance
-    /// name, so the existing `.path_value` phase materializes exactly the
-    /// value the load continuation reports as `'path`.
+    /// Embedded modules report their provenance name as their path.
     fn beginEmbedded(
         self: *AutoLoadDriver,
         via: *Loading,
@@ -393,17 +274,7 @@ const AutoLoadDriver = struct {
             .source => |source| source.name,
             .native, .builtin => intern.get(intern.moduleId(self.request.module.name)),
         };
-        var candidate = heap.Owned([]u8).init(try fiber.allocator.dupe(u8, provenance));
-        const materializer = kernel_storage.Utf8Materializer.init(
-            fiber.allocator,
-            candidate.borrow(),
-        );
-        self.state.borrowMut().* = .{ .path_value = .{
-            .loading = .init(loading.take()),
-            .candidate = .init(candidate.take()),
-            .materializer = .init(materializer),
-            .disposition = .{ .embedded = entry },
-        } };
+        self.beginPath(via, loading, try fiber.allocator.dupe(u8, provenance), .{ .embedded = entry });
     }
     /// The module is already registered, so this driver publishes nothing.
     fn finishWithoutLoading(
@@ -411,31 +282,57 @@ const AutoLoadDriver = struct {
         via: *Loading,
         loading: *heap.Owned(modules.LoadingLease),
     ) MachineError!WorkProgress {
-        loading.borrowMut().finish();
+        loading.borrowMut().deinit();
         return continueSourceRequest(via, self, self.request);
     }
     fn notFound(self: *AutoLoadDriver, via: *Loading) MachineError {
         const fiber = via.fiber();
         return fiber.undefinedWordIn(self.request.module.operation.qualified, .qualified);
     }
+    /// Answers the request from a completed catalog: the one file declaring
+    /// the module is loaded under its own lease, and a module no source
+    /// declares is looked for as a native library.
+    fn found(
+        self: *AutoLoadDriver,
+        via: *Loading,
+        loading: *heap.Owned(modules.LoadingLease),
+        catalog: *const module_search.Catalog,
+    ) MachineError!void {
+        const fiber = via.fiber();
+        if (catalog.failure) |reason| return fiber.fail(.io, reason);
+        const name = self.request.module.name;
+        switch (catalog.find(name)) {
+            .none => self.state.borrowMut().* = .{ .native_probe = .{ .loading = .init(loading.take()), .entry = 0 } },
+            .duplicate => |files| return fiber.failFmt(
+                .domain,
+                "module `{s}` is declared by both `{s}` and `{s}`",
+                .{ intern.get(intern.moduleId(name)), files[0].path(), files[1].path() },
+            ),
+            .file => |file| {
+                loading.borrowMut().deinit();
+                self.state.borrowMut().* = .{ .file_begin = .{
+                    .file = file,
+                    .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(file.id(), .of(fiber)),
+                } };
+            },
+        }
+    }
     fn sourceCompletion(
         self: *AutoLoadDriver,
         transfer: *@FieldType(State, "transfer"),
-        provenance: modules.RegistrationProvenance,
-        artifact: ?map_state.ArtifactId,
+        registrant: modules.RegistrationProvenance,
     ) SourceCompletion {
         return .{ .register = .{
             .loading = transfer.loading.borrowMut().move(),
             .path = transfer.path.take(),
             .request = self.request,
-            .provenance = provenance,
-            .artifact = artifact,
+            .registrant = registrant,
         } };
     }
     pub fn advance(via: *Loading, self: *AutoLoadDriver) MachineError!WorkProgress {
         const fiber = via.fiber();
         const work = fiber.workBudget();
-        work: while (work.spend()) switch (self.state.borrowMut().*) {
+        while (work.spend()) switch (self.state.borrowMut().*) {
             .begin => |*cursor| switch (try cursor.advance()) {
                 .pending => {},
                 .complete => |outcome| switch (outcome) {
@@ -457,22 +354,10 @@ const AutoLoadDriver = struct {
                     },
                     .granted => |lease| {
                         cursor.deinit();
-                        if (fiber.inherited.module_snapshot != null and
-                            via.embeddedLibrary(self.request.module.name) == null)
-                        {
-                            self.state.borrowMut().* = .{ .map_lookup = .{
-                                .loading = .init(lease),
-                                .cursor = .init(fiber.inherited.module_snapshot.?.lookupCursor(
-                                    self.request.module.operation.context.scopeId(),
-                                    intern.get(intern.moduleId(self.request.module.name)),
-                                )),
-                            } };
-                        } else {
-                            self.state.borrowMut().* = .{ .registered = .{
-                                .loading = .init(lease),
-                                .cursor = .init(fiber.inherited.registry.acquireCursor(self.request.module.name)),
-                            } };
-                        }
+                        self.state.borrowMut().* = .{ .registered = .{
+                            .loading = .init(lease),
+                            .cursor = .init(fiber.inherited.registry.acquireCursor(self.request.module.name)),
+                        } };
                     },
                 },
             },
@@ -483,317 +368,103 @@ const AutoLoadDriver = struct {
                 .complete => |maybe_generation| {
                     var loading = heap.Owned(modules.LoadingLease).init(registered.loading.take());
                     defer loading.deinit(fiber.releases, fiber.allocator);
-                    registered.cursor.deinit(
-                        fiber.releases,
-                        fiber.allocator,
-                    );
-                    if (maybe_generation) |generation| {
-                        var lease = generation;
-                        lease.deinit();
+                    registered.cursor.deinit(fiber.releases, fiber.allocator);
+                    if (maybe_generation != null)
                         return self.finishWithoutLoading(via, &loading);
-                    }
-                    // The embedded manifest is consulted before the
-                    // search path: a stdlib name resolves without filesystem lookup
-                    // and no ECL_PATH, and no path module can shadow one.
-                    if (via.embeddedLibrary(self.request.module.name)) |entry| {
+                    // The embedded manifest is consulted before the search
+                    // path: a stdlib name resolves without the filesystem,
+                    // and no file can shadow one.
+                    if (module_lookup.embeddedLibrary(self.request.module.name)) |entry| {
                         try self.beginEmbedded(via, &loading, entry);
                         continue;
                     }
-                    if (fiber.inherited.module_snapshot) |module_snapshot| {
-                        self.state.borrowMut().* = .{ .map_lookup = .{
-                            .loading = .init(loading.take()),
-                            .cursor = .init(module_snapshot.lookupCursor(
-                                self.request.module.operation.context.scopeId(),
-                                intern.get(intern.moduleId(self.request.module.name)),
-                            )),
-                        } };
+                    const search = fiber.inherited.module_search orelse return self.notFound(via);
+                    if (search.current()) |catalog| {
+                        try self.found(via, &loading, catalog);
                         continue;
                     }
-                    if (fiber.inherited.ecl_path == null)
-                        return self.notFound(via);
-                    const filename = try self.makeFilename(
-                        via,
-                        &loading,
-                        .source,
-                        .{ .component_start = 0 },
-                    );
-                    self.state.borrowMut().* = .{ .filename = filename };
+                    self.state.borrowMut().* = .{ .scanning = .{
+                        .loading = .init(loading.take()),
+                        .cursor = .init(search.scan()),
+                    } };
                 },
             },
-            .map_lookup => |*lookup| switch (lookup.cursor.borrowMut().advance()) {
+            .scanning => |*scanning| switch (try scanning.cursor.borrowMut().advance()) {
                 .pending => {},
-                .complete => |outcome| {
-                    var loading = heap.Owned(modules.LoadingLease).init(lookup.loading.take());
+                .complete => |built| {
+                    var loading = heap.Owned(modules.LoadingLease).init(scanning.loading.take());
                     defer loading.deinit(fiber.releases, fiber.allocator);
-                    lookup.cursor.deinit(
-                        fiber.releases,
-                        fiber.allocator,
-                    );
-                    switch (outcome) {
-                        .unmatched => {
-                            return fiber.failFmt(
-                                .undefined_word,
-                                "module `{s}` is not exported by the active module map",
-                                .{intern.get(intern.moduleId(self.request.module.name))},
-                            );
-                        },
-                        .hidden => |hidden| {
-                            return fiber.failFmt(
-                                .undefined_word,
-                                "module `{s}` is exported by scope `{s}`, but is not visible to `{s}`",
-                                .{
-                                    intern.get(intern.moduleId(self.request.module.name)),
-                                    hidden.owner,
-                                    hidden.consumer,
-                                },
-                            );
-                        },
-                        .matched => |match| {
-                            loading.borrowMut().finish();
-                            const target: MappedTarget = .{
-                                .scope_name = match.scope_name,
-                                .root = match.root,
-                                .relative_path = match.relative_path,
-                                .scope_id = match.scope_id,
-                                .artifact_id = match.artifact_id,
-                                .kind = match.kind,
-                            };
-                            self.state.borrowMut().* = .{ .artifact_begin = .{
-                                .target = target,
-                                .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(match.artifact_id, .of(fiber)),
-                            } };
-                        },
-                    }
+                    scanning.cursor.deinit(fiber.releases, fiber.allocator);
+                    const catalog = fiber.inherited.module_search.?.publish(built);
+                    try self.found(via, &loading, catalog);
                 },
             },
-            .artifact_begin => |*begin| switch (try begin.cursor.advance()) {
+            .file_begin => |*begin| switch (try begin.cursor.advance()) {
                 .pending => {},
                 .complete => |outcome| switch (outcome) {
                     .cycle => return fiber.failFmt(
                         .domain,
-                        "recursive auto-load of mapped artifact `{s}`",
-                        .{begin.target.relative_path},
+                        "recursive auto-load of `{s}`",
+                        .{begin.file.path()},
                     ),
                     .contended => {
-                        const target = begin.target;
+                        const file = begin.file;
                         begin.cursor.deinit();
-                        self.state.borrowMut().* = .{ .artifact_begin = .{
-                            .target = target,
-                            .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(
-                                target.artifact_id,
-                                .of(fiber),
-                            ),
+                        self.state.borrowMut().* = .{ .file_begin = .{
+                            .file = file,
+                            .cursor = fiber.inherited.registry.beginArtifactLoadingCursor(file.id(), .of(fiber)),
                         } };
                         return .{ .yielded = .wait };
                     },
                     .granted => |lease| {
-                        const target = begin.target;
+                        const file = begin.file;
                         begin.cursor.deinit();
-                        self.state.borrowMut().* = .{ .mapped_root = .{ .target = target, .loading = .init(lease) } };
-                        if (fiber.inherited.module_snapshot.?.artifactCommitted(target.artifact_id)) {
-                            self.state.borrowMut().mapped_root.loading.borrowMut().finish();
+                        self.state.borrowMut().* = .done;
+                        var loading = heap.Owned(modules.LoadingLease).init(lease);
+                        defer loading.deinit(fiber.releases, fiber.allocator);
+                        if (file.loaded()) {
+                            loading.borrowMut().deinit();
                             if (self.request == .source) return .completed;
-                            self.state.borrowMut().mapped_root.loading.deinit(fiber.releases, fiber.allocator);
                             self.state.borrowMut().* = .{ .committed = .init(fiber.inherited.registry.acquireCursor(self.request.module.name)) };
+                            continue;
                         }
+                        const candidate = try fiber.allocator.dupe(u8, file.path());
+                        self.beginPath(via, &loading, candidate, .{ .source = file });
                     },
                 },
             },
+            .native_probe => |*probe| {
+                const entries = fiber.inherited.module_search.?.entries;
+                if (probe.entry == entries.len) return self.notFound(via);
+                const filename = try std.mem.concat(fiber.allocator, u8, &.{ intern.get(intern.moduleId(self.request.module.name)), ".eclmod" });
+                defer fiber.allocator.free(filename);
+                const candidate = try std.fs.path.join(fiber.allocator, &.{ entries[probe.entry], filename });
+                std.Io.Dir.cwd().access(fiber.inherited.runtime().host_io, candidate, .{ .read = true }) catch |err| {
+                    defer fiber.allocator.free(candidate);
+                    switch (err) {
+                        // An entry that cannot be searched supplies nothing,
+                        // as in the scan.
+                        error.FileNotFound, error.AccessDenied, error.PermissionDenied => {
+                            probe.entry += 1;
+                            continue;
+                        },
+                        else => return fiber.failFmt(.io, "cannot access module file `{s}`: {s}", .{ candidate, @errorName(err) }),
+                    }
+                };
+                self.beginPath(via, &probe.loading, candidate, .native);
+            },
+            .done => unreachable,
             .committed => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |maybe_generation| {
                     cursor.deinit(fiber.releases, fiber.allocator);
-                    const generation = maybe_generation orelse return fiber.failFmt(
+                    if (maybe_generation == null) return fiber.failFmt(
                         .io,
-                        "a committed mapped artifact is missing module `{s}`",
+                        "a loaded file is missing module `{s}`",
                         .{intern.get(intern.moduleId(self.request.module.name))},
                     );
-                    var lease = generation;
-                    lease.deinit();
                     return continueSourceRequest(via, self, self.request);
                 },
-            },
-            .mapped_root => |*mapped| {
-                var loading = heap.Owned(modules.LoadingLease).init(mapped.loading.take());
-                defer loading.deinit(fiber.releases, fiber.allocator);
-                const origin: CandidateOrigin = .{ .mapped = .{
-                    .scope_name = mapped.target.scope_name,
-                    .root = mapped.target.root,
-                    .scope_id = mapped.target.scope_id,
-                    .artifact_id = mapped.target.artifact_id,
-                } };
-                const filename_bytes = try fiber.allocator.dupe(u8, mapped.target.relative_path);
-                const filename = FilenameState{
-                    .loading = .init(loading.take()),
-                    .filename = .init(filename_bytes),
-                    .index = filename_bytes.len,
-                    .kind = if (mapped.target.kind == .ecl) .source else .native,
-                    .target = .{ .candidate = origin },
-                };
-                self.state.borrowMut().* = .{ .filename = filename };
-            },
-            .filename => |*filename| {
-                if (filename.index != filename.filename.borrow().len) {
-                    const module_name = intern.get(intern.moduleId(self.request.module.name));
-                    const extension = switch (filename.kind) {
-                        .source => ".ecl",
-                        .native => ".eclmod",
-                    };
-                    filename.filename.borrow()[filename.index] = if (filename.index < module_name.len)
-                        module_name[filename.index]
-                    else
-                        extension[filename.index - module_name.len];
-                    filename.index += 1;
-                } else switch (filename.target) {
-                    .component_start => |search_index| {
-                        const next = @FieldType(State, "component_start"){
-                            .loading = .init(filename.loading.take()),
-                            .filename = .init(filename.filename.take()),
-                            .kind = filename.kind,
-                            .search_index = search_index,
-                        };
-                        self.state.borrowMut().* = .{ .component_start = next };
-                    },
-                    .candidate => |origin| {
-                        const candidate = try makeCandidate(
-                            via,
-                            &filename.loading,
-                            &filename.filename,
-                            filename.kind,
-                            origin,
-                        );
-                        self.state.borrowMut().* = .{ .candidate = candidate };
-                    },
-                }
-            },
-            .component_start => |*component| {
-                const search = fiber.inherited.ecl_path.?;
-                if (component.search_index == search.len) return self.notFound(via);
-                if (search[component.search_index] == std.fs.path.delimiter) {
-                    component.search_index += 1;
-                } else {
-                    const next = @FieldType(State, "component_end"){
-                        .loading = .init(component.loading.take()),
-                        .filename = .init(component.filename.take()),
-                        .kind = component.kind,
-                        .search_index = component.search_index,
-                        .component_start = component.search_index,
-                    };
-                    self.state.borrowMut().* = .{ .component_end = next };
-                }
-            },
-            .component_end => |*component| {
-                const search = fiber.inherited.ecl_path.?;
-                if (component.search_index == search.len or
-                    search[component.search_index] == std.fs.path.delimiter)
-                {
-                    const component_end = component.search_index;
-                    var next_search = component.search_index;
-                    if (next_search != search.len) next_search += 1;
-                    const origin: CandidateOrigin = .{ .search_path = .{
-                        .component_start = component.component_start,
-                        .component_end = component_end,
-                        .next_search = next_search,
-                    } };
-                    const candidate = try makeCandidate(
-                        via,
-                        &component.loading,
-                        &component.filename,
-                        component.kind,
-                        origin,
-                    );
-                    self.state.borrowMut().* = .{ .candidate = candidate };
-                } else component.search_index += 1;
-            },
-            .candidate => |*candidate| {
-                const directory = switch (candidate.origin) {
-                    .mapped => |mapped| mapped.root,
-                    .search_path => |legacy| legacy_directory: {
-                        const search = fiber.inherited.ecl_path.?;
-                        break :legacy_directory search[legacy.component_start..legacy.component_end];
-                    },
-                };
-                if (candidate.index != candidate.candidate.borrow().len) {
-                    candidate.candidate.borrow()[candidate.index] = if (candidate.index < directory.len)
-                        directory[candidate.index]
-                    else if (candidate.separator and candidate.index == directory.len)
-                        std.fs.path.sep
-                    else
-                        candidate.filename.borrow()[candidate.index - directory.len - @intFromBool(candidate.separator)];
-                    candidate.index += 1;
-                } else {
-                    const next = CandidateState{
-                        .loading = .init(candidate.loading.take()),
-                        .filename = .init(candidate.filename.take()),
-                        .kind = candidate.kind,
-                        .origin = candidate.origin,
-                        .candidate = .init(candidate.candidate.take()),
-                        .index = candidate.index,
-                        .separator = candidate.separator,
-                    };
-                    self.state.borrowMut().* = .{ .access = next };
-                }
-            },
-            .access => |*access| {
-                var disposition: Disposition = switch (access.kind) {
-                    .source => .{ .source = switch (access.origin) {
-                        .search_path => .{ .provenance = .ordinary, .artifact = null },
-                        .mapped => |mapped| .{
-                            .provenance = .{ .source = fiber.inherited.module_snapshot.?.sourceScope(mapped.artifact_id) },
-                            .artifact = mapped.artifact_id,
-                        },
-                    } },
-                    .native => .{ .native = switch (access.origin) {
-                        .search_path => null,
-                        .mapped => |mapped| mapped.artifact_id,
-                    } },
-                };
-                std.Io.Dir.cwd().access(
-                    fiber.inherited.runtime().host_io,
-                    access.candidate.borrow(),
-                    .{ .read = true },
-                ) catch |err| switch (err) {
-                    error.FileNotFound => {
-                        const origin = access.origin;
-                        switch (origin) {
-                            .mapped => |mapped| return fiber.failFmt(
-                                .undefined_word,
-                                "mapped source `{s}` is absent from scope `{s}`",
-                                .{ access.candidate.borrow(), mapped.scope_name },
-                            ),
-                            .search_path => |legacy| {
-                                const kind: FileKind = if (access.kind == .source) .native else .source;
-                                const target: FilenameTarget = if (access.kind == .source)
-                                    .{ .candidate = origin }
-                                else
-                                    .{ .component_start = legacy.next_search };
-                                const filename = try self.makeFilename(
-                                    via,
-                                    &access.loading,
-                                    kind,
-                                    target,
-                                );
-                                access.candidate.deinit(fiber.releases, fiber.allocator);
-                                access.filename.deinit(fiber.releases, fiber.allocator);
-                                self.state.borrowMut().* = .{ .filename = filename };
-                                continue :work;
-                            },
-                        }
-                    },
-                    else => disposition = .{ .fail = @errorName(err) },
-                };
-                const materializer = kernel_storage.Utf8Materializer.init(
-                    fiber.allocator,
-                    access.candidate.borrow(),
-                );
-                access.filename.deinit(fiber.releases, fiber.allocator);
-                const next = @FieldType(State, "path_value"){
-                    .loading = .init(access.loading.take()),
-                    .candidate = .init(access.candidate.take()),
-                    .materializer = .init(materializer),
-                    .disposition = disposition,
-                };
-                self.state.borrowMut().* = .{ .path_value = next };
             },
             .path_value => |*path| switch (path.materializer.borrowMut().advance(work) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -801,10 +472,7 @@ const AutoLoadDriver = struct {
             }) {
                 .pending => {},
                 .complete => |path_value| {
-                    path.materializer.deinit(
-                        fiber.releases,
-                        fiber.allocator,
-                    );
+                    path.materializer.deinit(fiber.releases, fiber.allocator);
                     const next = @FieldType(State, "transfer"){
                         .loading = .init(path.loading.take()),
                         .candidate = .init(path.candidate.take()),
@@ -815,24 +483,11 @@ const AutoLoadDriver = struct {
                 },
             },
             .transfer => |*transfer| switch (transfer.disposition) {
-                .fail => |name| {
-                    const failure = fiber.failFmt(
-                        .io,
-                        "cannot access module file `{s}`: {s}",
-                        .{ transfer.candidate.borrow(), name },
-                    );
-                    fiber.addErrorPath(transfer.path.borrow());
-                    return failure;
-                },
                 .embedded => |entry| return self.transferEmbedded(via, transfer, entry),
                 .native => return self.transferNative(via, transfer),
-                .source => |source| {
+                .source => |file| {
                     const candidate = transfer.candidate.take();
-                    const completion = self.sourceCompletion(
-                        transfer,
-                        source.provenance,
-                        source.artifact,
-                    );
+                    const completion = self.sourceCompletion(transfer, .source(file));
                     fiber.retireDriver(self);
                     try fileSourceOwned(via, candidate, null, completion);
                     return .detached;
@@ -859,7 +514,7 @@ const AutoLoadDriver = struct {
             .builtin => |module| return self.transferBuiltin(via, transfer, module),
         };
         const source_name = transfer.candidate.take();
-        const completion = self.sourceCompletion(transfer, .standard_library, null);
+        const completion = self.sourceCompletion(transfer, .standard_library);
         fiber.retireDriver(self);
         try sourceOwned(via, source_name, text, completion);
         return .detached;
@@ -943,7 +598,7 @@ const AutoLoadDriver = struct {
         const next = NativeLoadDriver{
             .name = self.request.module.name,
             .request = self.request.module.operation,
-            .provenance = if (transfer.disposition.native) |id| .{ .source = fiber.inherited.module_snapshot.?.sourceScope(id) } else .ordinary,
+            .provenance = .ordinary,
             .loading = .init(transfer.loading.take()),
             .path = .init(transfer.path.take()),
             .state = .init(.{ .validate = .init(loader) }),
@@ -1091,10 +746,7 @@ const NativeLoadDriver = struct {
                 } };
                 return .stepped;
             },
-            .definitions => |*definitions| switch (definitions.publication.borrowMut().advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.UnboundWord => return self.failLoad(via, "native module declares an invalid word"),
-            }) {
+            .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
                 .pending => return .stepped,
                 .complete => |candidate| {
                     // Sealing can fail; until it succeeds the instance and
@@ -1143,7 +795,6 @@ const NativeLoadDriver = struct {
                     var cursor = commit.cursor;
                     self.state.borrowMut().* = next;
                     cursor.deinit(fiber.releases, fiber.allocator);
-                    if (self.provenance == .source) fiber.inherited.module_snapshot.?.commitArtifact(self.loading.borrowMut().artifactCommit());
                     return verifyPublishedModule(
                         via,
                         self,
@@ -1161,27 +812,23 @@ const NativeLoadDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 const SourceCompletion = union(enum) {
+    /// `parse`: the forms are pushed as data.
     push,
-    call: ?*const map_state.SourceScope,
-    session: ?*const map_state.SourceScope,
+    session,
     /// `@load`: the source runs as a stack-isolated unit on an empty stack.
-    load: struct {
-        source: ?*const map_state.SourceScope = null,
-        word: intern.TraceWord,
-    },
+    load: struct { word: intern.TraceWord },
     /// Registration only: the source runs, then the loading lease and
     /// tagged qualified operation transfer to the return frame.
     register: struct {
         loading: ?modules.LoadingLease,
         path: ?Value,
         request: SourceLoadRequest,
-        provenance: modules.RegistrationProvenance,
-        artifact: ?map_state.ArtifactId,
+        registrant: modules.RegistrationProvenance,
     },
 
     pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
         switch (self.*) {
-            .push, .call, .session, .load => {},
+            .push, .session, .load => {},
             .register => |*register| {
                 if (register.loading) |*loading| loading.deinit();
                 if (register.path) |path| releases.releaseValue(path);
@@ -1231,7 +878,6 @@ fn sourceOwned(
 const SourceDriver = struct {
     const State = union(enum) {
         start,
-        locating: map_state.SourcePathCursor,
         ingesting: spans.SpanArchive.SourceIngestCursor,
         activating: *Header,
         storage,
@@ -1243,30 +889,27 @@ const SourceDriver = struct {
     diag: reader.Diag = .{},
     state: State = .start,
 
+    /// An embedded module's top-level words mean core's, as the prelude's do,
+    /// so no session definition can change what it registers. Any other
+    /// source links in the root of the fiber that loads it.
+    fn linkScope(self: *SourceDriver, fiber: *machine.Fiber) env.ScopeId {
+        switch (self.completion.borrow()) {
+            .register => |register| if (register.registrant == .standard_library)
+                return fiber.environment.coreScopeId(),
+            .push, .session, .load => {},
+        }
+        return fiber.lexicalScope();
+    }
+
     fn beginIngest(self: *SourceDriver, via: *Loading) error{OutOfMemory}!void {
         const fiber = via.fiber();
         const ingestion = try fiber.archive.sourceIngestCursor(
             self.text.borrow().sourceName(),
             self.text.borrow().source(),
             &self.diag,
-            fiber.rootLinker(fiber.lexicalScope(), self.sourceProvenance(fiber)),
+            fiber.rootLinker(self.linkScope(fiber)),
         );
         self.state = .{ .ingesting = ingestion };
-    }
-
-    /// The provenance of the source being read: what its words are written
-    /// by, and what its code registers under once it runs. Text read as
-    /// data, and a session unit outside any mapped file, are written by the
-    /// code that reads them.
-    fn sourceProvenance(self: *const SourceDriver, fiber: *machine.Fiber) modules.RegistrationProvenance {
-        const mapped: ?*const map_state.SourceScope = switch (self.completion.borrow()) {
-            .push => return fiber.current.?.site.registration_provenance,
-            .register => |register| return register.provenance,
-            .session => |source| source orelse return fiber.current.?.site.applied().registration_provenance,
-            .call => |source| source,
-            .load => |load| load.source,
-        };
-        return if (mapped) |source| .{ .source = source } else .ordinary;
     }
 
     /// Activates a source that fits its first slice before observing cancellation.
@@ -1282,29 +925,7 @@ const SourceDriver = struct {
         if (self.state != .start) try fiber.pollKernel();
         const work = fiber.workBudget();
         while (work.spend()) switch (self.state) {
-            .start => {
-                if ((self.completion.borrow() == .call or self.completion.borrow() == .session or
-                    self.completion.borrow() == .load) and
-                    fiber.inherited.module_snapshot != null)
-                {
-                    const cursor = try fiber.inherited.module_snapshot.?.sourcePathCursor(self.text.borrow().sourceName());
-                    self.state = .{ .locating = cursor };
-                } else try self.beginIngest(via);
-            },
-            .locating => |*cursor| switch (cursor.advance()) {
-                .pending => {},
-                .complete => |source| {
-                    cursor.deinit();
-                    self.state = .start;
-                    switch (self.completion.borrowMut().*) {
-                        .call => |*context| context.* = source,
-                        .session => |*context| context.* = source,
-                        .load => |*load| load.source = source,
-                        else => unreachable,
-                    }
-                    try self.beginIngest(via);
-                },
-            },
+            .start => try self.beginIngest(via),
             .ingesting => |*ingestion| {
                 switch (ingestion.advance(work) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -1337,13 +958,11 @@ const SourceDriver = struct {
                     .push => try fiber.pushBorrowed(.{ .list = root_header }),
                     .load => |load| {
                         heap.incRef(root_header);
-                        try via.openLoad(root_header, load.word, self.sourceProvenance(fiber));
+                        try via.openLoad(root_header, load.word);
                     },
-                    .call, .session => {
-                        const provenance = self.sourceProvenance(fiber);
+                    .session => {
                         heap.incRef(root_header);
                         try fiber.callProgramOwned(root_header, .owned);
-                        fiber.current.?.site.registration_provenance = provenance;
                     },
                     .register => |*register| {
                         heap.incRef(root_header);
@@ -1351,11 +970,11 @@ const SourceDriver = struct {
                             .loading = register.loading.?.move(),
                             .path = register.path.?,
                             .request = register.request,
-                            .artifact = .init(register.artifact),
+                            .registrant = register.registrant,
                         };
                         register.loading = null;
                         register.path = null;
-                        try via.enterRegistration(root_header, register.provenance, after);
+                        try via.enterRegistration(root_header, after);
                     },
                 }
                 return .completed;
@@ -1370,11 +989,6 @@ const SourceDriver = struct {
         self: *SourceDriver,
     ) bool {
         return switch (self.state) {
-            .locating => |*cursor| {
-                cursor.deinit();
-                self.state = .storage;
-                return false;
-            },
             .start, .activating => result: {
                 self.state = .storage;
                 break :result false;
@@ -1434,7 +1048,7 @@ const FileTransfer = union(enum) {
         return switch (self) {
             .source => |completion| switch (completion) {
                 .register => |register| register.path,
-                .push, .call, .session, .load => null,
+                .push, .session, .load => null,
             },
         };
     }
@@ -1634,11 +1248,7 @@ fn continueQualifiedRequest(
         .replay, .load_only => .completed,
         .dispatch => |dispatch_request| continuation: {
             fiber.retireDriver(driver);
-            try via.dispatchAfterLoad(
-                dispatch_request.word,
-                dispatch_request.site,
-                dispatch_request.trace_parent,
-            );
+            try via.dispatchAfterLoad(dispatch_request.word, dispatch_request.site);
             break :continuation .detached;
         },
     };
@@ -1653,7 +1263,7 @@ fn verifyPublishedModule(
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
     const fiber = via.fiber();
-    loading.borrowMut().finish();
+    loading.borrowMut().deinit();
     const registry = fiber.inherited.registry;
     const next = QualifiedRegistrationDriver{
         .path = .init(path.take()),
@@ -1666,13 +1276,14 @@ fn verifyPublishedModule(
 }
 
 /// Verifies that a completed load registered every module it was expected
-/// to before releasing its lease. An artifact commits only after that.
+/// to before releasing its lease. A found file is recorded loaded only after
+/// that.
 const QualifiedRegistrationDriver = struct {
     path: heap.Owned(Value),
     acquisition: heap.Owned(modules.Registry.AcquireCursor),
     request: SourceLoadRequest,
     loading: ?heap.Owned(modules.LoadingLease) = null,
-    artifact: ?map_state.ArtifactId = null,
+    file: ?*const module_search.Source = null,
     module_index: usize = 0,
 
     pub fn advance(via: *Loading, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
@@ -1680,16 +1291,16 @@ const QualifiedRegistrationDriver = struct {
         switch (self.acquisition.borrowMut().advance()) {
             .pending => return .stepped,
             .complete => |maybe_generation| {
-                const checked_name = if (self.artifact) |artifact|
-                    fiber.inherited.module_snapshot.?.artifactModules(artifact)[self.module_index]
+                const checked_name = if (self.file) |file|
+                    file.declared()[self.module_index]
                 else
                     self.request.module.name;
-                const generation = maybe_generation orelse {
-                    const failure = if (self.artifact != null)
+                if (maybe_generation == null) {
+                    const failure = if (self.file) |file|
                         fiber.failFmt(
                             .io,
-                            "loading mapped artifact registered nothing under declared module `{s}`",
-                            .{intern.get(intern.moduleId(checked_name))},
+                            "loading `{s}` registered nothing under its declared module `{s}`",
+                            .{ file.path(), intern.get(intern.moduleId(checked_name)) },
                         )
                     else
                         fiber.failFmt(
@@ -1699,30 +1310,13 @@ const QualifiedRegistrationDriver = struct {
                         );
                     fiber.addErrorPath(self.path.borrow());
                     return failure;
-                };
-                var lease = generation;
-                defer lease.deinit();
-                if (self.artifact) |artifact| {
-                    const expected_source = fiber.inherited.module_snapshot.?.sourceScope(artifact);
-                    const valid_origin = switch (lease.provenance()) {
-                        .source => |source| source == expected_source,
-                        .ordinary, .root_scope, .standard_library => false,
-                    };
-                    if (!valid_origin) {
-                        const failure = fiber.failFmt(
-                            .domain,
-                            "mapped artifact declared module `{s}` with foreign publication provenance",
-                            .{intern.get(intern.moduleId(checked_name))},
-                        );
-                        fiber.addErrorPath(self.path.borrow());
-                        return failure;
-                    }
-                    const modules_in_artifact = fiber.inherited.module_snapshot.?.artifactModules(artifact);
+                }
+                if (self.file) |file| {
                     self.module_index += 1;
-                    if (self.module_index != modules_in_artifact.len) {
+                    if (self.module_index != file.declared().len) {
                         self.acquisition.deinit(fiber.releases, fiber.allocator);
                         self.acquisition = .init(fiber.inherited.registry.acquireCursor(
-                            modules_in_artifact[self.module_index],
+                            file.declared()[self.module_index],
                         ));
                         return .stepped;
                     }
@@ -1736,9 +1330,9 @@ const QualifiedRegistrationDriver = struct {
         const fiber = via.fiber();
         if (self.loading) |*owned| {
             const lease = owned.borrowMut();
-            if (self.artifact != null)
-                fiber.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
-            lease.finish();
+            if (self.file != null)
+                catalogOf(fiber).markLoaded(lease.artifactCommit());
+            lease.deinit();
         }
         return continueSourceRequest(via, self, self.request);
     }

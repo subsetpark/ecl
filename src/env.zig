@@ -28,7 +28,7 @@ pub const EffectQuotation = opaque {};
 pub fn quotation(header: *value.ListHandle) ?*Quotation {
     return switch (header.kind()) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => @ptrCast(@alignCast(header)),
-        .dict, .task, .port, .address, .reserved_mask => null,
+        .dict, .task, .port, .address => null,
     };
 }
 
@@ -39,7 +39,7 @@ pub fn quotationHeader(body: *const Quotation) *value.ListHandle {
 pub fn documentation(header: *value.ListHandle) ?*DocumentationString {
     return switch (header.kind()) {
         .leaf_char1, .leaf_char2, .leaf_char4 => @ptrCast(@alignCast(header)),
-        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => null,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address => null,
     };
 }
 
@@ -48,20 +48,6 @@ pub fn documentationHeader(document: *const DocumentationString) *value.ListHand
 }
 
 pub const Visibility = enum { public, private };
-/// Where a definition was published. A module definition records only its own
-/// module-local name; its module's scope supplies the module name. Baking a slot
-/// here would put a cycle in the value heap.
-pub const BindingOrigin = union(enum) {
-    top,
-    module_local: struct { trace_word: intern.BindingName },
-
-    pub fn traceWord(self: BindingOrigin) ?intern.BindingName {
-        return switch (self) {
-            .top => null,
-            .module_local => |local| local.trace_word,
-        };
-    }
-};
 pub const ValidatedEffect = struct {
     quotation: *EffectQuotation,
     /// The named before slots: exactly what the word consumes, or the minimum
@@ -356,35 +342,43 @@ pub const ModulePublication = union(enum) {
     },
     native: struct {
         callable: NativeCallable,
-        visibility: Visibility,
         effect: ValidatedEffect,
         doc: *DocumentationString,
     },
-    /// A primitive published as a module word. `Binding` already had this
-    /// arm; only the publication typestate was missing, which is why a
-    /// primitive-backed module was unrepresentable.
+    /// A primitive published as a module word.
     builtin: struct {
         primitive: PrimitiveImpl,
-        visibility: Visibility,
         effect: ?ValidatedEffect = null,
         doc: *DocumentationString,
     },
 };
 
-/// Who keeps a definition alive. Core definitions live as long as the `Env`.
-/// Every other definition is counted: the session's directory or a module
-/// image owns one reference, and replacement can make it unreachable from
-/// any directory while activations still hold it.
-pub const Lifetime = enum { static, counted };
+/// A module as running code refers to it: the scope of the module's name,
+/// which fixes same-module dispatch and diagnostic spelling, and what one
+/// registration of the module was made under. It holds nothing of an image.
+pub const ModuleRoot = struct {
+    scope: ScopeId,
+    module: intern.ModuleName,
+    provenance: @import("modules.zig").RegistrationProvenance,
 
-/// The root a definition belongs to. A module's definition carries what an
-/// activation of it runs as, by value: the scope of the module's name and
-/// the source one registration of the module was made under. It holds
-/// nothing of the image that owns it.
+    pub fn name(self: ModuleRoot) intern.ModuleName {
+        return self.module;
+    }
+};
+
+/// The root a definition belongs to, which also says who keeps it alive. A
+/// core definition lives as long as the `Env`. Every other definition is
+/// counted: the session's directory or a module image owns one reference,
+/// and replacement can make it unreachable from any directory while
+/// activations still hold it.
+///
+/// A module's definition carries what an activation of it runs as, by value,
+/// and its own name in the module, which with the module's name is how a
+/// trace identifies it.
 pub const DefinitionRoot = union(enum) {
     core,
     session,
-    module: struct { scope: *Scope, provenance: SourceId },
+    module: struct { home: ModuleRoot, name: intern.BindingName },
 };
 
 /// Where a failure inside a word is reported. A `caller` word is a helper,
@@ -400,10 +394,8 @@ pub const Definition = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     refs: std.atomic.Value(u32) = .init(1),
     allocator: std.mem.Allocator,
-    lifetime: Lifetime,
     sealed: Code,
     visibility: Visibility = .public,
-    origin: BindingOrigin = .top,
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
     source: ?reader_types.SourceSlice = null,
@@ -425,7 +417,6 @@ pub const Definition = struct {
 
     pub const Metadata = struct {
         visibility: Visibility = .public,
-        origin: BindingOrigin = .top,
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
         source: ?reader_types.SourceSlice = null,
@@ -437,7 +428,6 @@ pub const Definition = struct {
     /// metadata value.
     pub fn create(
         allocator: std.mem.Allocator,
-        lifetime: Lifetime,
         callback: Callback,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
@@ -445,7 +435,7 @@ pub const Definition = struct {
             .builtin => |primitive| .{ .builtin = primitive },
             .native => |callable| .{ .native = callable },
         };
-        const result = try allocate(allocator, lifetime, sealed, metadata);
+        const result = try allocate(allocator, sealed, metadata);
         if (callback == .native) callback.native.instance.retain();
         return result;
     }
@@ -454,20 +444,18 @@ pub const Definition = struct {
     /// metadata value. `body` is retained here; the caller keeps its own.
     pub fn createSource(
         allocator: std.mem.Allocator,
-        lifetime: Lifetime,
         body: *value.ListHandle,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
-        const result = try allocate(allocator, lifetime, .{ .source = .{ .code = body, .owner = .static } }, metadata);
+        const result = try allocate(allocator, .{ .source = .{ .code = body, .owner = .static } }, metadata);
         // A counted definition's activations hold the definition itself.
-        if (lifetime == .counted) result.sealed.source.owner = .{ .definition = result };
+        if (result.counted()) result.sealed.source.owner = .{ .definition = result };
         heap.incRef(body);
         return result;
     }
 
     fn allocate(
         allocator: std.mem.Allocator,
-        lifetime: Lifetime,
         sealed: Code,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
@@ -477,10 +465,8 @@ pub const Definition = struct {
         if (metadata.source) |source| source.retain();
         result.* = .{
             .allocator = allocator,
-            .lifetime = lifetime,
             .sealed = sealed,
             .visibility = metadata.visibility,
-            .origin = metadata.origin,
             .effect = metadata.effect,
             .doc = metadata.doc,
             .source = metadata.source,
@@ -515,19 +501,29 @@ pub const Definition = struct {
         };
     }
 
-    pub fn traceWord(self: *const Definition) ?intern.BindingName {
-        return self.origin.traceWord();
+    inline fn counted(self: *const Definition) bool {
+        return self.root != .core;
     }
 
+    /// Takes one reference. Nothing for a core definition.
     pub fn retain(self: *Definition) void {
-        std.debug.assert(self.lifetime == .counted);
+        if (self.counted()) self.hold();
+    }
+
+    /// `retain` of a definition known to be counted.
+    inline fn hold(self: *Definition) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
 
-    /// Drops one counted reference; the last schedules bounded retirement.
+    /// Drops one reference; the last schedules bounded retirement. Nothing
+    /// for a core definition.
     pub fn release(self: *Definition, releases: *heap.ReleaseDomain) void {
-        std.debug.assert(self.lifetime == .counted);
+        if (self.counted()) self.drop(releases);
+    }
+
+    /// `release` of a definition known to be counted.
+    inline fn drop(self: *Definition, releases: *heap.ReleaseDomain) void {
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old != 0);
         if (old != 1) return;
@@ -535,9 +531,9 @@ pub const Definition = struct {
         releases.retire(self, &self.retirement);
     }
 
-    /// Retires a static definition with its owning table.
+    /// Retires a core definition with its owning table.
     pub fn retireStatic(self: *Definition, releases: *heap.ReleaseDomain) void {
-        std.debug.assert(self.lifetime == .static);
+        std.debug.assert(!self.counted());
         releases.retire(self, &self.retirement);
     }
 
@@ -568,35 +564,28 @@ pub const Definition = struct {
     }
 };
 
-/// Whether a quotation executes a word. A literal table entry of a host-built
-/// module is a body that does not.
-pub fn executesWord(body: *value.ListHandle) bool {
-    if (body.kind() != .generic_spine) return false;
-    for (heap.valuesConst(body)[0..@intCast(body.length())]) |form| {
-        if (form == .symbol and !isQuoted(form.symbol.slot) and localOperand(form.symbol.slot) == null) return true;
-    }
-    return false;
-}
-
 /// What a running activation must hold to keep its definition alive. A static
 /// owner needs nothing. A counted definition is retained by each
 /// activation running it and released when the activation ends; a tail call
 /// secures the callee's owner before the caller's is released.
 pub const Owner = union(enum) {
     static,
+    /// Always a counted definition.
     definition: *Definition,
 
-    pub fn retain(self: Owner) void {
+    // Inline, with the counted halves: every call of a source word takes
+    // and drops its owner.
+    pub inline fn retain(self: Owner) void {
         switch (self) {
             .static => {},
-            .definition => |definition| definition.retain(),
+            .definition => |definition| definition.hold(),
         }
     }
 
-    pub fn release(self: Owner, releases: *heap.ReleaseDomain) void {
+    pub inline fn release(self: Owner, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .static => {},
-            .definition => |definition| definition.release(releases),
+            .definition => |definition| definition.drop(releases),
         }
     }
 
@@ -652,14 +641,14 @@ pub const Entry = union(enum) {
 
     pub fn retain(self: Entry) void {
         switch (self) {
-            .definition => |definition| if (definition.lifetime == .counted) definition.retain(),
+            .definition => |definition| definition.retain(),
             .alias => {},
         }
     }
 
     pub fn release(self: Entry, releases: *heap.ReleaseDomain) void {
         switch (self) {
-            .definition => |definition| if (definition.lifetime == .counted) definition.release(releases),
+            .definition => |definition| definition.release(releases),
             .alias => {},
         }
     }
@@ -680,165 +669,15 @@ pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
 /// aliases, so it holds definitions alone.
 pub const CoreMap = poll.FixedMap(intern.BindingName, *Definition);
 
-const ScopeAllocation = enum { embedded, heap };
-
-/// Which root a scope is. A session or core-building scope denotes the one
-/// directory of its kind; a module root is the one scope of a module name,
-/// which the `Env` owns and every registration of the name shares.
-pub const ScopeStorage = union(enum) {
-    session,
-    core_build: CorePublisher,
-    module_root: ModuleIdentity,
-};
-
-/// What a module root's scope records: the module's name and the id words
-/// written in the module carry as their root.
+/// A module name's scope: the name, and the id words written in the module
+/// carry as their root. The `Env` issues one per name for its whole life.
 pub const ModuleIdentity = struct {
     name: intern.ModuleName,
     id: ScopeId,
 };
 
-pub const Scope = struct {
-    allocator: std.mem.Allocator,
-    storage: ScopeStorage,
-    refs: std.atomic.Value(u32) = .init(1),
-    allocation: ScopeAllocation = .embedded,
-    retirement: heap.ReleaseDomain.Retirement = .{},
-    retirement_state: ?RetireCursor.State = null,
-    /// Names this scope for as long as the process runs, which its address
-    /// does not: a scope freed unpublished leaves its address to the next one.
-    /// A cache that outlives a scope keys on this, never on the pointer.
-    serial: u64,
-
-    var next_serial: std.atomic.Value(u64) = .init(1);
-
-    pub fn isModuleRoot(self: *const Scope) bool {
-        return self.storage == .module_root;
-    }
-
-    /// The module whose root this scope is, or null for any other root.
-    pub fn moduleName(self: *const Scope) ?intern.ModuleName {
-        return switch (self.storage) {
-            .module_root => |module| module.name,
-            .session, .core_build => null,
-        };
-    }
-
-    pub const RetireCursor = struct {
-        scope: *Scope,
-        state: State,
-
-        const State = union(enum) {
-            destroy,
-            complete,
-        };
-
-        pub fn init(scope: *Scope) RetireCursor {
-            const old = scope.refs.fetchSub(1, .release);
-            std.debug.assert(old != 0);
-            if (old != 1) return .{ .scope = scope, .state = .complete };
-            _ = scope.refs.load(.acquire);
-            return .{ .scope = scope, .state = .destroy };
-        }
-
-        pub fn advance(self: *RetireCursor) bool {
-            return switch (self.state) {
-                .destroy => {
-                    const allocator = self.scope.allocator;
-                    switch (self.scope.allocation) {
-                        .heap => allocator.destroy(self.scope),
-                        .embedded => {},
-                    }
-                    self.state = .complete;
-                    return true;
-                },
-                .complete => true,
-            };
-        }
-    };
-
-    /// Teardown owner for scopes embedded in a larger allocation. The
-    /// embedding allocation is the scope's storage authority: it must remain
-    /// present until every holder has released, and only then may the owner
-    /// reference be consumed.
-    pub const EmbeddedTeardownCursor = struct {
-        scope: *Scope,
-        state: State = .waiting_for_children,
-
-        const State = union(enum) {
-            waiting_for_children,
-            retiring: RetireCursor,
-            complete,
-        };
-
-        pub fn init(scope: *Scope) EmbeddedTeardownCursor {
-            std.debug.assert(scope.allocation == .embedded);
-            return .{ .scope = scope };
-        }
-
-        pub fn advance(self: *EmbeddedTeardownCursor) bool {
-            return switch (self.state) {
-                .waiting_for_children => result: {
-                    if (self.scope.refs.load(.acquire) != 1) break :result false;
-                    self.state = .{ .retiring = self.scope.retireCursor() };
-                    break :result false;
-                },
-                .retiring => |*cursor| if (cursor.advance()) result: {
-                    self.state = .complete;
-                    break :result true;
-                } else false,
-                .complete => true,
-            };
-        }
-    };
-
-    fn direct(allocator: std.mem.Allocator, storage: ScopeStorage) Scope {
-        return .{
-            .allocator = allocator,
-            .storage = storage,
-            .serial = next_serial.fetchAdd(1, .monotonic),
-        };
-    }
-
-    pub fn retain(self: *Scope) void {
-        const old = self.refs.fetchAdd(1, .monotonic);
-        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-    }
-
-    pub fn retireCursor(self: *Scope) RetireCursor {
-        return .init(self);
-    }
-
-    pub fn retire(self: *Scope, releases: *heap.ReleaseDomain) void {
-        const cursor = self.retireCursor();
-        if (cursor.state == .complete) return;
-        std.debug.assert(self.allocation == .heap);
-        self.retirement_state = cursor.state;
-        releases.retire(self, &self.retirement);
-    }
-
-    pub fn advanceRetirement(
-        _: *heap.ReleaseDomain,
-        _: std.mem.Allocator,
-        self: *Scope,
-    ) bool {
-        var cursor = RetireCursor{ .scope = self, .state = self.retirement_state.? };
-        if (cursor.advance()) return true;
-        self.retirement_state = cursor.state;
-        return false;
-    }
-
-    /// Drops a root scope that was never really used: `replaceRoot`
-    /// overwriting a freshly built one before the fiber executed anything.
-    pub fn releaseTrivial(self: *Scope) void {
-        const old = self.refs.fetchSub(1, .release);
-        std.debug.assert(old == 1);
-        _ = self.refs.load(.acquire);
-    }
-};
-
 /// Authority to publish into core while it is being built. Minted only by
-/// `BuildingEnv.rootScope`, and refused once core is frozen.
+/// `BuildingEnv.corePublisher`, and refused once core is frozen.
 pub const CorePublisher = enum(usize) {
     invalid = 0,
     _,
@@ -892,7 +731,7 @@ pub const CellPublisher = enum(usize) {
     }
 
     /// Stores `definition`, or nothing, in every cell of the session's
-    /// top-level name `name`. Bounded by the sources that wrote the name.
+    /// top-level name `name`.
     pub fn define(self: CellPublisher, name: intern.BindingName, definition: ?*Definition) void {
         const state = self.target();
         state.word_cells.storeNamed(state.session_cell.id, name, definition);
@@ -915,17 +754,8 @@ pub const CellPublisher = enum(usize) {
 /// module is registered.
 pub const ScopeId = enum(u32) { none = 0, _ };
 
-/// A `ScopeId` is 24 bits of directory index plus a reserved high byte, kept
-/// clear so a generation tag could later be added without colliding with a
-/// live id.
+/// How many bits of a `ScopeId` the scope directory indexes.
 pub const id_bits: u5 = 24;
-
-comptime {
-    const reserved_bits: u5 = 8;
-    const budget: u16 = @as(u16, id_bits) + @as(u16, reserved_bits);
-    if (budget != @bitSizeOf(@typeInfo(ScopeId).@"enum".tag_type))
-        @compileError("scope id bit budget does not cover its tag type");
-}
 
 /// The root a `ScopeId` denotes.
 pub const Root = union(enum) {
@@ -937,20 +767,15 @@ pub const Root = union(enum) {
     module: intern.ModuleName,
 };
 
-/// The source a word was written in, as the owner of sources encodes it. `env`
-/// stores and compares it and never interprets it.
-pub const SourceId = enum(u64) { _ };
-
 /// Identifies one cell of the Session's `Env`: the link of a word occurrence.
 /// Issued from 1, never reused, and always below `value.quote_flag`.
 pub const CellId = enum(u32) { _ };
 
-/// Where a linked word was written: the root it resolves in, the source
-/// whose view of the module map it resolves under, and its spelling.
+/// Where a linked word was written: the root it resolves in, and its
+/// spelling.
 pub const Place = struct {
     root: ScopeId,
     name: u32,
-    source: SourceId,
 };
 
 /// What a word's cell answers: the definition its place resolves to now, or
@@ -1015,8 +840,7 @@ pub const WordCells = struct {
 /// registry also takes inside its writer lock, never the reverse. A hash trie
 /// threaded through the cells finds the first cell of a root and name: each
 /// such cell heads up to four subtrees, chosen by successive two-bit digits
-/// of the hash, so nothing is ever rehashed or relocated. The cells of one
-/// root and name, one per source that wrote the name there, chain from it.
+/// of the hash, so nothing is ever rehashed or relocated.
 const CellTable = struct {
     const first_shelf_bits = 6;
     const first_id_bias = 1 << first_shelf_bits;
@@ -1029,8 +853,6 @@ const CellTable = struct {
         /// What the place's spelling is as a word, copied from the interned
         /// name when the cell is minted.
         spelling: intern.Spelling,
-        /// The next cell of the same root and name; zero at the last.
-        next_source: u32 = 0,
     };
 
     mutex: std.Io.Mutex = .init,
@@ -1078,8 +900,8 @@ const CellTable = struct {
         return std.hash.Wyhash.hash(0, std.mem.asBytes(&[2]u32{ @backingInt(root), name }));
     }
 
-    /// The link to the first cell of `root` and `name`: zero where there is
-    /// none yet. Under `mutex`.
+    /// The link to the cell of `root` and `name`: zero where there is none
+    /// yet. Under `mutex`.
     fn named(self: *CellTable, root: ScopeId, name: u32) *u32 {
         var link: *u32 = &self.head;
         var digits = hash(root, name);
@@ -1094,12 +916,8 @@ const CellTable = struct {
     fn findOrMint(self: *CellTable, allocator: std.mem.Allocator, place: Place) error{OutOfMemory}!CellId {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        var link = self.named(place.root, place.name);
-        while (link.* != 0) {
-            const cell = self.at(link.*);
-            if (cell.place.source == place.source) return @fromBackingInt(link.*);
-            link = &cell.next_source;
-        }
+        const link = self.named(place.root, place.name);
+        if (link.* != 0) return @fromBackingInt(link.*);
         const raw = self.next;
         if (raw >= value.quote_flag) return error.OutOfMemory;
         const where = coordinates(raw);
@@ -1123,13 +941,13 @@ const CellTable = struct {
         return @fromBackingInt(raw);
     }
 
-    /// Stores `definition`, or nothing, as the answer of every cell of
-    /// `root` and the plain name `name`: one per source that wrote it.
+    /// Stores `definition`, or nothing, as the answer of the cell of `root`
+    /// and the plain name `name`, if there is one.
     fn storeNamed(self: *CellTable, root: ScopeId, name: intern.BindingName, definition: ?*Definition) void {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        var raw = self.named(root, intern.bindingId(name)).*;
-        while (raw != 0) : (raw = self.at(raw).next_source) self.content(raw).store(definition);
+        const raw = self.named(root, intern.bindingId(name)).*;
+        if (raw != 0) self.content(raw).store(definition);
     }
 
     /// Empties up to `count` cells from `from` whose answer a registration
@@ -1164,20 +982,19 @@ const CellTable = struct {
     }
 };
 
-/// How a producer of symbol occurrences links each one to the place it is
-/// written in: a root and a source. A reader that links nothing carries
-/// none, and every symbol it produces resolves in core.
+/// How a producer of symbol occurrences links each one to the root it is
+/// written in. A reader that links nothing carries none, and every symbol
+/// it produces resolves in core.
 pub const SymbolLinker = struct {
     state: *EnvState,
     root: ScopeId,
-    source: SourceId,
 
     /// The link of the word `name` written here: the id of its cell, minted
     /// on first use.
     pub fn link(self: SymbolLinker, name: u32) error{OutOfMemory}!u32 {
         const id = try self.state.word_cells.findOrMint(
             self.state.host.allocator(),
-            .{ .root = self.root, .name = name, .source = self.source },
+            .{ .root = self.root, .name = name },
         );
         return @backingInt(id);
     }
@@ -1190,11 +1007,10 @@ const ScopeCell = struct {
     root: Root,
 };
 
-/// One module name's root: its id and its scope, which live from the name's
-/// first use to the `Env`'s teardown at one address.
+/// One module name's scope cell, which lives from the name's first use to the
+/// `Env`'s teardown at one address.
 const ModuleCell = struct {
     cell: ScopeCell,
-    scope: Scope,
     /// The cells heading the subtrees below this one in the trie that finds
     /// a module's cell by name, read and written under
     /// `EnvState.modules_mutex`: successive two-bit digits of the name's
@@ -1465,7 +1281,6 @@ pub const Env = enum(usize) {
         var issued = backing.modules_last;
         while (issued) |cell| {
             issued = cell.previous;
-            cell.scope.releaseTrivial();
             allocator.destroy(cell);
         }
         backing.scopes.deinit(allocator);
@@ -1485,7 +1300,7 @@ pub const Env = enum(usize) {
     /// The scope of module `name`, made on first use and kept until
     /// teardown: every registration of the name, and all code running as
     /// the module, shares it.
-    pub fn moduleScope(self: *Env, name: intern.ModuleName) error{OutOfMemory}!*Scope {
+    pub fn moduleScope(self: *Env, name: intern.ModuleName) error{OutOfMemory}!ModuleIdentity {
         const backing = self.privateState();
         const allocator = backing.host.allocator();
         std.Io.Threaded.mutexLockUncancelable(&backing.modules_mutex);
@@ -1493,24 +1308,22 @@ pub const Env = enum(usize) {
         var link: *?*ModuleCell = &backing.modules_head;
         var digits = std.hash.Wyhash.hash(0, std.mem.asBytes(&name));
         while (link.*) |module| : (digits <<= 2) {
-            if (module.cell.root.module == name) return &module.scope;
+            if (module.cell.root.module == name) return .{ .name = name, .id = module.cell.id };
             link = &module.children[@intCast(digits >> 62)];
         }
         const module = try allocator.create(ModuleCell);
         errdefer allocator.destroy(module);
         module.* = .{
             .cell = .{ .id = .none, .root = .{ .module = name } },
-            .scope = Scope.direct(allocator, .{ .module_root = .{ .name = name, .id = .none } }),
             .previous = backing.modules_last,
         };
         // The cell is complete before its id exists: `register` is the one
         // point at which an id escapes into the lock-free directory. The
         // scope is found only through the trie, after it records the id.
         module.cell.id = try backing.scopes.register(allocator, &module.cell);
-        module.scope.storage.module_root.id = module.cell.id;
         backing.modules_last = module;
         link.* = module;
-        return &module.scope;
+        return .{ .name = name, .id = module.cell.id };
     }
 
     /// The domain definitions retire into.
@@ -1518,10 +1331,9 @@ pub const Env = enum(usize) {
         return heap.hostDomain(self.privateState().host);
     }
 
-    /// Links words written into the root `root` identifies by the source
-    /// `source`.
-    pub fn linker(self: *const Env, root: ScopeId, source: SourceId) SymbolLinker {
-        return .{ .state = self.privateState(), .root = root, .source = source };
+    /// Links words written into the root `root` identifies.
+    pub fn linker(self: *const Env, root: ScopeId) SymbolLinker {
+        return .{ .state = self.privateState(), .root = root };
     }
 
     /// Where the word whose link is `id` was written. An index: no hash and
@@ -1591,17 +1403,6 @@ pub const Env = enum(usize) {
         const environment = try init(host_owner);
         return .{ environment, BuildingEnv.init(environment) };
     }
-
-    pub fn sessionRoot(_: *Env, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .session);
-    }
-
-    pub fn createSessionRoot(self: *Env, allocator: std.mem.Allocator) error{OutOfMemory}!*Scope {
-        const root = try allocator.create(Scope);
-        root.* = self.sessionRoot(allocator);
-        root.allocation = .heap;
-        return root;
-    }
 };
 
 comptime {
@@ -1657,7 +1458,7 @@ pub const BuildingEnv = enum(usize) {
             else
                 null;
             defer if (effect_value) |item| releases.releaseValue(item);
-            const created = try Definition.create(allocator, .static, .{ .builtin = definition.primitive }, .{
+            const created = try Definition.create(allocator, .{ .builtin = definition.primitive }, .{
                 // assertStaticBuiltin checked this text against the same grammar.
                 .effect = if (effect_value) |item| ValidatedEffect.parse(item.list).? else null,
                 .doc = documentation(document_value.list).?,
@@ -1702,11 +1503,11 @@ pub const BuildingEnv = enum(usize) {
         return self.target();
     }
 
-    /// The root the bootstrap Fiber evaluates the prelude in. Its storage is the
-    /// core publisher, which refuses once core is frozen.
-    pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
+    /// What the bootstrap Fiber publishes the prelude's definitions with
+    /// while it evaluates them in core. It refuses once core is frozen.
+    pub fn corePublisher(self: *BuildingEnv) CorePublisher {
         var environment = self.target();
-        return Scope.direct(allocator, .{ .core_build = .init(environment.privateState()) });
+        return .init(environment.privateState());
     }
 
     /// Freezes core.
@@ -1745,7 +1546,7 @@ pub fn assertStaticModuleName(comptime name: []const u8) void {
     }
 }
 
-test "env: issued scope ids leave their reserved high bits clear" {
+test "env: a module name keeps one scope id, issued monotonically" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
     var container = try Env.init(&host);
@@ -1757,29 +1558,26 @@ test "env: issued scope ids leave their reserved high bits clear" {
         var spelling: [24]u8 = undefined;
         const name = try intern.internModuleName(try std.fmt.bufPrint(&spelling, "scope-probe-{d}", .{index}));
         const scope = try container.moduleScope(name);
-        // A name keeps the scope, and the id, it was first issued.
+        // A name keeps the id it was first issued.
         try std.testing.expectEqual(scope, try container.moduleScope(name));
-        try std.testing.expectEqual(name, scope.moduleName().?);
-        const id = scope.storage.module_root.id;
+        try std.testing.expectEqual(name, scope.name);
+        const id = scope.id;
         try std.testing.expectEqual(Root{ .module = name }, container.scopeOf(id));
         const raw = @backingInt(id);
         try std.testing.expect(raw != 0);
         try std.testing.expect(raw <= ScopeIndex.max_id);
-        try std.testing.expectEqual(@as(u32, 0), raw >> id_bits);
         try std.testing.expect(raw > previous);
         previous = raw;
     }
 }
 
-test "env: a root, source and name link to one cell below the flag bits" {
+test "env: a root and name link to one cell below the flag bits" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
     var container = try Env.init(&host);
     defer container.deinit();
 
-    const here: SourceId = @fromBackingInt(1);
-    const elsewhere: SourceId = @fromBackingInt(2);
-    const session = container.linker(container.sessionScopeId(), here);
+    const session = container.linker(container.sessionScopeId());
     // Enough names to spill past the first shelves of the table.
     var names: [1000]u32 = undefined;
     for (&names, 0..) |*name, index| {
@@ -1799,14 +1597,10 @@ test "env: a root, source and name link to one cell below the flag bits" {
         try std.testing.expect(link <= previous);
         const written = container.place(@fromBackingInt(link));
         try std.testing.expectEqual(container.sessionScopeId(), written.root);
-        try std.testing.expectEqual(here, written.source);
         try std.testing.expectEqual(name, written.name);
     }
-    // Another source, and another root, write the same name somewhere else.
-    const other_source = try container.linker(container.sessionScopeId(), elsewhere).link(names[0]);
-    const other_root = try container.linker(container.coreScopeId(), here).link(names[0]);
-    try std.testing.expect(other_source > previous);
-    try std.testing.expect(other_root > other_source);
-    try std.testing.expectEqual(elsewhere, container.place(@fromBackingInt(other_source)).source);
+    // Another root writes the same name somewhere else.
+    const other_root = try container.linker(container.coreScopeId()).link(names[0]);
+    try std.testing.expect(other_root > previous);
     try std.testing.expectEqual(container.coreScopeId(), container.place(@fromBackingInt(other_root)).root);
 }

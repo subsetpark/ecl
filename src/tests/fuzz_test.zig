@@ -879,7 +879,6 @@ fn fuzzSchedulerRuntime(_: void, smith: *std.testing.Smith) !void {
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1)
         try runOk(&runtime, programs[smith.index(programs.len)]);
-    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     var stack = try runtime.stackDisplay();
     defer stack.deinit();
     try std.testing.expectEqualStrings("", stack.bytes());

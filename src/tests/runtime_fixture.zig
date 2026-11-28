@@ -48,7 +48,7 @@ pub const Options = struct {
     diagnostics: ?@FieldType(session.RuntimeInputs, "diagnostics") = null,
     tls_trust: ?@FieldType(session.RuntimeInputs, "tls_trust") = null,
     ecl_path: ?@FieldType(session.RuntimeInputs, "ecl_path") = null,
-    module_map: ?@FieldType(session.RuntimeInputs, "module_map") = null,
+    module_root: ?@FieldType(session.RuntimeInputs, "module_root") = null,
     environ: ?@FieldType(session.RuntimeInputs, "environ") = null,
     standard_input: ?@FieldType(session.RuntimeInputs, "standard_input") = null,
     initial_cwd: ?@FieldType(session.RuntimeInputs, "initial_cwd") = null,
@@ -60,3 +60,34 @@ pub const Options = struct {
     native_instances: ?@FieldType(session.RuntimeInputs, "native_instances") = null,
     clock: ?@FieldType(session.RuntimeInputs, "clock") = null,
 };
+
+/// Runs `source` in one task while a second task cancels it, and expects the
+/// first to end cancelled. A `source` that finishes within one turn ends `ok`
+/// and fails here. The scheduler does not promise that the first task runs
+/// before the second, so a cancelled end does not prove `source` started;
+/// callers that need that must observe an effect of `source` themselves.
+pub fn expectCancelledAcrossTurns(runtime: *session.Session, source: []const u8) !void {
+    const program = try std.mem.concat(std.testing.allocator, u8, &.{
+        "(",
+        source,
+        ") @spawn `cancel-victim set (cancel-victim task.cancel) @spawn task.await pop " ++
+            "cancel-victim task.await dup `err has? (`err at `kind at) () if",
+    });
+    defer std.testing.allocator.free(program);
+    switch (try runtime.runUnit("<cancel-across-turns>", program)) {
+        .ok => {},
+        .incomplete => return error.TestUnexpectedResult,
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+    }
+    var ending = try runtime.stackDisplay();
+    defer ending.deinit();
+    if (!std.mem.endsWith(u8, ending.bytes(), "cancelled")) {
+        const shown = ending.bytes();
+        std.log.err("ended without cancellation: {s}", .{shown[shown.len -| 300..]});
+        return error.TestUnexpectedResult;
+    }
+    if (try runtime.runUnit("<cancel-across-turns>", "pop") != .ok) return error.TestUnexpectedResult;
+}

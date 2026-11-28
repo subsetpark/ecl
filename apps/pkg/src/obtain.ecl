@@ -1,5 +1,5 @@
 ### module pkg.obtain
-# Every selected download is pinned in the private generation before reuse.
+# Every selected download is pinned privately before reuse.
 (
  ### defp optional
  (result -- bytes :
@@ -7,17 +7,15 @@
  (dup result.ok? (`ok at first)
   (`err at dup `kind at `io match? (pop []) (raise) if) if) `optional defp
 
- ### defp active-read
- (context hash -- bytes : "Read a sealed artifact from the captured previous generation.")
+ ### defp installed-read
+ (context hash -- bytes : "Read an archive the previous installation kept.")
  (|context hash|
-  context `project at context `active at "/archives" cat fs.child-dir
-  dup hash pkg.cache.read-at swap port.close) `active-read defp
+  context `project at ".ecl/archives" fs.child-dir
+  dup hash pkg.cache.read-at swap port.close) `installed-read defp
 
- ### defp previous
- (context hash -- bytes : "An absent or damaged previous generation is only an optimization miss.")
- (|context hash|
-  context `active at empty? ([])
-  context hash pair (pair (active-read) cat @attempt optional) cat if) `previous defp
+ ### defp installed
+ (context hash -- bytes : "An absent or damaged previous installation is only a miss.")
+ (pair (installed-read) cat @attempt optional) `installed defp
 
  ### defp network
  (context requirement -- bytes : "Offline operation never starts a network request.")
@@ -28,9 +26,9 @@
 
  ### defp external
  (context requirement -- bytes :
-  "Try the captured generation and cache before the pinned network source.")
+  "Try the installed archives and the cache before the pinned network source.")
  (|context requirement|
-  context requirement `hash at previous
+  context requirement `hash at installed
   context requirement pair (cached-or-network) cat apply) `external defp
 
  ### defp cached-or-network

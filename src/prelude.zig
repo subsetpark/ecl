@@ -11,12 +11,6 @@ const poll = @import("poll.zig");
 
 pub const Error = error{ OutOfMemory, InvalidPrelude };
 
-var execution_access_seal: u8 = 0;
-
-fn executionAccess() *const modules.ExecutionAccess {
-    return @ptrCast(&execution_access_seal);
-}
-
 pub fn install(
     host: *const heap.HostCleanup,
     building: *env.BuildingEnv,
@@ -55,7 +49,7 @@ pub fn installSource(
         source_name,
         source,
         &diag,
-        environment.linker(environment.coreScopeId(), modules.RegistrationProvenance.sourceId(.standard_library)),
+        environment.linker(environment.coreScopeId()),
     );
     defer {
         while (!ingestion.advanceRetirement())
@@ -81,7 +75,6 @@ pub fn installSource(
     var fiber = machine.Fiber.init(
         allocator,
         release_domain,
-        executionAccess(),
         .empty,
         &environment,
         &archive,
@@ -89,11 +82,10 @@ pub fn installSource(
         // runs; the bootstrap fiber evaluates the prelude generically.
         .{ .registry = registry, .idiom_mode = .generic_only, .phase = .bootstrap },
         cancelled,
-        .bootstrap,
-        .own,
+        .{ .bootstrap = building.corePublisher() },
+        .{ .scope = environment.coreScopeId() },
     );
     defer fiber.deinit();
-    fiber.replaceRootScope(building.rootScope(allocator));
     machine.run(&fiber, root_header) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Ecl => {

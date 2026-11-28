@@ -1,4 +1,4 @@
-# Run from the repository root with the package application's module map.
+# Run from the repository root with the package application on ECL_PATH.
 `cwd "test/fixtures/pkg/runtime-valid.tgz.hex" fs.read-text str.trim
 ("0123456789abcdef" swap find) each
 dup len 2 div 2 pair reshape

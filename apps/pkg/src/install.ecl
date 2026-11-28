@@ -1,93 +1,95 @@
 ### module pkg.install
-# Resolution and publication policy for project-local immutable generations.
+# Resolution and installation: each selected package is unpacked beneath
+# `.ecl/packages/<name>`, where module search finds it, and its exact archive
+# is kept in `.ecl/archives`.
 (
  ### defp existing-lock
- (project manifest -- text :
+ (directory manifest -- text :
   "Preserve the portable lock's exact bytes during ordinary synchronization.")
- (|project manifest|
-  project `directory at "ecl.lock" fs.read-text
+ (|directory manifest|
+  directory "ecl.lock" fs.read-text
   dup pkg.resolution.read manifest pkg.resolution.compatible pop) `existing-lock defp
 
  ### defp resolve
- (work manifest -- text :
+ (context manifest -- text :
   "Select dependencies only for initial synchronization or an explicit update.")
- (|work manifest|
-  manifest work `context at manifest pkg.discover.catalog pkg.solver.resolve pkg.resolution.write)
+ (|context manifest|
+  manifest context manifest pkg.discover.catalog pkg.solver.resolve pkg.resolution.write)
  `resolve defp
 
  ### def selection
- (work manifest update -- text :
+ (context manifest update -- text :
   "Honor an existing lock unless dependency selection was explicitly requested.")
- (|work manifest update|
-  work `project at `directory at "ecl.lock" fs.exists? update not and
-  work `project at manifest pair (existing-lock) cat
-  work manifest pair (resolve) cat if) `selection def
+ (|context manifest update|
+  context `project at "ecl.lock" fs.exists? update not and
+  context `project at manifest pair (existing-lock) cat
+  context manifest pair (resolve) cat if) `selection def
 
- ### def recover
- (project -- : "Complete a validated pending publication under the caller's mutation lock.")
- (|project|
-  project `directory at project `path at (pkg.verify.publication) cons pkg.transaction.recover)
- `recover def
+ ### def start
+ (project offline -- context :
+  "Stage the package and archive trees beside the installed ones, and a private download pin
+   directory that is never published.")
+ (|project offline|
+  project `directory at ".ecl" fs.mkdirs
+  {} `project project `directory at put `offline offline put `cache pkg.project.cache-path put
+  `downloads project `directory at ".ecl/downloads" fs.stage-dir put
+  `packages project `directory at ".ecl/packages" fs.stage-dir put
+  `archives project `directory at ".ecl/archives" fs.stage-dir put) `start def
 
- ### def activate
- (work lock-text -- :
-  "Journal the published candidate and activate it through the recovery protocol.")
- (|work lock-text|
-  work `project at `directory at work `location at lock-text
-  work `project at `path at (pkg.verify.publication) cons pkg.transaction.prepare
-  work `project at recover) `activate def
+ ### defp install
+ (state name -- state : "Obtain, check, and unpack one selected package.")
+ (|state name|
+  state `context at state `lock at `packages at name at pkg.obtain.requirement
+  state name pair (install-bytes) cat apply) `install defp
 
- ### defp location
- (vendor -- path :
-  "Choose a fresh immutable destination without putting its identity into the lock.")
- (pkg.project.generation-id swap
-  (pkg.layout.vendor-generation) (pkg.layout.project-generation) if) `location defp
+ ### defp install-bytes
+ (bytes state name -- state : "Keep the exact archive and unpack only a validated package.")
+ (|bytes state name|
+  state `lock at bytes pkg.bundle.inspect `manifest at pkg.resolution.check-manifest
+  state [context archives] at-path state `lock at `packages at name at `hash at pkg.cache.filename
+  bytes fs.create-bytes
+  state [context packages] at-path name bytes gzip.decompress tar.unpack pop
+  state) `install-bytes defp
 
- ### defp synchronize-held
- (project update offline vendor -- : "Recover before reading the manifest or selecting new work.")
- (|project update offline vendor|
-  project recover
-  project `directory at "ecl.pkg" fs.read-text
-  project vendor location offline pkg.generation.start
-  update (synchronize-work) cons apply) `synchronize-held defp
+ ### defp replace
+ (directory path -- : "Remove an installed tree, if there is one.")
+ (dup2 fs.exists? (fs.remove-tree) (pop pop) if) `replace defp
 
- ### defp synchronize-work
- (manifest-text work update -- :
-  "Build against one observed manifest and one portable lock selection.")
- (|manifest-text work update|
-  work manifest-text pkg.manifest.read update selection
-  manifest-text work pair (publish) cat apply) `synchronize-work defp
+ ### def finish
+ (context manifest-text lock-text -- :
+  "Install every selected package, then publish the staged trees in place of the installed ones and
+   the lock after them. A failure or cancellation after the trees are replaced and before the lock
+   is published leaves the new packages beside the old lock; `verify` reports the mismatch, and
+   rerunning `sync` is the only recovery.")
+ (|context manifest-text lock-text|
+  lock-text pkg.resolution.read manifest-text pkg.manifest.read pkg.resolution.compatible
+  {} swap `lock swap put `context context put
+  dup `lock at `packages at dict.keys dup grade at swap (install) fold pop
+  context `downloads at port.close
+  context `project at ".ecl/packages" replace
+  context `project at ".ecl/archives" replace
+  context `packages at fs.commit-dir
+  context `archives at fs.commit-dir
+  context `project at "ecl.lock" lock-text fs.publish-text) `finish def
 
  ### defp publish
- (lock-text manifest-text work -- :
-  "Complete the private installation before either root-file publication.")
- (|lock-text manifest-text work|
-  work manifest-text lock-text pkg.generation.finish work lock-text activate) `publish defp
+ (context manifest-text update -- : "Build against one observed manifest and one lock selection.")
+ (|context manifest-text update|
+  context manifest-text pkg.manifest.read update selection
+  context manifest-text rolldown finish) `publish defp
 
  ### def synchronize
- (project update offline vendor -- :
+ (project update offline -- :
   "Synchronize under cancellable application-level project coordination.")
- (|project update offline vendor|
+ (|project update offline|
   project pkg.project.lock
-  project update offline vendor synchronize-held
+  project offline start project `directory at "ecl.pkg" fs.read-text update publish
   port.close) `synchronize def
 
  ### def verify
- (project -- : "Verify the captured active generation and report unsettled root publication state.")
+ (project -- : "Verify the installed packages against the root lock and their kept archives.")
  (|project|
-  project `directory at "ecl.modules" fs.read-text pkg.layout.from-reference
-  project swap verify-active) `verify def
-
- ### defp verify-active
- (project location -- :
-  "Check an immutable snapshot before diagnosing a pending or divergent root lock.")
- (|project location|
-  project location pkg.verify.generation
-  project `directory at ".ecl/publication.ecl" fs.exists? not
-  `domain error.new "package publication is pending; run pkg sync to recover" error.with-message
-  assert
-  project `directory at location "/ecl.lock" cat fs.read-text pkg.resolution.read
-  project `directory at "ecl.lock" fs.read-text pkg.resolution.read match?
-  `domain error.new "root ecl.lock differs from the active generation" error.with-message assert)
- `verify-active defp
+  project `directory at "ecl.lock" fs.read-text pkg.resolution.read
+  project pkg.project.manifest pkg.resolution.compatible
+  project `directory at swap pkg.verify.installation) `verify def
 ) `pkg.install @defm

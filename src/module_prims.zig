@@ -5,7 +5,6 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
-const binder = @import("binder.zig");
 const machine = @import("machine.zig");
 const modules = @import("modules.zig");
 const definition_prims = @import("definition_prims.zig");
@@ -104,9 +103,8 @@ const DefmDriver = struct {
                 // name that can never publish must fail before the body runs.
                 if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                     return fiber.fail(.domain, "module name `core` is reserved for the core qualifier");
-                const provenance = fiber.current.?.site.registration_provenance;
-                try fiber.refuseReservedModule(name, provenance);
-                try fiber.refuseUnexportedModule(name, provenance);
+                try fiber.refuseReservedModule(name);
+                try fiber.refuseUnexportedModule(name);
                 const body = self.body.take();
                 var doc = self.doc;
                 self.doc = .none;
@@ -116,6 +114,7 @@ const DefmDriver = struct {
                     name,
                     body,
                     if (doc.isPresent()) env.documentation(doc.borrow().list).? else null,
+                    fiber.registrant,
                 );
                 return .detached;
             },
@@ -126,8 +125,7 @@ const DefmDriver = struct {
 
 /// Returns the name of the module whose code is running. A construction
 /// body reports the name it is being built under.
-/// The symbol is linked as the running code would have written it, so a
-/// word that takes a module operand finds the module from that code's source.
+/// The symbol is linked as the running code would have written it.
 fn moduleNameWord(fiber: *Fiber) MachineError!void {
     const name = fiber.currentModule() orelse return fiber.fail(
         .domain,
@@ -172,7 +170,7 @@ fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
 fn importWord(fiber: *Fiber, visibility: env.Visibility) MachineError!void {
     try fiber.require(2);
     const scope = try fiber.definitionScope();
-    if (visibility == .private and (!scope.isModuleRoot() or fiber.stagingImage(scope) == null))
+    if (visibility == .private and (fiber.environment.scopeOf(scope) != .module or fiber.stagingImage(scope) == null))
         return fiber.fail(.domain, "importp is legal only in a module root under construction");
     var requested = try fiber.popList();
     errdefer requested.deinit();
@@ -196,7 +194,7 @@ const ImportDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: heap.Owned(Value),
     prepared: heap.Owned([]intern.BindingName),
-    scope: *env.Scope,
+    scope: env.ScopeId,
     visibility: env.Visibility,
     module_validation: intern.ModuleNameCursor,
     module_name: ?intern.ModuleName = null,
@@ -265,10 +263,10 @@ const ImportDriver = struct {
                 .binding = binding,
                 .visibility = self.visibility,
             };
-            switch (self.scope.storage) {
+            switch (fiber.environment.scopeOf(self.scope)) {
                 // A module stages its imports with its definitions; a name
                 // introduced twice fails construction.
-                .module_root => {
+                .module => {
                     const image = fiber.stagingImage(self.scope) orelse return fiber.fail(
                         .domain,
                         "module imports are legal only while the module is under construction",
@@ -277,7 +275,7 @@ const ImportDriver = struct {
                     self.publish_index += 1;
                     continue;
                 },
-                .core_build => return fiber.fail(.domain, "core does not import"),
+                .core => return fiber.fail(.domain, "core does not import"),
                 .session => {},
             }
             if (self.publisher == null)
@@ -364,7 +362,7 @@ fn exportsWord(fiber: *Fiber) MachineError!void {
 const ExportsDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     allocator: std.mem.Allocator,
-    /// The operand as written: its link says whose view finds the module.
+    /// The operand as written, which a load replays.
     requested: value.Symbol,
     found: heap.Owned(poll_api.ChunkList(u32)),
     state: heap.Owned(State),
@@ -373,11 +371,13 @@ const ExportsDriver = struct {
         validate: intern.ModuleNameCursor,
         acquire: struct {
             name: intern.ModuleName,
-            cursor: heap.Owned(machine.ModuleLookupCursor),
+            lookup: heap.Owned(machine.HeldModuleLookup),
         },
+        /// The registration's public names, borrowed from the view the
+        /// lookup held.
         module_names: struct {
-            generation: heap.Owned(modules.GenerationLease),
-            cursor: heap.Owned(modules.ModulePublicNameCursor),
+            view: heap.Owned(modules.View),
+            cursor: modules.ModulePublicNameCursor,
         },
         core_names: heap.Owned(reflection.VisibleNameCursor),
         sort: heap.Owned(reflection.SortedUniqueNameCursor),
@@ -394,11 +394,8 @@ const ExportsDriver = struct {
         ) void {
             switch (self.*) {
                 .validate => {},
-                .acquire => |*acquire| acquire.cursor.deinit(releases, allocator),
-                .module_names => |*names| {
-                    names.cursor.deinit(releases, allocator);
-                    names.generation.deinit(releases, allocator);
-                },
+                .acquire => |*acquire| acquire.lookup.deinit(releases, allocator),
+                .module_names => |*names| names.view.deinit(releases, allocator),
                 .core_names => |*cursor| cursor.deinit(releases, allocator),
                 .sort => |*cursor| cursor.deinit(releases, allocator),
                 .fill => |*fill| {
@@ -443,17 +440,17 @@ const ExportsDriver = struct {
                         return fiber.fail(.domain, "exports requires a valid module name");
                     self.replace(fiber, .{ .acquire = .{
                         .name = module_name,
-                        .cursor = .init(fiber.moduleLookup(self.requested, module_name)),
+                        .lookup = .init(fiber.moduleLookup(module_name)),
                     } });
                 },
             },
-            .acquire => |*acquire| switch (acquire.cursor.borrowMut().advance()) {
+            .acquire => |*acquire| switch (acquire.lookup.borrowMut().advance()) {
                 .pending => {},
                 .complete => |maybe_generation| if (maybe_generation) |generation| {
-                    const names = generation.publicNameCursor();
+                    const lookup = acquire.lookup.take();
                     self.replace(fiber, .{ .module_names = .{
-                        .generation = .init(generation),
-                        .cursor = .init(names),
+                        .view = .init(lookup.view),
+                        .cursor = generation.publicNameCursor(),
                     } });
                 } else {
                     const requested = self.requested;
@@ -461,11 +458,11 @@ const ExportsDriver = struct {
                     fiber.retireDriver(self);
                     return fiber.retryQualifiedOperandAfterLoad(
                         requested,
-                        .{ .unregistered_module = .{ .name = module_name, .searcher = binder.sourceOf(fiber.environment, requested) } },
+                        .{ .name = module_name },
                     );
                 },
             },
-            .module_names => |*names| switch (names.cursor.borrowMut().advance()) {
+            .module_names => |*names| switch (names.cursor.advance()) {
                 .pending => {},
                 .complete => try self.startSort(fiber),
                 .item => |name| try self.found.borrowMut().append(name),
@@ -522,7 +519,7 @@ const ModuleDocDriver = struct {
     /// The operand as written: its link says whose view finds the module.
     requested: value.Symbol,
     validation: intern.ModuleNameCursor,
-    acquire: heap.Owned(machine.ModuleLookupCursor) = .none,
+    acquire: heap.Owned(machine.HeldModuleLookup) = .none,
     name: ?intern.ModuleName = null,
     normalization: heap.Owned(definition_prims.DocumentNormalization) = .none,
 
@@ -535,20 +532,19 @@ const ModuleDocDriver = struct {
             } else if (self.acquire.isPresent()) switch (self.acquire.borrowMut().advance()) {
                 .pending => {},
                 .complete => |maybe_generation| {
-                    var generation = heap.Owned(modules.GenerationLease).init(maybe_generation orelse {
+                    const generation = maybe_generation orelse {
                         const requested = self.requested;
                         const module_name = self.name.?;
                         fiber.retireDriver(self);
                         return fiber.retryQualifiedOperandAfterLoad(
                             requested,
-                            .{ .unregistered_module = .{ .name = module_name, .searcher = binder.sourceOf(fiber.environment, requested) } },
+                            .{ .name = module_name },
                         );
-                    });
-                    defer generation.deinit(fiber.releases, fiber.allocator);
-                    const document = generation.borrow().documentation() orelse
+                    };
+                    const document = generation.documentation() orelse
                         return fiber.fail(.domain, "module has no documentation");
-                    self.acquire.deinit(fiber.releases, fiber.allocator);
                     self.normalization = .init(try .init(fiber, document));
+                    self.acquire.deinit(fiber.releases, fiber.allocator);
                 },
             } else switch (self.validation.advance()) {
                 .pending => {},
@@ -558,7 +554,7 @@ const ModuleDocDriver = struct {
                     if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                         return fiber.fail(.domain, "`core` is a qualifier, not a documented module");
                     self.name = name;
-                    self.acquire = .init(fiber.moduleLookup(self.requested, name));
+                    self.acquire = .init(fiber.moduleLookup(name));
                 },
             }
         }

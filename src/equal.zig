@@ -625,14 +625,14 @@ fn leafElementValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind))
 pub fn isFlatLeaf(kind: value.HeapKind) bool {
     return switch (kind) {
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,
-        .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
+        .generic_spine, .dict, .task, .port, .address => false,
     };
 }
 
 fn isStringKind(kind: value.HeapKind) bool {
     return switch (kind) {
         .leaf_char1, .leaf_char2, .leaf_char4 => true,
-        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => false,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address => false,
     };
 }
 
@@ -723,7 +723,7 @@ pub const LeafMatchKey = struct {
             else
                 .{ .class = .real, .bits = @bitCast(item) },
             .leaf_char1, .leaf_char2, .leaf_char4 => .{ .class = .other, .bits = item },
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .address => unreachable,
         };
     }
 

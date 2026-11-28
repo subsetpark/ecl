@@ -1,6 +1,6 @@
 //! Slow, exhaustive allocation-failure coverage across initialized sessions.
 //!
-//! Each logical standard-library, module-map, and host surface owns an independent
+//! Each logical standard-library, module-search, and host surface owns an independent
 //! failure window. Operations in one module still share its publication cost;
 //! unrelated modules never run as prefixes of one another's allocation
 //! ordinals. Package policy uses these same public facilities from ECL.
@@ -71,26 +71,21 @@ fn archiveViewSource(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, source.written());
 }
 
-const MapScratch = struct {
+const SearchScratch = struct {
     directory: std.testing.TmpDir,
     path: [:0]u8,
-    fn init() !MapScratch {
+    fn init() !SearchScratch {
         var directory = std.testing.tmpDir(.{});
         errdefer directory.cleanup();
         const path = try directory.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
         errdefer std.testing.allocator.free(path);
-        try directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "ecl.modules",
-            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-                "{path \"probe.ecl\" kind ecl exports [\"helper\" \"mapprobe\"]}]}}}",
-        });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "probe.ecl",
             .data = "((42) `answer def) `helper @defm ((helper.answer) `answer def) `mapprobe @defm",
         });
         return .{ .directory = directory, .path = path };
     }
-    fn deinit(self: *MapScratch) void {
+    fn deinit(self: *SearchScratch) void {
         std.testing.allocator.free(self.path);
         self.directory.cleanup();
     }
@@ -359,7 +354,7 @@ fn checkPostInitAllocationFailureShard(
 /// sets `fail_index` to that ordinal plus `failure_offset` when the offset is
 /// non-null. Session initialization itself is already exhausted by the core
 /// and project-session probes; replaying those same ordinals for every
-/// standard-library, module-map, and host bundle multiplied the slow gate without
+/// standard-library, module-search, and host bundle multiplied the slow gate without
 /// adding coverage.
 fn checkAllPostInitAllocationFailuresParallel(
     backing_allocator: std.mem.Allocator,
@@ -703,13 +698,13 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     }
 }
 
-/// Exhausts the module-map discovery branch of Session initialization once.
-/// Every standard-library and module-map probe below uses the same host shape, so
+/// Exhausts the project-root discovery branch of Session initialization once.
+/// Every standard-library and module-search probe below uses the same host shape, so
 /// their post-init windows do not need to replay these ordinals independently.
 fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
-    var scratch = try MapScratch.init();
+    var scratch = try SearchScratch.init();
     defer scratch.deinit();
     var output_buffer: [1024]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -779,27 +774,18 @@ fn stdlibSessionAllocationProbe(
     const allocator = failing.allocator();
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
-    var scratch = try MapScratch.init();
+    var scratch = try SearchScratch.init();
     defer scratch.deinit();
     if (surface == .root_source_preload) {
         try scratch.directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "ecl.modules",
-            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [\"suite.ecl\"] artifacts []}}}",
-        });
-        try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "suite.ecl",
-            .data = "((1) `answer test) `helper @defm\n",
+            .data = "((1) `answer test) `suite @defm\n",
         });
     }
     if (surface == .module_body_import) {
         // The first module's body records an import from a module declared
-        // later in the same artifact, so the import runs while the artifact
-        // loads and its word resolves when `answer` first reaches it.
-        try scratch.directory.dir.writeFile(std.testing.io, .{
-            .sub_path = "ecl.modules",
-            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
-                "{path \"imports.ecl\" kind ecl exports [\"importprobe\" \"importlater\"]}]}}}",
-        });
+        // later in the same file, so the import runs while the file loads
+        // and its word resolves when `answer` first reaches it.
         try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "imports.ecl",
             .data = "(`importlater (seven) importp (seven) `answer def) `importprobe @defm ((7) `seven def) `importlater @defm",
@@ -883,7 +869,7 @@ fn stdlibSessionAllocationProbe(
                 .pending => {},
                 .complete => break,
                 .err => |failure| return reportUnexpectedFailure(&runtime, "root source preload", failure),
-                .invalid, .no_map => return error.UnexpectedPreloadFailure,
+                .invalid => return error.UnexpectedPreloadFailure,
             };
             try runOk(&runtime, "oom-private-tests.ecl", "tests first @test pop");
         },
@@ -2192,26 +2178,6 @@ test "oom: standard-library and host: native operation overload registration" {
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe("instanceprobe.shared-value pop instanceprobe.private-value pop", "").run);
 }
 
-test "oom: standard-library and host: host static native registration" {
-    try requireSelectedOomTest(@src());
-    const Probe = struct {
-        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
-            var locked = LockedAllocator{ .child = failing.allocator() };
-            var inputs = try runtime_fixture.Fixture.init();
-            defer inputs.deinit();
-            var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
-            }), .cooperative, .evaluate);
-            defer runtime.deinit();
-            const first = failing.alloc_index;
-            if (failure_offset) |offset| failing.fail_index = first + offset;
-            try runOk(&runtime, "native-static.ecl", "instanceprobe.next pop");
-            return first;
-        }
-    };
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
-}
-
 test "oom: standard-library and host: unlimited cooperative instance resource" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
@@ -2220,7 +2186,8 @@ test "oom: standard-library and host: unlimited cooperative instance resource" {
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "cooperative.probe", .registration = .{ .deferred = @import("native-instance").CooperativeOnly.descriptor() }, .port_limits = .{ .max_live_ports = null } }},
+                .ecl_path = native_fixture.directory,
+                .native_instances = &.{.{ .name = "cooperative.probe", .port_limits = .{ .max_live_ports = null } }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             const first = failing.alloc_index;
@@ -2265,8 +2232,9 @@ test "oom: standard-library and host: native capacity rejection" {
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
+                .ecl_path = native_fixture.directory,
                 .native_port_limits = .{ .max_live_ports = 1 },
-                .native_instances = &.{.{ .name = "instanceprobe", .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+                .native_instances = &.{.{ .name = "instanceprobe" }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             try runOk(&runtime, "native-rejection-setup.ecl", "instanceprobe.resource [] port.open `p set");
@@ -2296,26 +2264,6 @@ test "oom: standard-library and host: native activity stream supervision" {
     ).run);
 }
 
-test "oom: standard-library and host: host eager native registration" {
-    try requireSelectedOomTest(@src());
-    const Probe = struct {
-        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
-            var locked = LockedAllocator{ .child = failing.allocator() };
-            var inputs = try runtime_fixture.Fixture.init();
-            defer inputs.deinit();
-            var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .registration = .{ .eager = @import("native-instance").Extension.descriptor() } }},
-            }), .cooperative, .evaluate);
-            defer runtime.deinit();
-            const first = failing.alloc_index;
-            if (failure_offset) |offset| failing.fail_index = first + offset;
-            try runOk(&runtime, "native-static.ecl", "instanceprobe.next pop");
-            return first;
-        }
-    };
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, Probe.run);
-}
-
 test "oom: standard-library and host: native instance message budgets" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
@@ -2324,7 +2272,8 @@ test "oom: standard-library and host: native instance message budgets" {
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .message_limits = .{ .nodes = 32, .bytes = 256 }, .builder_slots = 4 }, .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+                .ecl_path = native_fixture.directory,
+                .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .message_limits = .{ .nodes = 32, .bytes = 256 }, .builder_slots = 4 } }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             const first = failing.alloc_index;
@@ -2372,7 +2321,8 @@ test "oom: standard-library and host: native instance work quanta" {
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
             var runtime = try session.Session.init(locked.allocator(), &.{}, inputs.inputs(.{
-                .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .callback_quantum = .q1, .construction_quantum = .q1 }, .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+                .ecl_path = native_fixture.directory,
+                .native_instances = &.{.{ .name = "instanceprobe", .port_limits = .{ .callback_quantum = .q64, .construction_quantum = .q64 } }},
             }), .cooperative, .evaluate);
             defer runtime.deinit();
             const first = failing.alloc_index;
