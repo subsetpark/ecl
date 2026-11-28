@@ -62,9 +62,10 @@ pub const Options = struct {
 };
 
 /// Runs `source` in one task while a second task cancels it, and expects the
-/// first to end cancelled. The Session must be cooperative: the second task
-/// then runs only once the first has given up its turn, so a `source` that
-/// finished within one turn ends `ok` and fails here.
+/// first to end cancelled. A `source` that finishes within one turn ends `ok`
+/// and fails here. The scheduler does not promise that the first task runs
+/// before the second, so a cancelled end does not prove `source` started;
+/// callers that need that must observe an effect of `source` themselves.
 pub fn expectCancelledAcrossTurns(runtime: *session.Session, source: []const u8) !void {
     const program = try std.mem.concat(std.testing.allocator, u8, &.{
         "(",

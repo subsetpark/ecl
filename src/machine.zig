@@ -2402,8 +2402,8 @@ pub const Fiber = struct {
         return .{ .view = view, .cursor = view.moduleCursor(name) };
     }
 
-    /// A found file's load registers only the modules the file declares;
-    /// any other unit registers any name.
+    /// A found file's load, including any `@load` it makes, registers only
+    /// the modules the file declares; any other unit registers any name.
     pub fn refuseUnexportedModule(self: *Fiber, name: intern.ModuleName) MachineError!void {
         const source = self.registrant.foundSource() orelse return;
         if (source.exports(name)) return;
@@ -3549,8 +3549,9 @@ pub const Fiber = struct {
             return error.OutOfMemory;
         }
         const site = invoker.site;
+        // The body keeps the invoker's registrant: a nested load made while a
+        // found file registers is still that file's registration.
         try self.openBoundary(.{ .load = self.registrant }, @intCast(self.stack.items.len), word, body);
-        self.registrant = .ordinary;
         self.current = .{
             .code = body,
             .program = .owned,

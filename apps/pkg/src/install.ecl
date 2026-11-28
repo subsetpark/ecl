@@ -58,7 +58,9 @@
  ### def finish
  (context manifest-text lock-text -- :
   "Install every selected package, then publish the staged trees in place of the installed ones and
-   the lock after them.")
+   the lock after them. A failure or cancellation after the trees are replaced and before the lock
+   is published leaves the new packages beside the old lock; `verify` reports the mismatch, and
+   rerunning `sync` is the only recovery.")
  (|context manifest-text lock-text|
   lock-text pkg.resolution.read manifest-text pkg.manifest.read pkg.resolution.compatible
   {} swap `lock swap put `context context put

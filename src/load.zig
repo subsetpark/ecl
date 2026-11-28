@@ -440,13 +440,15 @@ const AutoLoadDriver = struct {
                 defer fiber.allocator.free(filename);
                 const candidate = try std.fs.path.join(fiber.allocator, &.{ entries[probe.entry], filename });
                 std.Io.Dir.cwd().access(fiber.inherited.runtime().host_io, candidate, .{ .read = true }) catch |err| {
-                    fiber.allocator.free(candidate);
+                    defer fiber.allocator.free(candidate);
                     switch (err) {
-                        error.FileNotFound => {
+                        // An entry that cannot be searched supplies nothing,
+                        // as in the scan.
+                        error.FileNotFound, error.AccessDenied, error.PermissionDenied => {
                             probe.entry += 1;
                             continue;
                         },
-                        else => return fiber.failFmt(.io, "cannot access module file `{s}`: {s}", .{ filename, @errorName(err) }),
+                        else => return fiber.failFmt(.io, "cannot access module file `{s}`: {s}", .{ candidate, @errorName(err) }),
                     }
                 };
                 self.beginPath(via, &probe.loading, candidate, .native);
@@ -887,13 +889,25 @@ const SourceDriver = struct {
     diag: reader.Diag = .{},
     state: State = .start,
 
+    /// An embedded module's top-level words mean core's, as the prelude's do,
+    /// so no session definition can change what it registers. Any other
+    /// source links in the root of the fiber that loads it.
+    fn linkScope(self: *SourceDriver, fiber: *machine.Fiber) env.ScopeId {
+        switch (self.completion.borrow()) {
+            .register => |register| if (register.registrant == .standard_library)
+                return fiber.environment.coreScopeId(),
+            .push, .session, .load => {},
+        }
+        return fiber.lexicalScope();
+    }
+
     fn beginIngest(self: *SourceDriver, via: *Loading) error{OutOfMemory}!void {
         const fiber = via.fiber();
         const ingestion = try fiber.archive.sourceIngestCursor(
             self.text.borrow().sourceName(),
             self.text.borrow().source(),
             &self.diag,
-            fiber.rootLinker(fiber.lexicalScope()),
+            fiber.rootLinker(self.linkScope(fiber)),
         );
         self.state = .{ .ingesting = ingestion };
     }
