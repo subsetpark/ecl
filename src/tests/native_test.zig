@@ -1119,7 +1119,7 @@ test "native: the SDK generates a descriptor the production validator accepts" {
         "make-char",     "singleton",      "pair-dict",             "sum-list",       "sum-dict",    "cooperative",    "draft-fail",
         "yield-forever", "builder-budget", "forward-values-budget", "text-span",      "bulk-budget", "bulk-immediate", "bulk-values-budget",
         "large-list",    "large-dict",     "duplicate-dict",        "noncooperative", "nan-scalar",  "nan-bulk",       "scratch-reverse",
-        "scratch-grant", "scratch-hold",   "symbol-burst",
+        "scratch-grant", "scratch-hold",   "scratch-resize",        "symbol-burst",
     };
     try std.testing.expectEqual(expected_names.len, validated.definitions().len);
     for (validated.definitions(), expected_names) |definition, expected| {
@@ -1161,7 +1161,7 @@ test "native: a discovered artifact publishes its complete table atomically" {
         "sample.text-span",          "sample.bulk-budget",    "sample.bulk-immediate",
         "sample.bulk-values-budget", "sample.nan-scalar",     "sample.nan-bulk",
         "sample.scratch-reverse",    "sample.scratch-grant",  "sample.scratch-hold",
-        "sample.symbol-burst",
+        "sample.scratch-resize",     "sample.symbol-burst",
     };
     var completion = try runtime.completionCandidates("sample.");
     defer completion.deinit();
