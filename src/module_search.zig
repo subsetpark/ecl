@@ -1,7 +1,9 @@
 //! Module search: the source files the search path supplies. Each entry is
-//! a directory scanned recursively, skipping dot-directories; every `.ecl`
-//! file is parsed without running it, and its literal top-level module
-//! declarations are the modules it may register. Nothing here loads a
+//! a directory scanned recursively, skipping dot-directories, except a
+//! startup directory outside any project, whose own files alone are read.
+//! Every `.ecl` file is parsed without running it, and its literal top-level
+//! module declarations are the modules it may register; a file that is too
+//! large, unreadable, or unparsable declares nothing. Nothing here loads a
 //! module.
 const std = @import("std");
 const heap = @import("heap.zig");
@@ -9,8 +11,9 @@ const reader = @import("reader.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
 
-/// Bounds on one scan. Passing one fails the lookup that started the scan,
-/// and every later one, with the reason.
+/// Bounds on one scan. A file over `max_file_bytes` declares nothing;
+/// passing any other bound fails the lookup that started the scan, and every
+/// later one, with the reason.
 pub const max_file_bytes = 16 * 1024 * 1024;
 pub const max_source_bytes = 64 * 1024 * 1024;
 pub const max_files = 4096;
@@ -142,11 +145,15 @@ pub const Search = struct {
     host: *const heap.HostCleanup,
     io: std.Io,
     entries: [][]u8,
+    /// Whether the first entry is a startup directory outside any project,
+    /// whose own files alone are searched.
+    flat: bool,
     catalog: std.atomic.Value(?*Catalog) = .init(null),
 
     /// The project root is `root` when given, and otherwise the nearest
-    /// ancestor of `start` holding `ecl.pkg`, or `start` itself. The path
-    /// is the root, its `.ecl/packages`, then each `ECL_PATH` entry.
+    /// ancestor of `start` holding `ecl.pkg`. The path is the project root
+    /// and its `.ecl/packages`, or, with no project, `start` alone and flat;
+    /// then each `ECL_PATH` entry.
     pub fn init(host: *const heap.HostCleanup, io: std.Io, start: []const u8, root: ?[]const u8, ecl_path: ?[]const u8) error{OutOfMemory}!*Search {
         const allocator = host.allocator();
         var entries: std.ArrayList([]u8) = .empty;
@@ -154,16 +161,19 @@ pub const Search = struct {
             for (entries.items) |entry| allocator.free(entry);
             entries.deinit(allocator);
         }
-        const project = if (root) |explicit| try allocator.dupe(u8, explicit) else try projectRoot(allocator, io, start);
-        entries.append(allocator, project) catch |err| {
-            allocator.free(project);
+        const project: ?[]u8 = if (root) |explicit| try allocator.dupe(u8, explicit) else try projectRoot(allocator, io, start);
+        const first = project orelse try allocator.dupe(u8, start);
+        entries.append(allocator, first) catch |err| {
+            allocator.free(first);
             return err;
         };
-        const packages = try std.fs.path.join(allocator, &.{ project, ".ecl", "packages" });
-        entries.append(allocator, packages) catch |err| {
-            allocator.free(packages);
-            return err;
-        };
+        if (project) |found| {
+            const packages = try std.fs.path.join(allocator, &.{ found, ".ecl", "packages" });
+            entries.append(allocator, packages) catch |err| {
+                allocator.free(packages);
+                return err;
+            };
+        }
         if (ecl_path) |list| {
             var parts = std.mem.splitScalar(u8, list, std.fs.path.delimiter);
             while (parts.next()) |part| {
@@ -181,26 +191,27 @@ pub const Search = struct {
             }
         }
         const result = try allocator.create(Search);
-        result.* = .{ .host = host, .io = io, .entries = entries.toOwnedSlice(allocator) catch |err| {
+        result.* = .{ .host = host, .io = io, .flat = project == null, .entries = entries.toOwnedSlice(allocator) catch |err| {
             allocator.destroy(result);
             return err;
         } };
         return result;
     }
 
-    fn projectRoot(allocator: std.mem.Allocator, io: std.Io, start: []const u8) error{OutOfMemory}![]u8 {
+    /// The nearest ancestor of `start` holding `ecl.pkg`, or null.
+    fn projectRoot(allocator: std.mem.Allocator, io: std.Io, start: []const u8) error{OutOfMemory}!?[]u8 {
         var directory = start;
         while (true) {
             const manifest = try std.fs.path.join(allocator, &.{ directory, "ecl.pkg" });
             defer allocator.free(manifest);
             if (std.Io.Dir.cwd().statFile(io, manifest, .{})) |stat| {
-                if (stat.kind == .file) return allocator.dupe(u8, directory);
+                if (stat.kind == .file) return try allocator.dupe(u8, directory);
             } else |_| {}
             const parent = std.fs.path.dirname(directory) orelse break;
             if (std.mem.eql(u8, parent, directory)) break;
             directory = parent;
         }
-        return allocator.dupe(u8, start);
+        return null;
     }
 
     pub fn deinit(self: *Search) void {
@@ -305,6 +316,7 @@ pub const ScanCursor = struct {
         switch (found.kind) {
             .directory => {
                 if (found.basename.len != 0 and found.basename[0] == '.') return .pending;
+                if (self.entry == 0 and self.search.flat) return .pending;
                 walk.walker.enter(host_io, found) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {},
@@ -318,9 +330,9 @@ pub const ScanCursor = struct {
         if (!std.mem.endsWith(u8, name, ".ecl")) return .pending;
         const text = walk.directory.readFileAlloc(host_io, name, allocator, .limited(max_file_bytes)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.StreamTooLong => return .{ .complete = try self.failFmt("module search source `{s}` exceeds 16 MiB", .{name}) },
-            // A file that cannot be read declares nothing.
-            else => return .pending,
+            // A file too large or unable to be read declares nothing.
+            error.StreamTooLong => return self.add(name, &.{}),
+            else => return self.add(name, &.{}),
         };
         defer allocator.free(text);
         self.source_bytes += text.len;

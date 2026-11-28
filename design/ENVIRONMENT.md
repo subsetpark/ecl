@@ -43,20 +43,22 @@ embedded module, or a library word that calls one, means.
 
 ### Module search
 
-A Session finds modules on its search path: the project root, then
-`<project root>/.ecl/packages`, then each entry of `ECL_PATH`, an ordered
-platform path list. The project root is the nearest ancestor of the startup
-directory holding `ecl.pkg`, or the startup directory itself. There is no other
-resolution metadata: nothing is written for the interpreter to read.
+A Session finds modules on its search path. Inside a project, which is the
+nearest ancestor of the startup directory holding `ecl.pkg`, the path begins
+with the project root and `<project root>/.ecl/packages`; outside one, it
+begins with the startup directory alone. Each entry of `ECL_PATH`, an ordered
+platform path list, follows. There is no other resolution metadata: nothing is
+written for the interpreter to read.
 
 The first time a Session looks up a module that is neither registered nor
 embedded, it scans every entry recursively, skipping directories whose names
-begin with `.`, so the project root's scan never enters `.ecl`. Each `.ecl` file
-is parsed without being run, and its literal top-level module declarations are
-the modules it declares; filenames are arbitrary, and a file may declare
-several modules. The scan happens once per Session: files added later appear
-in new Sessions. A missing entry supplies nothing, and a file that does not
-parse declares nothing.
+begin with `.`, so the project root's scan never enters `.ecl`. A startup
+directory outside a project is the exception: only its own files are read.
+Each `.ecl` file is parsed without being run, and its literal top-level module
+declarations are the modules it declares; filenames are arbitrary, and a file
+may declare several modules. The scan happens once per Session: files added
+later appear in new Sessions. A missing entry supplies nothing, and a file that
+cannot be read, exceeds 16 MiB, or does not parse declares nothing.
 
 A module that one file declares loads by running that file once, and loading
 requires every module the file declares to be registered when it completes. A
@@ -69,10 +71,10 @@ other registration while it loads, such as a computed or nested one, is
 `` `domain ``. Registrations a failing file made before it failed remain, and
 a later request for a module it has not registered runs it again.
 
-The scan is bounded: 16 MiB per file, 64 MiB of source in all, 4,096 files,
-65,536 declarations, and one million directory entries inspected. Passing a
-bound fails the lookup that started the scan, and every later lookup that
-needs it, with the reason.
+The scan is bounded: 64 MiB of source read in all, 4,096 files, 65,536
+declarations, and one million directory entries inspected. Passing a bound
+fails the lookup that started the scan, and every later lookup that needs it,
+with the reason.
 
 ### Native modules
 
@@ -705,7 +707,8 @@ editor remains usable.
 ### Test command
 
 `ecl test` loads every file under the project root that declares a module,
-skipping dot-directories, discovers their declared tests, and invokes the
+skipping dot-directories, or outside a project every such file in the startup
+directory itself, discovers their declared tests, and invokes the
 selected runner in a Test Session. Each file is loaded once, including when an
 earlier file already loaded it through a module it declares. A file that
 declares no module is a script and is never run. Dependencies load only as

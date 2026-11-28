@@ -24,6 +24,7 @@ test "search: project files supply modules under any filename, several to a file
     const dir = inputs.temporary.dir;
     try dir.createDir(std.testing.io, "local", .default_dir);
     try dir.createDirPath(std.testing.io, ".ecl/packages/dep");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "ecl.pkg", .data = "" });
     try dir.writeFile(std.testing.io, .{ .sub_path = "local/one.ecl", .data = "((10) `answer def) `localmod @defm" });
     try dir.writeFile(std.testing.io, .{ .sub_path = "pair.ecl", .data = "((indirect.answer) `answer def) `direct @defm ((7) `answer def) `sibling @defm" });
     try dir.writeFile(std.testing.io, .{ .sub_path = ".ecl/packages/dep/whatever.ecl", .data = "((42) `answer def) `indirect @defm" });
@@ -72,6 +73,38 @@ test "search: a found module reads its own exports and doc through *module*" {
     try expectStack(&runtime, "direct.inner-about", "\"Indirect doc.\"");
 }
 
+test "search: outside a project only the startup directory's own files are searched" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    try inputs.temporary.dir.createDir(std.testing.io, "nested", .default_dir);
+    try writeInput(&inputs, "top.ecl", "((1) `v def) `top @defm");
+    try writeInput(&inputs, "nested/deep.ecl", "((2) `v def) `deep @defm");
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "top.v", "1");
+    try expectErrorContains(&runtime, "deep.v", &.{ "kind undefined-word", "word deep.v" });
+}
+
+test "search: a file too large to read declares nothing" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    const big = try std.testing.allocator.alloc(u8, 16 * 1024 * 1024 + 1);
+    defer std.testing.allocator.free(big);
+    @memset(big, ' ');
+    const declaration = "() `huge @defm";
+    @memcpy(big[0..declaration.len], declaration);
+    try writeInput(&inputs, "huge.ecl", big);
+    try writeInput(&inputs, "small.ecl", "((4) `v def) `small @defm");
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "small.v", "4");
+    try expectErrorContains(&runtime, "huge.x", &.{ "kind undefined-word", "word huge.x" });
+}
+
 test "search: the project root is the nearest directory holding ecl.pkg" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
@@ -106,6 +139,7 @@ test "search: scanning and lookup clean up every allocation failure" {
     defer inputs.deinit();
     try inputs.temporary.dir.createDir(std.testing.io, "local", .default_dir);
     try inputs.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "local/one.ecl", .data = "() `localmod @defm () `other @defm" });
+    try inputs.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "ecl.pkg", .data = "" });
     const Probe = struct {
         fn run(allocator: std.mem.Allocator, cwd: []const u8) !void {
             const search_api = @import("../module_search.zig");
@@ -130,6 +164,7 @@ test "search: a file both the project root and an ECL_PATH entry reach is one fi
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     try inputs.temporary.dir.createDir(std.testing.io, "lib", .default_dir);
+    try writeInput(&inputs, "ecl.pkg", "");
     try writeInput(&inputs, "lib/anything.ecl", "((7) `v def) `lib @defm");
     const entry = try std.fs.path.join(std.testing.allocator, &.{ inputs.cwd, "lib" });
     defer std.testing.allocator.free(entry);
